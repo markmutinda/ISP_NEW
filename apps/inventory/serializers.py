@@ -38,9 +38,9 @@ class EquipmentTypeSerializer(serializers.ModelSerializer):
             'id', 'name', 'description', 'parent',
             'is_network_equipment', 'has_serial_numbers',
             'requires_assignment', 'item_count', 'available_count',
-            'created_at', 'updated_at'
+            
         ]
-        read_only_fields = ['created_at', 'updated_at']
+        read_only_fields = []
 
 
 class EquipmentItemSerializer(serializers.ModelSerializer):
