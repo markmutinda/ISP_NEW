@@ -9,6 +9,7 @@ staticfiles/
 .env
 *.sqlite3
 
+
 # Virtual Environment
 venv/
 ENV/

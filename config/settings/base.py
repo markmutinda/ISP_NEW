@@ -25,6 +25,7 @@ ALLOWED_HOSTS = []
 INSTALLED_APPS = [
     'django.contrib.admin',
     'django.contrib.auth',
+    'django_extensions',
     'django.contrib.contenttypes',
     'django.contrib.sessions',
     'django.contrib.messages',
@@ -243,3 +244,47 @@ LOGGING = {
         },
     },
 }
+
+# Notification settings
+NOTIFICATION_SETTINGS = {
+    'SMS_PROVIDER': 'africastalking',  # africastalking, twilio, nexmo
+    'SMS_CONFIG': {
+        'sender_id': 'ISPMS',
+        'max_per_hour': 10,
+    },
+    'EMAIL_CONFIG': {
+        'backend': 'django',  # django, smtp_direct
+        'default_from': 'noreply@yourisp.com',
+        'bcc_enabled': True,
+        'bcc_email': 'notifications@yourisp.com',
+    },
+    'PUSH_NOTIFICATION_CONFIG': {
+        'provider': 'firebase',  # firebase, apns
+        # Firebase config
+        'firebase_credentials_path': 'path/to/firebase-credentials.json',
+        # APNS config
+        'apns_team_id': '',
+        'apns_key_id': '',
+        'apns_auth_key': '',
+        'apns_bundle_id': '',
+    },
+}
+
+# Africa's Talking SMS configuration
+AFRICASTALKING_USERNAME = os.getenv('AFRICASTALKING_USERNAME', 'sandbox')
+AFRICASTALKING_API_KEY = os.getenv('AFRICASTALKING_API_KEY', '')
+AFRICASTALKING_SENDER_ID = os.getenv('AFRICASTALKING_SENDER_ID', 'ISPMS')
+
+# Twilio configuration
+TWILIO_ACCOUNT_SID = os.getenv('TWILIO_ACCOUNT_SID', '')
+TWILIO_AUTH_TOKEN = os.getenv('TWILIO_AUTH_TOKEN', '')
+TWILIO_PHONE_NUMBER = os.getenv('TWILIO_PHONE_NUMBER', '')
+
+# Email configuration
+EMAIL_BACKEND = 'django.core.mail.backends.smtp.EmailBackend'
+EMAIL_HOST = os.getenv('EMAIL_HOST', 'smtp.gmail.com')
+EMAIL_PORT = int(os.getenv('EMAIL_PORT', 587))
+EMAIL_USE_TLS = os.getenv('EMAIL_USE_TLS', 'True') == 'True'
+EMAIL_HOST_USER = os.getenv('EMAIL_HOST_USER', '')
+EMAIL_HOST_PASSWORD = os.getenv('EMAIL_HOST_PASSWORD', '')
+DEFAULT_FROM_EMAIL = os.getenv('DEFAULT_FROM_EMAIL', 'noreply@yourisp.com')

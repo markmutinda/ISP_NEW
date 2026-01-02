@@ -17,24 +17,24 @@ class AuditMixin(models.Model):
     """
     created_at = models.DateTimeField(auto_now_add=True, db_index=True)
     updated_at = models.DateTimeField(auto_now=True)
+
     created_by = models.ForeignKey(
-        'User',
+        settings.AUTH_USER_MODEL,
         on_delete=models.SET_NULL,
         null=True,
         blank=True,
-        related_name='%(class)s_created'
+        related_name="created_%(class)s"
     )
     updated_by = models.ForeignKey(
-        'User',
+        settings.AUTH_USER_MODEL,
         on_delete=models.SET_NULL,
         null=True,
         blank=True,
-        related_name='%(class)s_updated'
+        related_name="updated_%(class)s"
     )
 
     class Meta:
         abstract = True
-
 
 class UserManager(BaseUserManager):
     """Custom user manager for handling user creation"""
@@ -141,7 +141,7 @@ class User(AbstractUser, AuditMixin):
         ordering = ['-created_at']
         verbose_name = 'User'
         verbose_name_plural = 'Users'
-    
+        
     def __str__(self):
         return f"{self.get_full_name()} ({self.email})"
     
@@ -170,7 +170,22 @@ class User(AbstractUser, AuditMixin):
         return self.role == 'customer'
 
 
-class Company(AuditMixin):
+# Create a simplified BaseModel to avoid import issues
+class BaseModel(models.Model):
+    """
+    Base model with common fields
+    """
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    is_active = models.BooleanField(default=True)
+    
+    class Meta:
+        abstract = True
+        ordering = ['-created_at']
+
+
+class Company(BaseModel):
     """ISP Company model for multi-tenancy support"""
     
     COMPANY_TYPES = (
@@ -198,12 +213,8 @@ class Company(AuditMixin):
     logo = models.ImageField(upload_to='company_logos/', null=True, blank=True)
     
     # Settings
-    is_active = models.BooleanField(default=True)
     subscription_plan = models.CharField(max_length=50, default='basic')
     subscription_expiry = models.DateField(null=True, blank=True)
-    
-    # Remove duplicate fields from AuditMixin
-    # created_at, updated_at, created_by, updated_by are already in AuditMixin
     
     class Meta:
         ordering = ['name']
@@ -221,7 +232,7 @@ class Company(AuditMixin):
         return self.customers.filter(is_active=True).count()
 
 
-class Tenant(AuditMixin):
+class Tenant(BaseModel):
     """Tenant model for SaaS functionality"""
     
     STATUS_CHOICES = (
@@ -239,7 +250,6 @@ class Tenant(AuditMixin):
     subdomain = models.CharField(max_length=100, unique=True)
     domain = models.CharField(max_length=255, null=True, blank=True)
     database_name = models.CharField(max_length=100)
-    is_active = models.BooleanField(default=True)
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='trial')
     
     # Subscription details
@@ -251,9 +261,6 @@ class Tenant(AuditMixin):
     billing_cycle = models.CharField(max_length=20, default='monthly')
     monthly_rate = models.DecimalField(max_digits=10, decimal_places=2, default=0.00)
     next_billing_date = models.DateField(null=True, blank=True)
-    
-    # Remove duplicate fields from AuditMixin
-    # created_at, updated_at are already in AuditMixin
     
     class Meta:
         ordering = ['-created_at']
@@ -269,7 +276,7 @@ class Tenant(AuditMixin):
         return False
 
 
-class SystemSettings(AuditMixin):
+class SystemSettings(BaseModel):
     """System-wide settings and configurations"""
     
     SETTING_TYPES = (
@@ -299,9 +306,6 @@ class SystemSettings(AuditMixin):
     )
     is_public = models.BooleanField(default=False)
     description = models.TextField(null=True, blank=True)
-    
-    # Remove duplicate fields from AuditMixin
-    # created_at, updated_at, updated_by are already in AuditMixin
     
     class Meta:
         ordering = ['setting_type', 'key']
@@ -335,7 +339,7 @@ class SystemSettings(AuditMixin):
             return default
 
 
-class AuditLog(models.Model):
+class AuditLog(BaseModel):
     """Model to track all system changes"""
     
     ACTION_TYPES = (

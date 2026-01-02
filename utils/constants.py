@@ -147,14 +147,24 @@ INVOICE_TYPES = {
     'adjustment': 'Adjustment',
 }
 
-# Tax Types
-TAX_TYPES = {
-    'vat': 'VAT (16%)',
-    'withholding': 'Withholding Tax',
-    'service': 'Service Tax',
-    'none': 'No Tax',
+# Tax Rates in Kenya
+TAX_RATES = {
+    'VAT': 16.0,  # Value Added Tax
+    'WHT_INDIVIDUAL': 5.0,  # Withholding Tax for Individuals
+    'WHT_COMPANY': 3.0,  # Withholding Tax for Companies
+    'EXCISE_INTERNET': 15.0,  # Excise Duty for Internet Services
+    'EXCISE_VOICE': 12.0,  # Excise Duty for Voice Calls
+    'EXCISE_SMS': 12.0,  # Excise Duty for SMS
 }
 
+# Tax Types
+TAX_TYPES = [
+    ('VAT', 'Value Added Tax'),
+    ('WHT', 'Withholding Tax'),
+    ('EXCISE', 'Excise Duty'),
+    ('INCOME_TAX', 'Income Tax'),
+    ('OTHER', 'Other'),
+]
 # Notification Types
 NOTIFICATION_TYPES = {
     'email': 'Email',
@@ -472,3 +482,13 @@ KENYAN_COUNTIES = [
     ('KAKAMEGA', 'Kakamega'),
     # Add all 47 counties...
 ]
+
+VOUCHER_TYPES = [
+    ('PREPAID', 'Prepaid Internet'),
+    ('VOICE', 'Voice Calling'),
+    ('DATA', 'Mobile Data'),
+    ('GENERAL', 'General Purpose'),
+    ('PROMOTIONAL', 'Promotional'),
+    ('LOYALTY', 'Loyalty Reward'),
+]
+

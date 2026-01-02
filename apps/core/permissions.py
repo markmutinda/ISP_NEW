@@ -7,6 +7,44 @@ from django.contrib.auth import get_user_model
 User = get_user_model()
 
 
+class HasCompanyAccess(permissions.BasePermission):
+    """
+    Permission class that ensures users can only access data from their own company.
+    Superusers can access all data.
+    Compatible with billing app views.
+    """
+    
+    def has_permission(self, request, view):
+        # Allow all authenticated users to access the view
+        # Actual company filtering happens in get_queryset
+        return request.user and request.user.is_authenticated
+    
+    def has_object_permission(self, request, view, obj):
+        # Superusers can do anything
+        if request.user.is_superuser or request.user.role == 'admin':
+            return True
+        
+        # Check if object has a company field
+        if hasattr(obj, 'company'):
+            # Check if user has access to this company
+            if hasattr(request.user, 'companies'):
+                # User has ManyToMany relationship with companies
+                return obj.company in request.user.companies.all()
+            elif hasattr(request.user, 'company'):
+                # User has a single company
+                return obj.company == request.user.company
+        
+        # For objects without direct company field, check related objects
+        # Example: If object has customer, check customer's company
+        if hasattr(obj, 'customer') and hasattr(obj.customer, 'company'):
+            if hasattr(request.user, 'company'):
+                return obj.customer.company == request.user.company
+        
+        # For network devices (OLT, Mikrotik, etc.), they should have company field
+        # If we can't determine company access, be conservative and deny
+        return False
+
+
 class IsAdmin(permissions.BasePermission):
     """
     Allows access only to admin users.
@@ -166,3 +204,27 @@ class CanViewDashboard(permissions.BasePermission):
             return True
         
         return True
+
+
+# Billing app compatibility aliases
+class IsCompanyAdmin(permissions.BasePermission):
+    """
+    Allows access only to admin users (for billing app compatibility).
+    This is an alias for IsAdmin to maintain compatibility with billing app.
+    """
+    def has_permission(self, request, view):
+        return bool(request.user and request.user.is_authenticated and 
+                   (request.user.role == 'admin' or request.user.is_superuser))
+
+
+class IsCompanyStaff(permissions.BasePermission):
+    """
+    Allows access to staff users (for billing app compatibility).
+    This is an alias for IsAdminOrStaff to maintain compatibility with billing app.
+    """
+    def has_permission(self, request, view):
+        if not request.user or not request.user.is_authenticated:
+            return False
+        
+        allowed_roles = ['admin', 'staff', 'accountant', 'support']
+        return request.user.role in allowed_roles or request.user.is_superuser

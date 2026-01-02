@@ -33,31 +33,31 @@ api_urlpatterns = [
     path('customers/', include('apps.customers.urls')),
     
     # Network app (Phase 3 - Network Management)
-    # path('network/', include('apps.network.urls')),
+    path('api/network/', include('apps.network.urls')),
     
     # Bandwidth app (Phase 4 - Bandwidth Management)
-    # path('bandwidth/', include('apps.bandwidth.urls')),
+    path('api/bandwidth/', include('apps.bandwidth.urls')),  
     
     # Billing app (Phase 5 - Billing & Finance)
-    # path('billing/', include('apps.billing.urls')),
+     path('api/billing/', include('apps.billing.urls')),
     
     # Support app (Phase 6 - Support Ticketing)
-    # path('support/', include('apps.support.urls')),
+     path('api/support/', include('apps.support.urls')),
     
     # Analytics app (Phase 7 - Reports & Analytics)
-    # path('analytics/', include('apps.analytics.urls')),
+     path('api/analytics/', include('apps.analytics.urls')),
     
     # Staff app (Phase 8 - Staff Management)
-    # path('staff/', include('apps.staff.urls')),
+    path('api/staff/', include('apps.staff.urls')),
     
     # Self-Service app (Phase 9 - Customer Portal)
-    # path('self-service/', include('apps.self_service.urls')),
+    path('api/self-service/', include('apps.self_service.urls')),
     
     # Inventory app (Phase 10 - Inventory Management)
-    # path('inventory/', include('apps.inventory.urls')),
+     path('api/inventory/', include('apps.inventory.urls')),
     
     # Notifications app (Phase 11 - Alerts & Notifications)
-    # path('notifications/', include('apps.notifications.urls')),
+     path('notifications/', include('apps.notifications.urls')),
 ]
 
 # Main URL Patterns

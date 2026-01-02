@@ -889,6 +889,15 @@ def format_phone_number_legacy(phone_number: str) -> Optional[str]:
     """
     return format_phone_number(phone_number)
 
+def calculate_uptime_percentage(device, start_date, end_date):
+    """
+    Calculate device uptime percentage for a given period
+    This is a simplified version - you should implement actual uptime calculation
+    based on your monitoring system
+    """
+    # Placeholder implementation
+    # In reality, you'd query monitoring data for this device
+    return 99.8  # Example value
 
 # Export all functions
 __all__ = [

@@ -1,0 +1,1430 @@
+App,Model,Table,Field,Type,Relation To,Relation Type,Null,Unique
+Core,User,core_user,id,BigAutoField,,,No,Yes
+Core,User,core_user,password,CharField,,,No,No
+Core,User,core_user,last_login,DateTimeField,,,Yes,No
+Core,User,core_user,is_superuser,BooleanField,,,No,No
+Core,User,core_user,first_name,CharField,,,No,No
+Core,User,core_user,last_name,CharField,,,No,No
+Core,User,core_user,is_staff,BooleanField,,,No,No
+Core,User,core_user,is_active,BooleanField,,,No,No
+Core,User,core_user,date_joined,DateTimeField,,,No,No
+Core,User,core_user,created_at,DateTimeField,,,No,No
+Core,User,core_user,updated_at,DateTimeField,,,No,No
+Core,User,core_user,created_by,ForeignKey,User,FK,Yes,No
+Core,User,core_user,updated_by,ForeignKey,User,FK,Yes,No
+Core,User,core_user,email,CharField,,,No,Yes
+Core,User,core_user,phone_number,CharField,,,No,Yes
+Core,User,core_user,id_number,CharField,,,Yes,Yes
+Core,User,core_user,gender,CharField,,,Yes,No
+Core,User,core_user,date_of_birth,DateField,,,Yes,No
+Core,User,core_user,profile_picture,FileField,,,Yes,No
+Core,User,core_user,role,CharField,,,No,No
+Core,User,core_user,is_verified,BooleanField,,,No,No
+Core,User,core_user,verification_token,UUIDField,,,No,No
+Core,User,core_user,verification_token_expiry,DateTimeField,,,Yes,No
+Core,User,core_user,groups,ManyToManyField,Group,M2M,Yes,No
+Core,User,core_user,user_permissions,ManyToManyField,Permission,M2M,Yes,No
+Core,Company,core_company,id,UUIDField,,,No,Yes
+Core,Company,core_company,created_at,DateTimeField,,,No,No
+Core,Company,core_company,updated_at,DateTimeField,,,No,No
+Core,Company,core_company,is_active,BooleanField,,,No,No
+Core,Company,core_company,name,CharField,,,No,Yes
+Core,Company,core_company,slug,SlugField,,,No,Yes
+Core,Company,core_company,company_type,CharField,,,No,No
+Core,Company,core_company,email,CharField,,,No,No
+Core,Company,core_company,phone_number,CharField,,,No,No
+Core,Company,core_company,address,TextField,,,No,No
+Core,Company,core_company,city,CharField,,,No,No
+Core,Company,core_company,county,CharField,,,Yes,No
+Core,Company,core_company,postal_code,CharField,,,Yes,No
+Core,Company,core_company,registration_number,CharField,,,No,Yes
+Core,Company,core_company,tax_pin,CharField,,,Yes,No
+Core,Company,core_company,website,CharField,,,Yes,No
+Core,Company,core_company,logo,FileField,,,Yes,No
+Core,Company,core_company,subscription_plan,CharField,,,No,No
+Core,Company,core_company,subscription_expiry,DateField,,,Yes,No
+Core,Tenant,core_tenant,id,UUIDField,,,No,Yes
+Core,Tenant,core_tenant,created_at,DateTimeField,,,No,No
+Core,Tenant,core_tenant,updated_at,DateTimeField,,,No,No
+Core,Tenant,core_tenant,is_active,BooleanField,,,No,No
+Core,Tenant,core_tenant,company,OneToOneField,Company,O2O,No,Yes
+Core,Tenant,core_tenant,subdomain,CharField,,,No,Yes
+Core,Tenant,core_tenant,domain,CharField,,,Yes,No
+Core,Tenant,core_tenant,database_name,CharField,,,No,No
+Core,Tenant,core_tenant,status,CharField,,,No,No
+Core,Tenant,core_tenant,max_users,IntegerField,,,No,No
+Core,Tenant,core_tenant,max_customers,IntegerField,,,No,No
+Core,Tenant,core_tenant,features,JSONField,,,No,No
+Core,Tenant,core_tenant,billing_cycle,CharField,,,No,No
+Core,Tenant,core_tenant,monthly_rate,DecimalField,,,No,No
+Core,Tenant,core_tenant,next_billing_date,DateField,,,Yes,No
+Core,SystemSettings,core_systemsettings,id,UUIDField,,,No,Yes
+Core,SystemSettings,core_systemsettings,created_at,DateTimeField,,,No,No
+Core,SystemSettings,core_systemsettings,updated_at,DateTimeField,,,No,No
+Core,SystemSettings,core_systemsettings,is_active,BooleanField,,,No,No
+Core,SystemSettings,core_systemsettings,key,CharField,,,No,Yes
+Core,SystemSettings,core_systemsettings,name,CharField,,,No,No
+Core,SystemSettings,core_systemsettings,value,TextField,,,No,No
+Core,SystemSettings,core_systemsettings,setting_type,CharField,,,No,No
+Core,SystemSettings,core_systemsettings,data_type,CharField,,,No,No
+Core,SystemSettings,core_systemsettings,is_public,BooleanField,,,No,No
+Core,SystemSettings,core_systemsettings,description,TextField,,,Yes,No
+Core,AuditLog,core_auditlog,id,UUIDField,,,No,Yes
+Core,AuditLog,core_auditlog,created_at,DateTimeField,,,No,No
+Core,AuditLog,core_auditlog,updated_at,DateTimeField,,,No,No
+Core,AuditLog,core_auditlog,is_active,BooleanField,,,No,No
+Core,AuditLog,core_auditlog,user,ForeignKey,User,FK,Yes,No
+Core,AuditLog,core_auditlog,action,CharField,,,No,No
+Core,AuditLog,core_auditlog,model_name,CharField,,,No,No
+Core,AuditLog,core_auditlog,object_id,CharField,,,Yes,No
+Core,AuditLog,core_auditlog,object_repr,CharField,,,Yes,No
+Core,AuditLog,core_auditlog,changes,JSONField,,,Yes,No
+Core,AuditLog,core_auditlog,ip_address,GenericIPAddressField,,,Yes,No
+Core,AuditLog,core_auditlog,user_agent,TextField,,,Yes,No
+Core,AuditLog,core_auditlog,timestamp,DateTimeField,,,No,No
+Core,AuditLog,core_auditlog,tenant,ForeignKey,Tenant,FK,Yes,No
+Customers,Customer,customers_customer,id,BigAutoField,,,No,Yes
+Customers,Customer,customers_customer,user,OneToOneField,User,O2O,No,Yes
+Customers,Customer,customers_customer,company,ForeignKey,Company,FK,No,No
+Customers,Customer,customers_customer,customer_code,CharField,,,No,Yes
+Customers,Customer,customers_customer,date_of_birth,DateField,,,Yes,No
+Customers,Customer,customers_customer,gender,CharField,,,No,No
+Customers,Customer,customers_customer,id_type,CharField,,,No,No
+Customers,Customer,customers_customer,id_number,CharField,,,No,Yes
+Customers,Customer,customers_customer,alternative_phone,CharField,,,No,No
+Customers,Customer,customers_customer,marital_status,CharField,,,No,No
+Customers,Customer,customers_customer,occupation,CharField,,,No,No
+Customers,Customer,customers_customer,employer,CharField,,,No,No
+Customers,Customer,customers_customer,customer_type,CharField,,,No,No
+Customers,Customer,customers_customer,status,CharField,,,No,No
+Customers,Customer,customers_customer,category,CharField,,,No,No
+Customers,Customer,customers_customer,activation_date,DateField,,,No,No
+Customers,Customer,customers_customer,deactivation_date,DateField,,,Yes,No
+Customers,Customer,customers_customer,referral_source,CharField,,,No,No
+Customers,Customer,customers_customer,notes,TextField,,,No,No
+Customers,Customer,customers_customer,billing_cycle,PositiveIntegerField,,,No,No
+Customers,Customer,customers_customer,credit_limit,DecimalField,,,No,No
+Customers,Customer,customers_customer,outstanding_balance,DecimalField,,,No,No
+Customers,Customer,customers_customer,receive_sms,BooleanField,,,No,No
+Customers,Customer,customers_customer,receive_email,BooleanField,,,No,No
+Customers,Customer,customers_customer,receive_promotions,BooleanField,,,No,No
+Customers,Customer,customers_customer,created_by,ForeignKey,User,FK,Yes,No
+Customers,Customer,customers_customer,updated_by,ForeignKey,User,FK,Yes,No
+Customers,Customer,customers_customer,created_at,DateTimeField,,,No,No
+Customers,Customer,customers_customer,updated_at,DateTimeField,,,No,No
+Customers,CustomerAddress,customers_customeraddress,id,BigAutoField,,,No,Yes
+Customers,CustomerAddress,customers_customeraddress,customer,ForeignKey,Customer,FK,No,No
+Customers,CustomerAddress,customers_customeraddress,address_type,CharField,,,No,No
+Customers,CustomerAddress,customers_customeraddress,is_primary,BooleanField,,,No,No
+Customers,CustomerAddress,customers_customeraddress,building_name,CharField,,,No,No
+Customers,CustomerAddress,customers_customeraddress,floor,CharField,,,No,No
+Customers,CustomerAddress,customers_customeraddress,room,CharField,,,No,No
+Customers,CustomerAddress,customers_customeraddress,street_address,TextField,,,No,No
+Customers,CustomerAddress,customers_customeraddress,landmark,CharField,,,No,No
+Customers,CustomerAddress,customers_customeraddress,county,CharField,,,No,No
+Customers,CustomerAddress,customers_customeraddress,sub_county,CharField,,,No,No
+Customers,CustomerAddress,customers_customeraddress,ward,CharField,,,No,No
+Customers,CustomerAddress,customers_customeraddress,estate,CharField,,,No,No
+Customers,CustomerAddress,customers_customeraddress,contact_person,CharField,,,No,No
+Customers,CustomerAddress,customers_customeraddress,contact_phone,CharField,,,No,No
+Customers,CustomerAddress,customers_customeraddress,latitude,DecimalField,,,Yes,No
+Customers,CustomerAddress,customers_customeraddress,longitude,DecimalField,,,Yes,No
+Customers,CustomerAddress,customers_customeraddress,installation_notes,TextField,,,No,No
+Customers,CustomerAddress,customers_customeraddress,created_by,ForeignKey,User,FK,Yes,No
+Customers,CustomerAddress,customers_customeraddress,updated_by,ForeignKey,User,FK,Yes,No
+Customers,CustomerAddress,customers_customeraddress,created_at,DateTimeField,,,No,No
+Customers,CustomerAddress,customers_customeraddress,updated_at,DateTimeField,,,No,No
+Customers,CustomerDocument,customers_customerdocument,id,BigAutoField,,,No,Yes
+Customers,CustomerDocument,customers_customerdocument,customer,ForeignKey,Customer,FK,No,No
+Customers,CustomerDocument,customers_customerdocument,document_type,CharField,,,No,No
+Customers,CustomerDocument,customers_customerdocument,title,CharField,,,No,No
+Customers,CustomerDocument,customers_customerdocument,description,TextField,,,No,No
+Customers,CustomerDocument,customers_customerdocument,document_file,FileField,,,No,No
+Customers,CustomerDocument,customers_customerdocument,file_size,PositiveIntegerField,,,Yes,No
+Customers,CustomerDocument,customers_customerdocument,mime_type,CharField,,,No,No
+Customers,CustomerDocument,customers_customerdocument,verified,BooleanField,,,No,No
+Customers,CustomerDocument,customers_customerdocument,verified_by,ForeignKey,User,FK,Yes,No
+Customers,CustomerDocument,customers_customerdocument,verified_at,DateTimeField,,,Yes,No
+Customers,CustomerDocument,customers_customerdocument,verification_notes,TextField,,,No,No
+Customers,CustomerDocument,customers_customerdocument,expiry_date,DateField,,,Yes,No
+Customers,CustomerDocument,customers_customerdocument,is_expired,BooleanField,,,No,No
+Customers,CustomerDocument,customers_customerdocument,created_by,ForeignKey,User,FK,Yes,No
+Customers,CustomerDocument,customers_customerdocument,updated_by,ForeignKey,User,FK,Yes,No
+Customers,CustomerDocument,customers_customerdocument,created_at,DateTimeField,,,No,No
+Customers,CustomerDocument,customers_customerdocument,updated_at,DateTimeField,,,No,No
+Customers,NextOfKin,customers_nextofkin,id,BigAutoField,,,No,Yes
+Customers,NextOfKin,customers_nextofkin,customer,OneToOneField,Customer,O2O,No,Yes
+Customers,NextOfKin,customers_nextofkin,full_name,CharField,,,No,No
+Customers,NextOfKin,customers_nextofkin,relationship,CharField,,,No,No
+Customers,NextOfKin,customers_nextofkin,phone_number,CharField,,,No,No
+Customers,NextOfKin,customers_nextofkin,email,CharField,,,No,No
+Customers,NextOfKin,customers_nextofkin,id_type,CharField,,,No,No
+Customers,NextOfKin,customers_nextofkin,id_number,CharField,,,No,No
+Customers,NextOfKin,customers_nextofkin,address,TextField,,,No,No
+Customers,NextOfKin,customers_nextofkin,county,CharField,,,No,No
+Customers,NextOfKin,customers_nextofkin,is_primary_contact,BooleanField,,,No,No
+Customers,NextOfKin,customers_nextofkin,created_by,ForeignKey,User,FK,Yes,No
+Customers,NextOfKin,customers_nextofkin,updated_by,ForeignKey,User,FK,Yes,No
+Customers,NextOfKin,customers_nextofkin,created_at,DateTimeField,,,No,No
+Customers,NextOfKin,customers_nextofkin,updated_at,DateTimeField,,,No,No
+Customers,CustomerNotes,customers_customernotes,id,BigAutoField,,,No,Yes
+Customers,CustomerNotes,customers_customernotes,customer,ForeignKey,Customer,FK,No,No
+Customers,CustomerNotes,customers_customernotes,note,TextField,,,No,No
+Customers,CustomerNotes,customers_customernotes,note_type,CharField,,,No,No
+Customers,CustomerNotes,customers_customernotes,priority,CharField,,,No,No
+Customers,CustomerNotes,customers_customernotes,requires_followup,BooleanField,,,No,No
+Customers,CustomerNotes,customers_customernotes,followup_date,DateField,,,Yes,No
+Customers,CustomerNotes,customers_customernotes,followup_completed,BooleanField,,,No,No
+Customers,CustomerNotes,customers_customernotes,internal_only,BooleanField,,,No,No
+Customers,CustomerNotes,customers_customernotes,attachment,FileField,,,Yes,No
+Customers,CustomerNotes,customers_customernotes,created_by,ForeignKey,User,FK,No,No
+Customers,CustomerNotes,customers_customernotes,updated_by,ForeignKey,User,FK,Yes,No
+Customers,CustomerNotes,customers_customernotes,created_at,DateTimeField,,,No,No
+Customers,CustomerNotes,customers_customernotes,updated_at,DateTimeField,,,No,No
+Customers,ServiceConnection,customers_serviceconnection,id,BigAutoField,,,No,Yes
+Customers,ServiceConnection,customers_serviceconnection,customer,ForeignKey,Customer,FK,No,No
+Customers,ServiceConnection,customers_serviceconnection,service_type,CharField,,,No,No
+Customers,ServiceConnection,customers_serviceconnection,service_plan,CharField,,,No,No
+Customers,ServiceConnection,customers_serviceconnection,connection_type,CharField,,,No,No
+Customers,ServiceConnection,customers_serviceconnection,status,CharField,,,No,No
+Customers,ServiceConnection,customers_serviceconnection,activation_date,DateTimeField,,,Yes,No
+Customers,ServiceConnection,customers_serviceconnection,suspension_date,DateTimeField,,,Yes,No
+Customers,ServiceConnection,customers_serviceconnection,termination_date,DateTimeField,,,Yes,No
+Customers,ServiceConnection,customers_serviceconnection,ip_address,GenericIPAddressField,,,Yes,No
+Customers,ServiceConnection,customers_serviceconnection,mac_address,CharField,,,No,No
+Customers,ServiceConnection,customers_serviceconnection,vlan_id,PositiveIntegerField,,,Yes,No
+Customers,ServiceConnection,customers_serviceconnection,router_model,CharField,,,No,No
+Customers,ServiceConnection,customers_serviceconnection,router_serial,CharField,,,No,No
+Customers,ServiceConnection,customers_serviceconnection,ont_model,CharField,,,No,No
+Customers,ServiceConnection,customers_serviceconnection,ont_serial,CharField,,,No,No
+Customers,ServiceConnection,customers_serviceconnection,download_speed,PositiveIntegerField,,,No,No
+Customers,ServiceConnection,customers_serviceconnection,upload_speed,PositiveIntegerField,,,No,No
+Customers,ServiceConnection,customers_serviceconnection,data_cap,PositiveIntegerField,,,Yes,No
+Customers,ServiceConnection,customers_serviceconnection,qos_profile,CharField,,,No,No
+Customers,ServiceConnection,customers_serviceconnection,installation_address,ForeignKey,CustomerAddress,FK,Yes,No
+Customers,ServiceConnection,customers_serviceconnection,installation_notes,TextField,,,No,No
+Customers,ServiceConnection,customers_serviceconnection,installed_by,ForeignKey,User,FK,Yes,No
+Customers,ServiceConnection,customers_serviceconnection,monthly_price,DecimalField,,,No,No
+Customers,ServiceConnection,customers_serviceconnection,setup_fee,DecimalField,,,No,No
+Customers,ServiceConnection,customers_serviceconnection,prorated_billing,BooleanField,,,No,No
+Customers,ServiceConnection,customers_serviceconnection,auto_renew,BooleanField,,,No,No
+Customers,ServiceConnection,customers_serviceconnection,contract_period,PositiveIntegerField,,,No,No
+Customers,ServiceConnection,customers_serviceconnection,created_by,ForeignKey,User,FK,Yes,No
+Customers,ServiceConnection,customers_serviceconnection,updated_by,ForeignKey,User,FK,Yes,No
+Customers,ServiceConnection,customers_serviceconnection,created_at,DateTimeField,,,No,No
+Customers,ServiceConnection,customers_serviceconnection,updated_at,DateTimeField,,,No,No
+Network Management,OLTDevice,network_oltdevice,id,BigAutoField,,,No,Yes
+Network Management,OLTDevice,network_oltdevice,created_at,DateTimeField,,,No,No
+Network Management,OLTDevice,network_oltdevice,updated_at,DateTimeField,,,No,No
+Network Management,OLTDevice,network_oltdevice,created_by,ForeignKey,User,FK,Yes,No
+Network Management,OLTDevice,network_oltdevice,updated_by,ForeignKey,User,FK,Yes,No
+Network Management,OLTDevice,network_oltdevice,company,ForeignKey,Company,FK,No,No
+Network Management,OLTDevice,network_oltdevice,name,CharField,,,No,No
+Network Management,OLTDevice,network_oltdevice,hostname,CharField,,,No,Yes
+Network Management,OLTDevice,network_oltdevice,ip_address,GenericIPAddressField,,,No,No
+Network Management,OLTDevice,network_oltdevice,vendor,CharField,,,No,No
+Network Management,OLTDevice,network_oltdevice,model,CharField,,,No,No
+Network Management,OLTDevice,network_oltdevice,serial_number,CharField,,,No,Yes
+Network Management,OLTDevice,network_oltdevice,firmware_version,CharField,,,No,No
+Network Management,OLTDevice,network_oltdevice,location,CharField,,,No,No
+Network Management,OLTDevice,network_oltdevice,community_string,CharField,,,No,No
+Network Management,OLTDevice,network_oltdevice,ssh_username,CharField,,,No,No
+Network Management,OLTDevice,network_oltdevice,ssh_password,CharField,,,No,No
+Network Management,OLTDevice,network_oltdevice,telnet_port,IntegerField,,,No,No
+Network Management,OLTDevice,network_oltdevice,api_port,IntegerField,,,No,No
+Network Management,OLTDevice,network_oltdevice,status,CharField,,,No,No
+Network Management,OLTDevice,network_oltdevice,last_sync,DateTimeField,,,Yes,No
+Network Management,OLTDevice,network_oltdevice,notes,TextField,,,No,No
+Network Management,OLTPort,network_oltport,id,BigAutoField,,,No,Yes
+Network Management,OLTPort,network_oltport,created_at,DateTimeField,,,No,No
+Network Management,OLTPort,network_oltport,updated_at,DateTimeField,,,No,No
+Network Management,OLTPort,network_oltport,created_by,ForeignKey,User,FK,Yes,No
+Network Management,OLTPort,network_oltport,updated_by,ForeignKey,User,FK,Yes,No
+Network Management,OLTPort,network_oltport,olt,ForeignKey,OLTDevice,FK,No,No
+Network Management,OLTPort,network_oltport,port_number,CharField,,,No,No
+Network Management,OLTPort,network_oltport,port_type,CharField,,,No,No
+Network Management,OLTPort,network_oltport,description,CharField,,,No,No
+Network Management,OLTPort,network_oltport,admin_state,BooleanField,,,No,No
+Network Management,OLTPort,network_oltport,operational_state,BooleanField,,,No,No
+Network Management,OLTPort,network_oltport,speed,CharField,,,No,No
+Network Management,OLTPort,network_oltport,mtu,IntegerField,,,No,No
+Network Management,OLTPort,network_oltport,last_change,DateTimeField,,,No,No
+Network Management,PONPort,network_ponport,id,BigAutoField,,,No,Yes
+Network Management,PONPort,network_ponport,created_at,DateTimeField,,,No,No
+Network Management,PONPort,network_ponport,updated_at,DateTimeField,,,No,No
+Network Management,PONPort,network_ponport,created_by,ForeignKey,User,FK,Yes,No
+Network Management,PONPort,network_ponport,updated_by,ForeignKey,User,FK,Yes,No
+Network Management,PONPort,network_ponport,olt_port,ForeignKey,OLTPort,FK,No,No
+Network Management,PONPort,network_ponport,pon_index,CharField,,,No,No
+Network Management,PONPort,network_ponport,pon_type,CharField,,,No,No
+Network Management,PONPort,network_ponport,splitter_ratio,CharField,,,No,No
+Network Management,PONPort,network_ponport,total_onus,IntegerField,,,No,No
+Network Management,PONPort,network_ponport,registered_onus,IntegerField,,,No,No
+Network Management,PONPort,network_ponport,rx_power,DecimalField,,,Yes,No
+Network Management,PONPort,network_ponport,tx_power,DecimalField,,,Yes,No
+Network Management,PONPort,network_ponport,distance,DecimalField,,,Yes,No
+Network Management,PONPort,network_ponport,status,CharField,,,No,No
+Network Management,ONUDevice,network_onudevice,id,BigAutoField,,,No,Yes
+Network Management,ONUDevice,network_onudevice,created_at,DateTimeField,,,No,No
+Network Management,ONUDevice,network_onudevice,updated_at,DateTimeField,,,No,No
+Network Management,ONUDevice,network_onudevice,created_by,ForeignKey,User,FK,Yes,No
+Network Management,ONUDevice,network_onudevice,updated_by,ForeignKey,User,FK,Yes,No
+Network Management,ONUDevice,network_onudevice,pon_port,ForeignKey,PONPort,FK,No,No
+Network Management,ONUDevice,network_onudevice,service_connection,OneToOneField,ServiceConnection,O2O,Yes,Yes
+Network Management,ONUDevice,network_onudevice,serial_number,CharField,,,No,Yes
+Network Management,ONUDevice,network_onudevice,mac_address,CharField,,,No,Yes
+Network Management,ONUDevice,network_onudevice,onu_type,CharField,,,No,No
+Network Management,ONUDevice,network_onudevice,onu_index,CharField,,,No,No
+Network Management,ONUDevice,network_onudevice,rx_power,DecimalField,,,Yes,No
+Network Management,ONUDevice,network_onudevice,tx_power,DecimalField,,,Yes,No
+Network Management,ONUDevice,network_onudevice,distance,DecimalField,,,Yes,No
+Network Management,ONUDevice,network_onudevice,status,CharField,,,No,No
+Network Management,ONUDevice,network_onudevice,last_seen,DateTimeField,,,Yes,No
+Network Management,ONUDevice,network_onudevice,registration_date,DateTimeField,,,Yes,No
+Network Management,ONUDevice,network_onudevice,config_version,CharField,,,No,No
+Network Management,OLTConfig,network_oltconfig,id,BigAutoField,,,No,Yes
+Network Management,OLTConfig,network_oltconfig,created_at,DateTimeField,,,No,No
+Network Management,OLTConfig,network_oltconfig,updated_at,DateTimeField,,,No,No
+Network Management,OLTConfig,network_oltconfig,created_by,ForeignKey,User,FK,Yes,No
+Network Management,OLTConfig,network_oltconfig,updated_by,ForeignKey,User,FK,Yes,No
+Network Management,OLTConfig,network_oltconfig,olt,ForeignKey,OLTDevice,FK,No,No
+Network Management,OLTConfig,network_oltconfig,config_type,CharField,,,No,No
+Network Management,OLTConfig,network_oltconfig,version,CharField,,,No,No
+Network Management,OLTConfig,network_oltconfig,config_data,TextField,,,No,No
+Network Management,OLTConfig,network_oltconfig,checksum,CharField,,,No,No
+Network Management,OLTConfig,network_oltconfig,applied_by,ForeignKey,User,FK,Yes,No
+Network Management,OLTConfig,network_oltconfig,applied_date,DateTimeField,,,No,No
+Network Management,OLTConfig,network_oltconfig,is_active,BooleanField,,,No,No
+Network Management,ACSConfiguration,network_acsconfiguration,id,BigAutoField,,,No,Yes
+Network Management,ACSConfiguration,network_acsconfiguration,created_at,DateTimeField,,,No,No
+Network Management,ACSConfiguration,network_acsconfiguration,updated_at,DateTimeField,,,No,No
+Network Management,ACSConfiguration,network_acsconfiguration,created_by,ForeignKey,User,FK,Yes,No
+Network Management,ACSConfiguration,network_acsconfiguration,updated_by,ForeignKey,User,FK,Yes,No
+Network Management,ACSConfiguration,network_acsconfiguration,company,ForeignKey,Company,FK,No,No
+Network Management,ACSConfiguration,network_acsconfiguration,name,CharField,,,No,No
+Network Management,ACSConfiguration,network_acsconfiguration,acs_url,CharField,,,No,No
+Network Management,ACSConfiguration,network_acsconfiguration,acs_username,CharField,,,No,No
+Network Management,ACSConfiguration,network_acsconfiguration,acs_password,CharField,,,No,No
+Network Management,ACSConfiguration,network_acsconfiguration,connection_request_url,CharField,,,No,No
+Network Management,ACSConfiguration,network_acsconfiguration,cpe_username,CharField,,,No,No
+Network Management,ACSConfiguration,network_acsconfiguration,cpe_password,CharField,,,No,No
+Network Management,ACSConfiguration,network_acsconfiguration,periodic_interval,IntegerField,,,No,No
+Network Management,ACSConfiguration,network_acsconfiguration,is_active,BooleanField,,,No,No
+Network Management,CPEDevice,network_cpedevice,id,BigAutoField,,,No,Yes
+Network Management,CPEDevice,network_cpedevice,created_at,DateTimeField,,,No,No
+Network Management,CPEDevice,network_cpedevice,updated_at,DateTimeField,,,No,No
+Network Management,CPEDevice,network_cpedevice,created_by,ForeignKey,User,FK,Yes,No
+Network Management,CPEDevice,network_cpedevice,updated_by,ForeignKey,User,FK,Yes,No
+Network Management,CPEDevice,network_cpedevice,company,ForeignKey,Company,FK,No,No
+Network Management,CPEDevice,network_cpedevice,service_connection,OneToOneField,ServiceConnection,O2O,Yes,Yes
+Network Management,CPEDevice,network_cpedevice,acs_config,ForeignKey,ACSConfiguration,FK,Yes,No
+Network Management,CPEDevice,network_cpedevice,manufacturer,CharField,,,No,No
+Network Management,CPEDevice,network_cpedevice,model,CharField,,,No,No
+Network Management,CPEDevice,network_cpedevice,serial_number,CharField,,,No,Yes
+Network Management,CPEDevice,network_cpedevice,product_class,CharField,,,No,No
+Network Management,CPEDevice,network_cpedevice,hardware_version,CharField,,,No,No
+Network Management,CPEDevice,network_cpedevice,software_version,CharField,,,No,No
+Network Management,CPEDevice,network_cpedevice,oui,CharField,,,No,No
+Network Management,CPEDevice,network_cpedevice,cpe_id,CharField,,,No,Yes
+Network Management,CPEDevice,network_cpedevice,connection_status,CharField,,,No,No
+Network Management,CPEDevice,network_cpedevice,wan_ip,GenericIPAddressField,,,Yes,No
+Network Management,CPEDevice,network_cpedevice,wan_mac,CharField,,,No,No
+Network Management,CPEDevice,network_cpedevice,lan_ip,GenericIPAddressField,,,No,No
+Network Management,CPEDevice,network_cpedevice,last_connection,DateTimeField,,,Yes,No
+Network Management,CPEDevice,network_cpedevice,last_boot,DateTimeField,,,Yes,No
+Network Management,CPEDevice,network_cpedevice,provisioned,BooleanField,,,No,No
+Network Management,CPEDevice,network_cpedevice,configuration_file,TextField,,,No,No
+Network Management,CPEDevice,network_cpedevice,custom_parameters,JSONField,,,No,No
+Network Management,TR069Parameter,network_tr069parameter,id,BigAutoField,,,No,Yes
+Network Management,TR069Parameter,network_tr069parameter,created_at,DateTimeField,,,No,No
+Network Management,TR069Parameter,network_tr069parameter,updated_at,DateTimeField,,,No,No
+Network Management,TR069Parameter,network_tr069parameter,created_by,ForeignKey,User,FK,Yes,No
+Network Management,TR069Parameter,network_tr069parameter,updated_by,ForeignKey,User,FK,Yes,No
+Network Management,TR069Parameter,network_tr069parameter,cpe_device,ForeignKey,CPEDevice,FK,No,No
+Network Management,TR069Parameter,network_tr069parameter,parameter_name,CharField,,,No,No
+Network Management,TR069Parameter,network_tr069parameter,parameter_type,CharField,,,No,No
+Network Management,TR069Parameter,network_tr069parameter,access_type,CharField,,,No,No
+Network Management,TR069Parameter,network_tr069parameter,current_value,TextField,,,No,No
+Network Management,TR069Parameter,network_tr069parameter,configured_value,TextField,,,No,No
+Network Management,TR069Parameter,network_tr069parameter,min_value,CharField,,,No,No
+Network Management,TR069Parameter,network_tr069parameter,max_value,CharField,,,No,No
+Network Management,TR069Parameter,network_tr069parameter,default_value,TextField,,,No,No
+Network Management,TR069Parameter,network_tr069parameter,notification,IntegerField,,,No,No
+Network Management,TR069Parameter,network_tr069parameter,description,TextField,,,No,No
+Network Management,TR069Parameter,network_tr069parameter,last_updated,DateTimeField,,,No,No
+Network Management,TR069Session,network_tr069session,id,BigAutoField,,,No,Yes
+Network Management,TR069Session,network_tr069session,created_at,DateTimeField,,,No,No
+Network Management,TR069Session,network_tr069session,updated_at,DateTimeField,,,No,No
+Network Management,TR069Session,network_tr069session,created_by,ForeignKey,User,FK,Yes,No
+Network Management,TR069Session,network_tr069session,updated_by,ForeignKey,User,FK,Yes,No
+Network Management,TR069Session,network_tr069session,cpe_device,ForeignKey,CPEDevice,FK,No,No
+Network Management,TR069Session,network_tr069session,session_type,CharField,,,No,No
+Network Management,TR069Session,network_tr069session,session_id,CharField,,,No,Yes
+Network Management,TR069Session,network_tr069session,start_time,DateTimeField,,,No,No
+Network Management,TR069Session,network_tr069session,end_time,DateTimeField,,,Yes,No
+Network Management,TR069Session,network_tr069session,duration,DurationField,,,Yes,No
+Network Management,TR069Session,network_tr069session,status,CharField,,,No,No
+Network Management,TR069Session,network_tr069session,request_data,JSONField,,,Yes,No
+Network Management,TR069Session,network_tr069session,response_data,JSONField,,,Yes,No
+Network Management,TR069Session,network_tr069session,error_message,TextField,,,No,No
+Network Management,TR069Session,network_tr069session,initiated_by,ForeignKey,User,FK,Yes,No
+Network Management,MikrotikDevice,network_mikrotikdevice,id,BigAutoField,,,No,Yes
+Network Management,MikrotikDevice,network_mikrotikdevice,created_at,DateTimeField,,,No,No
+Network Management,MikrotikDevice,network_mikrotikdevice,updated_at,DateTimeField,,,No,No
+Network Management,MikrotikDevice,network_mikrotikdevice,created_by,ForeignKey,User,FK,Yes,No
+Network Management,MikrotikDevice,network_mikrotikdevice,updated_by,ForeignKey,User,FK,Yes,No
+Network Management,MikrotikDevice,network_mikrotikdevice,company,ForeignKey,Company,FK,No,No
+Network Management,MikrotikDevice,network_mikrotikdevice,name,CharField,,,No,No
+Network Management,MikrotikDevice,network_mikrotikdevice,hostname,CharField,,,No,No
+Network Management,MikrotikDevice,network_mikrotikdevice,ip_address,GenericIPAddressField,,,No,Yes
+Network Management,MikrotikDevice,network_mikrotikdevice,api_port,IntegerField,,,No,No
+Network Management,MikrotikDevice,network_mikrotikdevice,ssh_port,IntegerField,,,No,No
+Network Management,MikrotikDevice,network_mikrotikdevice,winbox_port,IntegerField,,,No,No
+Network Management,MikrotikDevice,network_mikrotikdevice,device_type,CharField,,,No,No
+Network Management,MikrotikDevice,network_mikrotikdevice,model,CharField,,,No,No
+Network Management,MikrotikDevice,network_mikrotikdevice,serial_number,CharField,,,No,Yes
+Network Management,MikrotikDevice,network_mikrotikdevice,firmware_version,CharField,,,No,No
+Network Management,MikrotikDevice,network_mikrotikdevice,location,CharField,,,No,No
+Network Management,MikrotikDevice,network_mikrotikdevice,api_username,CharField,,,No,No
+Network Management,MikrotikDevice,network_mikrotikdevice,api_password,CharField,,,No,No
+Network Management,MikrotikDevice,network_mikrotikdevice,ssh_username,CharField,,,No,No
+Network Management,MikrotikDevice,network_mikrotikdevice,ssh_password,CharField,,,No,No
+Network Management,MikrotikDevice,network_mikrotikdevice,status,CharField,,,No,No
+Network Management,MikrotikDevice,network_mikrotikdevice,last_sync,DateTimeField,,,Yes,No
+Network Management,MikrotikDevice,network_mikrotikdevice,cpu_load,FloatField,,,Yes,No
+Network Management,MikrotikDevice,network_mikrotikdevice,memory_usage,FloatField,,,Yes,No
+Network Management,MikrotikDevice,network_mikrotikdevice,disk_usage,FloatField,,,Yes,No
+Network Management,MikrotikDevice,network_mikrotikdevice,uptime,DurationField,,,Yes,No
+Network Management,MikrotikDevice,network_mikrotikdevice,notes,TextField,,,No,No
+Network Management,MikrotikInterface,network_mikrotikinterface,id,BigAutoField,,,No,Yes
+Network Management,MikrotikInterface,network_mikrotikinterface,created_at,DateTimeField,,,No,No
+Network Management,MikrotikInterface,network_mikrotikinterface,updated_at,DateTimeField,,,No,No
+Network Management,MikrotikInterface,network_mikrotikinterface,created_by,ForeignKey,User,FK,Yes,No
+Network Management,MikrotikInterface,network_mikrotikinterface,updated_by,ForeignKey,User,FK,Yes,No
+Network Management,MikrotikInterface,network_mikrotikinterface,mikrotik,ForeignKey,MikrotikDevice,FK,No,No
+Network Management,MikrotikInterface,network_mikrotikinterface,interface_name,CharField,,,No,No
+Network Management,MikrotikInterface,network_mikrotikinterface,interface_type,CharField,,,No,No
+Network Management,MikrotikInterface,network_mikrotikinterface,mac_address,CharField,,,No,No
+Network Management,MikrotikInterface,network_mikrotikinterface,mtu,IntegerField,,,No,No
+Network Management,MikrotikInterface,network_mikrotikinterface,rx_bytes,BigIntegerField,,,No,No
+Network Management,MikrotikInterface,network_mikrotikinterface,tx_bytes,BigIntegerField,,,No,No
+Network Management,MikrotikInterface,network_mikrotikinterface,rx_packets,BigIntegerField,,,No,No
+Network Management,MikrotikInterface,network_mikrotikinterface,tx_packets,BigIntegerField,,,No,No
+Network Management,MikrotikInterface,network_mikrotikinterface,rx_errors,BigIntegerField,,,No,No
+Network Management,MikrotikInterface,network_mikrotikinterface,tx_errors,BigIntegerField,,,No,No
+Network Management,MikrotikInterface,network_mikrotikinterface,admin_state,BooleanField,,,No,No
+Network Management,MikrotikInterface,network_mikrotikinterface,operational_state,BooleanField,,,No,No
+Network Management,MikrotikInterface,network_mikrotikinterface,last_change,DateTimeField,,,No,No
+Network Management,HotspotUser,network_hotspotuser,id,BigAutoField,,,No,Yes
+Network Management,HotspotUser,network_hotspotuser,created_at,DateTimeField,,,No,No
+Network Management,HotspotUser,network_hotspotuser,updated_at,DateTimeField,,,No,No
+Network Management,HotspotUser,network_hotspotuser,created_by,ForeignKey,User,FK,Yes,No
+Network Management,HotspotUser,network_hotspotuser,updated_by,ForeignKey,User,FK,Yes,No
+Network Management,HotspotUser,network_hotspotuser,mikrotik,ForeignKey,MikrotikDevice,FK,No,No
+Network Management,HotspotUser,network_hotspotuser,service_connection,OneToOneField,ServiceConnection,O2O,Yes,Yes
+Network Management,HotspotUser,network_hotspotuser,username,CharField,,,No,No
+Network Management,HotspotUser,network_hotspotuser,password,CharField,,,No,No
+Network Management,HotspotUser,network_hotspotuser,mac_address,CharField,,,No,No
+Network Management,HotspotUser,network_hotspotuser,ip_address,GenericIPAddressField,,,Yes,No
+Network Management,HotspotUser,network_hotspotuser,bytes_in,BigIntegerField,,,No,No
+Network Management,HotspotUser,network_hotspotuser,bytes_out,BigIntegerField,,,No,No
+Network Management,HotspotUser,network_hotspotuser,packets_in,BigIntegerField,,,No,No
+Network Management,HotspotUser,network_hotspotuser,packets_out,BigIntegerField,,,No,No
+Network Management,HotspotUser,network_hotspotuser,session_time,DurationField,,,Yes,No
+Network Management,HotspotUser,network_hotspotuser,idle_time,DurationField,,,Yes,No
+Network Management,HotspotUser,network_hotspotuser,status,CharField,,,No,No
+Network Management,HotspotUser,network_hotspotuser,profile,CharField,,,No,No
+Network Management,HotspotUser,network_hotspotuser,limit_uptime,DurationField,,,Yes,No
+Network Management,HotspotUser,network_hotspotuser,limit_bytes_in,BigIntegerField,,,Yes,No
+Network Management,HotspotUser,network_hotspotuser,limit_bytes_out,BigIntegerField,,,Yes,No
+Network Management,HotspotUser,network_hotspotuser,last_login,DateTimeField,,,Yes,No
+Network Management,HotspotUser,network_hotspotuser,last_logout,DateTimeField,,,Yes,No
+Network Management,PPPoEUser,network_pppoeuser,id,BigAutoField,,,No,Yes
+Network Management,PPPoEUser,network_pppoeuser,created_at,DateTimeField,,,No,No
+Network Management,PPPoEUser,network_pppoeuser,updated_at,DateTimeField,,,No,No
+Network Management,PPPoEUser,network_pppoeuser,created_by,ForeignKey,User,FK,Yes,No
+Network Management,PPPoEUser,network_pppoeuser,updated_by,ForeignKey,User,FK,Yes,No
+Network Management,PPPoEUser,network_pppoeuser,mikrotik,ForeignKey,MikrotikDevice,FK,No,No
+Network Management,PPPoEUser,network_pppoeuser,service_connection,OneToOneField,ServiceConnection,O2O,Yes,Yes
+Network Management,PPPoEUser,network_pppoeuser,username,CharField,,,No,No
+Network Management,PPPoEUser,network_pppoeuser,password,CharField,,,No,No
+Network Management,PPPoEUser,network_pppoeuser,service,CharField,,,No,No
+Network Management,PPPoEUser,network_pppoeuser,caller_id,CharField,,,No,No
+Network Management,PPPoEUser,network_pppoeuser,local_address,GenericIPAddressField,,,Yes,No
+Network Management,PPPoEUser,network_pppoeuser,remote_address,GenericIPAddressField,,,Yes,No
+Network Management,PPPoEUser,network_pppoeuser,bytes_in,BigIntegerField,,,No,No
+Network Management,PPPoEUser,network_pppoeuser,bytes_out,BigIntegerField,,,No,No
+Network Management,PPPoEUser,network_pppoeuser,packets_in,BigIntegerField,,,No,No
+Network Management,PPPoEUser,network_pppoeuser,packets_out,BigIntegerField,,,No,No
+Network Management,PPPoEUser,network_pppoeuser,session_time,DurationField,,,Yes,No
+Network Management,PPPoEUser,network_pppoeuser,idle_time,DurationField,,,Yes,No
+Network Management,PPPoEUser,network_pppoeuser,status,CharField,,,No,No
+Network Management,PPPoEUser,network_pppoeuser,profile,CharField,,,No,No
+Network Management,PPPoEUser,network_pppoeuser,last_connection,DateTimeField,,,Yes,No
+Network Management,PPPoEUser,network_pppoeuser,last_disconnection,DateTimeField,,,Yes,No
+Network Management,MikrotikQueue,network_mikrotikqueue,id,BigAutoField,,,No,Yes
+Network Management,MikrotikQueue,network_mikrotikqueue,created_at,DateTimeField,,,No,No
+Network Management,MikrotikQueue,network_mikrotikqueue,updated_at,DateTimeField,,,No,No
+Network Management,MikrotikQueue,network_mikrotikqueue,created_by,ForeignKey,User,FK,Yes,No
+Network Management,MikrotikQueue,network_mikrotikqueue,updated_by,ForeignKey,User,FK,Yes,No
+Network Management,MikrotikQueue,network_mikrotikqueue,mikrotik,ForeignKey,MikrotikDevice,FK,No,No
+Network Management,MikrotikQueue,network_mikrotikqueue,queue_name,CharField,,,No,No
+Network Management,MikrotikQueue,network_mikrotikqueue,queue_type,CharField,,,No,No
+Network Management,MikrotikQueue,network_mikrotikqueue,target,CharField,,,No,No
+Network Management,MikrotikQueue,network_mikrotikqueue,max_limit,CharField,,,No,No
+Network Management,MikrotikQueue,network_mikrotikqueue,burst_limit,CharField,,,No,No
+Network Management,MikrotikQueue,network_mikrotikqueue,burst_threshold,CharField,,,No,No
+Network Management,MikrotikQueue,network_mikrotikqueue,burst_time,CharField,,,No,No
+Network Management,MikrotikQueue,network_mikrotikqueue,priority,IntegerField,,,No,No
+Network Management,MikrotikQueue,network_mikrotikqueue,packet_mark,CharField,,,No,No
+Network Management,MikrotikQueue,network_mikrotikqueue,disabled,BooleanField,,,No,No
+Network Management,MikrotikQueue,network_mikrotikqueue,comment,TextField,,,No,No
+Network Management,MikrotikQueue,network_mikrotikqueue,hotspot_user,ForeignKey,HotspotUser,FK,Yes,No
+Network Management,MikrotikQueue,network_mikrotikqueue,pppoe_user,ForeignKey,PPPoEUser,FK,Yes,No
+Network Management,Subnet,network_subnet,id,BigAutoField,,,No,Yes
+Network Management,Subnet,network_subnet,created_at,DateTimeField,,,No,No
+Network Management,Subnet,network_subnet,updated_at,DateTimeField,,,No,No
+Network Management,Subnet,network_subnet,created_by,ForeignKey,User,FK,Yes,No
+Network Management,Subnet,network_subnet,updated_by,ForeignKey,User,FK,Yes,No
+Network Management,Subnet,network_subnet,company,ForeignKey,Company,FK,No,No
+Network Management,Subnet,network_subnet,name,CharField,,,No,No
+Network Management,Subnet,network_subnet,network_address,GenericIPAddressField,,,No,No
+Network Management,Subnet,network_subnet,subnet_mask,GenericIPAddressField,,,No,No
+Network Management,Subnet,network_subnet,cidr,CharField,,,No,No
+Network Management,Subnet,network_subnet,version,CharField,,,No,No
+Network Management,Subnet,network_subnet,description,TextField,,,No,No
+Network Management,Subnet,network_subnet,vlan_id,IntegerField,,,Yes,No
+Network Management,Subnet,network_subnet,location,CharField,,,No,No
+Network Management,Subnet,network_subnet,is_public,BooleanField,,,No,No
+Network Management,Subnet,network_subnet,total_ips,IntegerField,,,No,No
+Network Management,Subnet,network_subnet,used_ips,IntegerField,,,No,No
+Network Management,Subnet,network_subnet,available_ips,IntegerField,,,No,No
+Network Management,Subnet,network_subnet,utilization_percentage,FloatField,,,No,No
+Network Management,VLAN,network_vlan,id,BigAutoField,,,No,Yes
+Network Management,VLAN,network_vlan,created_at,DateTimeField,,,No,No
+Network Management,VLAN,network_vlan,updated_at,DateTimeField,,,No,No
+Network Management,VLAN,network_vlan,created_by,ForeignKey,User,FK,Yes,No
+Network Management,VLAN,network_vlan,updated_by,ForeignKey,User,FK,Yes,No
+Network Management,VLAN,network_vlan,company,ForeignKey,Company,FK,No,No
+Network Management,VLAN,network_vlan,vlan_id,IntegerField,,,No,No
+Network Management,VLAN,network_vlan,name,CharField,,,No,No
+Network Management,VLAN,network_vlan,description,TextField,,,No,No
+Network Management,VLAN,network_vlan,subnet,ForeignKey,Subnet,FK,Yes,No
+Network Management,IPPool,network_ippool,id,BigAutoField,,,No,Yes
+Network Management,IPPool,network_ippool,created_at,DateTimeField,,,No,No
+Network Management,IPPool,network_ippool,updated_at,DateTimeField,,,No,No
+Network Management,IPPool,network_ippool,created_by,ForeignKey,User,FK,Yes,No
+Network Management,IPPool,network_ippool,updated_by,ForeignKey,User,FK,Yes,No
+Network Management,IPPool,network_ippool,subnet,ForeignKey,Subnet,FK,No,No
+Network Management,IPPool,network_ippool,name,CharField,,,No,No
+Network Management,IPPool,network_ippool,pool_type,CharField,,,No,No
+Network Management,IPPool,network_ippool,start_ip,GenericIPAddressField,,,No,No
+Network Management,IPPool,network_ippool,end_ip,GenericIPAddressField,,,No,No
+Network Management,IPPool,network_ippool,gateway,GenericIPAddressField,,,Yes,No
+Network Management,IPPool,network_ippool,dns_servers,CharField,,,No,No
+Network Management,IPPool,network_ippool,lease_time,CharField,,,No,No
+Network Management,IPPool,network_ippool,description,TextField,,,No,No
+Network Management,IPPool,network_ippool,is_active,BooleanField,,,No,No
+Network Management,IPPool,network_ippool,total_ips,IntegerField,,,No,No
+Network Management,IPPool,network_ippool,used_ips,IntegerField,,,No,No
+Network Management,IPAddress,network_ipaddress,id,BigAutoField,,,No,Yes
+Network Management,IPAddress,network_ipaddress,created_at,DateTimeField,,,No,No
+Network Management,IPAddress,network_ipaddress,updated_at,DateTimeField,,,No,No
+Network Management,IPAddress,network_ipaddress,created_by,ForeignKey,User,FK,Yes,No
+Network Management,IPAddress,network_ipaddress,updated_by,ForeignKey,User,FK,Yes,No
+Network Management,IPAddress,network_ipaddress,subnet,ForeignKey,Subnet,FK,No,No
+Network Management,IPAddress,network_ipaddress,ip_pool,ForeignKey,IPPool,FK,Yes,No
+Network Management,IPAddress,network_ipaddress,ip_address,GenericIPAddressField,,,No,Yes
+Network Management,IPAddress,network_ipaddress,assignment_type,CharField,,,No,No
+Network Management,IPAddress,network_ipaddress,status,CharField,,,No,No
+Network Management,IPAddress,network_ipaddress,mac_address,CharField,,,No,No
+Network Management,IPAddress,network_ipaddress,hostname,CharField,,,No,No
+Network Management,IPAddress,network_ipaddress,description,TextField,,,No,No
+Network Management,IPAddress,network_ipaddress,service_connection,ForeignKey,ServiceConnection,FK,Yes,No
+Network Management,IPAddress,network_ipaddress,lease_start,DateTimeField,,,Yes,No
+Network Management,IPAddress,network_ipaddress,lease_end,DateTimeField,,,Yes,No
+Network Management,IPAddress,network_ipaddress,last_seen,DateTimeField,,,Yes,No
+Network Management,IPAddress,network_ipaddress,device_type,CharField,,,No,No
+Network Management,IPAddress,network_ipaddress,manufacturer,CharField,,,No,No
+Network Management,DHCPRange,network_dhcprange,id,BigAutoField,,,No,Yes
+Network Management,DHCPRange,network_dhcprange,created_at,DateTimeField,,,No,No
+Network Management,DHCPRange,network_dhcprange,updated_at,DateTimeField,,,No,No
+Network Management,DHCPRange,network_dhcprange,created_by,ForeignKey,User,FK,Yes,No
+Network Management,DHCPRange,network_dhcprange,updated_by,ForeignKey,User,FK,Yes,No
+Network Management,DHCPRange,network_dhcprange,ip_pool,ForeignKey,IPPool,FK,No,No
+Network Management,DHCPRange,network_dhcprange,name,CharField,,,No,No
+Network Management,DHCPRange,network_dhcprange,start_ip,GenericIPAddressField,,,No,No
+Network Management,DHCPRange,network_dhcprange,end_ip,GenericIPAddressField,,,No,No
+Network Management,DHCPRange,network_dhcprange,router,GenericIPAddressField,,,Yes,No
+Network Management,DHCPRange,network_dhcprange,dns_server,GenericIPAddressField,,,Yes,No
+Network Management,DHCPRange,network_dhcprange,domain_name,CharField,,,No,No
+Network Management,DHCPRange,network_dhcprange,lease_time,CharField,,,No,No
+Network Management,DHCPRange,network_dhcprange,is_active,BooleanField,,,No,No
+Billing Management,Plan,billing_plan,id,BigAutoField,,,No,Yes
+Billing Management,Plan,billing_plan,company,ForeignKey,Company,FK,No,No
+Billing Management,Plan,billing_plan,name,CharField,,,No,No
+Billing Management,Plan,billing_plan,code,CharField,,,No,Yes
+Billing Management,Plan,billing_plan,plan_type,CharField,,,No,No
+Billing Management,Plan,billing_plan,description,TextField,,,No,No
+Billing Management,Plan,billing_plan,base_price,DecimalField,,,No,No
+Billing Management,Plan,billing_plan,setup_fee,DecimalField,,,No,No
+Billing Management,Plan,billing_plan,tax_inclusive,BooleanField,,,No,No
+Billing Management,Plan,billing_plan,tax_rate,DecimalField,,,No,No
+Billing Management,Plan,billing_plan,download_speed,PositiveIntegerField,,,No,No
+Billing Management,Plan,billing_plan,upload_speed,PositiveIntegerField,,,No,No
+Billing Management,Plan,billing_plan,data_limit,PositiveBigIntegerField,,,No,No
+Billing Management,Plan,billing_plan,burst_limit,PositiveIntegerField,,,Yes,No
+Billing Management,Plan,billing_plan,billing_cycle,CharField,,,No,No
+Billing Management,Plan,billing_plan,prorated_billing,BooleanField,,,No,No
+Billing Management,Plan,billing_plan,auto_renew,BooleanField,,,No,No
+Billing Management,Plan,billing_plan,contract_period,PositiveIntegerField,,,No,No
+Billing Management,Plan,billing_plan,early_termination_fee,DecimalField,,,No,No
+Billing Management,Plan,billing_plan,is_active,BooleanField,,,No,No
+Billing Management,Plan,billing_plan,is_public,BooleanField,,,No,No
+Billing Management,Plan,billing_plan,created_by,ForeignKey,User,FK,Yes,No
+Billing Management,Plan,billing_plan,updated_by,ForeignKey,User,FK,Yes,No
+Billing Management,Plan,billing_plan,created_at,DateTimeField,,,No,No
+Billing Management,Plan,billing_plan,updated_at,DateTimeField,,,No,No
+Billing Management,BillingCycle,billing_billingcycle,id,BigAutoField,,,No,Yes
+Billing Management,BillingCycle,billing_billingcycle,company,ForeignKey,Company,FK,No,No
+Billing Management,BillingCycle,billing_billingcycle,name,CharField,,,No,No
+Billing Management,BillingCycle,billing_billingcycle,cycle_code,CharField,,,No,Yes
+Billing Management,BillingCycle,billing_billingcycle,start_date,DateField,,,No,No
+Billing Management,BillingCycle,billing_billingcycle,end_date,DateField,,,No,No
+Billing Management,BillingCycle,billing_billingcycle,due_date,DateField,,,No,No
+Billing Management,BillingCycle,billing_billingcycle,status,CharField,,,No,No
+Billing Management,BillingCycle,billing_billingcycle,is_locked,BooleanField,,,No,No
+Billing Management,BillingCycle,billing_billingcycle,total_invoices,PositiveIntegerField,,,No,No
+Billing Management,BillingCycle,billing_billingcycle,total_amount,DecimalField,,,No,No
+Billing Management,BillingCycle,billing_billingcycle,total_paid,DecimalField,,,No,No
+Billing Management,BillingCycle,billing_billingcycle,total_outstanding,DecimalField,,,No,No
+Billing Management,BillingCycle,billing_billingcycle,closed_by,ForeignKey,User,FK,Yes,No
+Billing Management,BillingCycle,billing_billingcycle,closed_at,DateTimeField,,,Yes,No
+Billing Management,BillingCycle,billing_billingcycle,notes,TextField,,,No,No
+Billing Management,BillingCycle,billing_billingcycle,created_by,ForeignKey,User,FK,Yes,No
+Billing Management,BillingCycle,billing_billingcycle,created_at,DateTimeField,,,No,No
+Billing Management,BillingCycle,billing_billingcycle,updated_at,DateTimeField,,,No,No
+Billing Management,Invoice,billing_invoice,id,BigAutoField,,,No,Yes
+Billing Management,Invoice,billing_invoice,invoice_number,CharField,,,No,Yes
+Billing Management,Invoice,billing_invoice,company,ForeignKey,Company,FK,No,No
+Billing Management,Invoice,billing_invoice,customer,ForeignKey,Customer,FK,No,No
+Billing Management,Invoice,billing_invoice,billing_cycle,ForeignKey,BillingCycle,FK,Yes,No
+Billing Management,Invoice,billing_invoice,billing_date,DateField,,,No,No
+Billing Management,Invoice,billing_invoice,due_date,DateField,,,No,No
+Billing Management,Invoice,billing_invoice,payment_terms,CharField,,,No,No
+Billing Management,Invoice,billing_invoice,service_period_start,DateField,,,No,No
+Billing Management,Invoice,billing_invoice,service_period_end,DateField,,,No,No
+Billing Management,Invoice,billing_invoice,subtotal,DecimalField,,,No,No
+Billing Management,Invoice,billing_invoice,tax_amount,DecimalField,,,No,No
+Billing Management,Invoice,billing_invoice,discount_amount,DecimalField,,,No,No
+Billing Management,Invoice,billing_invoice,total_amount,DecimalField,,,No,No
+Billing Management,Invoice,billing_invoice,amount_paid,DecimalField,,,No,No
+Billing Management,Invoice,billing_invoice,balance,DecimalField,,,No,No
+Billing Management,Invoice,billing_invoice,status,CharField,,,No,No
+Billing Management,Invoice,billing_invoice,is_overdue,BooleanField,,,No,No
+Billing Management,Invoice,billing_invoice,overdue_days,PositiveIntegerField,,,No,No
+Billing Management,Invoice,billing_invoice,paid_at,DateTimeField,,,Yes,No
+Billing Management,Invoice,billing_invoice,paid_by,ForeignKey,User,FK,Yes,No
+Billing Management,Invoice,billing_invoice,service_connection,ForeignKey,ServiceConnection,FK,Yes,No
+Billing Management,Invoice,billing_invoice,plan,ForeignKey,Plan,FK,Yes,No
+Billing Management,Invoice,billing_invoice,notes,TextField,,,No,No
+Billing Management,Invoice,billing_invoice,internal_notes,TextField,,,No,No
+Billing Management,Invoice,billing_invoice,created_by,ForeignKey,User,FK,Yes,No
+Billing Management,Invoice,billing_invoice,issued_by,ForeignKey,User,FK,Yes,No
+Billing Management,Invoice,billing_invoice,issued_at,DateTimeField,,,Yes,No
+Billing Management,Invoice,billing_invoice,created_at,DateTimeField,,,No,No
+Billing Management,Invoice,billing_invoice,updated_at,DateTimeField,,,No,No
+Billing Management,InvoiceItem,billing_invoiceitem,id,BigAutoField,,,No,Yes
+Billing Management,InvoiceItem,billing_invoiceitem,invoice,ForeignKey,Invoice,FK,No,No
+Billing Management,InvoiceItem,billing_invoiceitem,description,CharField,,,No,No
+Billing Management,InvoiceItem,billing_invoiceitem,quantity,DecimalField,,,No,No
+Billing Management,InvoiceItem,billing_invoiceitem,unit_price,DecimalField,,,No,No
+Billing Management,InvoiceItem,billing_invoiceitem,tax_rate,DecimalField,,,No,No
+Billing Management,InvoiceItem,billing_invoiceitem,tax_amount,DecimalField,,,No,No
+Billing Management,InvoiceItem,billing_invoiceitem,total,DecimalField,,,No,No
+Billing Management,InvoiceItem,billing_invoiceitem,service_type,CharField,,,No,No
+Billing Management,InvoiceItem,billing_invoiceitem,service_period_start,DateField,,,Yes,No
+Billing Management,InvoiceItem,billing_invoiceitem,service_period_end,DateField,,,Yes,No
+Billing Management,InvoiceItem,billing_invoiceitem,created_at,DateTimeField,,,No,No
+Billing Management,InvoiceItem,billing_invoiceitem,updated_at,DateTimeField,,,No,No
+Billing Management,PaymentMethod,billing_paymentmethod,id,BigAutoField,,,No,Yes
+Billing Management,PaymentMethod,billing_paymentmethod,company,ForeignKey,Company,FK,No,No
+Billing Management,PaymentMethod,billing_paymentmethod,name,CharField,,,No,No
+Billing Management,PaymentMethod,billing_paymentmethod,code,CharField,,,No,Yes
+Billing Management,PaymentMethod,billing_paymentmethod,method_type,CharField,,,No,No
+Billing Management,PaymentMethod,billing_paymentmethod,description,TextField,,,No,No
+Billing Management,PaymentMethod,billing_paymentmethod,is_active,BooleanField,,,No,No
+Billing Management,PaymentMethod,billing_paymentmethod,requires_confirmation,BooleanField,,,No,No
+Billing Management,PaymentMethod,billing_paymentmethod,confirmation_timeout,PositiveIntegerField,,,No,No
+Billing Management,PaymentMethod,billing_paymentmethod,transaction_fee,DecimalField,,,No,No
+Billing Management,PaymentMethod,billing_paymentmethod,fee_type,CharField,,,No,No
+Billing Management,PaymentMethod,billing_paymentmethod,minimum_amount,DecimalField,,,No,No
+Billing Management,PaymentMethod,billing_paymentmethod,maximum_amount,DecimalField,,,No,No
+Billing Management,PaymentMethod,billing_paymentmethod,integration_class,CharField,,,No,No
+Billing Management,PaymentMethod,billing_paymentmethod,config_json,JSONField,,,No,No
+Billing Management,PaymentMethod,billing_paymentmethod,status,CharField,,,No,No
+Billing Management,PaymentMethod,billing_paymentmethod,last_used,DateTimeField,,,Yes,No
+Billing Management,PaymentMethod,billing_paymentmethod,created_by,ForeignKey,User,FK,Yes,No
+Billing Management,PaymentMethod,billing_paymentmethod,updated_by,ForeignKey,User,FK,Yes,No
+Billing Management,PaymentMethod,billing_paymentmethod,created_at,DateTimeField,,,No,No
+Billing Management,PaymentMethod,billing_paymentmethod,updated_at,DateTimeField,,,No,No
+Billing Management,Payment,billing_payment,id,BigAutoField,,,No,Yes
+Billing Management,Payment,billing_payment,payment_number,CharField,,,No,Yes
+Billing Management,Payment,billing_payment,company,ForeignKey,Company,FK,No,No
+Billing Management,Payment,billing_payment,customer,ForeignKey,Customer,FK,No,No
+Billing Management,Payment,billing_payment,invoice,ForeignKey,Invoice,FK,Yes,No
+Billing Management,Payment,billing_payment,amount,DecimalField,,,No,No
+Billing Management,Payment,billing_payment,transaction_fee,DecimalField,,,No,No
+Billing Management,Payment,billing_payment,net_amount,DecimalField,,,No,No
+Billing Management,Payment,billing_payment,currency,CharField,,,No,No
+Billing Management,Payment,billing_payment,payment_method,ForeignKey,PaymentMethod,FK,No,No
+Billing Management,Payment,billing_payment,payment_reference,CharField,,,No,No
+Billing Management,Payment,billing_payment,transaction_id,CharField,,,No,No
+Billing Management,Payment,billing_payment,status,CharField,,,No,No
+Billing Management,Payment,billing_payment,is_reconciled,BooleanField,,,No,No
+Billing Management,Payment,billing_payment,payment_date,DateTimeField,,,No,No
+Billing Management,Payment,billing_payment,processed_at,DateTimeField,,,Yes,No
+Billing Management,Payment,billing_payment,reconciled_at,DateTimeField,,,Yes,No
+Billing Management,Payment,billing_payment,payer_name,CharField,,,No,No
+Billing Management,Payment,billing_payment,payer_phone,CharField,,,No,No
+Billing Management,Payment,billing_payment,payer_email,CharField,,,No,No
+Billing Management,Payment,billing_payment,payer_id_number,CharField,,,No,No
+Billing Management,Payment,billing_payment,bank_name,CharField,,,No,No
+Billing Management,Payment,billing_payment,account_number,CharField,,,No,No
+Billing Management,Payment,billing_payment,branch,CharField,,,No,No
+Billing Management,Payment,billing_payment,cheque_number,CharField,,,No,No
+Billing Management,Payment,billing_payment,mpesa_receipt,CharField,,,No,No
+Billing Management,Payment,billing_payment,mpesa_phone,CharField,,,No,No
+Billing Management,Payment,billing_payment,mpesa_name,CharField,,,No,No
+Billing Management,Payment,billing_payment,notes,TextField,,,No,No
+Billing Management,Payment,billing_payment,failure_reason,TextField,,,No,No
+Billing Management,Payment,billing_payment,created_by,ForeignKey,User,FK,Yes,No
+Billing Management,Payment,billing_payment,processed_by,ForeignKey,User,FK,Yes,No
+Billing Management,Payment,billing_payment,reconciled_by,ForeignKey,User,FK,Yes,No
+Billing Management,Payment,billing_payment,created_at,DateTimeField,,,No,No
+Billing Management,Payment,billing_payment,updated_at,DateTimeField,,,No,No
+Billing Management,Receipt,billing_receipt,id,BigAutoField,,,No,Yes
+Billing Management,Receipt,billing_receipt,receipt_number,CharField,,,No,Yes
+Billing Management,Receipt,billing_receipt,company,ForeignKey,Company,FK,No,No
+Billing Management,Receipt,billing_receipt,customer,ForeignKey,Customer,FK,No,No
+Billing Management,Receipt,billing_receipt,payment,OneToOneField,Payment,O2O,No,Yes
+Billing Management,Receipt,billing_receipt,amount,DecimalField,,,No,No
+Billing Management,Receipt,billing_receipt,amount_in_words,CharField,,,No,No
+Billing Management,Receipt,billing_receipt,currency,CharField,,,No,No
+Billing Management,Receipt,billing_receipt,payment_method,CharField,,,No,No
+Billing Management,Receipt,billing_receipt,payment_reference,CharField,,,No,No
+Billing Management,Receipt,billing_receipt,status,CharField,,,No,No
+Billing Management,Receipt,billing_receipt,receipt_date,DateTimeField,,,No,No
+Billing Management,Receipt,billing_receipt,issued_at,DateTimeField,,,Yes,No
+Billing Management,Receipt,billing_receipt,issued_by,ForeignKey,User,FK,Yes,No
+Billing Management,Receipt,billing_receipt,notes,TextField,,,No,No
+Billing Management,Receipt,billing_receipt,digital_signature,TextField,,,No,No
+Billing Management,Receipt,billing_receipt,qr_code,TextField,,,No,No
+Billing Management,Receipt,billing_receipt,created_by,ForeignKey,User,FK,Yes,No
+Billing Management,Receipt,billing_receipt,created_at,DateTimeField,,,No,No
+Billing Management,Receipt,billing_receipt,updated_at,DateTimeField,,,No,No
+Billing Management,VoucherBatch,billing_voucherbatch,id,BigAutoField,,,No,Yes
+Billing Management,VoucherBatch,billing_voucherbatch,batch_number,CharField,,,No,Yes
+Billing Management,VoucherBatch,billing_voucherbatch,company,ForeignKey,Company,FK,No,No
+Billing Management,VoucherBatch,billing_voucherbatch,name,CharField,,,No,No
+Billing Management,VoucherBatch,billing_voucherbatch,description,TextField,,,No,No
+Billing Management,VoucherBatch,billing_voucherbatch,voucher_type,CharField,,,No,No
+Billing Management,VoucherBatch,billing_voucherbatch,face_value,DecimalField,,,No,No
+Billing Management,VoucherBatch,billing_voucherbatch,sale_price,DecimalField,,,No,No
+Billing Management,VoucherBatch,billing_voucherbatch,valid_from,DateTimeField,,,No,No
+Billing Management,VoucherBatch,billing_voucherbatch,valid_to,DateTimeField,,,No,No
+Billing Management,VoucherBatch,billing_voucherbatch,is_reusable,BooleanField,,,No,No
+Billing Management,VoucherBatch,billing_voucherbatch,max_uses,PositiveIntegerField,,,No,No
+Billing Management,VoucherBatch,billing_voucherbatch,quantity,PositiveIntegerField,,,No,No
+Billing Management,VoucherBatch,billing_voucherbatch,issued_count,PositiveIntegerField,,,No,No
+Billing Management,VoucherBatch,billing_voucherbatch,used_count,PositiveIntegerField,,,No,No
+Billing Management,VoucherBatch,billing_voucherbatch,available_count,PositiveIntegerField,,,No,No
+Billing Management,VoucherBatch,billing_voucherbatch,status,CharField,,,No,No
+Billing Management,VoucherBatch,billing_voucherbatch,is_active,BooleanField,,,No,No
+Billing Management,VoucherBatch,billing_voucherbatch,prefix,CharField,,,No,No
+Billing Management,VoucherBatch,billing_voucherbatch,length,PositiveIntegerField,,,No,No
+Billing Management,VoucherBatch,billing_voucherbatch,charset,CharField,,,No,No
+Billing Management,VoucherBatch,billing_voucherbatch,minimum_purchase,DecimalField,,,No,No
+Billing Management,VoucherBatch,billing_voucherbatch,customer_restriction,BooleanField,,,No,No
+Billing Management,VoucherBatch,billing_voucherbatch,plan_restriction,BooleanField,,,No,No
+Billing Management,VoucherBatch,billing_voucherbatch,created_by,ForeignKey,User,FK,Yes,No
+Billing Management,VoucherBatch,billing_voucherbatch,approved_by,ForeignKey,User,FK,Yes,No
+Billing Management,VoucherBatch,billing_voucherbatch,approved_at,DateTimeField,,,Yes,No
+Billing Management,VoucherBatch,billing_voucherbatch,created_at,DateTimeField,,,No,No
+Billing Management,VoucherBatch,billing_voucherbatch,updated_at,DateTimeField,,,No,No
+Billing Management,Voucher,billing_voucher,id,BigAutoField,,,No,Yes
+Billing Management,Voucher,billing_voucher,batch,ForeignKey,VoucherBatch,FK,No,No
+Billing Management,Voucher,billing_voucher,code,CharField,,,No,Yes
+Billing Management,Voucher,billing_voucher,pin,CharField,,,No,No
+Billing Management,Voucher,billing_voucher,face_value,DecimalField,,,No,No
+Billing Management,Voucher,billing_voucher,sale_price,DecimalField,,,No,No
+Billing Management,Voucher,billing_voucher,remaining_value,DecimalField,,,No,No
+Billing Management,Voucher,billing_voucher,valid_from,DateTimeField,,,No,No
+Billing Management,Voucher,billing_voucher,valid_to,DateTimeField,,,No,No
+Billing Management,Voucher,billing_voucher,is_reusable,BooleanField,,,No,No
+Billing Management,Voucher,billing_voucher,max_uses,PositiveIntegerField,,,No,No
+Billing Management,Voucher,billing_voucher,use_count,PositiveIntegerField,,,No,No
+Billing Management,Voucher,billing_voucher,status,CharField,,,No,No
+Billing Management,Voucher,billing_voucher,sold_to,ForeignKey,Customer,FK,Yes,No
+Billing Management,Voucher,billing_voucher,sold_at,DateTimeField,,,Yes,No
+Billing Management,Voucher,billing_voucher,sold_by,ForeignKey,User,FK,Yes,No
+Billing Management,Voucher,billing_voucher,created_by,ForeignKey,User,FK,Yes,No
+Billing Management,Voucher,billing_voucher,created_at,DateTimeField,,,No,No
+Billing Management,Voucher,billing_voucher,updated_at,DateTimeField,,,No,No
+Billing Management,VoucherUsage,billing_voucherusage,id,BigAutoField,,,No,Yes
+Billing Management,VoucherUsage,billing_voucherusage,voucher,ForeignKey,Voucher,FK,No,No
+Billing Management,VoucherUsage,billing_voucherusage,customer,ForeignKey,Customer,FK,No,No
+Billing Management,VoucherUsage,billing_voucherusage,amount,DecimalField,,,No,No
+Billing Management,VoucherUsage,billing_voucherusage,remaining_balance,DecimalField,,,No,No
+Billing Management,VoucherUsage,billing_voucherusage,description,TextField,,,No,No
+Billing Management,VoucherUsage,billing_voucherusage,payment,ForeignKey,Payment,FK,Yes,No
+Billing Management,VoucherUsage,billing_voucherusage,invoice,ForeignKey,Invoice,FK,Yes,No
+Billing Management,VoucherUsage,billing_voucherusage,created_by,ForeignKey,User,FK,Yes,No
+Billing Management,VoucherUsage,billing_voucherusage,created_at,DateTimeField,,,No,No
+Support & Ticketing,TicketCategory,support_ticketcategory,id,BigAutoField,,,No,Yes
+Support & Ticketing,TicketCategory,support_ticketcategory,name,CharField,,,No,No
+Support & Ticketing,TicketCategory,support_ticketcategory,description,TextField,,,No,No
+Support & Ticketing,TicketCategory,support_ticketcategory,priority,IntegerField,,,No,No
+Support & Ticketing,TicketCategory,support_ticketcategory,sla_hours,PositiveIntegerField,,,No,No
+Support & Ticketing,TicketCategory,support_ticketcategory,is_active,BooleanField,,,No,No
+Support & Ticketing,TicketCategory,support_ticketcategory,company,ForeignKey,Company,FK,Yes,No
+Support & Ticketing,TicketStatus,support_ticketstatus,id,BigAutoField,,,No,Yes
+Support & Ticketing,TicketStatus,support_ticketstatus,name,CharField,,,No,No
+Support & Ticketing,TicketStatus,support_ticketstatus,description,TextField,,,No,No
+Support & Ticketing,TicketStatus,support_ticketstatus,is_open,BooleanField,,,No,No
+Support & Ticketing,TicketStatus,support_ticketstatus,is_closed,BooleanField,,,No,No
+Support & Ticketing,TicketStatus,support_ticketstatus,order,PositiveIntegerField,,,No,No
+Support & Ticketing,TicketStatus,support_ticketstatus,color,CharField,,,No,No
+Support & Ticketing,TicketStatus,support_ticketstatus,company,ForeignKey,Company,FK,Yes,No
+Support & Ticketing,Technician,support_technician,id,BigAutoField,,,No,Yes
+Support & Ticketing,Technician,support_technician,user,OneToOneField,User,O2O,No,Yes
+Support & Ticketing,Technician,support_technician,employee_id,CharField,,,No,Yes
+Support & Ticketing,Technician,support_technician,department,CharField,,,No,No
+Support & Ticketing,Technician,support_technician,expertise,JSONField,,,No,No
+Support & Ticketing,Technician,support_technician,certification,TextField,,,No,No
+Support & Ticketing,Technician,support_technician,is_available,BooleanField,,,No,No
+Support & Ticketing,Technician,support_technician,availability_schedule,JSONField,,,No,No
+Support & Ticketing,Technician,support_technician,max_active_tickets,PositiveIntegerField,,,No,No
+Support & Ticketing,Technician,support_technician,average_rating,FloatField,,,No,No
+Support & Ticketing,Technician,support_technician,total_tickets_resolved,PositiveIntegerField,,,No,No
+Support & Ticketing,Technician,support_technician,total_resolution_time,DurationField,,,No,No
+Support & Ticketing,Technician,support_technician,work_phone,CharField,,,No,No
+Support & Ticketing,Technician,support_technician,mobile_phone,CharField,,,No,No
+Support & Ticketing,Technician,support_technician,emergency_contact,TextField,,,No,No
+Support & Ticketing,Technician,support_technician,company,ForeignKey,Company,FK,Yes,No
+Support & Ticketing,Technician,support_technician,hire_date,DateField,,,Yes,No
+Support & Ticketing,Technician,support_technician,created_at,DateTimeField,,,No,No
+Support & Ticketing,Technician,support_technician,updated_at,DateTimeField,,,No,No
+Support & Ticketing,Ticket,support_ticket,id,BigAutoField,,,No,Yes
+Support & Ticketing,Ticket,support_ticket,ticket_number,CharField,,,No,Yes
+Support & Ticketing,Ticket,support_ticket,subject,CharField,,,No,No
+Support & Ticketing,Ticket,support_ticket,description,TextField,,,No,No
+Support & Ticketing,Ticket,support_ticket,customer,ForeignKey,Customer,FK,No,No
+Support & Ticketing,Ticket,support_ticket,contact_person,CharField,,,No,No
+Support & Ticketing,Ticket,support_ticket,contact_phone,CharField,,,No,No
+Support & Ticketing,Ticket,support_ticket,contact_email,CharField,,,No,No
+Support & Ticketing,Ticket,support_ticket,category,ForeignKey,TicketCategory,FK,Yes,No
+Support & Ticketing,Ticket,support_ticket,priority,CharField,,,No,No
+Support & Ticketing,Ticket,support_ticket,source_channel,CharField,,,No,No
+Support & Ticketing,Ticket,support_ticket,related_device_id,PositiveIntegerField,,,Yes,No
+Support & Ticketing,Ticket,support_ticket,related_device_type,CharField,,,No,No
+Support & Ticketing,Ticket,support_ticket,related_service_id,PositiveIntegerField,,,Yes,No
+Support & Ticketing,Ticket,support_ticket,assigned_to,ForeignKey,Technician,FK,Yes,No
+Support & Ticketing,Ticket,support_ticket,assigned_at,DateTimeField,,,Yes,No
+Support & Ticketing,Ticket,support_ticket,status,ForeignKey,TicketStatus,FK,Yes,No
+Support & Ticketing,Ticket,support_ticket,created_by,ForeignKey,User,FK,Yes,No
+Support & Ticketing,Ticket,support_ticket,sla_due_at,DateTimeField,,,Yes,No
+Support & Ticketing,Ticket,support_ticket,first_response_at,DateTimeField,,,Yes,No
+Support & Ticketing,Ticket,support_ticket,first_response_by,ForeignKey,User,FK,Yes,No
+Support & Ticketing,Ticket,support_ticket,resolution_due_at,DateTimeField,,,Yes,No
+Support & Ticketing,Ticket,support_ticket,resolved_at,DateTimeField,,,Yes,No
+Support & Ticketing,Ticket,support_ticket,resolved_by,ForeignKey,User,FK,Yes,No
+Support & Ticketing,Ticket,support_ticket,resolution_notes,TextField,,,No,No
+Support & Ticketing,Ticket,support_ticket,resolution_category,CharField,,,No,No
+Support & Ticketing,Ticket,support_ticket,customer_rating,PositiveIntegerField,,,Yes,No
+Support & Ticketing,Ticket,support_ticket,customer_feedback,TextField,,,No,No
+Support & Ticketing,Ticket,support_ticket,internal_notes,TextField,,,No,No
+Support & Ticketing,Ticket,support_ticket,is_escalated,BooleanField,,,No,No
+Support & Ticketing,Ticket,support_ticket,escalation_level,PositiveIntegerField,,,No,No
+Support & Ticketing,Ticket,support_ticket,escalation_reason,TextField,,,No,No
+Support & Ticketing,Ticket,support_ticket,company,ForeignKey,Company,FK,Yes,No
+Support & Ticketing,Ticket,support_ticket,created_at,DateTimeField,,,No,No
+Support & Ticketing,Ticket,support_ticket,updated_at,DateTimeField,,,No,No
+Support & Ticketing,Ticket,support_ticket,closed_at,DateTimeField,,,Yes,No
+Support & Ticketing,TicketMessage,support_ticketmessage,id,BigAutoField,,,No,Yes
+Support & Ticketing,TicketMessage,support_ticketmessage,ticket,ForeignKey,Ticket,FK,No,No
+Support & Ticketing,TicketMessage,support_ticketmessage,message,TextField,,,No,No
+Support & Ticketing,TicketMessage,support_ticketmessage,is_internal,BooleanField,,,No,No
+Support & Ticketing,TicketMessage,support_ticketmessage,sender,ForeignKey,User,FK,Yes,No
+Support & Ticketing,TicketMessage,support_ticketmessage,sender_type,CharField,,,No,No
+Support & Ticketing,TicketMessage,support_ticketmessage,attachments,JSONField,,,No,No
+Support & Ticketing,TicketMessage,support_ticketmessage,read_by_customer,BooleanField,,,No,No
+Support & Ticketing,TicketMessage,support_ticketmessage,read_by_staff,BooleanField,,,No,No
+Support & Ticketing,TicketMessage,support_ticketmessage,read_at,DateTimeField,,,Yes,No
+Support & Ticketing,TicketMessage,support_ticketmessage,company,ForeignKey,Company,FK,Yes,No
+Support & Ticketing,TicketMessage,support_ticketmessage,created_at,DateTimeField,,,No,No
+Support & Ticketing,TicketMessage,support_ticketmessage,updated_at,DateTimeField,,,No,No
+Support & Ticketing,TicketActivity,support_ticketactivity,id,BigAutoField,,,No,Yes
+Support & Ticketing,TicketActivity,support_ticketactivity,ticket,ForeignKey,Ticket,FK,No,No
+Support & Ticketing,TicketActivity,support_ticketactivity,activity_type,CharField,,,No,No
+Support & Ticketing,TicketActivity,support_ticketactivity,description,TextField,,,No,No
+Support & Ticketing,TicketActivity,support_ticketactivity,performed_by,ForeignKey,User,FK,Yes,No
+Support & Ticketing,TicketActivity,support_ticketactivity,changes,JSONField,,,No,No
+Support & Ticketing,TicketActivity,support_ticketactivity,company,ForeignKey,Company,FK,Yes,No
+Support & Ticketing,TicketActivity,support_ticketactivity,created_at,DateTimeField,,,No,No
+Support & Ticketing,KnowledgeBaseArticle,support_knowledgebasearticle,id,BigAutoField,,,No,Yes
+Support & Ticketing,KnowledgeBaseArticle,support_knowledgebasearticle,title,CharField,,,No,No
+Support & Ticketing,KnowledgeBaseArticle,support_knowledgebasearticle,slug,SlugField,,,No,Yes
+Support & Ticketing,KnowledgeBaseArticle,support_knowledgebasearticle,content,TextField,,,No,No
+Support & Ticketing,KnowledgeBaseArticle,support_knowledgebasearticle,excerpt,TextField,,,No,No
+Support & Ticketing,KnowledgeBaseArticle,support_knowledgebasearticle,category,CharField,,,No,No
+Support & Ticketing,KnowledgeBaseArticle,support_knowledgebasearticle,subcategory,CharField,,,No,No
+Support & Ticketing,KnowledgeBaseArticle,support_knowledgebasearticle,tags,JSONField,,,No,No
+Support & Ticketing,KnowledgeBaseArticle,support_knowledgebasearticle,author,ForeignKey,User,FK,Yes,No
+Support & Ticketing,KnowledgeBaseArticle,support_knowledgebasearticle,reviewed_by,ForeignKey,User,FK,Yes,No
+Support & Ticketing,KnowledgeBaseArticle,support_knowledgebasearticle,reviewed_at,DateTimeField,,,Yes,No
+Support & Ticketing,KnowledgeBaseArticle,support_knowledgebasearticle,status,CharField,,,No,No
+Support & Ticketing,KnowledgeBaseArticle,support_knowledgebasearticle,is_featured,BooleanField,,,No,No
+Support & Ticketing,KnowledgeBaseArticle,support_knowledgebasearticle,is_pinned,BooleanField,,,No,No
+Support & Ticketing,KnowledgeBaseArticle,support_knowledgebasearticle,meta_title,CharField,,,No,No
+Support & Ticketing,KnowledgeBaseArticle,support_knowledgebasearticle,meta_description,TextField,,,No,No
+Support & Ticketing,KnowledgeBaseArticle,support_knowledgebasearticle,keywords,TextField,,,No,No
+Support & Ticketing,KnowledgeBaseArticle,support_knowledgebasearticle,view_count,PositiveIntegerField,,,No,No
+Support & Ticketing,KnowledgeBaseArticle,support_knowledgebasearticle,helpful_yes,PositiveIntegerField,,,No,No
+Support & Ticketing,KnowledgeBaseArticle,support_knowledgebasearticle,helpful_no,PositiveIntegerField,,,No,No
+Support & Ticketing,KnowledgeBaseArticle,support_knowledgebasearticle,last_viewed_at,DateTimeField,,,Yes,No
+Support & Ticketing,KnowledgeBaseArticle,support_knowledgebasearticle,company,ForeignKey,Company,FK,Yes,No
+Support & Ticketing,KnowledgeBaseArticle,support_knowledgebasearticle,created_at,DateTimeField,,,No,No
+Support & Ticketing,KnowledgeBaseArticle,support_knowledgebasearticle,updated_at,DateTimeField,,,No,No
+Support & Ticketing,KnowledgeBaseArticle,support_knowledgebasearticle,published_at,DateTimeField,,,Yes,No
+Support & Ticketing,FAQ,support_faq,id,BigAutoField,,,No,Yes
+Support & Ticketing,FAQ,support_faq,question,CharField,,,No,No
+Support & Ticketing,FAQ,support_faq,answer,TextField,,,No,No
+Support & Ticketing,FAQ,support_faq,category,CharField,,,No,No
+Support & Ticketing,FAQ,support_faq,subcategory,CharField,,,No,No
+Support & Ticketing,FAQ,support_faq,tags,JSONField,,,No,No
+Support & Ticketing,FAQ,support_faq,display_order,PositiveIntegerField,,,No,No
+Support & Ticketing,FAQ,support_faq,view_count,PositiveIntegerField,,,No,No
+Support & Ticketing,FAQ,support_faq,helpful_yes,PositiveIntegerField,,,No,No
+Support & Ticketing,FAQ,support_faq,helpful_no,PositiveIntegerField,,,No,No
+Support & Ticketing,FAQ,support_faq,is_active,BooleanField,,,No,No
+Support & Ticketing,FAQ,support_faq,is_featured,BooleanField,,,No,No
+Support & Ticketing,FAQ,support_faq,company,ForeignKey,Company,FK,Yes,No
+Support & Ticketing,FAQ,support_faq,created_at,DateTimeField,,,No,No
+Support & Ticketing,FAQ,support_faq,updated_at,DateTimeField,,,No,No
+Support & Ticketing,ServiceOutage,support_serviceoutage,id,BigAutoField,,,No,Yes
+Support & Ticketing,ServiceOutage,support_serviceoutage,title,CharField,,,No,No
+Support & Ticketing,ServiceOutage,support_serviceoutage,description,TextField,,,No,No
+Support & Ticketing,ServiceOutage,support_serviceoutage,outage_type,CharField,,,No,No
+Support & Ticketing,ServiceOutage,support_serviceoutage,severity,CharField,,,No,No
+Support & Ticketing,ServiceOutage,support_serviceoutage,affected_areas,JSONField,,,No,No
+Support & Ticketing,ServiceOutage,support_serviceoutage,estimated_customers_affected,PositiveIntegerField,,,No,No
+Support & Ticketing,ServiceOutage,support_serviceoutage,start_time,DateTimeField,,,No,No
+Support & Ticketing,ServiceOutage,support_serviceoutage,estimated_resolution_time,DateTimeField,,,Yes,No
+Support & Ticketing,ServiceOutage,support_serviceoutage,actual_resolution_time,DateTimeField,,,Yes,No
+Support & Ticketing,ServiceOutage,support_serviceoutage,status,CharField,,,No,No
+Support & Ticketing,ServiceOutage,support_serviceoutage,updates,JSONField,,,No,No
+Support & Ticketing,ServiceOutage,support_serviceoutage,notify_customers,BooleanField,,,No,No
+Support & Ticketing,ServiceOutage,support_serviceoutage,notification_sent,BooleanField,,,No,No
+Support & Ticketing,ServiceOutage,support_serviceoutage,root_cause,TextField,,,No,No
+Support & Ticketing,ServiceOutage,support_serviceoutage,resolution,TextField,,,No,No
+Support & Ticketing,ServiceOutage,support_serviceoutage,preventative_measures,TextField,,,No,No
+Support & Ticketing,ServiceOutage,support_serviceoutage,company,ForeignKey,Company,FK,Yes,No
+Support & Ticketing,ServiceOutage,support_serviceoutage,created_by,ForeignKey,User,FK,Yes,No
+Support & Ticketing,ServiceOutage,support_serviceoutage,created_at,DateTimeField,,,No,No
+Support & Ticketing,ServiceOutage,support_serviceoutage,updated_at,DateTimeField,,,No,No
+Support & Ticketing,ServiceOutage,support_serviceoutage,affected_customers,ManyToManyField,Customer,M2M,Yes,No
+Analytics,ReportDefinition,analytics_reportdefinition,id,BigAutoField,,,No,Yes
+Analytics,ReportDefinition,analytics_reportdefinition,name,CharField,,,No,No
+Analytics,ReportDefinition,analytics_reportdefinition,report_type,CharField,,,No,No
+Analytics,ReportDefinition,analytics_reportdefinition,description,TextField,,,No,No
+Analytics,ReportDefinition,analytics_reportdefinition,query,TextField,,,No,No
+Analytics,ReportDefinition,analytics_reportdefinition,parameters,JSONField,,,No,No
+Analytics,ReportDefinition,analytics_reportdefinition,format,CharField,,,No,No
+Analytics,ReportDefinition,analytics_reportdefinition,is_active,BooleanField,,,No,No
+Analytics,ReportDefinition,analytics_reportdefinition,created_by,ForeignKey,User,FK,Yes,No
+Analytics,ReportDefinition,analytics_reportdefinition,created_at,DateTimeField,,,No,No
+Analytics,ReportDefinition,analytics_reportdefinition,updated_at,DateTimeField,,,No,No
+Analytics,DashboardWidget,analytics_dashboardwidget,id,BigAutoField,,,No,Yes
+Analytics,DashboardWidget,analytics_dashboardwidget,name,CharField,,,No,No
+Analytics,DashboardWidget,analytics_dashboardwidget,widget_type,CharField,,,No,No
+Analytics,DashboardWidget,analytics_dashboardwidget,chart_type,CharField,,,Yes,No
+Analytics,DashboardWidget,analytics_dashboardwidget,data_source,CharField,,,No,No
+Analytics,DashboardWidget,analytics_dashboardwidget,refresh_interval,IntegerField,,,No,No
+Analytics,DashboardWidget,analytics_dashboardwidget,position,IntegerField,,,No,No
+Analytics,DashboardWidget,analytics_dashboardwidget,size,CharField,,,No,No
+Analytics,DashboardWidget,analytics_dashboardwidget,config,JSONField,,,No,No
+Analytics,DashboardWidget,analytics_dashboardwidget,is_visible,BooleanField,,,No,No
+Analytics,DashboardWidget,analytics_dashboardwidget,created_at,DateTimeField,,,No,No
+Analytics,DashboardWidget,analytics_dashboardwidget,updated_at,DateTimeField,,,No,No
+Analytics,AnalyticsCache,analytics_analyticscache,id,BigAutoField,,,No,Yes
+Analytics,AnalyticsCache,analytics_analyticscache,cache_key,CharField,,,No,Yes
+Analytics,AnalyticsCache,analytics_analyticscache,data,JSONField,,,No,No
+Analytics,AnalyticsCache,analytics_analyticscache,expires_at,DateTimeField,,,No,No
+Analytics,AnalyticsCache,analytics_analyticscache,created_at,DateTimeField,,,No,No
+Staff,Department,staff_department,id,UUIDField,,,No,Yes
+Staff,Department,staff_department,created_at,DateTimeField,,,No,No
+Staff,Department,staff_department,updated_at,DateTimeField,,,No,No
+Staff,Department,staff_department,name,CharField,,,No,No
+Staff,Department,staff_department,description,TextField,,,Yes,No
+Staff,Department,staff_department,parent_department,ForeignKey,Department,FK,Yes,No
+Staff,Department,staff_department,manager,ForeignKey,Employee,FK,Yes,No
+Staff,Department,staff_department,budget,DecimalField,,,No,No
+Staff,Department,staff_department,location,CharField,,,Yes,No
+Staff,Department,staff_department,is_active,BooleanField,,,No,No
+Staff,Employee,staff_employee,id,UUIDField,,,No,Yes
+Staff,Employee,staff_employee,created_at,DateTimeField,,,No,No
+Staff,Employee,staff_employee,updated_at,DateTimeField,,,No,No
+Staff,Employee,staff_employee,user,OneToOneField,User,O2O,No,Yes
+Staff,Employee,staff_employee,employee_id,CharField,,,No,Yes
+Staff,Employee,staff_employee,department,ForeignKey,Department,FK,No,No
+Staff,Employee,staff_employee,position,CharField,,,No,No
+Staff,Employee,staff_employee,employment_type,CharField,,,No,No
+Staff,Employee,staff_employee,status,CharField,,,No,No
+Staff,Employee,staff_employee,hire_date,DateField,,,No,No
+Staff,Employee,staff_employee,contract_start_date,DateField,,,Yes,No
+Staff,Employee,staff_employee,contract_end_date,DateField,,,Yes,No
+Staff,Employee,staff_employee,termination_date,DateField,,,Yes,No
+Staff,Employee,staff_employee,phone,CharField,,,No,No
+Staff,Employee,staff_employee,alternate_phone,CharField,,,Yes,No
+Staff,Employee,staff_employee,personal_email,CharField,,,Yes,No
+Staff,Employee,staff_employee,address,TextField,,,No,No
+Staff,Employee,staff_employee,city,CharField,,,No,No
+Staff,Employee,staff_employee,county,CharField,,,Yes,No
+Staff,Employee,staff_employee,postal_code,CharField,,,Yes,No
+Staff,Employee,staff_employee,emergency_contact_name,CharField,,,No,No
+Staff,Employee,staff_employee,emergency_contact_phone,CharField,,,No,No
+Staff,Employee,staff_employee,emergency_contact_relationship,CharField,,,No,No
+Staff,Employee,staff_employee,salary,DecimalField,,,Yes,No
+Staff,Employee,staff_employee,bank_name,CharField,,,Yes,No
+Staff,Employee,staff_employee,bank_account,CharField,,,Yes,No
+Staff,Employee,staff_employee,bank_branch,CharField,,,Yes,No
+Staff,Employee,staff_employee,next_of_kin_name,CharField,,,Yes,No
+Staff,Employee,staff_employee,next_of_kin_phone,CharField,,,Yes,No
+Staff,Employee,staff_employee,next_of_kin_relationship,CharField,,,Yes,No
+Staff,Employee,staff_employee,next_of_kin_id_number,CharField,,,Yes,No
+Staff,Employee,staff_employee,id_number,CharField,,,Yes,No
+Staff,Employee,staff_employee,kra_pin,CharField,,,Yes,No
+Staff,Employee,staff_employee,nssf_number,CharField,,,Yes,No
+Staff,Employee,staff_employee,nhif_number,CharField,,,Yes,No
+Staff,Employee,staff_employee,date_of_birth,DateField,,,Yes,No
+Staff,Employee,staff_employee,gender,CharField,,,Yes,No
+Staff,Employee,staff_employee,blood_group,CharField,,,Yes,No
+Staff,Employee,staff_employee,has_system_access,BooleanField,,,No,No
+Staff,Employee,staff_employee,access_level,CharField,,,No,No
+Staff,Employee,staff_employee,qualifications,TextField,,,Yes,No
+Staff,Employee,staff_employee,skills,TextField,,,Yes,No
+Staff,Employee,staff_employee,notes,TextField,,,Yes,No
+Staff,Employee,staff_employee,is_active,BooleanField,,,No,No
+Staff,Attendance,staff_attendance,id,UUIDField,,,No,Yes
+Staff,Attendance,staff_attendance,created_at,DateTimeField,,,No,No
+Staff,Attendance,staff_attendance,updated_at,DateTimeField,,,No,No
+Staff,Attendance,staff_attendance,is_active,BooleanField,,,No,No
+Staff,Attendance,staff_attendance,employee,ForeignKey,Employee,FK,No,No
+Staff,Attendance,staff_attendance,date,DateField,,,No,No
+Staff,Attendance,staff_attendance,check_in,TimeField,,,Yes,No
+Staff,Attendance,staff_attendance,check_out,TimeField,,,Yes,No
+Staff,Attendance,staff_attendance,status,CharField,,,No,No
+Staff,Attendance,staff_attendance,hours_worked,DecimalField,,,No,No
+Staff,Attendance,staff_attendance,leave_type,CharField,,,Yes,No
+Staff,Attendance,staff_attendance,leave_reason,TextField,,,Yes,No
+Staff,Attendance,staff_attendance,overtime_hours,DecimalField,,,No,No
+Staff,Attendance,staff_attendance,notes,TextField,,,Yes,No
+Staff,Attendance,staff_attendance,approved_by,ForeignKey,User,FK,Yes,No
+Staff,LeaveRequest,staff_leaverequest,id,UUIDField,,,No,Yes
+Staff,LeaveRequest,staff_leaverequest,created_at,DateTimeField,,,No,No
+Staff,LeaveRequest,staff_leaverequest,updated_at,DateTimeField,,,No,No
+Staff,LeaveRequest,staff_leaverequest,is_active,BooleanField,,,No,No
+Staff,LeaveRequest,staff_leaverequest,employee,ForeignKey,Employee,FK,No,No
+Staff,LeaveRequest,staff_leaverequest,leave_type,CharField,,,No,No
+Staff,LeaveRequest,staff_leaverequest,start_date,DateField,,,No,No
+Staff,LeaveRequest,staff_leaverequest,end_date,DateField,,,No,No
+Staff,LeaveRequest,staff_leaverequest,total_days,PositiveIntegerField,,,No,No
+Staff,LeaveRequest,staff_leaverequest,reason,TextField,,,No,No
+Staff,LeaveRequest,staff_leaverequest,emergency_contact,CharField,,,Yes,No
+Staff,LeaveRequest,staff_leaverequest,emergency_phone,CharField,,,Yes,No
+Staff,LeaveRequest,staff_leaverequest,status,CharField,,,No,No
+Staff,LeaveRequest,staff_leaverequest,approved_by,ForeignKey,User,FK,Yes,No
+Staff,LeaveRequest,staff_leaverequest,approved_date,DateTimeField,,,Yes,No
+Staff,LeaveRequest,staff_leaverequest,rejection_reason,TextField,,,Yes,No
+Staff,LeaveRequest,staff_leaverequest,handover_to,ForeignKey,Employee,FK,Yes,No
+Staff,LeaveRequest,staff_leaverequest,handover_notes,TextField,,,Yes,No
+Staff,PerformanceReview,staff_performancereview,id,UUIDField,,,No,Yes
+Staff,PerformanceReview,staff_performancereview,created_at,DateTimeField,,,No,No
+Staff,PerformanceReview,staff_performancereview,updated_at,DateTimeField,,,No,No
+Staff,PerformanceReview,staff_performancereview,is_active,BooleanField,,,No,No
+Staff,PerformanceReview,staff_performancereview,employee,ForeignKey,Employee,FK,No,No
+Staff,PerformanceReview,staff_performancereview,review_date,DateField,,,No,No
+Staff,PerformanceReview,staff_performancereview,review_period_start,DateField,,,No,No
+Staff,PerformanceReview,staff_performancereview,review_period_end,DateField,,,No,No
+Staff,PerformanceReview,staff_performancereview,reviewed_by,ForeignKey,User,FK,No,No
+Staff,PerformanceReview,staff_performancereview,quality_of_work,IntegerField,,,No,No
+Staff,PerformanceReview,staff_performancereview,productivity,IntegerField,,,No,No
+Staff,PerformanceReview,staff_performancereview,technical_skills,IntegerField,,,No,No
+Staff,PerformanceReview,staff_performancereview,communication,IntegerField,,,No,No
+Staff,PerformanceReview,staff_performancereview,teamwork,IntegerField,,,No,No
+Staff,PerformanceReview,staff_performancereview,initiative,IntegerField,,,No,No
+Staff,PerformanceReview,staff_performancereview,attendance_punctuality,IntegerField,,,No,No
+Staff,PerformanceReview,staff_performancereview,overall_rating,DecimalField,,,No,No
+Staff,PerformanceReview,staff_performancereview,strengths,TextField,,,No,No
+Staff,PerformanceReview,staff_performancereview,areas_for_improvement,TextField,,,No,No
+Staff,PerformanceReview,staff_performancereview,goals,TextField,,,No,No
+Staff,PerformanceReview,staff_performancereview,employee_comments,TextField,,,Yes,No
+Staff,PerformanceReview,staff_performancereview,reviewer_comments,TextField,,,No,No
+Staff,PerformanceReview,staff_performancereview,employee_acknowledged,BooleanField,,,No,No
+Staff,PerformanceReview,staff_performancereview,employee_acknowledged_date,DateTimeField,,,Yes,No
+Staff,Payroll,staff_payroll,id,UUIDField,,,No,Yes
+Staff,Payroll,staff_payroll,created_at,DateTimeField,,,No,No
+Staff,Payroll,staff_payroll,updated_at,DateTimeField,,,No,No
+Staff,Payroll,staff_payroll,is_active,BooleanField,,,No,No
+Staff,Payroll,staff_payroll,employee,ForeignKey,Employee,FK,No,No
+Staff,Payroll,staff_payroll,pay_period_start,DateField,,,No,No
+Staff,Payroll,staff_payroll,pay_period_end,DateField,,,No,No
+Staff,Payroll,staff_payroll,payment_date,DateField,,,No,No
+Staff,Payroll,staff_payroll,basic_salary,DecimalField,,,No,No
+Staff,Payroll,staff_payroll,overtime_pay,DecimalField,,,No,No
+Staff,Payroll,staff_payroll,allowances,DecimalField,,,No,No
+Staff,Payroll,staff_payroll,bonuses,DecimalField,,,No,No
+Staff,Payroll,staff_payroll,paye,DecimalField,,,No,No
+Staff,Payroll,staff_payroll,nssf,DecimalField,,,No,No
+Staff,Payroll,staff_payroll,nhif,DecimalField,,,No,No
+Staff,Payroll,staff_payroll,other_deductions,DecimalField,,,No,No
+Staff,Payroll,staff_payroll,gross_pay,DecimalField,,,No,No
+Staff,Payroll,staff_payroll,total_deductions,DecimalField,,,No,No
+Staff,Payroll,staff_payroll,net_pay,DecimalField,,,No,No
+Staff,Payroll,staff_payroll,payment_method,CharField,,,No,No
+Staff,Payroll,staff_payroll,bank_name,CharField,,,Yes,No
+Staff,Payroll,staff_payroll,bank_account,CharField,,,Yes,No
+Staff,Payroll,staff_payroll,is_paid,BooleanField,,,No,No
+Staff,Payroll,staff_payroll,paid_date,DateField,,,Yes,No
+Staff,Payroll,staff_payroll,notes,TextField,,,Yes,No
+Self_Service,CustomerSession,self_service_customersession,id,BigAutoField,,,No,Yes
+Self_Service,CustomerSession,self_service_customersession,customer,ForeignKey,Customer,FK,No,No
+Self_Service,CustomerSession,self_service_customersession,session_key,CharField,,,No,Yes
+Self_Service,CustomerSession,self_service_customersession,ip_address,GenericIPAddressField,,,Yes,No
+Self_Service,CustomerSession,self_service_customersession,user_agent,TextField,,,No,No
+Self_Service,CustomerSession,self_service_customersession,login_time,DateTimeField,,,No,No
+Self_Service,CustomerSession,self_service_customersession,logout_time,DateTimeField,,,Yes,No
+Self_Service,CustomerSession,self_service_customersession,last_activity,DateTimeField,,,No,No
+Self_Service,CustomerSession,self_service_customersession,is_active,BooleanField,,,No,No
+Self_Service,ServiceRequest,self_service_servicerequest,id,BigAutoField,,,No,Yes
+Self_Service,ServiceRequest,self_service_servicerequest,customer,ForeignKey,Customer,FK,No,No
+Self_Service,ServiceRequest,self_service_servicerequest,request_type,CharField,,,No,No
+Self_Service,ServiceRequest,self_service_servicerequest,subject,CharField,,,No,No
+Self_Service,ServiceRequest,self_service_servicerequest,description,TextField,,,No,No
+Self_Service,ServiceRequest,self_service_servicerequest,status,CharField,,,No,No
+Self_Service,ServiceRequest,self_service_servicerequest,priority,CharField,,,No,No
+Self_Service,ServiceRequest,self_service_servicerequest,current_plan,ForeignKey,Plan,FK,Yes,No
+Self_Service,ServiceRequest,self_service_servicerequest,requested_plan,ForeignKey,Plan,FK,Yes,No
+Self_Service,ServiceRequest,self_service_servicerequest,current_location,TextField,,,No,No
+Self_Service,ServiceRequest,self_service_servicerequest,requested_location,TextField,,,No,No
+Self_Service,ServiceRequest,self_service_servicerequest,assigned_to,ForeignKey,User,FK,Yes,No
+Self_Service,ServiceRequest,self_service_servicerequest,estimated_completion,DateField,,,Yes,No
+Self_Service,ServiceRequest,self_service_servicerequest,actual_completion,DateTimeField,,,Yes,No
+Self_Service,ServiceRequest,self_service_servicerequest,customer_notes,TextField,,,No,No
+Self_Service,ServiceRequest,self_service_servicerequest,staff_notes,TextField,,,No,No
+Self_Service,ServiceRequest,self_service_servicerequest,created_at,DateTimeField,,,No,No
+Self_Service,ServiceRequest,self_service_servicerequest,updated_at,DateTimeField,,,No,No
+Self_Service,UsageAlert,self_service_usagealert,id,BigAutoField,,,No,Yes
+Self_Service,UsageAlert,self_service_usagealert,customer,ForeignKey,Customer,FK,No,No
+Self_Service,UsageAlert,self_service_usagealert,alert_type,CharField,,,No,No
+Self_Service,UsageAlert,self_service_usagealert,trigger_type,CharField,,,No,No
+Self_Service,UsageAlert,self_service_usagealert,threshold_value,FloatField,,,Yes,No
+Self_Service,UsageAlert,self_service_usagealert,current_value,FloatField,,,Yes,No
+Self_Service,UsageAlert,self_service_usagealert,message,TextField,,,No,No
+Self_Service,UsageAlert,self_service_usagealert,is_read,BooleanField,,,No,No
+Self_Service,UsageAlert,self_service_usagealert,is_resolved,BooleanField,,,No,No
+Self_Service,UsageAlert,self_service_usagealert,triggered_at,DateTimeField,,,No,No
+Self_Service,UsageAlert,self_service_usagealert,resolved_at,DateTimeField,,,Yes,No
+Inventory,Supplier,inventory_supplier,id,UUIDField,,,No,Yes
+Inventory,Supplier,inventory_supplier,name,CharField,,,No,No
+Inventory,Supplier,inventory_supplier,contact_person,CharField,,,No,No
+Inventory,Supplier,inventory_supplier,email,CharField,,,No,No
+Inventory,Supplier,inventory_supplier,phone,CharField,,,No,No
+Inventory,Supplier,inventory_supplier,address,TextField,,,No,No
+Inventory,Supplier,inventory_supplier,website,CharField,,,Yes,No
+Inventory,Supplier,inventory_supplier,tax_id,CharField,,,Yes,No
+Inventory,Supplier,inventory_supplier,payment_terms,CharField,,,Yes,No
+Inventory,Supplier,inventory_supplier,notes,TextField,,,Yes,No
+Inventory,Supplier,inventory_supplier,is_active,BooleanField,,,No,No
+Inventory,Supplier,inventory_supplier,created_at,DateTimeField,,,No,No
+Inventory,Supplier,inventory_supplier,updated_at,DateTimeField,,,No,No
+Inventory,EquipmentType,inventory_equipmenttype,id,BigAutoField,,,No,Yes
+Inventory,EquipmentType,inventory_equipmenttype,name,CharField,,,No,No
+Inventory,EquipmentType,inventory_equipmenttype,description,TextField,,,Yes,No
+Inventory,EquipmentType,inventory_equipmenttype,parent,ForeignKey,EquipmentType,FK,Yes,No
+Inventory,EquipmentType,inventory_equipmenttype,is_network_equipment,BooleanField,,,No,No
+Inventory,EquipmentType,inventory_equipmenttype,has_serial_numbers,BooleanField,,,No,No
+Inventory,EquipmentType,inventory_equipmenttype,requires_assignment,BooleanField,,,No,No
+Inventory,EquipmentItem,inventory_equipmentitem,id,BigAutoField,,,No,Yes
+Inventory,EquipmentItem,inventory_equipmentitem,equipment_type,ForeignKey,EquipmentType,FK,No,No
+Inventory,EquipmentItem,inventory_equipmentitem,name,CharField,,,No,No
+Inventory,EquipmentItem,inventory_equipmentitem,model,CharField,,,No,No
+Inventory,EquipmentItem,inventory_equipmentitem,serial_number,CharField,,,Yes,Yes
+Inventory,EquipmentItem,inventory_equipmentitem,asset_tag,CharField,,,Yes,Yes
+Inventory,EquipmentItem,inventory_equipmentitem,mac_address,CharField,,,Yes,No
+Inventory,EquipmentItem,inventory_equipmentitem,supplier,ForeignKey,Supplier,FK,Yes,No
+Inventory,EquipmentItem,inventory_equipmentitem,purchase_date,DateField,,,No,No
+Inventory,EquipmentItem,inventory_equipmentitem,purchase_price,DecimalField,,,No,No
+Inventory,EquipmentItem,inventory_equipmentitem,warranty_expiry,DateField,,,Yes,No
+Inventory,EquipmentItem,inventory_equipmentitem,status,CharField,,,No,No
+Inventory,EquipmentItem,inventory_equipmentitem,condition,CharField,,,No,No
+Inventory,EquipmentItem,inventory_equipmentitem,location,CharField,,,Yes,No
+Inventory,EquipmentItem,inventory_equipmentitem,shelf,CharField,,,Yes,No
+Inventory,EquipmentItem,inventory_equipmentitem,assigned_to,ForeignKey,Employee,FK,Yes,No
+Inventory,EquipmentItem,inventory_equipmentitem,notes,TextField,,,Yes,No
+Inventory,EquipmentItem,inventory_equipmentitem,qr_code,FileField,,,Yes,No
+Inventory,EquipmentItem,inventory_equipmentitem,ip_address,GenericIPAddressField,,,Yes,No
+Inventory,EquipmentItem,inventory_equipmentitem,firmware_version,CharField,,,Yes,No
+Inventory,Assignment,inventory_assignment,id,BigAutoField,,,No,Yes
+Inventory,Assignment,inventory_assignment,equipment,ForeignKey,EquipmentItem,FK,No,No
+Inventory,Assignment,inventory_assignment,assigned_to,ForeignKey,Employee,FK,No,No
+Inventory,Assignment,inventory_assignment,assigned_by,ForeignKey,User,FK,Yes,No
+Inventory,Assignment,inventory_assignment,assigned_date,DateField,,,No,No
+Inventory,Assignment,inventory_assignment,expected_return_date,DateField,,,Yes,No
+Inventory,Assignment,inventory_assignment,actual_return_date,DateField,,,Yes,No
+Inventory,Assignment,inventory_assignment,condition_on_assignment,CharField,,,No,No
+Inventory,Assignment,inventory_assignment,condition_on_return,CharField,,,Yes,No
+Inventory,Assignment,inventory_assignment,purpose,TextField,,,No,No
+Inventory,Assignment,inventory_assignment,notes,TextField,,,Yes,No
+Inventory,PurchaseOrder,inventory_purchaseorder,id,BigAutoField,,,No,Yes
+Inventory,PurchaseOrder,inventory_purchaseorder,po_number,CharField,,,No,Yes
+Inventory,PurchaseOrder,inventory_purchaseorder,supplier,ForeignKey,Supplier,FK,No,No
+Inventory,PurchaseOrder,inventory_purchaseorder,order_date,DateField,,,No,No
+Inventory,PurchaseOrder,inventory_purchaseorder,expected_delivery,DateField,,,Yes,No
+Inventory,PurchaseOrder,inventory_purchaseorder,actual_delivery,DateField,,,Yes,No
+Inventory,PurchaseOrder,inventory_purchaseorder,status,CharField,,,No,No
+Inventory,PurchaseOrder,inventory_purchaseorder,total_amount,DecimalField,,,No,No
+Inventory,PurchaseOrder,inventory_purchaseorder,tax_amount,DecimalField,,,No,No
+Inventory,PurchaseOrder,inventory_purchaseorder,prepared_by,ForeignKey,User,FK,Yes,No
+Inventory,PurchaseOrder,inventory_purchaseorder,approved_by,ForeignKey,User,FK,Yes,No
+Inventory,PurchaseOrder,inventory_purchaseorder,approved_date,DateTimeField,,,Yes,No
+Inventory,PurchaseOrder,inventory_purchaseorder,notes,TextField,,,Yes,No
+Inventory,PurchaseOrderItem,inventory_purchaseorderitem,id,BigAutoField,,,No,Yes
+Inventory,PurchaseOrderItem,inventory_purchaseorderitem,purchase_order,ForeignKey,PurchaseOrder,FK,No,No
+Inventory,PurchaseOrderItem,inventory_purchaseorderitem,equipment_type,ForeignKey,EquipmentType,FK,No,No
+Inventory,PurchaseOrderItem,inventory_purchaseorderitem,description,CharField,,,No,No
+Inventory,PurchaseOrderItem,inventory_purchaseorderitem,quantity,PositiveIntegerField,,,No,No
+Inventory,PurchaseOrderItem,inventory_purchaseorderitem,unit_price,DecimalField,,,No,No
+Inventory,PurchaseOrderItem,inventory_purchaseorderitem,received_quantity,PositiveIntegerField,,,No,No
+Inventory,MaintenanceRecord,inventory_maintenancerecord,id,BigAutoField,,,No,Yes
+Inventory,MaintenanceRecord,inventory_maintenancerecord,equipment,ForeignKey,EquipmentItem,FK,No,No
+Inventory,MaintenanceRecord,inventory_maintenancerecord,scheduled_date,DateField,,,No,No
+Inventory,MaintenanceRecord,inventory_maintenancerecord,completed_date,DateField,,,Yes,No
+Inventory,MaintenanceRecord,inventory_maintenancerecord,status,CharField,,,No,No
+Inventory,MaintenanceRecord,inventory_maintenancerecord,maintenance_type,CharField,,,No,No
+Inventory,MaintenanceRecord,inventory_maintenancerecord,description,TextField,,,No,No
+Inventory,MaintenanceRecord,inventory_maintenancerecord,action_taken,TextField,,,Yes,No
+Inventory,MaintenanceRecord,inventory_maintenancerecord,cost,DecimalField,,,No,No
+Inventory,MaintenanceRecord,inventory_maintenancerecord,performed_by,ForeignKey,Employee,FK,Yes,No
+Inventory,MaintenanceRecord,inventory_maintenancerecord,next_maintenance_date,DateField,,,Yes,No
+Inventory,StockAlert,inventory_stockalert,id,BigAutoField,,,No,Yes
+Inventory,StockAlert,inventory_stockalert,equipment_type,ForeignKey,EquipmentType,FK,No,No
+Inventory,StockAlert,inventory_stockalert,threshold,PositiveIntegerField,,,No,No
+Inventory,StockAlert,inventory_stockalert,current_stock,PositiveIntegerField,,,No,No
+Inventory,StockAlert,inventory_stockalert,is_active,BooleanField,,,No,No
+Inventory,StockAlert,inventory_stockalert,triggered_on,DateTimeField,,,No,No
+Notifications Management,NotificationTemplate,notifications_notificationtemplate,id,BigAutoField,,,No,Yes
+Notifications Management,NotificationTemplate,notifications_notificationtemplate,name,CharField,,,No,No
+Notifications Management,NotificationTemplate,notifications_notificationtemplate,notification_type,CharField,,,No,No
+Notifications Management,NotificationTemplate,notifications_notificationtemplate,trigger_event,CharField,,,No,Yes
+Notifications Management,NotificationTemplate,notifications_notificationtemplate,subject,CharField,,,Yes,No
+Notifications Management,NotificationTemplate,notifications_notificationtemplate,message_template,TextField,,,No,No
+Notifications Management,NotificationTemplate,notifications_notificationtemplate,is_active,BooleanField,,,No,No
+Notifications Management,NotificationTemplate,notifications_notificationtemplate,priority,IntegerField,,,No,No
+Notifications Management,NotificationTemplate,notifications_notificationtemplate,available_variables,TextField,,,No,No
+Notifications Management,NotificationTemplate,notifications_notificationtemplate,created_at,DateTimeField,,,No,No
+Notifications Management,NotificationTemplate,notifications_notificationtemplate,updated_at,DateTimeField,,,No,No
+Notifications Management,Notification,notifications_notification,id,BigAutoField,,,No,Yes
+Notifications Management,Notification,notifications_notification,user,ForeignKey,User,FK,Yes,No
+Notifications Management,Notification,notifications_notification,content_type,ForeignKey,ContentType,FK,Yes,No
+Notifications Management,Notification,notifications_notification,object_id,PositiveIntegerField,,,Yes,No
+Notifications Management,Notification,notifications_notification,template,ForeignKey,NotificationTemplate,FK,Yes,No
+Notifications Management,Notification,notifications_notification,notification_type,CharField,,,No,No
+Notifications Management,Notification,notifications_notification,subject,CharField,,,Yes,No
+Notifications Management,Notification,notifications_notification,message,TextField,,,No,No
+Notifications Management,Notification,notifications_notification,recipient_email,CharField,,,Yes,No
+Notifications Management,Notification,notifications_notification,recipient_phone,CharField,,,Yes,No
+Notifications Management,Notification,notifications_notification,recipient_device_token,CharField,,,Yes,No
+Notifications Management,Notification,notifications_notification,status,CharField,,,No,No
+Notifications Management,Notification,notifications_notification,priority,IntegerField,,,No,No
+Notifications Management,Notification,notifications_notification,sent_at,DateTimeField,,,Yes,No
+Notifications Management,Notification,notifications_notification,delivered_at,DateTimeField,,,Yes,No
+Notifications Management,Notification,notifications_notification,read_at,DateTimeField,,,Yes,No
+Notifications Management,Notification,notifications_notification,retry_count,IntegerField,,,No,No
+Notifications Management,Notification,notifications_notification,max_retries,IntegerField,,,No,No
+Notifications Management,Notification,notifications_notification,next_retry_at,DateTimeField,,,Yes,No
+Notifications Management,Notification,notifications_notification,metadata,JSONField,,,No,No
+Notifications Management,Notification,notifications_notification,error_message,TextField,,,Yes,No
+Notifications Management,Notification,notifications_notification,created_at,DateTimeField,,,No,No
+Notifications Management,Notification,notifications_notification,updated_at,DateTimeField,,,No,No
+Notifications Management,AlertRule,notifications_alertrule,id,BigAutoField,,,No,Yes
+Notifications Management,AlertRule,notifications_alertrule,name,CharField,,,No,No
+Notifications Management,AlertRule,notifications_alertrule,description,TextField,,,No,No
+Notifications Management,AlertRule,notifications_alertrule,alert_type,CharField,,,No,No
+Notifications Management,AlertRule,notifications_alertrule,model_name,CharField,,,No,No
+Notifications Management,AlertRule,notifications_alertrule,field_name,CharField,,,No,No
+Notifications Management,AlertRule,notifications_alertrule,condition_type,CharField,,,No,No
+Notifications Management,AlertRule,notifications_alertrule,condition_value,CharField,,,No,No
+Notifications Management,AlertRule,notifications_alertrule,check_interval,IntegerField,,,No,No
+Notifications Management,AlertRule,notifications_alertrule,is_active,BooleanField,,,No,No
+Notifications Management,AlertRule,notifications_alertrule,enabled_days,CharField,,,No,No
+Notifications Management,AlertRule,notifications_alertrule,enabled_hours,CharField,,,No,No
+Notifications Management,AlertRule,notifications_alertrule,cooldown_minutes,IntegerField,,,No,No
+Notifications Management,AlertRule,notifications_alertrule,target_roles,JSONField,,,No,No
+Notifications Management,AlertRule,notifications_alertrule,created_at,DateTimeField,,,No,No
+Notifications Management,AlertRule,notifications_alertrule,updated_at,DateTimeField,,,No,No
+Notifications Management,AlertRule,notifications_alertrule,last_checked,DateTimeField,,,Yes,No
+Notifications Management,AlertRule,notifications_alertrule,last_triggered,DateTimeField,,,Yes,No
+Notifications Management,AlertRule,notifications_alertrule,notification_templates,ManyToManyField,NotificationTemplate,M2M,Yes,No
+Notifications Management,AlertRule,notifications_alertrule,specific_users,ManyToManyField,User,M2M,Yes,No
+Notifications Management,NotificationPreference,notifications_notificationpreference,id,BigAutoField,,,No,Yes
+Notifications Management,NotificationPreference,notifications_notificationpreference,user,OneToOneField,User,O2O,No,Yes
+Notifications Management,NotificationPreference,notifications_notificationpreference,receive_email,BooleanField,,,No,No
+Notifications Management,NotificationPreference,notifications_notificationpreference,receive_sms,BooleanField,,,No,No
+Notifications Management,NotificationPreference,notifications_notificationpreference,receive_push,BooleanField,,,No,No
+Notifications Management,NotificationPreference,notifications_notificationpreference,receive_in_app,BooleanField,,,No,No
+Notifications Management,NotificationPreference,notifications_notificationpreference,billing_notifications,BooleanField,,,No,No
+Notifications Management,NotificationPreference,notifications_notificationpreference,service_notifications,BooleanField,,,No,No
+Notifications Management,NotificationPreference,notifications_notificationpreference,support_notifications,BooleanField,,,No,No
+Notifications Management,NotificationPreference,notifications_notificationpreference,marketing_notifications,BooleanField,,,No,No
+Notifications Management,NotificationPreference,notifications_notificationpreference,system_notifications,BooleanField,,,No,No
+Notifications Management,NotificationPreference,notifications_notificationpreference,quiet_hours_enabled,BooleanField,,,No,No
+Notifications Management,NotificationPreference,notifications_notificationpreference,quiet_start_time,TimeField,,,No,No
+Notifications Management,NotificationPreference,notifications_notificationpreference,quiet_end_time,TimeField,,,No,No
+Notifications Management,NotificationPreference,notifications_notificationpreference,daily_notification_limit,IntegerField,,,No,No
+Notifications Management,NotificationPreference,notifications_notificationpreference,preferred_language,CharField,,,No,No
+Notifications Management,NotificationPreference,notifications_notificationpreference,updated_at,DateTimeField,,,No,No
+Notifications Management,NotificationLog,notifications_notificationlog,id,BigAutoField,,,No,Yes
+Notifications Management,NotificationLog,notifications_notificationlog,notification,ForeignKey,Notification,FK,Yes,No
+Notifications Management,NotificationLog,notifications_notificationlog,user,ForeignKey,User,FK,Yes,No
+Notifications Management,NotificationLog,notifications_notificationlog,action,CharField,,,No,No
+Notifications Management,NotificationLog,notifications_notificationlog,details,JSONField,,,No,No
+Notifications Management,NotificationLog,notifications_notificationlog,timestamp,DateTimeField,,,No,No
+Notifications Management,NotificationLog,notifications_notificationlog,ip_address,GenericIPAddressField,,,Yes,No
+Notifications Management,BulkNotification,notifications_bulknotification,id,BigAutoField,,,No,Yes
+Notifications Management,BulkNotification,notifications_bulknotification,name,CharField,,,No,No
+Notifications Management,BulkNotification,notifications_bulknotification,notification_type,CharField,,,No,No
+Notifications Management,BulkNotification,notifications_bulknotification,subject,CharField,,,No,No
+Notifications Management,BulkNotification,notifications_bulknotification,message,TextField,,,No,No
+Notifications Management,BulkNotification,notifications_bulknotification,target_segment,CharField,,,No,No
+Notifications Management,BulkNotification,notifications_bulknotification,custom_recipients,JSONField,,,Yes,No
+Notifications Management,BulkNotification,notifications_bulknotification,status,CharField,,,No,No
+Notifications Management,BulkNotification,notifications_bulknotification,scheduled_for,DateTimeField,,,Yes,No
+Notifications Management,BulkNotification,notifications_bulknotification,started_at,DateTimeField,,,Yes,No
+Notifications Management,BulkNotification,notifications_bulknotification,completed_at,DateTimeField,,,Yes,No
+Notifications Management,BulkNotification,notifications_bulknotification,total_recipients,IntegerField,,,No,No
+Notifications Management,BulkNotification,notifications_bulknotification,sent_count,IntegerField,,,No,No
+Notifications Management,BulkNotification,notifications_bulknotification,failed_count,IntegerField,,,No,No
+Notifications Management,BulkNotification,notifications_bulknotification,created_by,ForeignKey,User,FK,Yes,No
+Notifications Management,BulkNotification,notifications_bulknotification,created_at,DateTimeField,,,No,No
+Notifications Management,BulkNotification,notifications_bulknotification,updated_at,DateTimeField,,,No,No
+Bandwidth Management,BandwidthProfile,bandwidth_bandwidthprofile,id,BigAutoField,,,No,Yes
+Bandwidth Management,BandwidthProfile,bandwidth_bandwidthprofile,name,CharField,,,No,No
+Bandwidth Management,BandwidthProfile,bandwidth_bandwidthprofile,description,TextField,,,No,No
+Bandwidth Management,BandwidthProfile,bandwidth_bandwidthprofile,profile_type,CharField,,,No,No
+Bandwidth Management,BandwidthProfile,bandwidth_bandwidthprofile,download_speed,PositiveIntegerField,,,No,No
+Bandwidth Management,BandwidthProfile,bandwidth_bandwidthprofile,upload_speed,PositiveIntegerField,,,No,No
+Bandwidth Management,BandwidthProfile,bandwidth_bandwidthprofile,data_cap,PositiveIntegerField,,,No,No
+Bandwidth Management,BandwidthProfile,bandwidth_bandwidthprofile,burst_limit,PositiveIntegerField,,,No,No
+Bandwidth Management,BandwidthProfile,bandwidth_bandwidthprofile,burst_duration,PositiveIntegerField,,,No,No
+Bandwidth Management,BandwidthProfile,bandwidth_bandwidthprofile,priority,IntegerField,,,No,No
+Bandwidth Management,BandwidthProfile,bandwidth_bandwidthprofile,guaranteed_min_speed,PositiveIntegerField,,,No,No
+Bandwidth Management,BandwidthProfile,bandwidth_bandwidthprofile,peak_hours_only,BooleanField,,,No,No
+Bandwidth Management,BandwidthProfile,bandwidth_bandwidthprofile,peak_start_time,TimeField,,,Yes,No
+Bandwidth Management,BandwidthProfile,bandwidth_bandwidthprofile,peak_end_time,TimeField,,,Yes,No
+Bandwidth Management,BandwidthProfile,bandwidth_bandwidthprofile,monthly_price,DecimalField,,,No,No
+Bandwidth Management,BandwidthProfile,bandwidth_bandwidthprofile,is_active,BooleanField,,,No,No
+Bandwidth Management,BandwidthProfile,bandwidth_bandwidthprofile,company,ForeignKey,Company,FK,Yes,No
+Bandwidth Management,BandwidthProfile,bandwidth_bandwidthprofile,created_at,DateTimeField,,,No,No
+Bandwidth Management,BandwidthProfile,bandwidth_bandwidthprofile,updated_at,DateTimeField,,,No,No
+Bandwidth Management,TrafficRule,bandwidth_trafficrule,id,BigAutoField,,,No,Yes
+Bandwidth Management,TrafficRule,bandwidth_trafficrule,name,CharField,,,No,No
+Bandwidth Management,TrafficRule,bandwidth_trafficrule,rule_type,CharField,,,No,No
+Bandwidth Management,TrafficRule,bandwidth_trafficrule,priority_level,CharField,,,No,No
+Bandwidth Management,TrafficRule,bandwidth_trafficrule,source_ip,GenericIPAddressField,,,Yes,No
+Bandwidth Management,TrafficRule,bandwidth_trafficrule,destination_ip,GenericIPAddressField,,,Yes,No
+Bandwidth Management,TrafficRule,bandwidth_trafficrule,source_port,PositiveIntegerField,,,Yes,No
+Bandwidth Management,TrafficRule,bandwidth_trafficrule,destination_port,PositiveIntegerField,,,Yes,No
+Bandwidth Management,TrafficRule,bandwidth_trafficrule,protocol,CharField,,,No,No
+Bandwidth Management,TrafficRule,bandwidth_trafficrule,max_bandwidth,PositiveIntegerField,,,No,No
+Bandwidth Management,TrafficRule,bandwidth_trafficrule,guaranteed_bandwidth,PositiveIntegerField,,,No,No
+Bandwidth Management,TrafficRule,bandwidth_trafficrule,schedule_enabled,BooleanField,,,No,No
+Bandwidth Management,TrafficRule,bandwidth_trafficrule,schedule_start,TimeField,,,Yes,No
+Bandwidth Management,TrafficRule,bandwidth_trafficrule,schedule_end,TimeField,,,Yes,No
+Bandwidth Management,TrafficRule,bandwidth_trafficrule,schedule_days,CharField,,,No,No
+Bandwidth Management,TrafficRule,bandwidth_trafficrule,application_protocol,CharField,,,No,No
+Bandwidth Management,TrafficRule,bandwidth_trafficrule,content_filter,TextField,,,No,No
+Bandwidth Management,TrafficRule,bandwidth_trafficrule,target_device_id,PositiveIntegerField,,,Yes,No
+Bandwidth Management,TrafficRule,bandwidth_trafficrule,target_device_type,CharField,,,No,No
+Bandwidth Management,TrafficRule,bandwidth_trafficrule,is_active,BooleanField,,,No,No
+Bandwidth Management,TrafficRule,bandwidth_trafficrule,is_applied,BooleanField,,,No,No
+Bandwidth Management,TrafficRule,bandwidth_trafficrule,company,ForeignKey,Company,FK,Yes,No
+Bandwidth Management,TrafficRule,bandwidth_trafficrule,created_at,DateTimeField,,,No,No
+Bandwidth Management,TrafficRule,bandwidth_trafficrule,updated_at,DateTimeField,,,No,No
+Bandwidth Management,TrafficRule,bandwidth_trafficrule,applied_at,DateTimeField,,,Yes,No
+Bandwidth Management,DataUsage,bandwidth_datausage,id,BigAutoField,,,No,Yes
+Bandwidth Management,DataUsage,bandwidth_datausage,customer,ForeignKey,Customer,FK,No,No
+Bandwidth Management,DataUsage,bandwidth_datausage,bandwidth_profile,ForeignKey,BandwidthProfile,FK,Yes,No
+Bandwidth Management,DataUsage,bandwidth_datausage,download_bytes,BigIntegerField,,,No,No
+Bandwidth Management,DataUsage,bandwidth_datausage,upload_bytes,BigIntegerField,,,No,No
+Bandwidth Management,DataUsage,bandwidth_datausage,total_bytes,BigIntegerField,,,No,No
+Bandwidth Management,DataUsage,bandwidth_datausage,peak_download_speed,FloatField,,,No,No
+Bandwidth Management,DataUsage,bandwidth_datausage,peak_upload_speed,FloatField,,,No,No
+Bandwidth Management,DataUsage,bandwidth_datausage,peak_time,DateTimeField,,,Yes,No
+Bandwidth Management,DataUsage,bandwidth_datausage,period_start,DateTimeField,,,No,No
+Bandwidth Management,DataUsage,bandwidth_datausage,period_end,DateTimeField,,,No,No
+Bandwidth Management,DataUsage,bandwidth_datausage,billing_cycle_id,PositiveIntegerField,,,Yes,No
+Bandwidth Management,DataUsage,bandwidth_datausage,daily_usage,JSONField,,,No,No
+Bandwidth Management,DataUsage,bandwidth_datausage,hourly_peak,JSONField,,,No,No
+Bandwidth Management,DataUsage,bandwidth_datausage,is_over_limit,BooleanField,,,No,No
+Bandwidth Management,DataUsage,bandwidth_datausage,overage_amount,DecimalField,,,No,No
+Bandwidth Management,DataUsage,bandwidth_datausage,created_at,DateTimeField,,,No,No
+Bandwidth Management,DataUsage,bandwidth_datausage,updated_at,DateTimeField,,,No,No
+Bandwidth Management,BandwidthAlert,bandwidth_bandwidthalert,id,BigAutoField,,,No,Yes
+Bandwidth Management,BandwidthAlert,bandwidth_bandwidthalert,alert_type,CharField,,,No,No
+Bandwidth Management,BandwidthAlert,bandwidth_bandwidthalert,alert_level,CharField,,,No,No
+Bandwidth Management,BandwidthAlert,bandwidth_bandwidthalert,customer,ForeignKey,Customer,FK,Yes,No
+Bandwidth Management,BandwidthAlert,bandwidth_bandwidthalert,device_id,PositiveIntegerField,,,Yes,No
+Bandwidth Management,BandwidthAlert,bandwidth_bandwidthalert,device_type,CharField,,,No,No
+Bandwidth Management,BandwidthAlert,bandwidth_bandwidthalert,threshold_percentage,PositiveIntegerField,,,No,No
+Bandwidth Management,BandwidthAlert,bandwidth_bandwidthalert,threshold_value,FloatField,,,Yes,No
+Bandwidth Management,BandwidthAlert,bandwidth_bandwidthalert,threshold_unit,CharField,,,No,No
+Bandwidth Management,BandwidthAlert,bandwidth_bandwidthalert,message,TextField,,,No,No
+Bandwidth Management,BandwidthAlert,bandwidth_bandwidthalert,triggered_value,FloatField,,,Yes,No
+Bandwidth Management,BandwidthAlert,bandwidth_bandwidthalert,notify_customer,BooleanField,,,No,No
+Bandwidth Management,BandwidthAlert,bandwidth_bandwidthalert,notify_staff,BooleanField,,,No,No
+Bandwidth Management,BandwidthAlert,bandwidth_bandwidthalert,notification_methods,JSONField,,,No,No
+Bandwidth Management,BandwidthAlert,bandwidth_bandwidthalert,is_triggered,BooleanField,,,No,No
+Bandwidth Management,BandwidthAlert,bandwidth_bandwidthalert,triggered_at,DateTimeField,,,Yes,No
+Bandwidth Management,BandwidthAlert,bandwidth_bandwidthalert,acknowledged,BooleanField,,,No,No
+Bandwidth Management,BandwidthAlert,bandwidth_bandwidthalert,acknowledged_by,ForeignKey,User,FK,Yes,No
+Bandwidth Management,BandwidthAlert,bandwidth_bandwidthalert,acknowledged_at,DateTimeField,,,Yes,No
+Bandwidth Management,BandwidthAlert,bandwidth_bandwidthalert,resolved,BooleanField,,,No,No
+Bandwidth Management,BandwidthAlert,bandwidth_bandwidthalert,resolved_at,DateTimeField,,,Yes,No
+Bandwidth Management,BandwidthAlert,bandwidth_bandwidthalert,resolution_notes,TextField,,,No,No
+Bandwidth Management,BandwidthAlert,bandwidth_bandwidthalert,recurring,BooleanField,,,No,No
+Bandwidth Management,BandwidthAlert,bandwidth_bandwidthalert,recurrence_interval,PositiveIntegerField,,,No,No
+Bandwidth Management,BandwidthAlert,bandwidth_bandwidthalert,company,ForeignKey,Company,FK,Yes,No
+Bandwidth Management,BandwidthAlert,bandwidth_bandwidthalert,created_at,DateTimeField,,,No,No
+Bandwidth Management,BandwidthAlert,bandwidth_bandwidthalert,updated_at,DateTimeField,,,No,No
+Bandwidth Management,SpeedTestResult,bandwidth_speedtestresult,id,BigAutoField,,,No,Yes
+Bandwidth Management,SpeedTestResult,bandwidth_speedtestresult,customer,ForeignKey,Customer,FK,No,No
+Bandwidth Management,SpeedTestResult,bandwidth_speedtestresult,device_id,PositiveIntegerField,,,Yes,No
+Bandwidth Management,SpeedTestResult,bandwidth_speedtestresult,device_type,CharField,,,No,No
+Bandwidth Management,SpeedTestResult,bandwidth_speedtestresult,download_speed,FloatField,,,No,No
+Bandwidth Management,SpeedTestResult,bandwidth_speedtestresult,upload_speed,FloatField,,,No,No
+Bandwidth Management,SpeedTestResult,bandwidth_speedtestresult,latency,FloatField,,,No,No
+Bandwidth Management,SpeedTestResult,bandwidth_speedtestresult,jitter,FloatField,,,No,No
+Bandwidth Management,SpeedTestResult,bandwidth_speedtestresult,packet_loss,FloatField,,,No,No
+Bandwidth Management,SpeedTestResult,bandwidth_speedtestresult,server_name,CharField,,,No,No
+Bandwidth Management,SpeedTestResult,bandwidth_speedtestresult,server_location,CharField,,,No,No
+Bandwidth Management,SpeedTestResult,bandwidth_speedtestresult,test_method,CharField,,,No,No
+Bandwidth Management,SpeedTestResult,bandwidth_speedtestresult,test_duration,PositiveIntegerField,,,No,No
+Bandwidth Management,SpeedTestResult,bandwidth_speedtestresult,concurrent_users,PositiveIntegerField,,,Yes,No
+Bandwidth Management,SpeedTestResult,bandwidth_speedtestresult,network_load,FloatField,,,Yes,No
+Bandwidth Management,SpeedTestResult,bandwidth_speedtestresult,is_valid,BooleanField,,,No,No
+Bandwidth Management,SpeedTestResult,bandwidth_speedtestresult,validation_notes,TextField,,,No,No
+Bandwidth Management,SpeedTestResult,bandwidth_speedtestresult,company,ForeignKey,Company,FK,Yes,No
+Bandwidth Management,SpeedTestResult,bandwidth_speedtestresult,test_time,DateTimeField,,,No,No
+Bandwidth Management,SpeedTestResult,bandwidth_speedtestresult,created_at,DateTimeField,,,No,No

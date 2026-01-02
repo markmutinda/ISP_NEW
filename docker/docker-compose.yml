@@ -1,0 +1,33 @@
+version: '3.8'
+
+services:
+  # ... other services
+  
+  celery-worker:
+    build: .
+    command: celery -A config worker -l info
+    volumes:
+      - .:/app
+    environment:
+      - DJANGO_SETTINGS_MODULE=config.settings.production
+      - REDIS_URL=redis://redis:6379/0
+    depends_on:
+      - redis
+      - db
+  
+  celery-beat:
+    build: .
+    command: celery -A config beat -l info
+    volumes:
+      - .:/app
+    environment:
+      - DJANGO_SETTINGS_MODULE=config.settings.production
+      - REDIS_URL=redis://redis:6379/0
+    depends_on:
+      - redis
+      - db
+  
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"

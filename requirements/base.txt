@@ -26,3 +26,9 @@ qrcode==7.4.2
 
 # PDF generation (optional for invoices)
 reportlab==4.0.4
+
+# Network Management
+paramiko==3.4.0           # SSH for OLT/Huawei
+librouteros==3.3.0        # Mikrotik API
+netaddr==1.2.0            # IP address manipulation
+requests==2.31.0          # HTTP requests for TR-069
