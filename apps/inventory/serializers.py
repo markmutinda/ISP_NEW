@@ -70,9 +70,9 @@ class EquipmentItemSerializer(serializers.ModelSerializer):
             'assigned_to', 'assigned_to_name', 'notes',
             'ip_address', 'firmware_version',
             'age_in_months', 'is_available',
-            'qr_code', 'created_at', 'updated_at'
+            'qr_code'
         ]
-        read_only_fields = ['created_at', 'updated_at', 'asset_tag']
+        read_only_fields = ['asset_tag']
 
 
 class AssignmentSerializer(serializers.ModelSerializer):

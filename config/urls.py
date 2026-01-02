@@ -54,7 +54,7 @@ api_urlpatterns = [
     path('api/self-service/', include('apps.self_service.urls')),
     
     # Inventory app (Phase 10 - Inventory Management)
-     path('api/inventory/', include('apps.inventory.urls')),
+     path('inventory/', include('apps.inventory.urls')),
     
     # Notifications app (Phase 11 - Alerts & Notifications)
      path('notifications/', include('apps.notifications.urls')),
