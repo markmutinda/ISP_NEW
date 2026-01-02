@@ -278,7 +278,7 @@ class AssignmentViewSet(viewsets.ModelViewSet):
     serializer_class = AssignmentSerializer
     permission_classes = [IsAuthenticated, IsAdminOrStaff]
     filter_backends = [filters.DjangoFilterBackend, OrderingFilter]
-    filterset_fields = ['assigned_to', 'equipment', 'status']
+    filterset_fields = ['assigned_to', 'equipment']
     ordering_fields = ['assigned_date', 'created_at']
    
     def get_queryset(self):
