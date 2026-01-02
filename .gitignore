@@ -6,25 +6,54 @@ __pycache__/
 db.sqlite3
 media/
 staticfiles/
-.env
 *.sqlite3
 
+# Environment
+.env
+.env.local
+.env.*.local
 
 # Virtual Environment
 .venv/
+venv/
 ENV/
 env/
+.Python
 
 # IDE
 .vscode/
 .idea/
 *.swp
 *.swo
+*.sublime-*
 
 # OS
 .DS_Store
 Thumbs.db
+*.bak
+
+# Python
+*.py[cod]
+*$py.class
+*.so
+.Python
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Testing
+.coverage
+htmlcov/
+.pytest_cache/
+.tox/
 
 # Project specific
 *.db
-*.sqlite3
+local_settings.py
+
+# Jupyter Notebooks
+.ipynb_checkpoints/
+
+# Distribution / packaging
+dist/
+build/
+*.egg-info/
