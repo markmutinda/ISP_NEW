@@ -39,7 +39,7 @@ api_urlpatterns = [
     path('api/bandwidth/', include('apps.bandwidth.urls')),  
     
     # Billing app (Phase 5 - Billing & Finance)
-     path('api/billing/', include('apps.billing.urls')),
+     path('billing/', include('apps.billing.urls')),
     
     # Support app (Phase 6 - Support Ticketing)
      path('api/support/', include('apps.support.urls')),
