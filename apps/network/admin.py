@@ -1,23 +1,117 @@
 # apps/network/admin.py
+
 from django.contrib import admin
 from django.utils.html import format_html
+
 from .models import (
+    # NEW: Router Models
+    Router,
+    RouterEvent,
+    MikrotikInterface,
+    HotspotUser,
+    PPPoEUser,
+    MikrotikQueue,
+
     # OLT Models
     OLTDevice, OLTPort, PONPort, ONUDevice, OLTConfig,
     
     # TR-069 Models
     ACSConfiguration, CPEDevice, TR069Parameter, TR069Session,
     
-    # Mikrotik Models
-    MikrotikDevice, MikrotikInterface, HotspotUser,
-    PPPoEUser, MikrotikQueue,
-    
     # IPAM Models
     Subnet, VLAN, IPPool, IPAddress, DHCPRange,
 )
 
 
-# OLT Admin
+# ================================
+#       ROUTER ADMIN SECTION
+# ================================
+
+@admin.register(Router)
+class RouterAdmin(admin.ModelAdmin):
+    list_display = ('name', 'ip_address', 'router_type', 'status', 'last_seen', 'active_users', 'is_authenticated', 'company')
+    list_filter = ('router_type', 'status', 'is_active', 'is_authenticated', 'company')
+    search_fields = ('name', 'ip_address', 'model', 'location', 'auth_key')
+    readonly_fields = ('auth_key', 'authenticated_at', 'last_seen', 'created_at', 'updated_at')
+    fieldsets = (
+        (None, {
+            'fields': ('company', 'name', 'router_type', 'model', 'firmware_version', 'location', ('latitude', 'longitude'))
+        }),
+        ('Connection & Auth', {
+            'fields': ('ip_address', 'mac_address', 'api_port', 'api_username', 'api_password')
+        }),
+        ('Status & Metrics', {
+            'fields': ('status', 'is_active', 'last_seen', 'uptime', 'uptime_percentage', 'sla_target', ('total_users', 'active_users'))
+        }),
+        ('Self-Registration', {
+            'fields': ('auth_key', 'is_authenticated', 'authenticated_at'),
+            'description': 'Used for router self-registration via script.'
+        }),
+        ('Extra', {
+            'fields': ('tags', 'notes'),
+            'classes': ('collapse',)
+        }),
+    )
+
+
+@admin.register(RouterEvent)
+class RouterEventAdmin(admin.ModelAdmin):
+    list_display = ('router', 'event_type', 'message_truncated', 'created_at')
+    list_filter = ('event_type', 'router__company')
+    search_fields = ('router__name', 'message', 'event_type')
+    readonly_fields = ('created_at',)
+    date_hierarchy = 'created_at'
+
+    def message_truncated(self, obj):
+        return obj.message[:75] + ('...' if len(obj.message) > 75 else '')
+    message_truncated.short_description = 'Message'
+
+
+# Mikrotik Sub-models (now linked to Router)
+@admin.register(MikrotikInterface)
+class MikrotikInterfaceAdmin(admin.ModelAdmin):
+    list_display = ('interface_name', 'router', 'interface_type', 'admin_state', 'operational_state', 'rx_bytes', 'tx_bytes')
+    list_filter = ('interface_type', 'admin_state', 'operational_state', 'router__company')
+    search_fields = ('interface_name', 'router__name')
+
+
+@admin.register(HotspotUser)
+class HotspotUserAdmin(admin.ModelAdmin):
+    list_display = ('username', 'router', 'status', 'ip_address', 'bytes_in', 'bytes_out', 'customer')
+    list_filter = ('status', 'profile', 'router__company')
+    search_fields = ('username', 'mac_address', 'service_connection__customer__full_name', 'router__name')
+    
+    def customer(self, obj):
+        if obj.service_connection and obj.service_connection.customer:
+            return obj.service_connection.customer.full_name
+        return 'Unassigned'
+    customer.short_description = 'Customer'
+
+
+@admin.register(PPPoEUser)
+class PPPoEUserAdmin(admin.ModelAdmin):
+    list_display = ('username', 'router', 'status', 'local_address', 'remote_address', 'customer')
+    list_filter = ('status', 'profile', 'router__company')
+    search_fields = ('username', 'caller_id', 'service_connection__customer__full_name', 'router__name')
+    
+    def customer(self, obj):
+        if obj.service_connection and obj.service_connection.customer:
+            return obj.service_connection.customer.full_name
+        return 'Unassigned'
+    customer.short_description = 'Customer'
+
+
+@admin.register(MikrotikQueue)
+class MikrotikQueueAdmin(admin.ModelAdmin):
+    list_display = ('queue_name', 'router', 'queue_type', 'target', 'max_limit', 'disabled')
+    list_filter = ('queue_type', 'disabled', 'router__company')
+    search_fields = ('queue_name', 'target', 'router__name')
+
+
+# ================================
+#          OLT ADMIN SECTION
+# ================================
+
 @admin.register(OLTDevice)
 class OLTDeviceAdmin(admin.ModelAdmin):
     list_display = ('name', 'vendor', 'ip_address', 'status', 'last_sync', 'company')
@@ -54,6 +148,7 @@ class ONUDeviceAdmin(admin.ModelAdmin):
         if obj.service_connection and obj.service_connection.customer:
             return obj.service_connection.customer.full_name
         return 'Unassigned'
+    customer.short_description = 'Customer'
 
 
 @admin.register(OLTConfig)
@@ -63,7 +158,10 @@ class OLTConfigAdmin(admin.ModelAdmin):
     search_fields = ('olt__name', 'version')
 
 
-# TR-069 Admin
+# ================================
+#        TR-069 ADMIN SECTION
+# ================================
+
 @admin.register(ACSConfiguration)
 class ACSConfigurationAdmin(admin.ModelAdmin):
     list_display = ('name', 'acs_url', 'periodic_interval', 'is_active', 'company')
@@ -85,6 +183,7 @@ class CPEDeviceAdmin(admin.ModelAdmin):
         if obj.service_connection and obj.service_connection.customer:
             return obj.service_connection.customer.full_name
         return 'Unassigned'
+    customer.short_description = 'Customer'
 
 
 @admin.register(TR069Parameter)
@@ -109,54 +208,10 @@ class TR069SessionAdmin(admin.ModelAdmin):
     session_id_short.short_description = 'Session ID'
 
 
-# Mikrotik Admin
-@admin.register(MikrotikDevice)
-class MikrotikDeviceAdmin(admin.ModelAdmin):
-    list_display = ('name', 'device_type', 'ip_address', 'status', 'cpu_load', 'memory_usage', 'company')
-    list_filter = ('device_type', 'status', 'company')
-    search_fields = ('name', 'hostname', 'ip_address', 'serial_number')
-    readonly_fields = ('last_sync', 'created_at', 'updated_at')
+# ================================
+#          IPAM ADMIN SECTION
+# ================================
 
-
-@admin.register(MikrotikInterface)
-class MikrotikInterfaceAdmin(admin.ModelAdmin):
-    list_display = ('interface_name', 'mikrotik', 'interface_type', 'admin_state', 'operational_state', 'rx_bytes', 'tx_bytes')
-    list_filter = ('interface_type', 'admin_state', 'operational_state')
-    search_fields = ('interface_name', 'mikrotik__name')
-
-
-@admin.register(HotspotUser)
-class HotspotUserAdmin(admin.ModelAdmin):
-    list_display = ('username', 'mikrotik', 'status', 'ip_address', 'bytes_in', 'bytes_out', 'customer')
-    list_filter = ('status', 'profile', 'mikrotik')
-    search_fields = ('username', 'mac_address', 'service_connection__customer__full_name')
-    
-    def customer(self, obj):
-        if obj.service_connection and obj.service_connection.customer:
-            return obj.service_connection.customer.full_name
-        return 'Unassigned'
-
-
-@admin.register(PPPoEUser)
-class PPPoEUserAdmin(admin.ModelAdmin):
-    list_display = ('username', 'mikrotik', 'status', 'local_address', 'remote_address', 'customer')
-    list_filter = ('status', 'profile', 'mikrotik')
-    search_fields = ('username', 'caller_id', 'service_connection__customer__full_name')
-    
-    def customer(self, obj):
-        if obj.service_connection and obj.service_connection.customer:
-            return obj.service_connection.customer.full_name
-        return 'Unassigned'
-
-
-@admin.register(MikrotikQueue)
-class MikrotikQueueAdmin(admin.ModelAdmin):
-    list_display = ('queue_name', 'mikrotik', 'queue_type', 'target', 'max_limit', 'disabled')
-    list_filter = ('queue_type', 'disabled', 'mikrotik')
-    search_fields = ('queue_name', 'target')
-
-
-# IPAM Admin
 @admin.register(Subnet)
 class SubnetAdmin(admin.ModelAdmin):
     list_display = ('name', 'network_cidr', 'version', 'total_ips', 'used_ips', 'utilization', 'company')
@@ -165,9 +220,11 @@ class SubnetAdmin(admin.ModelAdmin):
     
     def network_cidr(self, obj):
         return f"{obj.network_address}/{obj.cidr}"
+    network_cidr.short_description = 'Network'
     
     def utilization(self, obj):
         return f"{obj.utilization_percentage:.1f}%"
+    utilization.short_description = 'Utilization'
 
 
 @admin.register(VLAN)
@@ -187,6 +244,7 @@ class IPPoolAdmin(admin.ModelAdmin):
         if obj.total_ips > 0:
             return f"{(obj.used_ips / obj.total_ips) * 100:.1f}%"
         return "0%"
+    utilization.short_description = 'Utilization'
 
 
 @admin.register(IPAddress)
@@ -199,6 +257,7 @@ class IPAddressAdmin(admin.ModelAdmin):
         if obj.service_connection and obj.service_connection.customer:
             return obj.service_connection.customer.full_name
         return ''
+    customer.short_description = 'Customer'
 
 
 @admin.register(DHCPRange)

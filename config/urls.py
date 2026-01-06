@@ -33,7 +33,7 @@ api_urlpatterns = [
     path('customers/', include('apps.customers.urls')),
     
     # Network app (Phase 3 - Network Management)
-    path('api/network/', include('apps.network.urls')),
+    path('network/', include('apps.network.urls')),
     
     # Bandwidth app (Phase 4 - Bandwidth Management)
     path('api/bandwidth/', include('apps.bandwidth.urls')),  

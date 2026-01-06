@@ -1,7 +1,7 @@
 # apps/network/serializers/__init__.py
 from .olt_serializers import *
 from .tr069_serializers import *
-from .mikrotik_serializers import *
+from .router_serializers import *
 from .ipam_serializers import *
 
 __all__ = [
