@@ -2,6 +2,7 @@
 
 from rest_framework import serializers
 from apps.network.models.router_models import Router, RouterEvent
+from apps.core.models import Company  # Import Company here for the quick fix
 
 
 class RouterEventSerializer(serializers.ModelSerializer):
@@ -24,57 +25,44 @@ class RouterEventSerializer(serializers.ModelSerializer):
 
 
 class RouterSerializer(serializers.ModelSerializer):
-    """
-    Main serializer for Router model.
-    Includes helpful read-only fields for frontend display.
-    """
     company_name = serializers.CharField(source='company.name', read_only=True)
     router_type_display = serializers.CharField(source='get_router_type_display', read_only=True)
     status_display = serializers.CharField(source='get_status_display', read_only=True)
-
-    # Optional: Show auth status in a friendly way
     auth_status = serializers.SerializerMethodField()
 
     class Meta:
         model = Router
         fields = [
-            'id',
-            'company',
-            'company_name',
-            'name',
-            'ip_address',
-            'mac_address',
-            'api_port',
-            'api_username',
-            'api_password',
-            'router_type',
-            'router_type_display',
-            'model',
-            'firmware_version',
-            'location',
-            'latitude',
-            'longitude',
-            'status',
-            'status_display',
-            'total_users',
-            'active_users',
-            'uptime',
-            'uptime_percentage',
-            'sla_target',
-            'last_seen',
-            'tags',
-            'notes',
-            'is_active',
-            'auth_key',
-            'is_authenticated',
-            'authenticated_at',
-            'auth_status',
-            'created_at',
-            'updated_at',
+            'id', 'company', 'company_name', 'name', 'ip_address', 'mac_address',
+            'api_port', 'api_username', 'api_password', 'router_type', 'router_type_display',
+            'model', 'firmware_version', 'location', 'latitude', 'longitude',
+            'status', 'status_display', 'total_users', 'active_users', 'uptime',
+            'uptime_percentage', 'sla_target', 'last_seen', 'tags', 'notes',
+            'is_active', 'auth_key', 'is_authenticated', 'authenticated_at',
+            'auth_status', 'created_at', 'updated_at',
         ]
         extra_kwargs = {
-            'api_password': {'write_only': True},  # Never return password
-            'auth_key': {'read_only': True},       # Only shown via dedicated endpoint if needed
+            'api_password': {'write_only': True, 'required': False, 'allow_blank': True},
+            'auth_key': {'read_only': True},
+            'company': {'required': False, 'read_only': True},
+            'ip_address': {'required': False, 'allow_blank': True, 'allow_null': True},
+            'mac_address': {'required': False, 'allow_blank': True, 'allow_null': True},
+            'api_username': {'required': False, 'allow_blank': True, 'allow_null': True},
+            'api_port': {'required': False},
+            'model': {'required': False, 'allow_blank': True, 'allow_null': True},
+            'firmware_version': {'required': False, 'allow_blank': True, 'allow_null': True},
+            'location': {'required': False, 'allow_blank': True, 'allow_null': True},
+            'latitude': {'required': False, 'allow_null': True},
+            'longitude': {'required': False, 'allow_null': True},
+            'uptime': {'required': False, 'allow_blank': True, 'allow_null': True},
+            'notes': {'required': False, 'allow_blank': True, 'allow_null': True},
+            'tags': {'required': False},
+            'status': {'read_only': True},
+            'total_users': {'read_only': True},
+            'active_users': {'read_only': True},
+            'last_seen': {'read_only': True},
+            'is_authenticated': {'read_only': True},
+            'authenticated_at': {'read_only': True},
         }
 
     def get_auth_status(self, obj):
@@ -84,18 +72,28 @@ class RouterSerializer(serializers.ModelSerializer):
             return "Pending Authentication"
         return "Not Configured"
 
+    def create(self, validated_data):
+        """
+        TEMPORARY WORKING FIX:
+        Assign the first company in the database (we have "Default ISP").
+        This lets router creation work immediately.
+        We'll replace with proper user-profile logic later.
+        """
+        company = Company.objects.first()
+        if not company:
+            raise serializers.ValidationError("No companies exist in the database. Please create one first.")
+
+        validated_data['company'] = company
+        return super().create(validated_data)
+
     def validate(self, data):
         """
-        Additional validation if needed (e.g., IP uniqueness per company)
+        Prevent duplicate IP addresses (optional but nice)
         """
-        if 'ip_address' in data and data['ip_address']:
-            existing = Router.objects.filter(
-                ip_address=data['ip_address'],
-                company=self.instance.company if self.instance else data.get('company')
-            )
+        if data.get('ip_address'):
+            queryset = Router.objects.filter(ip_address=data['ip_address'])
             if self.instance:
-                existing = existing.exclude(pk=self.instance.pk)
-            if existing.exists():
-                raise serializers.ValidationError("A router with this IP address already exists in your company.")
-
-        return data       
+                queryset = queryset.exclude(pk=self.instance.pk)
+            if queryset.exists():
+                raise serializers.ValidationError("A router with this IP address already exists.")
+        return data
