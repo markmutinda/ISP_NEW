@@ -1,6 +1,58 @@
 # apps/network/integrations/olt_integration.py
 import paramiko
-import telnetlib
+# telnetlib was removed in Python 3.13, create a compatibility shim
+import socket
+import sys
+
+if sys.version_info >= (3, 13):
+    # Simple telnetlib compatibility class for Python 3.13+
+    class TelnetCompat:
+        """Minimal telnetlib.Telnet compatibility for Python 3.13+"""
+        def __init__(self, host=None, port=23, timeout=None):
+            self.host = host
+            self.port = port
+            self.timeout = timeout
+            self.sock = None
+            if host is not None:
+                self.open(host, port, timeout)
+        
+        def open(self, host, port=23, timeout=None):
+            self.host = host
+            self.port = port
+            self.timeout = timeout
+            self.sock = socket.create_connection((host, port), timeout)
+        
+        def read_until(self, match, timeout=None):
+            """Read until a given string is encountered or until timeout."""
+            data = b""
+            while True:
+                try:
+                    chunk = self.sock.recv(1024)
+                    if not chunk:
+                        break
+                    data += chunk
+                    if match in data:
+                        break
+                except socket.timeout:
+                    break
+            return data
+        
+        def write(self, buffer):
+            """Write a string to the socket."""
+            self.sock.sendall(buffer)
+        
+        def close(self):
+            """Close the connection."""
+            if self.sock:
+                self.sock.close()
+                self.sock = None
+    
+    class telnetlib:
+        """Compatibility module"""
+        Telnet = TelnetCompat
+else:
+    import telnetlib
+
 import time
 import re
 from abc import ABC, abstractmethod
