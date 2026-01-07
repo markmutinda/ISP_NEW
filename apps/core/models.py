@@ -407,3 +407,52 @@ class AuditLog(BaseModel):
             user_agent=user_agent,
             tenant=tenant
         )
+    
+
+class GlobalSystemSettings(models.Model):
+    # RADIUS Settings
+    primary_server = models.CharField(max_length=255, blank=True)
+    primary_port = models.IntegerField(default=1812)
+    primary_secret = models.CharField(max_length=255, blank=True)
+    secondary_server = models.CharField(max_length=255, blank=True)
+    secondary_port = models.IntegerField(default=1812)
+    secondary_secret = models.CharField(max_length=255, blank=True)
+    accounting_port = models.IntegerField(default=1813)
+    timeout = models.IntegerField(default=5)
+    retries = models.IntegerField(default=3)
+   
+    # Automation Settings
+    auto_renew = models.BooleanField(default=True)
+    auto_expiry = models.BooleanField(default=True)
+    auto_notifications = models.BooleanField(default=True)
+    auto_backup = models.BooleanField(default=False)
+    auto_reports = models.BooleanField(default=True)
+    grace_period = models.IntegerField(default=3)
+    backup_frequency = models.CharField(max_length=20, default='daily', choices=[
+        ('daily', 'Daily'), ('weekly', 'Weekly'), ('monthly', 'Monthly')
+    ])
+    report_frequency = models.CharField(max_length=20, default='weekly', choices=[
+        ('daily', 'Daily'), ('weekly', 'Weekly'), ('monthly', 'Monthly')
+    ])
+   
+    # Notification Settings
+    email_enabled = models.BooleanField(default=True)
+    sms_enabled = models.BooleanField(default=True)
+    payment_notifications = models.BooleanField(default=True)
+    expiry_notifications = models.BooleanField(default=True)
+    system_alerts = models.BooleanField(default=True)
+    marketing_emails = models.BooleanField(default=False)
+    admin_email = models.EmailField(blank=True)
+    sms_gateway = models.CharField(max_length=50, default='africastalking')
+
+    class Meta:
+        verbose_name = 'System Settings'
+        verbose_name_plural = 'System Settings'
+
+    def __str__(self):
+        return "Global System Settings"
+
+    @classmethod
+    def get_solo(cls):
+        obj, created = cls.objects.get_or_create(pk=1)
+        return obj

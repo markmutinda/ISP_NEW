@@ -13,10 +13,13 @@ from django.conf import settings
 from rest_framework_simplejwt.views import TokenRefreshView
 from rest_framework.views import APIView
 from rest_framework import generics
+from .models import GlobalSystemSettings  # Add this
+from .serializers import GlobalSystemSettingsSerializer, CustomTokenRefreshSerializer  # Add this
+from rest_framework_simplejwt.exceptions import InvalidToken  # Already needed for token fix
 
 from .models import User, Company, SystemSettings, AuditLog, Tenant
 from .serializers import (
-    UserSerializer, LoginSerializer, UserCreateSerializer, UserUpdateSerializer,
+    CustomTokenRefreshSerializer, UserSerializer, LoginSerializer, UserCreateSerializer, UserUpdateSerializer,
     ProfileSerializer, PasswordChangeSerializer,
     CompanySerializer, TenantSerializer, SystemSettingsSerializer, AuditLogSerializer,
     CustomTokenObtainPairSerializer, DashboardStatsSerializer
@@ -248,32 +251,27 @@ class LogoutView(APIView):
 
 
 class PasswordChangeView(generics.GenericAPIView):
-    """Change password view"""
+    """Change password - matches frontend /auth/change-password/"""
     serializer_class = PasswordChangeSerializer
     permission_classes = [IsAuthenticated]
 
     def post(self, request, *args, **kwargs):
-        serializer = self.get_serializer(
-            data=request.data, 
-            context={'request': request}
-        )
+        serializer = self.get_serializer(data=request.data, context={'request': request})
         if serializer.is_valid():
-            user = request.user
-            user.set_password(serializer.validated_data['new_password'])
-            user.save()
+            serializer.save()
             
             # Log the action
             AuditLog.log_action(
                 user=request.user,
                 action='password_change',
                 model_name='User',
-                object_id=str(user.id),
-                object_repr=str(user),
+                object_id=str(request.user.id),
+                object_repr=str(request.user),
                 ip_address=request.META.get('REMOTE_ADDR'),
                 user_agent=request.META.get('HTTP_USER_AGENT', '')
             )
             
-            return Response({'message': 'Password updated successfully'})
+            return Response({'message': 'Password changed successfully'})
         
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
@@ -463,3 +461,29 @@ class AuditLogViewSet(viewsets.ReadOnlyModelViewSet):
             queryset = queryset.filter(timestamp__date__lte=date_to)
         
         return queryset
+    
+
+class GlobalSystemSettingsView(APIView):
+    """Singleton System Settings - GET and PATCH /api/v1/core/settings/"""
+    permission_classes = [IsAdmin]
+
+    def get_object(self):
+        return GlobalSystemSettings.get_solo()
+
+    def get(self, request):
+        settings = self.get_object()
+        serializer = GlobalSystemSettingsSerializer(settings)
+        return Response(serializer.data)
+
+    def patch(self, request):
+        settings = self.get_object()
+        serializer = GlobalSystemSettingsSerializer(settings, data=request.data, partial=True)
+        if serializer.is_valid():
+            serializer.save()
+            return Response(serializer.data)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+
+class CustomTokenRefreshView(TokenRefreshView):
+    """Fix: Return 401 instead of 500 when user is deleted"""
+    serializer_class = CustomTokenRefreshSerializer

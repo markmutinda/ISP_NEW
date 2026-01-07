@@ -19,8 +19,9 @@ urlpatterns = [
     path('auth/login/', views.CustomTokenObtainPairView.as_view(), name='login'),
     path('auth/login/legacy/', views.LoginView.as_view(), name='login_legacy'),
     path('auth/logout/', views.LogoutView.as_view(), name='logout'),
-    path('auth/token/refresh/', TokenRefreshView.as_view(), name='token_refresh'),
-    path('auth/password/change/', views.PasswordChangeView.as_view(), name='password_change'),
+    path('auth/token/refresh/', views.CustomTokenRefreshView.as_view(), name='token_refresh'),
+    path('auth/change-password/', views.PasswordChangeView.as_view(), name='change-password'),
+    path('settings/', views.GlobalSystemSettingsView.as_view(), name='system-settings'),
     
     # Email verification
     path('auth/verify-email/<uuid:token>/', views.VerifyEmailView.as_view(), name='verify_email'),

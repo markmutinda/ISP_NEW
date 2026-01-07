@@ -5,6 +5,9 @@ from rest_framework import serializers
 from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
 from rest_framework_simplejwt.tokens import RefreshToken
 from django.contrib.auth import authenticate
+from .models import GlobalSystemSettings  # Add this
+from rest_framework_simplejwt.exceptions import InvalidToken  # Add this
+from rest_framework_simplejwt.serializers import TokenRefreshSerializer  # Already there or add
 from django.utils import timezone
 from django.contrib.auth.password_validation import validate_password
 from .models import User, Company, Tenant, SystemSettings, AuditLog
@@ -275,30 +278,23 @@ class ProfileSerializer(serializers.ModelSerializer):
 
 
 class PasswordChangeSerializer(serializers.Serializer):
-    """Serializer for password change"""
-    
-    old_password = serializers.CharField(required=True, write_only=True)
+    current_password = serializers.CharField(required=True, write_only=True)
     new_password = serializers.CharField(required=True, write_only=True)
-    confirm_password = serializers.CharField(required=True, write_only=True)
-    
-    def validate(self, data):
-        new_password = data.get('new_password')
-        confirm_password = data.get('confirm_password')
-        
-        if new_password != confirm_password:
-            raise serializers.ValidationError({
-                "new_password": "Passwords do not match."
-            })
-        
-        validate_password(new_password)
-        return data
-    
-    def validate_old_password(self, value):
+
+    def validate_current_password(self, value):
         user = self.context['request'].user
         if not user.check_password(value):
-            raise serializers.ValidationError("Old password is incorrect.")
+            raise serializers.ValidationError("Current password is incorrect.")
         return value
 
+    def validate_new_password(self, value):
+        validate_password(value)
+        return value
+
+    def save(self):
+        user = self.context['request'].user
+        user.set_password(self.validated_data['new_password'])
+        user.save()
 
 class CompanySerializer(serializers.ModelSerializer):
     """Serializer for Company model"""
@@ -457,3 +453,18 @@ class DashboardStatsSerializer(serializers.Serializer):
     total_active_customers = serializers.IntegerField(default=0)
     total_inactive_customers = serializers.IntegerField(default=0)
     recent_activity = serializers.ListField(child=serializers.DictField(), required=False)
+
+
+class GlobalSystemSettingsSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = GlobalSystemSettings
+        fields = '__all__'
+        read_only_fields = ['id']
+
+
+class CustomTokenRefreshSerializer(TokenRefreshSerializer):
+    def validate(self, attrs):
+        try:
+            return super().validate(attrs)
+        except User.DoesNotExist:
+            raise InvalidToken('User no longer exists')
