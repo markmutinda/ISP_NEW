@@ -11,6 +11,7 @@ import json
 
 # Use your existing permissions
 from apps.core.permissions import IsCompanyAdmin, IsCompanyStaff, IsCompanyMember
+from apps.core.models import Company
 from ..models.billing_models import Plan, BillingCycle, Invoice, InvoiceItem
 from ..serializers import (
     PlanSerializer, PlanCreateSerializer,
@@ -67,9 +68,15 @@ class PlanViewSet(viewsets.ModelViewSet):
     
     def perform_create(self, serializer):
         """Set created_by and company on plan creation"""
+        # Get company from user if available, otherwise use first company
+        user = self.request.user
+        company = getattr(user, 'company', None)
+        if not company:
+            company = Company.objects.first()
+        
         serializer.save(
-            created_by=self.request.user,
-            company=self.request.user.company
+            created_by=user,
+            company=company
         )
     
     def perform_update(self, serializer):
