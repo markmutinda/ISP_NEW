@@ -49,6 +49,7 @@ htmlcov/
 # Project specific
 *.db
 local_settings.py
+config/settings/local.py
 
 # Jupyter Notebooks
 .ipynb_checkpoints/
