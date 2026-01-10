@@ -242,7 +242,7 @@ class ServiceConnectionForm(forms.ModelForm):
     class Meta:
         model = ServiceConnection
         fields = [
-            'service_type', 'service_plan', 'connection_type', 'status',
+            'service_type','plan', 'connection_type', 'status',
             'ip_address', 'mac_address', 'vlan_id',
             'router_model', 'router_serial', 'ont_model', 'ont_serial',
             'download_speed', 'upload_speed', 'data_cap', 'qos_profile',

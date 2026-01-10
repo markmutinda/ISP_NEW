@@ -45,7 +45,7 @@ api_urlpatterns = [
      path('api/support/', include('apps.support.urls')),
     
     # Analytics app (Phase 7 - Reports & Analytics)
-     path('api/analytics/', include('apps.analytics.urls')),
+     path('analytics/', include('apps.analytics.urls')),  
     
     # Staff app (Phase 8 - Staff Management)
     path('api/staff/', include('apps.staff.urls')),

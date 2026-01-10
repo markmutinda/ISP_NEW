@@ -6,7 +6,7 @@ from decimal import Decimal
 import uuid
 from django.utils.text import slugify
 from apps.core.models import Company
-from apps.customers.models import Customer, ServiceConnection
+#from apps.customers.models import Customer, ServiceConnection
 from utils.constants import KENYAN_COUNTIES, TAX_RATES, TAX_TYPES
 
 
@@ -198,7 +198,7 @@ class Invoice(models.Model):
     # Basic Information
     invoice_number = models.CharField(max_length=50, unique=True)
     company = models.ForeignKey(Company, on_delete=models.CASCADE, related_name='invoices')
-    customer = models.ForeignKey(Customer, on_delete=models.CASCADE, related_name='invoices')
+    customer = models.ForeignKey('customers.Customer', on_delete=models.CASCADE, related_name='invoices')
     
     # Billing Period
     billing_cycle = models.ForeignKey(BillingCycle, on_delete=models.SET_NULL, null=True, blank=True, related_name='invoices')
@@ -228,8 +228,8 @@ class Invoice(models.Model):
     paid_by = models.ForeignKey('core.User', on_delete=models.SET_NULL, null=True, blank=True, related_name='paid_invoices')
     
     # References
-    service_connection = models.ForeignKey(ServiceConnection, on_delete=models.SET_NULL, null=True, blank=True, related_name='invoices')
-    plan = models.ForeignKey(Plan, on_delete=models.SET_NULL, null=True, blank=True, related_name='invoices')
+    service_connection = models.ForeignKey('customers.ServiceConnection', on_delete=models.SET_NULL, null=True, blank=True, related_name='invoices')
+    plan = models.ForeignKey('billing.Plan', on_delete=models.SET_NULL, null=True, blank=True, related_name='invoices')
     
     # Notes
     notes = models.TextField(blank=True)

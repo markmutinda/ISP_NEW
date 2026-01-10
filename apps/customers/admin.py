@@ -277,7 +277,7 @@ class CustomerNotesAdmin(admin.ModelAdmin):
 class ServiceConnectionAdmin(admin.ModelAdmin):
     form = ServiceConnectionForm
     list_display = [
-        'customer', 'service_type', 'service_plan',
+        'customer', 'service_type', 'plan',
         'status', 'download_speed', 'upload_speed',
         'monthly_price', 'activation_date'
     ]

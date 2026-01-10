@@ -3,7 +3,7 @@ from django.core.validators import MinValueValidator
 from django.utils import timezone
 from decimal import Decimal
 from apps.core.models import Company
-from apps.customers.models import Customer
+#from apps.customers.models import Customer
 from .billing_models import Invoice
 
 
@@ -108,7 +108,7 @@ class Payment(models.Model):
 
     payment_number = models.CharField(max_length=50, unique=True)
     company = models.ForeignKey(Company, on_delete=models.CASCADE, related_name='payments')
-    customer = models.ForeignKey(Customer, on_delete=models.CASCADE, related_name='payments')
+    customer = models.ForeignKey('customers.Customer', on_delete=models.CASCADE, related_name='payments')
     invoice = models.ForeignKey(Invoice, on_delete=models.SET_NULL, null=True, blank=True, related_name='payments')
 
     amount = models.DecimalField(max_digits=12, decimal_places=2, validators=[MinValueValidator(0.01)])
@@ -249,7 +249,7 @@ class Receipt(models.Model):
     # Basic Information
     receipt_number = models.CharField(max_length=50, unique=True)
     company = models.ForeignKey(Company, on_delete=models.CASCADE, related_name='receipts')
-    customer = models.ForeignKey(Customer, on_delete=models.CASCADE, related_name='receipts')
+    customer = models.ForeignKey('customers.Customer', on_delete=models.CASCADE, related_name='receipts')
     
     # Payment Reference
     payment = models.OneToOneField(Payment, on_delete=models.CASCADE, related_name='receipt')

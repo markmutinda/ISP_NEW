@@ -3,10 +3,11 @@ Customer Management Models for ISP System
 """
 from django.db import models
 from django.contrib.auth import get_user_model
-from django.core.validators import MinLengthValidator
+from django.core.validators import MinValueValidator, MinLengthValidator
 from django.utils import timezone
 from django.utils.translation import gettext_lazy as _
 from django.conf import settings
+#from apps.billing.models.billing_models import Plan
 
 from apps.core.models import Company
 
@@ -37,6 +38,14 @@ ID_TYPE_CHOICES = (
     ('BIRTH_CERTIFICATE', 'Birth Certificate'),
 )
 
+AUTH_CONNECTION_TYPE_CHOICES = (
+    ('HOTSPOT', 'Hotspot'),
+    ('PPPOE', 'PPPoE'),
+    ('STATIC', 'Static IP'),
+    ('DYNAMIC', 'Dynamic IP'),
+    ('OTHER', 'Other'),
+)
+
 CUSTOMER_STATUS_CHOICES = (
     ('LEAD', 'Lead'),
     ('PENDING', 'Pending Approval'),
@@ -52,6 +61,13 @@ ADDRESS_TYPE_CHOICES = (
     ('HOME', 'Home Address'),
     ('BUSINESS', 'Business Address'),
     ('ALTERNATIVE', 'Alternative Address'),
+)
+
+CONNECTION_TYPE_CHOICES = (
+    ('FIBER', 'Fiber Optic'),
+    ('WIRELESS', 'Wireless'),
+    ('COPPER', 'Copper (DSL)'),
+    ('SATELLITE', 'Satellite'),
 )
 
 DOCUMENT_TYPE_CHOICES = (
@@ -584,152 +600,205 @@ class CustomerNotes(models.Model):
 
 
 class ServiceConnection(models.Model):
-    """Customer service connection details"""
+    """
+    Customer service connection details - links customer to a specific plan/service
+    """
     customer = models.ForeignKey(
-        Customer, 
-        on_delete=models.CASCADE, 
-        related_name='services'
-    )
-    
-    # Service Details
-    service_type = models.CharField(
-        max_length=30, 
-        choices=SERVICE_TYPE_CHOICES, 
-        default='INTERNET'
+        Customer,
+        on_delete=models.CASCADE,
+        related_name='services',
+        verbose_name="Customer"
     )
 
-    service_plan = models.CharField(max_length=100)
+    # === Service & Plan Details ===
+    service_type = models.CharField(
+        max_length=30,
+        choices=SERVICE_TYPE_CHOICES,
+        default='INTERNET',
+        verbose_name="Service Type"
+    )
 
     plan = models.ForeignKey(
-    'billing.Plan',
-    on_delete=models.SET_NULL,          # or PROTECT if you don't want to allow plan deletion
-    null=True,
-    blank=True,
-    related_name='service_connections'  # ← this creates the reverse accessor we need!
+        'billing.Plan',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='service_connections',
+        verbose_name="Assigned Plan"
     )
-    
-    # Connection Details
+
+    # Authentication/connection method - CRITICAL for analytics (Priority 10)
+    auth_connection_type = models.CharField(
+        max_length=20,
+        choices=AUTH_CONNECTION_TYPE_CHOICES,
+        default='PPPOE',
+        blank=True,
+        verbose_name="Authentication Type",
+        help_text="PPPoE, Hotspot, Static IP etc. - used for analytics"
+    )
+
+    # Physical connection medium
     connection_type = models.CharField(
         max_length=30,
-        choices=(
-            ('FIBER', 'Fiber Optic'),
-            ('WIRELESS', 'Wireless'),
-            ('COPPER', 'Copper (DSL)'),
-            ('SATELLITE', 'Satellite'),
-        ),
-        default='FIBER'
+        choices=CONNECTION_TYPE_CHOICES,
+        default='FIBER',
+        verbose_name="Connection Medium"
     )
-    
-    # Status and Dates
+
+    # === Status & Timeline ===
     status = models.CharField(
-        max_length=20, 
-        choices=SERVICE_STATUS_CHOICES, 
-        default='PENDING'
+        max_length=20,
+        choices=SERVICE_STATUS_CHOICES,
+        default='PENDING',
+        verbose_name="Status"
     )
-    activation_date = models.DateTimeField(null=True, blank=True)
-    suspension_date = models.DateTimeField(null=True, blank=True)
-    termination_date = models.DateTimeField(null=True, blank=True)
-    
-    # Network Details
+
+    activation_date = models.DateTimeField(null=True, blank=True, verbose_name="Activation Date")
+    suspension_date = models.DateTimeField(null=True, blank=True, verbose_name="Suspension Date")
+    termination_date = models.DateTimeField(null=True, blank=True, verbose_name="Termination Date")
+
+    # === Network Configuration ===
     ip_address = models.GenericIPAddressField(
         protocol='both',
         unpack_ipv4=False,
         null=True,
-        blank=True
+        blank=True,
+        verbose_name="IP Address"
     )
-    mac_address = models.CharField(max_length=17, blank=True)
-    vlan_id = models.PositiveIntegerField(null=True, blank=True)
-    
-    # Equipment Details
-    router_model = models.CharField(max_length=100, blank=True)
-    router_serial = models.CharField(max_length=100, blank=True)
-    ont_model = models.CharField(max_length=100, blank=True)
-    ont_serial = models.CharField(max_length=100, blank=True)
-    
-    # Bandwidth and QoS
+    mac_address = models.CharField(max_length=17, blank=True, verbose_name="MAC Address")
+    vlan_id = models.PositiveIntegerField(null=True, blank=True, verbose_name="VLAN ID")
+
+    # === Equipment ===
+    router_model = models.CharField(max_length=100, blank=True, verbose_name="Router Model")
+    router_serial = models.CharField(max_length=100, blank=True, verbose_name="Router Serial")
+    ont_model = models.CharField(max_length=100, blank=True, verbose_name="ONT Model")
+    ont_serial = models.CharField(max_length=100, blank=True, verbose_name="ONT Serial")
+
+    # === Bandwidth & QoS ===
     download_speed = models.PositiveIntegerField(
-        help_text="Speed in Mbps"
+        help_text="Provisioned download speed in Mbps",
+        verbose_name="Download Speed (Mbps)"
     )
     upload_speed = models.PositiveIntegerField(
-        help_text="Speed in Mbps"
+        help_text="Provisioned upload speed in Mbps",
+        verbose_name="Upload Speed (Mbps)"
     )
     data_cap = models.PositiveIntegerField(
         null=True,
         blank=True,
-        help_text="Data cap in GB (null = unlimited)"
+        help_text="Data cap in GB (null = unlimited)",
+        verbose_name="Data Cap (GB)"
     )
-    qos_profile = models.CharField(max_length=50, blank=True)
-    
-    # Installation Details
+    qos_profile = models.CharField(max_length=50, blank=True, verbose_name="QoS Profile")
+
+    # === Installation ===
     installation_address = models.ForeignKey(
         CustomerAddress,
         on_delete=models.SET_NULL,
         null=True,
         blank=True,
-        related_name='service_installations'
+        related_name='service_installations',
+        verbose_name="Installation Address"
     )
-    installation_notes = models.TextField(blank=True)
+    installation_notes = models.TextField(blank=True, verbose_name="Installation Notes")
     installed_by = models.ForeignKey(
-        settings.AUTH_USER_MODEL,  # FIXED
+        settings.AUTH_USER_MODEL,
         on_delete=models.SET_NULL,
         null=True,
         blank=True,
-        related_name='installed_services'
+        related_name='installed_services',
+        verbose_name="Installed By"
     )
-    
-    # Billing Information
+
+    # === Billing ===
     monthly_price = models.DecimalField(
-        max_digits=10, 
-        decimal_places=2
+        max_digits=10,
+        decimal_places=2,
+        validators=[MinValueValidator(0)],
+        verbose_name="Monthly Price (KES)"
     )
     setup_fee = models.DecimalField(
-        max_digits=10, 
-        decimal_places=2, 
-        default=0.00
+        max_digits=10,
+        decimal_places=2,
+        default=0.00,
+        validators=[MinValueValidator(0)],
+        verbose_name="Setup Fee (KES)"
     )
-    prorated_billing = models.BooleanField(default=True)
-    
-    # Auto-renewal
-    auto_renew = models.BooleanField(default=True)
+    prorated_billing = models.BooleanField(default=True, verbose_name="Prorated Billing")
+    auto_renew = models.BooleanField(default=True, verbose_name="Auto Renew")
     contract_period = models.PositiveIntegerField(
         default=12,
-        help_text="Contract period in months"
+        help_text="Contract period in months (0 = no contract)",
+        verbose_name="Contract Period (months)"
     )
-    
-    # Audit fields
+
+    # === Audit Trail ===
     created_by = models.ForeignKey(
-        settings.AUTH_USER_MODEL,  # FIXED
+        settings.AUTH_USER_MODEL,
         on_delete=models.SET_NULL,
         null=True,
         blank=True,
-        related_name='created_service_connections'
+        related_name='created_service_connections',
+        verbose_name="Created By"
     )
     updated_by = models.ForeignKey(
-        settings.AUTH_USER_MODEL,  # FIXED
+        settings.AUTH_USER_MODEL,
         on_delete=models.SET_NULL,
         null=True,
         blank=True,
-        related_name='updated_service_connections'
+        related_name='updated_service_connections',
+        verbose_name="Updated By"
     )
-    created_at = models.DateTimeField(auto_now_add=True)
-    updated_at = models.DateTimeField(auto_now=True)
-    
+    created_at = models.DateTimeField(auto_now_add=True, verbose_name="Created At")
+    updated_at = models.DateTimeField(auto_now=True, verbose_name="Updated At")
+
     class Meta:
         ordering = ['-created_at']
-    
+        verbose_name = "Service Connection"
+        verbose_name_plural = "Service Connections"
+        indexes = [
+            models.Index(fields=['status']),
+            models.Index(fields=['customer', 'status']),
+            models.Index(fields=['plan', 'status']),
+            models.Index(fields=['auth_connection_type']),
+        ]
+
     def __str__(self):
-        return f"{self.customer.customer_code} - {self.service_type}"
-    
+        plan_name = self.plan.name if self.plan else self.service_plan or "No Plan"
+        return f"{self.customer.customer_code} - {self.service_type} ({plan_name})"
+
     @property
     def is_active(self):
         return self.status == 'ACTIVE'
-    
+
     @property
     def days_active(self):
         if self.activation_date:
             return (timezone.now() - self.activation_date).days
         return 0
-    
+
+    def save(self, *args, **kwargs):
+        """
+        Auto-populate auth_connection_type from plan if not set
+        """
+        if self.plan and not self.auth_connection_type:
+            # Automatic mapping from Plan.plan_type
+            mapping = {
+                'HOTSPOT': 'HOTSPOT',
+                'PPPOE': 'PPPOE',
+                'STATIC': 'STATIC',
+                'INTERNET': 'PPPOE',  # or 'DYNAMIC'
+            }
+            self.auth_connection_type = mapping.get(self.plan.plan_type, 'OTHER')
+
+        # Optional: sync speeds from plan if not manually overridden
+        if self.plan and not self.download_speed:
+            self.download_speed = self.plan.download_speed or 0
+        if self.plan and not self.upload_speed:
+            self.upload_speed = self.plan.upload_speed or 0
+
+        super().save(*args, **kwargs)
+
     def activate_service(self, user=None):
         """Activate the service"""
         if self.status != 'ACTIVE':
@@ -737,30 +806,37 @@ class ServiceConnection(models.Model):
             self.activation_date = timezone.now()
             if user:
                 self.installed_by = user
+                self.updated_by = user
             self.save()
-    
-    def suspend_service(self, reason=""):
+
+    def suspend_service(self, reason="", user=None):
         """Suspend the service"""
         self.status = 'SUSPENDED'
         self.suspension_date = timezone.now()
+        if user:
+            self.updated_by = user
         self.save()
-        # Create a note about suspension
+        # Log suspension note
         CustomerNotes.objects.create(
             customer=self.customer,
             note=f"Service suspended. Reason: {reason}",
             note_type='SERVICE_ISSUE',
-            priority='HIGH'
+            priority='HIGH',
+            created_by=user
         )
-    
-    def terminate_service(self, reason=""):
+
+    def terminate_service(self, reason="", user=None):
         """Terminate the service"""
         self.status = 'TERMINATED'
         self.termination_date = timezone.now()
+        if user:
+            self.updated_by = user
         self.save()
-        # Create a note about termination
+        # Log termination note
         CustomerNotes.objects.create(
             customer=self.customer,
             note=f"Service terminated. Reason: {reason}",
             note_type='SERVICE_ISSUE',
-            priority='HIGH'
+            priority='HIGH',
+            created_by=user
         )
