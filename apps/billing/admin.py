@@ -12,37 +12,40 @@ from .models.voucher_models import VoucherBatch, Voucher, VoucherUsage
 # Billing Models Admin
 @admin.register(Plan)
 class PlanAdmin(admin.ModelAdmin):
-    list_display = ('name', 'code', 'plan_type', 'base_price', 'download_speed', 'upload_speed', 'is_active', 'company')
-    list_filter = ('plan_type', 'is_active', 'billing_cycle', 'company')
+    list_display = ('name', 'code', 'plan_type', 'base_price', 'download_speed', 'upload_speed', 
+                    'is_active', 'is_public', 'is_popular', 'subscriber_count', 'company')
+    list_filter = ('plan_type', 'is_active', 'is_public', 'is_popular', 'company')
     search_fields = ('name', 'code', 'description')
-    readonly_fields = ('created_at', 'updated_at')
+    readonly_fields = ('code', 'subscriber_count', 'created_at', 'updated_at')
     fieldsets = (
         ('Basic Information', {
             'fields': ('company', 'name', 'code', 'plan_type', 'description')
         }),
         ('Pricing', {
-            'fields': ('base_price', 'setup_fee', 'tax_inclusive', 'tax_rate')
+            'fields': ('base_price', 'setup_fee')
         }),
-        ('Technical Specifications', {
-            'fields': ('download_speed', 'upload_speed', 'data_limit', 'burst_limit')
+        ('Speed & Data', {
+            'fields': ('download_speed', 'upload_speed', 'data_limit')
         }),
-        ('Billing Settings', {
-            'fields': ('billing_cycle', 'prorated_billing', 'auto_renew', 'contract_period', 'early_termination_fee')
+        ('Validity', {
+            'fields': ('duration_days', 'validity_hours')
         }),
-        ('Status', {
-            'fields': ('is_active', 'is_public')
+        ('Fair Usage Policy', {
+            'fields': ('fup_limit', 'fup_speed'),
+            'classes': ('collapse',)
+        }),
+        ('Features', {
+            'fields': ('features',),
+            'classes': ('collapse',)
+        }),
+        ('Visibility & Status', {
+            'fields': ('is_active', 'is_public', 'is_popular')
         }),
         ('Metadata', {
             'fields': ('created_by', 'updated_by', 'created_at', 'updated_at'),
             'classes': ('collapse',)
         })
     )
-    
-    def save_model(self, request, obj, form, change):
-        if not change:
-            obj.created_by = request.user
-        obj.updated_by = request.user
-        super().save_model(request, obj, form, change)
 
 
 @admin.register(BillingCycle)

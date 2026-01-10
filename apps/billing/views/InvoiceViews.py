@@ -1,6 +1,7 @@
 from rest_framework import viewsets, status, filters
 from rest_framework.decorators import action
 from rest_framework.response import Response
+from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.permissions import IsAuthenticated
 from django_filters.rest_framework import DjangoFilterBackend
 from django.utils import timezone
@@ -10,13 +11,13 @@ import json
 
 # Use your existing permissions
 from apps.core.permissions import IsCompanyAdmin, IsCompanyStaff, IsCompanyMember
-from apps.customers.models import Customer
-from ..models.billing_models import Invoice, InvoiceItem, Plan, BillingCycle
+from ..models.billing_models import Plan, BillingCycle, Invoice, InvoiceItem
 from ..serializers import (
-    InvoiceSerializer, InvoiceItemSerializer, 
-    InvoiceCreateSerializer, InvoiceDetailSerializer,
-    PlanSerializer, BillingCycleSerializer
+    PlanSerializer, PlanCreateSerializer,
+    BillingCycleSerializer, InvoiceSerializer, InvoiceItemSerializer, 
+    InvoiceCreateSerializer, InvoiceDetailSerializer
 )
+
 from ..calculators.invoice_calculator import InvoiceCalculator
 
 
@@ -25,19 +26,44 @@ class PlanViewSet(viewsets.ModelViewSet):
     ViewSet for managing internet plans
     """
     queryset = Plan.objects.all()
-    serializer_class = PlanSerializer
-    permission_classes = [IsAuthenticated, IsCompanyStaff]  # Changed to IsCompanyStaff
     filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
-    filterset_fields = ['plan_type', 'is_active', 'billing_cycle', 'company']
+    filterset_fields = ['plan_type', 'is_active', 'is_public', 'is_popular']
     search_fields = ['name', 'code', 'description']
-    ordering_fields = ['name', 'base_price', 'download_speed', 'created_at']
+    ordering_fields = ['name', 'base_price', 'created_at', 'subscriber_count']
+    ordering = ['-created_at']
+    
+    def get_serializer_class(self):
+        """Return appropriate serializer based on action"""
+        if self.action in ['create', 'update', 'partial_update']:
+            return PlanCreateSerializer
+        return PlanSerializer
+    
+    def get_permissions(self):
+        """Set permissions based on action"""
+        if self.action in ['public']:
+            return [AllowAny()]
+        elif self.action in ['create', 'update', 'partial_update', 'destroy', 'toggle_active']:
+            return [IsAuthenticated(), IsCompanyAdmin()]
+        else:
+            return [IsAuthenticated(), IsCompanyStaff()]
     
     def get_queryset(self):
         """Filter plans by company"""
         user = self.request.user
+        
+        # For public endpoint, show all active public plans
+        if self.action == 'public':
+            return Plan.objects.filter(is_active=True, is_public=True)
+        
+        # For admin/staff, filter by their company
         if user.is_superuser:
             return Plan.objects.all()
-        return Plan.objects.filter(company=user.company)
+        
+        # For regular users, filter by their company
+        if hasattr(user, 'company'):
+            return Plan.objects.filter(company=user.company)
+        
+        return Plan.objects.none()
     
     def perform_create(self, serializer):
         """Set created_by and company on plan creation"""
@@ -46,20 +72,147 @@ class PlanViewSet(viewsets.ModelViewSet):
             company=self.request.user.company
         )
     
+    def perform_update(self, serializer):
+        """Set updated_by on plan update"""
+        serializer.save(updated_by=self.request.user)
+    
     @action(detail=True, methods=['post'])
     def toggle_active(self, request, pk=None):
         """Toggle plan active status"""
         plan = self.get_object()
         plan.is_active = not plan.is_active
+        plan.updated_by = request.user
         plan.save()
-        return Response({'status': 'success', 'is_active': plan.is_active})
+        
+        return Response({
+            'id': plan.id,
+            'is_active': plan.is_active,
+            'message': f'Plan {"activated" if plan.is_active else "deactivated"} successfully'
+        })
     
-    @action(detail=False, methods=['get'])
+    @action(detail=False, methods=['get'], permission_classes=[AllowAny])
     def public(self, request):
-        """Get public plans"""
-        plans = self.get_queryset().filter(is_public=True, is_active=True)
+        """Public endpoint for customer-facing plan listing"""
+        plans = self.get_queryset()
+        page = self.paginate_queryset(plans)
+        
+        if page is not None:
+            serializer = self.get_serializer(page, many=True)
+            return self.get_paginated_response(serializer.data)
+        
         serializer = self.get_serializer(plans, many=True)
         return Response(serializer.data)
+    
+    @action(detail=False, methods=['get'])
+    def dashboard_stats(self, request):
+        """Get plans dashboard statistics"""
+        queryset = self.get_queryset()
+        
+        total_plans = queryset.count()
+        active_plans = queryset.filter(is_active=True).count()
+        inactive_plans = queryset.filter(is_active=False).count()
+        
+        # Count by plan type
+        hotspot_plans = queryset.filter(plan_type='HOTSPOT').count()
+        pppoe_plans = queryset.filter(plan_type='PPPOE').count()
+        static_plans = queryset.filter(plan_type='STATIC').count()
+        internet_plans = queryset.filter(plan_type='INTERNET').count()
+        addon_plans = queryset.filter(plan_type='ADDON').count()
+        bundle_plans = queryset.filter(plan_type='BUNDLE').count()
+        topup_plans = queryset.filter(plan_type='TOPUP').count()
+        
+        # Calculate total subscribers
+        total_subscribers = sum(plan.subscriber_count for plan in queryset)
+        
+        # Count popular plans
+        popular_plans = queryset.filter(is_popular=True).count()
+        
+        stats = {
+            'total_plans': total_plans,
+            'active_plans': active_plans,
+            'inactive_plans': inactive_plans,
+            'hotspot_plans': hotspot_plans,
+            'pppoe_plans': pppoe_plans,
+            'static_plans': static_plans,
+            'internet_plans': internet_plans,
+            'addon_plans': addon_plans,
+            'bundle_plans': bundle_plans,
+            'topup_plans': topup_plans,
+            'total_subscribers': total_subscribers,
+            'popular_plans': popular_plans,
+        }
+        
+        return Response(stats)
+    
+    @action(detail=False, methods=['get'])
+    def types(self, request):
+        """Get all plan types with counts"""
+        queryset = self.get_queryset()
+        
+        plan_types = []
+        for choice in Plan.PLAN_TYPE_CHOICES:
+            type_code, type_name = choice
+            count = queryset.filter(plan_type=type_code).count()
+            active_count = queryset.filter(plan_type=type_code, is_active=True).count()
+            
+            plan_types.append({
+                'type': type_code,
+                'name': type_name,
+                'count': count,
+                'active_count': active_count
+            })
+        
+        return Response(plan_types)
+    
+    @action(detail=False, methods=['get'])
+    def summary(self, request):
+        """Get plans summary for dashboard"""
+        queryset = self.get_queryset()
+        
+        # Get revenue potential
+        total_revenue_potential = queryset.filter(is_active=True).aggregate(
+            Sum('base_price')
+        )['base_price__sum'] or Decimal('0')
+        
+        # Get average price
+        avg_price = queryset.filter(is_active=True).aggregate(
+            avg_price=Sum('base_price') / Count('id')
+        )['avg_price'] or Decimal('0')
+        
+        # Get speed distribution
+        speed_distribution = []
+        speed_ranges = [
+            (0, 10, '0-10 Mbps'),
+            (11, 25, '11-25 Mbps'),
+            (26, 50, '26-50 Mbps'),
+            (51, 100, '51-100 Mbps'),
+            (101, 1000, '100+ Mbps')
+        ]
+        
+        for min_speed, max_speed, label in speed_ranges:
+            count = queryset.filter(
+                is_active=True,
+                download_speed__gte=min_speed,
+                download_speed__lte=max_speed
+            ).count()
+            
+            if count > 0:
+                speed_distribution.append({
+                    'range': label,
+                    'count': count
+                })
+        
+        summary = {
+            'total_revenue_potential': total_revenue_potential,
+            'average_price': avg_price,
+            'speed_distribution': speed_distribution,
+            'top_plans': PlanSerializer(
+                queryset.filter(is_active=True).order_by('-subscriber_count')[:5],
+                many=True
+            ).data
+        }
+        
+        return Response(summary)
 
 
 class BillingCycleViewSet(viewsets.ModelViewSet):

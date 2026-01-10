@@ -4,6 +4,7 @@ from django.utils import timezone
 from django.db.models import Sum, Q
 from decimal import Decimal
 import uuid
+from django.utils.text import slugify
 from apps.core.models import Company
 from apps.customers.models import Customer, ServiceConnection
 from utils.constants import KENYAN_COUNTIES, TAX_RATES, TAX_TYPES
@@ -11,51 +12,49 @@ from utils.constants import KENYAN_COUNTIES, TAX_RATES, TAX_TYPES
 
 
 class Plan(models.Model):
-    PLAN_TYPES = [
+    PLAN_TYPE_CHOICES = [
         ('INTERNET', 'Internet'),
-        ('VOIP', 'VoIP'),
-        ('IPTV', 'IPTV'),
-        ('DEDICATED', 'Dedicated Line'),
-        ('BUSINESS', 'Business'),
-        ('RESIDENTIAL', 'Residential'),
+        ('ADDON', 'Add-on'),
+        ('BUNDLE', 'Bundle'),
+        ('TOPUP', 'Top-up'),
+        ('PPPOE', 'PPPoE'),
+        ('HOTSPOT', 'Hotspot'),
+        ('STATIC', 'Static IP'),
     ]
-
-    BILLING_CYCLES = [
-        ('DAILY', 'Daily'),
-        ('WEEKLY', 'Weekly'),
-        ('MONTHLY', 'Monthly'),
-        ('QUARTERLY', 'Quarterly'),
-        ('ANNUALLY', 'Annually'),
-    ]
-
-    company = models.ForeignKey(Company, on_delete=models.CASCADE, related_name='plans')
-    name = models.CharField(max_length=100)
-    code = models.CharField(max_length=20, unique=True)
-    plan_type = models.CharField(max_length=20, choices=PLAN_TYPES, default='INTERNET')
-    description = models.TextField(blank=True)
+    
+    # Basic Information
+    name = models.CharField(max_length=255)
+    code = models.CharField(max_length=50, unique=True, blank=True)
+    plan_type = models.CharField(max_length=20, choices=PLAN_TYPE_CHOICES, default='PPPOE')
+    description = models.TextField(blank=True, null=True)
     
     # Pricing
-    base_price = models.DecimalField(max_digits=10, decimal_places=2, validators=[MinValueValidator(0)])
-    setup_fee = models.DecimalField(max_digits=10, decimal_places=2, default=0, validators=[MinValueValidator(0)])
-    tax_inclusive = models.BooleanField(default=True)
-    tax_rate = models.DecimalField(max_digits=5, decimal_places=2, default=16.0, validators=[MinValueValidator(0)])
+    base_price = models.DecimalField(max_digits=10, decimal_places=2)  # In KES
+    setup_fee = models.DecimalField(max_digits=10, decimal_places=2, default=0)
     
-    # Technical specifications
-    download_speed = models.PositiveIntegerField(help_text="Speed in Mbps")
-    upload_speed = models.PositiveIntegerField(help_text="Speed in Mbps")
-    data_limit = models.PositiveBigIntegerField(help_text="Data limit in GB (0 for unlimited)", default=0)
-    burst_limit = models.PositiveIntegerField(help_text="Burst speed in Mbps", null=True, blank=True)
+    # Speed & Data
+    download_speed = models.IntegerField(null=True, blank=True)  # Mbps
+    upload_speed = models.IntegerField(null=True, blank=True)    # Mbps
+    data_limit = models.IntegerField(null=True, blank=True)       # GB, null = unlimited
     
-    # Billing
-    billing_cycle = models.CharField(max_length=20, choices=BILLING_CYCLES, default='MONTHLY')
-    prorated_billing = models.BooleanField(default=True)
-    auto_renew = models.BooleanField(default=True)
-    contract_period = models.PositiveIntegerField(help_text="Contract period in months (0 for no contract)", default=0)
-    early_termination_fee = models.DecimalField(max_digits=10, decimal_places=2, default=0)
+    # Validity
+    duration_days = models.IntegerField(default=30)  # Plan validity
+    validity_hours = models.IntegerField(null=True, blank=True)  # For hourly plans
     
-    # Status
+    # Fair Usage Policy
+    fup_limit = models.IntegerField(null=True, blank=True)  # GB before throttle
+    fup_speed = models.IntegerField(null=True, blank=True)  # Reduced speed in Mbps
+    
+    # Company (for multi-tenancy - hidden from frontend)
+    company = models.ForeignKey(Company, on_delete=models.CASCADE, related_name='plans')
+    
+    # Visibility & Status
     is_active = models.BooleanField(default=True)
-    is_public = models.BooleanField(default=True)
+    is_public = models.BooleanField(default=True)  # Visible in customer portal
+    is_popular = models.BooleanField(default=False)  # Featured plan
+    
+    # Features (stored as JSON array of strings)
+    features = models.JSONField(default=list, blank=True)
     
     # Metadata
     created_by = models.ForeignKey('core.User', on_delete=models.SET_NULL, null=True, related_name='created_plans')
@@ -64,39 +63,45 @@ class Plan(models.Model):
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
-        ordering = ['name']
+        ordering = ['-created_at']
         indexes = [
             models.Index(fields=['code']),
             models.Index(fields=['plan_type']),
             models.Index(fields=['is_active']),
+            models.Index(fields=['is_public']),
+            models.Index(fields=['is_popular']),
         ]
+        verbose_name = 'Plan'
+        verbose_name_plural = 'Plans'
 
     def __str__(self):
-        return f"{self.name} - {self.company.name}"
+        return f"{self.name} ({self.code})"
+
+    def save(self, *args, **kwargs):
+        if not self.code:
+            # Auto-generate code from name
+            self.code = slugify(self.name).upper().replace('-', '_')
+        super().save(*args, **kwargs)
 
     @property
-    def tax_amount(self):
-        if self.tax_inclusive:
-            return (self.base_price * self.tax_rate) / (100 + self.tax_rate)
-        else:
-            return (self.base_price * self.tax_rate) / 100
+    def price(self):
+        """Alias for base_price for frontend compatibility"""
+        return self.base_price
 
     @property
-    def total_price(self):
-        if self.tax_inclusive:
-            return self.base_price
-        else:
-            return self.base_price + self.tax_amount
+    def validity_days(self):
+        """Alias for duration_days for frontend compatibility"""
+        return self.duration_days
 
-    def get_billing_cycle_days(self):
-        cycle_map = {
-            'DAILY': 1,
-            'WEEKLY': 7,
-            'MONTHLY': 30,
-            'QUARTERLY': 90,
-            'ANNUALLY': 365,
-        }
-        return cycle_map.get(self.billing_cycle, 30)
+    @property
+    def subscriber_count(self):
+        return self.service_connections.filter(status='ACTIVE').count()
+
+    @property
+    def subscribers_count(self):
+        """Alias for subscriber_count for frontend compatibility"""
+        return self.subscriber_count
+
 
 
 class BillingCycle(models.Model):

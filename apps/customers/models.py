@@ -597,7 +597,16 @@ class ServiceConnection(models.Model):
         choices=SERVICE_TYPE_CHOICES, 
         default='INTERNET'
     )
+
     service_plan = models.CharField(max_length=100)
+
+    plan = models.ForeignKey(
+    'billing.Plan',
+    on_delete=models.SET_NULL,          # or PROTECT if you don't want to allow plan deletion
+    null=True,
+    blank=True,
+    related_name='service_connections'  # ← this creates the reverse accessor we need!
+    )
     
     # Connection Details
     connection_type = models.CharField(

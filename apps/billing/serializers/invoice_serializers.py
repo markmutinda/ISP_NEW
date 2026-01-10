@@ -8,23 +8,77 @@ from customers.serializers import CustomerSerializer
 
 
 class PlanSerializer(serializers.ModelSerializer):
-    """Serializer for Plan model"""
+    price = serializers.DecimalField(source='base_price', max_digits=10, decimal_places=2, read_only=True)
+    validity_days = serializers.IntegerField(source='duration_days', read_only=True)
+    subscriber_count = serializers.IntegerField(read_only=True)
+    subscribers_count = serializers.IntegerField(source='subscriber_count', read_only=True)
     company_name = serializers.CharField(source='company.name', read_only=True)
     created_by_name = serializers.CharField(source='created_by.get_full_name', read_only=True)
-    tax_amount = serializers.DecimalField(max_digits=10, decimal_places=2, read_only=True)
-    total_price = serializers.DecimalField(max_digits=10, decimal_places=2, read_only=True)
     
     class Meta:
         model = Plan
         fields = [
-            'id', 'company', 'company_name', 'name', 'code', 'plan_type', 'description',
-            'base_price', 'setup_fee', 'tax_inclusive', 'tax_rate', 'tax_amount', 'total_price',
-            'download_speed', 'upload_speed', 'data_limit', 'burst_limit',
-            'billing_cycle', 'prorated_billing', 'auto_renew', 'contract_period',
-            'early_termination_fee', 'is_active', 'is_public',
-            'created_by', 'created_by_name', 'updated_by', 'created_at', 'updated_at'
+            'id', 'name', 'code', 'plan_type', 'description',
+            'base_price', 'price', 'setup_fee',
+            'download_speed', 'upload_speed', 'data_limit',
+            'duration_days', 'validity_days', 'validity_hours',
+            'fup_limit', 'fup_speed',
+            'is_active', 'is_public', 'is_popular',
+            'features', 'subscriber_count', 'subscribers_count',
+            'company', 'company_name', 'created_by', 'created_by_name',
+            'created_at', 'updated_at'
         ]
-        read_only_fields = ['created_by', 'updated_by', 'created_at', 'updated_at']
+        read_only_fields = ['id', 'code', 'subscriber_count', 'created_by', 'created_at', 'updated_at']
+    
+    def validate_base_price(self, value):
+        """Validate base price is positive"""
+        if value <= 0:
+            raise serializers.ValidationError("Base price must be greater than zero")
+        return value
+    
+    def validate_duration_days(self, value):
+        """Validate duration days is positive"""
+        if value <= 0:
+            raise serializers.ValidationError("Duration days must be greater than zero")
+        return value
+
+
+class PlanCreateSerializer(serializers.ModelSerializer):
+    """Serializer for creating plans (without read-only fields)"""
+    
+    class Meta:
+        model = Plan
+        fields = [
+            'name', 'plan_type', 'description',
+            'base_price', 'setup_fee',
+            'download_speed', 'upload_speed', 'data_limit',
+            'duration_days', 'validity_hours',
+            'fup_limit', 'fup_speed',
+            'is_active', 'is_public', 'is_popular',
+            'features'
+        ]
+    
+    def validate(self, data):
+        """Validate the entire plan data"""
+        # Validate download/upload speeds
+        if data.get('download_speed') and data['download_speed'] <= 0:
+            raise serializers.ValidationError({"download_speed": "Download speed must be greater than zero"})
+        
+        if data.get('upload_speed') and data['upload_speed'] <= 0:
+            raise serializers.ValidationError({"upload_speed": "Upload speed must be greater than zero"})
+        
+        # Validate data limit if provided
+        if data.get('data_limit') and data['data_limit'] <= 0:
+            raise serializers.ValidationError({"data_limit": "Data limit must be greater than zero"})
+        
+        # Validate FUP values if provided
+        if data.get('fup_limit') and data['fup_limit'] <= 0:
+            raise serializers.ValidationError({"fup_limit": "FUP limit must be greater than zero"})
+        
+        if data.get('fup_speed') and data['fup_speed'] <= 0:
+            raise serializers.ValidationError({"fup_speed": "FUP speed must be greater than zero"})
+        
+        return data
 
 
 class BillingCycleSerializer(serializers.ModelSerializer):
