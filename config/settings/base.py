@@ -41,6 +41,7 @@ INSTALLED_APPS = [
     # Local apps
     'apps.core',
     'apps.customers',
+    'apps.messaging',
     'apps.network',
     'apps.billing',
     'apps.support',

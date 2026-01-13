@@ -58,6 +58,10 @@ api_urlpatterns = [
     
     # Notifications app (Phase 11 - Alerts & Notifications)
      path('notifications/', include('apps.notifications.urls')),
+
+
+    # Messaging app (Phase 12 - SMS/Email Messaging) 
+    path('messaging/', include('apps.messaging.urls')),
 ]
 
 # Main URL Patterns
