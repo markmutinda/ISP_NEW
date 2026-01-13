@@ -1,24 +1,14 @@
+# apps/support/serializers/__init__.py
+
 from .serializers import (
-    TicketSerializer,
+    SupportTicketListSerializer,
+    SupportTicketDetailSerializer,
     TicketCreateSerializer,
     TicketUpdateSerializer,
-    TicketDetailSerializer,
-    TicketMessageSerializer,
-    TicketActivitySerializer,
-    TicketCategorySerializer,
+    SupportTicketMessageSerializer,
+    TicketReplySerializer,
+    TicketAssignSerializer,
     TicketStatusSerializer,
-
-    TechnicianSerializer,
-    TechnicianDetailSerializer,
-    TechnicianCreateSerializer,
-    TechnicianPerformanceSerializer,     # ✅ ADD
-    TechnicianAvailabilitySerializer,     # ✅ ADD
-
-    KnowledgeBaseArticleSerializer,
-    KnowledgeBaseArticleDetailSerializer,
-    KnowledgeBaseArticleCreateSerializer,
-    KnowledgeBaseSearchSerializer,
-    FAQSerializer,
+    TicketStatsSerializer,
 )
-
 

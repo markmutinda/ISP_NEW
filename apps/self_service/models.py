@@ -3,7 +3,7 @@ from django.contrib.auth import get_user_model
 from django.utils import timezone
 from apps.customers.models import Customer
 from apps.billing.models import Invoice, Payment
-from apps.support.models import Ticket
+from apps.support.models import SupportTicket
 
 User = get_user_model()
 

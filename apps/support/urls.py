@@ -1,30 +1,19 @@
 from django.urls import path, include
 from rest_framework.routers import DefaultRouter
-
-from .views import (
-    TicketCategoryViewSet, TicketStatusViewSet, 
-    TicketViewSet, TicketMessageViewSet, TicketActivityViewSet,
-    KnowledgeBaseArticleViewSet, FAQViewSet,
-    TechnicianViewSet
-)
+from .views import SupportTicketViewSet
 
 router = DefaultRouter()
+router.register(r'tickets', SupportTicketViewSet, basename='ticket')
 
-# Ticket routes
-router.register(r'ticket-categories', TicketCategoryViewSet, basename='ticket-category')
-router.register(r'ticket-statuses', TicketStatusViewSet, basename='ticket-status')
-router.register(r'tickets', TicketViewSet, basename='ticket')
-router.register(r'tickets/(?P<ticket_pk>\d+)/messages', TicketMessageViewSet, basename='ticket-message')
-router.register(r'tickets/(?P<ticket_pk>\d+)/activities', TicketActivityViewSet, basename='ticket-activity')
-
-# Knowledge base routes
-router.register(r'knowledge-base/articles', KnowledgeBaseArticleViewSet, basename='knowledgebase-article')
-router.register(r'knowledge-base/faqs', FAQViewSet, basename='faq')
-
-# Technician routes
-router.register(r'technicians', TechnicianViewSet, basename='technician')
-
+# Custom URL patterns to match frontend requirements
 urlpatterns = [
     path('', include(router.urls)),
-    path('dashboard/stats/', TicketViewSet.as_view({'get': 'dashboard_stats'}), name='support-dashboard-stats'),
+    # Additional endpoints as per frontend requirements
+    path('tickets/<int:pk>/assign/', SupportTicketViewSet.as_view({'post': 'assign'}), name='ticket-assign'),
+    path('tickets/<int:pk>/status/', SupportTicketViewSet.as_view({'post': 'status'}), name='ticket-status'),
+    path('tickets/<int:pk>/reply/', SupportTicketViewSet.as_view({'post': 'reply'}), name='ticket-reply'),
+    path('tickets/<int:pk>/escalate/', SupportTicketViewSet.as_view({'post': 'escalate'}), name='ticket-escalate'),
+    path('tickets/<int:pk>/messages/', SupportTicketViewSet.as_view({'get': 'messages'}), name='ticket-messages'),
+    path('tickets/stats/', SupportTicketViewSet.as_view({'get': 'stats'}), name='ticket-stats'),
+    path('tickets/my/', SupportTicketViewSet.as_view({'get': 'my'}), name='my-tickets'),
 ]

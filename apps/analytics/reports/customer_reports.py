@@ -3,7 +3,7 @@ from django.db.models import Count, Sum, Avg, Q, F
 from django.utils import timezone
 from apps.customers.models import Customer
 from apps.billing.models import Invoice, Payment
-from apps.support.models import Ticket
+from apps.support.models import SupportTicket
 
 
 class CustomerReports:

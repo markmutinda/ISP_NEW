@@ -12,7 +12,7 @@ from ..permissions import CustomerOnlyPermission
 from apps.customers.models import Customer
 from apps.billing.models import Invoice, Payment
 from apps.bandwidth.models import DataUsage
-from apps.support.models import Ticket
+from apps.support.models import SupportTicket
 
 
 class CustomerDashboardView(generics.RetrieveAPIView):
@@ -146,7 +146,7 @@ class CustomerDashboardView(generics.RetrieveAPIView):
         ).order_by('-created_at')[:5]
         
         # Recent support tickets
-        recent_tickets = Ticket.objects.filter(
+        recent_tickets = SupportTicket.objects.filter(
             customer=customer
         ).order_by('-created_at')[:5]
         

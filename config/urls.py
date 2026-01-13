@@ -42,7 +42,7 @@ api_urlpatterns = [
      path('billing/', include('apps.billing.urls')),
     
     # Support app (Phase 6 - Support Ticketing)
-     path('api/support/', include('apps.support.urls')),
+     path('support/', include('apps.support.urls')),
     
     # Analytics app (Phase 7 - Reports & Analytics)
      path('analytics/', include('apps.analytics.urls')),  
