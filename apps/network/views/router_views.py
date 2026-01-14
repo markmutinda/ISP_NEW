@@ -181,7 +181,109 @@ class RouterViewSet(viewsets.ModelViewSet):
         router.save(update_fields=['auth_key', 'is_authenticated', 'authenticated_at'])
         RouterEvent.objects.create(router=router, event_type='warning', message="Authentication key regenerated")
         return Response({"status": "success", "new_auth_key": router.auth_key})
+    
+    @action(detail=True, methods=['get'])
+    def script(self, request, pk=None):
+        router = self.get_object()
+        version = request.query_params.get('version', '7')  # 6 or 7
+        subdomain = request.query_params.get('subdomain', 'default')
 
+        # Dynamic variables for the script
+        radius_ip = "your-server-ip"  # e.g., request.get_host() or settings.RADIUS_IP
+        shared_secret = router.shared_secret
+        hotspot_profile = f"yourisp-profile-{router.id}"
+        walled_garden = "portal.yourdomain.com"
+        portal_url = "https://portal.yourdomain.com"
+
+        # Template for .rsc file (exact match to your logs)
+        script_content = f"""
+    # YourISP Auto-Configuration Script for RouterOS {version}
+    # Generated for {router.name} (ID: {router.id})
+
+    :put "Starting YourISP configuration..."
+
+    # Check RouterOS version
+    :global version [/system package update get installed-version];
+    :local majorVersion 0;
+    :local minorVersion 0;
+    :local dotPos [:find $version "."];
+    :if ([:len $dotPos] > 0) do={{
+        :set majorVersion [:tonum [:pick $version 0 $dotPos]];
+        :local remaining [:pick $version ($dotPos + 1) [:len $version]];
+        :set dotPos [:find $remaining "."];
+        :if ([:len $dotPos] > 0) do={{
+            :set minorVersion [:tonum [:pick $remaining 0 $dotPos]];
+        }}
+    }}
+    :if ($majorVersion < 6 || ($majorVersion = 6 && $minorVersion < 49)) do={{
+        :error "RouterOS 6.49 or higher required.";
+    }}
+
+    # Check internet
+    :if ([/ping 8.8.8.8 count=3] = 0) do={{
+        :error "No internet connection.";
+    }}
+
+    # Cleanup existing configs
+    :put "Cleaning up existing configurations..."
+    /ip firewall nat remove [find]
+    /ip hotspot remove [find]
+    /ip pppoe-server remove [find]
+    /interface bridge remove [find]
+    /ip address remove [find]
+    /ip pool remove [find]
+    /ip dhcp-server remove [find]
+    /certificate remove [find]
+
+    # Create bridge
+    :put "Creating bridge..."
+    /interface bridge add name=yourisp-bridge
+    /interface bridge port add bridge=yourisp-bridge interface=ether1  # Adjust interface
+
+    # Assign IP
+    :put "Assigning IP..."
+    /ip address add address=192.168.88.1/24 interface=yourisp-bridge
+
+    # IP pool
+    :put "Creating IP pool..."
+    /ip pool add name=yourisp-pool ranges=192.168.88.10-192.168.88.254
+
+    # DHCP server
+    :put "Creating DHCP server..."
+    /ip dhcp-server add interface=yourisp-bridge lease-time=1d name=yourisp-dhcp-server
+    /ip dhcp-server network add address=192.168.88.0/24 gateway=192.168.88.1 dns-server=8.8.8.8
+
+    # Hotspot profile and server
+    :put "Creating Hotspot..."
+    /ip hotspot profile add name={hotspot_profile} dns-name={portal_url} html-directory=flash/hotspot
+    /ip hotspot add name=yourisp-hotspot interface=yourisp-bridge profile={hotspot_profile}
+
+    # Walled garden
+    /ip hotspot walled-garden add dst-host={walled_garden} action=allow
+
+    # Download hotspot files and certificates (adjust URLs)
+    :put "Downloading hotspot files..."
+    /tool fetch url="https://your-domain.com/static/hotspot/hotspot.html" dst-path=flash/hotspot/hotspot.html
+    /tool fetch url="https://your-domain.com/static/certificates/your-cert.crt" dst-path=your-cert.crt
+    /certificate import file-name=your-cert.crt
+
+    # PPPoE server
+    :put "Creating PPPoE server..."
+    /ip pppoe-server add interface=yourisp-bridge service-name=yourisp-pppoe
+
+    # RADIUS configuration
+    :put "Configuring RADIUS..."
+    /radius add address={radius_ip} secret={shared_secret} service=hotspot,ppp timeout=3s
+    /ip hotspot profile set {hotspot_profile} use-radius=yes
+    /ppp aaa set use-radius=yes
+
+    :put "YourISP configuration completed successfully!"
+    """
+
+        # Return as downloadable .rsc file
+        response = HttpResponse(script_content, content_type='text/plain')
+        response['Content-Disposition'] = f'attachment; filename="yourisp-{router.id}.rsc"'
+        return response
 
 # PUBLIC ENDPOINTS
 class RouterAuthenticateView(APIView):

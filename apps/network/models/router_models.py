@@ -15,6 +15,11 @@ def generate_auth_key():
     return f"RTR_{random_part}_AUTH"
 
 
+def generate_shared_secret():
+    """Generate a strong random shared secret for RADIUS communication"""
+    return secrets.token_hex(16)
+
+
 class Router(AuditMixin, models.Model):
     ROUTER_TYPES = [
         ('mikrotik', 'Mikrotik'),
@@ -31,11 +36,29 @@ class Router(AuditMixin, models.Model):
         ('error', 'Error'),
     ]
 
-    company = models.ForeignKey(Company, on_delete=models.CASCADE, related_name='routers')
-    name = models.CharField(max_length=255)
-    ip_address = models.GenericIPAddressField(protocol='both', null=True, blank=True)
-    mac_address = models.CharField(max_length=17, null=True, blank=True)
-    api_port = models.PositiveIntegerField(default=8728, validators=[MinValueValidator(1), MaxValueValidator(65535)])
+    company = models.ForeignKey(
+        Company,
+        on_delete=models.CASCADE,
+        related_name='routers',
+        help_text="The ISP/company this router belongs to"
+    )
+    name = models.CharField(max_length=255, help_text="Friendly name for the router")
+    ip_address = models.GenericIPAddressField(
+        protocol='both',
+        null=True,
+        blank=True,
+        help_text="Management IP — auto-filled on authentication"
+    )
+    mac_address = models.CharField(
+        max_length=17,
+        null=True,
+        blank=True,
+        help_text="WAN MAC address (optional)"
+    )
+    api_port = models.PositiveIntegerField(
+        default=8728,
+        validators=[MinValueValidator(1), MaxValueValidator(65535)]
+    )
     api_username = models.CharField(max_length=100, null=True, blank=True)
     api_password = models.CharField(max_length=255, null=True, blank=True)
     router_type = models.CharField(max_length=50, choices=ROUTER_TYPES, default='mikrotik')
@@ -54,9 +77,23 @@ class Router(AuditMixin, models.Model):
     tags = models.JSONField(default=list)
     notes = models.TextField(null=True, blank=True)
     is_active = models.BooleanField(default=True)
-    auth_key = models.CharField(max_length=50, unique=True, default=generate_auth_key)
+
+    # Authentication fields for router self-registration
+    auth_key = models.CharField(
+        max_length=50,
+        unique=True,
+        default=generate_auth_key,
+        help_text="Auto-generated key used by router script to authenticate"
+    )
     is_authenticated = models.BooleanField(default=False)
     authenticated_at = models.DateTimeField(null=True, blank=True)
+
+    # NEW: Shared secret for RADIUS communication with this router
+    shared_secret = models.CharField(
+        max_length=255,
+        default=generate_shared_secret,
+        help_text="RADIUS shared secret — used when configuring this router as a RADIUS client"
+    )
 
     class Meta:
         verbose_name = 'Router'
@@ -73,7 +110,6 @@ class Router(AuditMixin, models.Model):
     def __str__(self):
         ip = f" ({self.ip_address})" if self.ip_address else ""
         return f"{self.name}{ip}"
-
 
 class RouterEvent(AuditMixin, models.Model):
     EVENT_TYPES = [

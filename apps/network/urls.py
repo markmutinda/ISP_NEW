@@ -32,6 +32,7 @@ router = DefaultRouter()
 # === NEW: Router Management ===
 router.register(r'routers', RouterViewSet, basename='router')
 
+
 # === IPAM ===
 router.register(r'subnets', SubnetViewSet, basename='subnet')
 router.register(r'vlans', VLANViewSet, basename='vlan')
