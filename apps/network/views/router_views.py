@@ -7,6 +7,7 @@ from rest_framework.views import APIView
 from django_filters.rest_framework import DjangoFilterBackend
 from django.utils import timezone
 from django.db.models import Sum, Avg, F
+from django.http import HttpResponse
 
 from apps.network.models.router_models import (
     Router,
@@ -182,105 +183,96 @@ class RouterViewSet(viewsets.ModelViewSet):
         RouterEvent.objects.create(router=router, event_type='warning', message="Authentication key regenerated")
         return Response({"status": "success", "new_auth_key": router.auth_key})
     
-    @action(detail=True, methods=['get'])
+    @action(detail=True, methods=['get'], url_path='script')  # ← FIXED: Added url_path='script'
     def script(self, request, pk=None):
         router = self.get_object()
-        version = request.query_params.get('version', '7')  # 6 or 7
-        subdomain = request.query_params.get('subdomain', 'default')
 
-        # Dynamic variables for the script
-        radius_ip = "your-server-ip"  # e.g., request.get_host() or settings.RADIUS_IP
+        # Get version from query params (frontend sends ?version=7 or 6)
+        version = request.query_params.get('version', '7')
+
+        # Use your actual server IP or domain (replace this!)
+        # For local testing: '127.0.0.1:8000' or request.get_host()
+        # For production: 'your-domain.com' or settings.SERVER_IP
+        server_url = request.get_host()  # Automatically uses current host (e.g., 127.0.0.1:8000 or yourdomain.com)
+        radius_ip = request.get_host().split(':')[0]  # Just the IP/hostname
         shared_secret = router.shared_secret
-        hotspot_profile = f"yourisp-profile-{router.id}"
-        walled_garden = "portal.yourdomain.com"
-        portal_url = "https://portal.yourdomain.com"
 
-        # Template for .rsc file (exact match to your logs)
+        # Full dynamic script (matches your example logs style)
         script_content = f"""
-    # YourISP Auto-Configuration Script for RouterOS {version}
-    # Generated for {router.name} (ID: {router.id})
+# YourISP Auto-Configuration Script for RouterOS v{version}
+# Generated for {router.name} (ID: {router.id})
 
-    :put "Starting YourISP configuration..."
+:put "Starting YourISP configuration..."
 
-    # Check RouterOS version
-    :global version [/system package update get installed-version];
-    :local majorVersion 0;
-    :local minorVersion 0;
-    :local dotPos [:find $version "."];
+# Version check
+:global version [/system package update get installed-version];
+:local majorVersion 0;
+:local minorVersion 0;
+:local dotPos [:find $version "."];
+:if ([:len $dotPos] > 0) do={{
+    :set majorVersion [:tonum [:pick $version 0 $dotPos]];
+    :local remaining [:pick $version ($dotPos + 1) [:len $version]];
+    :set dotPos [:find $remaining "."];
     :if ([:len $dotPos] > 0) do={{
-        :set majorVersion [:tonum [:pick $version 0 $dotPos]];
-        :local remaining [:pick $version ($dotPos + 1) [:len $version]];
-        :set dotPos [:find $remaining "."];
-        :if ([:len $dotPos] > 0) do={{
-            :set minorVersion [:tonum [:pick $remaining 0 $dotPos]];
-        }}
+        :set minorVersion [:tonum [:pick $remaining 0 $dotPos]];
     }}
-    :if ($majorVersion < 6 || ($majorVersion = 6 && $minorVersion < 49)) do={{
-        :error "RouterOS 6.49 or higher required.";
-    }}
+}}
+:if ($majorVersion < 6 || ($majorVersion = 6 && $minorVersion < 49)) do={{
+    :error "RouterOS 6.49 or higher required.";
+}}
 
-    # Check internet
-    :if ([/ping 8.8.8.8 count=3] = 0) do={{
-        :error "No internet connection.";
-    }}
+# Internet check
+:if ([/ping 8.8.8.8 count=3] = 0) do={{
+    :error "No internet connection.";
+}}
 
-    # Cleanup existing configs
-    :put "Cleaning up existing configurations..."
-    /ip firewall nat remove [find]
-    /ip hotspot remove [find]
-    /ip pppoe-server remove [find]
-    /interface bridge remove [find]
-    /ip address remove [find]
-    /ip pool remove [find]
-    /ip dhcp-server remove [find]
-    /certificate remove [find]
+# Cleanup existing configs
+:put "Cleaning up existing configurations..."
+/ip hotspot remove [find]
+/ip pppoe-server remove [find]
+/interface bridge remove [find]
+/ip address remove [find]
+/ip pool remove [find]
+/ip dhcp-server remove [find]
+/certificate remove [find]
 
-    # Create bridge
-    :put "Creating bridge..."
-    /interface bridge add name=yourisp-bridge
-    /interface bridge port add bridge=yourisp-bridge interface=ether1  # Adjust interface
+# Create bridge
+:put "Creating bridge..."
+/interface bridge add name=yourisp-bridge
+/interface bridge port add bridge=yourisp-bridge interface=ether1  # Change to your WAN interface
 
-    # Assign IP
-    :put "Assigning IP..."
-    /ip address add address=192.168.88.1/24 interface=yourisp-bridge
+# Assign IP
+:put "Assigning IP..."
+/ip address add address=192.168.88.1/24 interface=yourisp-bridge
 
-    # IP pool
-    :put "Creating IP pool..."
-    /ip pool add name=yourisp-pool ranges=192.168.88.10-192.168.88.254
+# IP pool
+:put "Creating IP pool..."
+/ip pool add name=yourisp-pool ranges=192.168.88.10-192.168.88.254
 
-    # DHCP server
-    :put "Creating DHCP server..."
-    /ip dhcp-server add interface=yourisp-bridge lease-time=1d name=yourisp-dhcp-server
-    /ip dhcp-server network add address=192.168.88.0/24 gateway=192.168.88.1 dns-server=8.8.8.8
+# DHCP server
+:put "Creating DHCP server..."
+/ip dhcp-server add interface=yourisp-bridge lease-time=1d name=yourisp-dhcp-server
+/ip dhcp-server network add address=192.168.88.0/24 gateway=192.168.88.1 dns-server=8.8.8.8
 
-    # Hotspot profile and server
-    :put "Creating Hotspot..."
-    /ip hotspot profile add name={hotspot_profile} dns-name={portal_url} html-directory=flash/hotspot
-    /ip hotspot add name=yourisp-hotspot interface=yourisp-bridge profile={hotspot_profile}
+# Hotspot profile and server
+:put "Creating Hotspot..."
+/ip hotspot profile add name=yourisp-hotspot dns-name=portal.yourdomain.com html-directory=flash/hotspot
+/ip hotspot add name=yourisp-hotspot interface=yourisp-bridge profile=yourisp-hotspot
 
-    # Walled garden
-    /ip hotspot walled-garden add dst-host={walled_garden} action=allow
+# Walled garden (allow your portal)
+:put "Adding walled garden..."
+/ip hotspot walled-garden add dst-host=portal.yourdomain.com action=allow
 
-    # Download hotspot files and certificates (adjust URLs)
-    :put "Downloading hotspot files..."
-    /tool fetch url="https://your-domain.com/static/hotspot/hotspot.html" dst-path=flash/hotspot/hotspot.html
-    /tool fetch url="https://your-domain.com/static/certificates/your-cert.crt" dst-path=your-cert.crt
-    /certificate import file-name=your-cert.crt
+# RADIUS configuration (uses this router's unique shared_secret)
+:put "Configuring RADIUS..."
+/radius add address={radius_ip} secret={shared_secret} service=hotspot,ppp timeout=3s
+/ip hotspot profile set yourisp-hotspot use-radius=yes
+/ppp aaa set use-radius=yes
 
-    # PPPoE server
-    :put "Creating PPPoE server..."
-    /ip pppoe-server add interface=yourisp-bridge service-name=yourisp-pppoe
+:put "YourISP configuration completed successfully!"
+"""
 
-    # RADIUS configuration
-    :put "Configuring RADIUS..."
-    /radius add address={radius_ip} secret={shared_secret} service=hotspot,ppp timeout=3s
-    /ip hotspot profile set {hotspot_profile} use-radius=yes
-    /ppp aaa set use-radius=yes
-
-    :put "YourISP configuration completed successfully!"
-    """
-
-        # Return as downloadable .rsc file
+        # Return as downloadable .rsc file (frontend can fetch and show "Copy" button)
         response = HttpResponse(script_content, content_type='text/plain')
         response['Content-Disposition'] = f'attachment; filename="yourisp-{router.id}.rsc"'
         return response
