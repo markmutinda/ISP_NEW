@@ -277,6 +277,26 @@ class RouterViewSet(viewsets.ModelViewSet):
         response['Content-Disposition'] = f'attachment; filename="yourisp-{router.id}.rsc"'
         return response
 
+    @action(detail=True, methods=['get'], url_path='auth-key')
+    def auth_key(self, request, pk=None):
+        router = self.get_object()
+        
+        # Generate the MikroTik authentication script (exactly as frontend expects)
+        script = f''':local authKey "{router.auth_key}"
+/tool fetch \\
+  url="https://api.netily.io/api/v1/routers/authenticate/" \\
+  http-method=post \\
+  http-header-field="Content-Type: application/json" \\
+  http-data="{{\\"auth_key\\":\\"$authKey\\",\\"mac\\":\\"[/interface ethernet get 0 mac-address]\\",\\"identity\\":\\"[/system identity get name]\\",\\"version\\":\\"[/system resource get version]\\"}}" \\
+  mode=https'''
+        
+        return Response({
+            'auth_key': router.auth_key,
+            'script': script,
+            'is_authenticated': router.is_authenticated,
+            'authenticated_at': router.authenticated_at,
+        })
+
 # PUBLIC ENDPOINTS
 class RouterAuthenticateView(APIView):
     permission_classes = []
