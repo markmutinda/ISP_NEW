@@ -75,6 +75,7 @@ if DEBUG:
     INTERNAL_IPS = [
         '127.0.0.1',
         'localhost',
+        'camden-convocative-oversorrowfully.ngrok-free.dev',
     ]
     
     DEBUG_TOOLBAR_CONFIG = {
@@ -155,7 +156,7 @@ REST_FRAMEWORK = {
         'rest_framework_simplejwt.authentication.JWTAuthentication',
     ),
     'DEFAULT_PERMISSION_CLASSES': (
-        'rest_framework.permissions.IsAuthenticated',
+        'rest_framework.permissions.AllowAny',
     ),
     'DEFAULT_FILTER_BACKENDS': (
         'django_filters.rest_framework.DjangoFilterBackend',
@@ -294,3 +295,16 @@ DEFAULT_FROM_EMAIL = os.getenv('DEFAULT_FROM_EMAIL', 'noreply@yourisp.com')
 PAYHERO_API_USERNAME = os.getenv('PAYHERO_API_USERNAME')
 PAYHERO_API_PASSWORD = os.getenv('PAYHERO_API_PASSWORD')
 PAYHERO_CALLBACK_URL = os.getenv('PAYHERO_CALLBACK_URL', 'https://yourdomain.com/billing/payments/payhero/callback/')
+
+
+# Get ngrok URL from environment or use default
+NGROK_URL = os.environ.get('NGROK_URL', '')
+PUBLIC_DOMAIN = os.environ.get('PUBLIC_DOMAIN', '')
+
+# Use ngrok URL if available, otherwise use domain
+if NGROK_URL:
+    BASE_URL = NGROK_URL
+elif PUBLIC_DOMAIN:
+    BASE_URL = f"https://{PUBLIC_DOMAIN}"
+else:
+    BASE_URL = ''

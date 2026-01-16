@@ -2,30 +2,27 @@
 
 from rest_framework import viewsets, status, filters
 from rest_framework.decorators import action
+from rest_framework.parsers import JSONParser
+import json
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from django_filters.rest_framework import DjangoFilterBackend
 from django.utils import timezone
+from rest_framework.permissions import AllowAny, IsAuthenticated
 from django.db.models import Sum, Avg, F
 from django.http import HttpResponse
+from django.views.decorators.csrf import csrf_exempt
+from django.utils.decorators import method_decorator
 
 from apps.network.models.router_models import (
     Router,
     RouterEvent,
-    MikrotikInterface,
-    HotspotUser,
-    PPPoEUser,
-    MikrotikQueue,
 )
 
 from apps.network.serializers.router_serializers import (
     RouterSerializer,
     RouterEventSerializer,
 )
-
-# NOTE: We no longer need sub-serializers in router_serializers.py
-# If you want to keep granular endpoints, create a separate file later
-# For now, we remove them to avoid import errors
 
 from apps.core.permissions import HasCompanyAccess
 from apps.network.integrations.mikrotik_api import MikrotikAPI
@@ -167,11 +164,6 @@ class RouterViewSet(viewsets.ModelViewSet):
             logger.error(f"Backup failed for {router.name}: {str(e)}")
             return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
 
-    @action(detail=True, methods=['get'])
-    def auth_key(self, request, pk=None):
-        router = self.get_object()
-        return Response({"auth_key": router.auth_key})
-
     @action(detail=True, methods=['post'])
     def regenerate_auth_key(self, request, pk=None):
         router = self.get_object()
@@ -183,170 +175,280 @@ class RouterViewSet(viewsets.ModelViewSet):
         RouterEvent.objects.create(router=router, event_type='warning', message="Authentication key regenerated")
         return Response({"status": "success", "new_auth_key": router.auth_key})
     
-    @action(detail=True, methods=['get'], url_path='script')  # ← FIXED: Added url_path='script'
+    @action(detail=True, methods=['get'], url_path='script', permission_classes=[AllowAny])
     def script(self, request, pk=None):
-        router = self.get_object()
-
-        # Get version from query params (frontend sends ?version=7 or 6)
+        """Public endpoint for router to download script"""
+        router = Router.objects.filter(id=pk).first()
+        if not router:
+            return Response({"error": "Router not found"}, status=status.HTTP_404_NOT_FOUND)
+        
+        # Get version from query params
         version = request.query_params.get('version', '7')
+        
+        # SUPER SIMPLE script - just runs the config directly
+        script_content = f"""# YourISP Configuration Script for Router ID: {router.id}
+# This script will configure your router for YourISP service
 
-        # Use your actual server IP or domain (replace this!)
-        # For local testing: '127.0.0.1:8000' or request.get_host()
-        # For production: 'your-domain.com' or settings.SERVER_IP
-        server_url = request.get_host()  # Automatically uses current host (e.g., 127.0.0.1:8000 or yourdomain.com)
-        radius_ip = request.get_host().split(':')[0]  # Just the IP/hostname
-        shared_secret = router.shared_secret
+:put "Starting YourISP configuration...";
 
-        # Full dynamic script (matches your example logs style)
-        script_content = f"""
-# YourISP Auto-Configuration Script for RouterOS v{version}
-# Generated for {router.name} (ID: {router.id})
+# Download and run configuration
+/tool fetch url="https://camden-convocative-oversorrowfully.ngrok-free.dev/api/v1/network/routers/{router.id}/config/?auth_key={router.auth_key}&version={version}" dst-path=yourisp-config.rsc;
+:delay 2s;
+/import yourisp-config.rsc;
 
-:put "Starting YourISP configuration..."
-
-# Version check
-:global version [/system package update get installed-version];
-:local majorVersion 0;
-:local minorVersion 0;
-:local dotPos [:find $version "."];
-:if ([:len $dotPos] > 0) do={{
-    :set majorVersion [:tonum [:pick $version 0 $dotPos]];
-    :local remaining [:pick $version ($dotPos + 1) [:len $version]];
-    :set dotPos [:find $remaining "."];
-    :if ([:len $dotPos] > 0) do={{
-        :set minorVersion [:tonum [:pick $remaining 0 $dotPos]];
-    }}
-}}
-:if ($majorVersion < 6 || ($majorVersion = 6 && $minorVersion < 49)) do={{
-    :error "RouterOS 6.49 or higher required.";
-}}
-
-# Internet check
-:if ([/ping 8.8.8.8 count=3] = 0) do={{
-    :error "No internet connection.";
-}}
-
-# Cleanup existing configs
-:put "Cleaning up existing configurations..."
-/ip hotspot remove [find]
-/ip pppoe-server remove [find]
-/interface bridge remove [find]
-/ip address remove [find]
-/ip pool remove [find]
-/ip dhcp-server remove [find]
-/certificate remove [find]
-
-# Create bridge
-:put "Creating bridge..."
-/interface bridge add name=yourisp-bridge
-/interface bridge port add bridge=yourisp-bridge interface=ether1  # Change to your WAN interface
-
-# Assign IP
-:put "Assigning IP..."
-/ip address add address=192.168.88.1/24 interface=yourisp-bridge
-
-# IP pool
-:put "Creating IP pool..."
-/ip pool add name=yourisp-pool ranges=192.168.88.10-192.168.88.254
-
-# DHCP server
-:put "Creating DHCP server..."
-/ip dhcp-server add interface=yourisp-bridge lease-time=1d name=yourisp-dhcp-server
-/ip dhcp-server network add address=192.168.88.0/24 gateway=192.168.88.1 dns-server=8.8.8.8
-
-# Hotspot profile and server
-:put "Creating Hotspot..."
-/ip hotspot profile add name=yourisp-hotspot dns-name=portal.yourdomain.com html-directory=flash/hotspot
-/ip hotspot add name=yourisp-hotspot interface=yourisp-bridge profile=yourisp-hotspot
-
-# Walled garden (allow your portal)
-:put "Adding walled garden..."
-/ip hotspot walled-garden add dst-host=portal.yourdomain.com action=allow
-
-# RADIUS configuration (uses this router's unique shared_secret)
-:put "Configuring RADIUS..."
-/radius add address={radius_ip} secret={shared_secret} service=hotspot,ppp timeout=3s
-/ip hotspot profile set yourisp-hotspot use-radius=yes
-/ppp aaa set use-radius=yes
-
-:put "YourISP configuration completed successfully!"
+:put "Configuration completed!";
 """
-
-        # Return as downloadable .rsc file (frontend can fetch and show "Copy" button)
+        
         response = HttpResponse(script_content, content_type='text/plain')
         response['Content-Disposition'] = f'attachment; filename="yourisp-{router.id}.rsc"'
+        return response
+    
+    @action(detail=True, methods=['get'], url_path='config', permission_classes=[AllowAny])
+    def config_script(self, request, pk=None):
+        """Public endpoint for router to download configuration script"""
+        router = Router.objects.filter(id=pk).first()
+        if not router:
+            return Response({"error": "Router not found"}, status=status.HTTP_404_NOT_FOUND)
+        
+        # Verify auth_key
+        auth_key = request.query_params.get('auth_key')
+        if not auth_key or auth_key != router.auth_key:
+            return Response({"error": "Invalid auth key"}, status=status.HTTP_401_UNAUTHORIZED)
+        
+        version = request.query_params.get('version', '7')
+        
+        # SIMPLE WORKING VERSION - minimal escaping
+        script_content = f"""# YourISP Configuration for {router.name}
+# Generated at {timezone.now()}
+
+:put "Starting YourISP configuration...";
+
+# Get router information
+:local macAddr "";
+:local ethernetList [/interface ethernet find];
+:if ([:len $ethernetList] > 0) do={{
+    :set macAddr [/interface ethernet get [:pick $ethernetList 0] mac-address];
+}} else={{
+    :set macAddr "00:00:00:00:00:00";
+}};
+
+:local routerIdentity [/system identity get name];
+:local routerVersion [/system resource get version];
+
+:put ("MAC Address: $macAddr");
+:put ("Router Identity: $routerIdentity");
+:put ("Router Version: $routerVersion");
+
+# Register router with YourISP
+:put "Registering router...";
+/tool fetch url="https://camden-convocative-oversorrowfully.ngrok-free.dev/api/v1/network/routers/auth/" \\
+  http-method=post \\
+  http-header-field="Content-Type: application/json" \\
+  http-data="{{\\"auth_key\\":\\"{router.auth_key}\\",\\"mac\\":\\"$macAddr\\",\\"identity\\":\\"$routerIdentity\\",\\"version\\":\\"$routerVersion\\"}}";
+
+:delay 2s;
+
+# Basic configuration - WITH ERROR HANDLING
+:put "Configuring router...";
+
+# Check if bridge already exists
+:do {{
+    /interface bridge add name=bridge-local comment="YourISP Local Bridge";
+}} on-error={{ :put "Bridge already exists or error: $error"; }}
+
+# Check if IP address already exists
+:do {{
+    /ip address add address=192.168.88.1/24 interface=bridge-local;
+}} on-error={{ :put "IP address already exists or error: $error"; }}
+
+# Check if DHCP pool exists
+:do {{
+    /ip pool add name=dhcp-pool ranges=192.168.88.10-192.168.88.254;
+}} on-error={{ :put "DHCP pool already exists or error: $error"; }}
+
+# Check if DHCP server exists
+:do {{
+    /ip dhcp-server add interface=bridge-local name=dhcp-server address-pool=dhcp-pool lease-time=1d disabled=no;
+}} on-error={{ :put "DHCP server already exists or error: $error"; }}
+
+# Check if DHCP network exists
+:do {{
+    /ip dhcp-server network add address=192.168.88.0/24 gateway=192.168.88.1 dns-server=8.8.8.8;
+}} on-error={{ :put "DHCP network already exists or error: $error"; }}
+
+# Check if NAT rule exists
+:do {{
+    /ip firewall nat add chain=srcnat action=masquerade out-interface-list=WAN;
+}} on-error={{ :put "NAT rule already exists or error: $error"; }}
+
+:put "Basic configuration completed!";
+
+# RADIUS Configuration (if shared secret exists)
+:if ([:len "{router.shared_secret}"] > 0) do={{
+    :put "Configuring RADIUS...";
+    :do {{
+        /radius add address=camden-convocative-oversorrowfully.ngrok-free.dev secret={router.shared_secret} service=hotspot timeout=3s;
+    }} on-error={{ :put "RADIUS already exists or error: $error"; }};
+    :put "RADIUS configured.";
+}};
+
+:put "YourISP configuration completed successfully!";
+:put "Router is now ready for service.";
+"""
+        
+        response = HttpResponse(script_content, content_type='text/plain')
+        response['Content-Disposition'] = f'attachment; filename="yourisp-config-{router.id}.rsc"'
         return response
 
     @action(detail=True, methods=['get'], url_path='auth-key')
     def auth_key(self, request, pk=None):
         router = self.get_object()
         
-        # Generate the MikroTik authentication script (exactly as frontend expects)
-        script = f''':local authKey "{router.auth_key}"
-/tool fetch \\
-  url="https://api.netily.io/api/v1/routers/authenticate/" \\
-  http-method=post \\
-  http-header-field="Content-Type: application/json" \\
-  http-data="{{\\"auth_key\\":\\"$authKey\\",\\"mac\\":\\"[/interface ethernet get 0 mac-address]\\",\\"identity\\":\\"[/system identity get name]\\",\\"version\\":\\"[/system resource get version]\\"}}" \\
-  mode=https'''
+        # SIMPLE one-liner like Lipa Net
+        one_liner = f'/tool fetch url="https://camden-convocative-oversorrowfully.ngrok-free.dev/api/v1/network/routers/{router.id}/config/?auth_key={router.auth_key}" dst-path=yourisp.rsc; :delay 2s; /import yourisp.rsc;'
         
         return Response({
             'auth_key': router.auth_key,
-            'script': script,
+            'one_liner': one_liner,
             'is_authenticated': router.is_authenticated,
             'authenticated_at': router.authenticated_at,
         })
 
-# PUBLIC ENDPOINTS
+
+# SIMPLE AUTHENTICATION ENDPOINT
 class RouterAuthenticateView(APIView):
-    permission_classes = []
-
-    def get(self, request):
-        key = request.query_params.get('key')
-        if not key:
-            return Response({"error": "Missing key parameter"}, status=status.HTTP_400_BAD_REQUEST)
+    permission_classes = [AllowAny]
+    
+    @method_decorator(csrf_exempt)
+    def dispatch(self, *args, **kwargs):
+        return super().dispatch(*args, **kwargs)
+    
+    def post(self, request):
         try:
-            router = Router.objects.get(auth_key=key)
-        except Router.DoesNotExist:
-            return Response({"error": "Invalid or expired key"}, status=status.HTTP_404_NOT_FOUND)
-
-        x_forwarded_for = request.META.get('HTTP_X_FORWARDED_FOR')
-        ip = x_forwarded_for.split(',')[0].strip() if x_forwarded_for else request.META.get('REMOTE_ADDR')
-
-        router.ip_address = ip
-        router.is_authenticated = True
-        router.authenticated_at = timezone.now()
-        router.status = 'online'
-        router.last_seen = timezone.now()
-        router.save(update_fields=['ip_address', 'is_authenticated', 'authenticated_at', 'status', 'last_seen'])
-
-        RouterEvent.objects.create(router=router, event_type='up', message=f"Router authenticated from IP {ip}")
-
-        return Response({
-            "status": "success",
-            "message": f"Router {router.name} authenticated successfully",
-            "router_id": router.id,
-        })
+            # Parse JSON from request body
+            if not request.body:
+                return Response({"error": "Empty request body"}, status=status.HTTP_400_BAD_REQUEST)
+            
+            try:
+                data = json.loads(request.body.decode('utf-8'))
+            except json.JSONDecodeError as e:
+                logger.error(f"JSON decode error: {e}")
+                return Response({"error": "Invalid JSON format"}, status=status.HTTP_400_BAD_REQUEST)
+            
+            # Get auth_key
+            auth_key = data.get('auth_key')
+            if not auth_key:
+                return Response({"error": "Missing auth_key"}, status=status.HTTP_400_BAD_REQUEST)
+            
+            # Find router
+            router = Router.objects.filter(auth_key=auth_key).first()
+            if not router:
+                logger.warning(f"Invalid auth_key provided: {auth_key}")
+                return Response({"error": "Invalid authentication key"}, status=status.HTTP_404_NOT_FOUND)
+            
+            # Get IP address
+            x_forwarded_for = request.META.get('HTTP_X_FORWARDED_FOR', '')
+            if x_forwarded_for:
+                ip = x_forwarded_for.split(',')[0].strip()
+            else:
+                ip = request.META.get('REMOTE_ADDR', 'Unknown')
+            
+            # Get other data
+            mac = data.get('mac', 'Unknown')
+            identity = data.get('identity', 'Unknown')
+            version = data.get('version', 'Unknown')
+            
+            # Log the authentication
+            logger.info(f"Router {router.name} (ID: {router.id}) authenticated from IP: {ip}")
+            
+            # Update router
+            router.ip_address = ip
+            router.is_authenticated = True
+            router.authenticated_at = timezone.now()
+            router.status = "online"
+            router.last_seen = timezone.now()
+            router.save()
+            
+            # Create event
+            try:
+                RouterEvent.objects.create(
+                    router=router,
+                    event_type="authenticated",
+                    message=f"Router authenticated from IP {ip}",
+                    details={
+                        "mac_address": mac,
+                        "identity": identity,
+                        "version": version
+                    }
+                )
+            except TypeError:
+                # If details field doesn't exist in model
+                RouterEvent.objects.create(
+                    router=router,
+                    event_type="authenticated",
+                    message=f"Router authenticated from IP {ip} (MAC: {mac}, Identity: {identity})",
+                )
+            
+            return Response({
+                "status": "success",
+                "message": "Router authenticated successfully",
+                "router_id": router.id,
+                "router_name": router.name,
+                "ip_address": ip
+            })
+            
+        except Exception as e:
+            logger.error(f"Authentication error: {str(e)}")
+            return Response({"error": "Internal server error"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
 class RouterHeartbeatView(APIView):
-    permission_classes = []
-
+    permission_classes = [AllowAny]
+    
+    @method_decorator(csrf_exempt)
+    def dispatch(self, *args, **kwargs):
+        return super().dispatch(*args, **kwargs)
+    
     def post(self, request):
-        key = request.data.get('key')
-        if not key:
-            return Response({"error": "Missing key"}, status=status.HTTP_400_BAD_REQUEST)
-        router = Router.objects.filter(auth_key=key).first()
-        if not router:
-            return Response({"error": "Invalid key"}, status=status.HTTP_404_NOT_FOUND)
-        router.last_seen = timezone.now()
-        router.status = 'online'
-        router.save(update_fields=['last_seen', 'status'])
-        return Response({"status": "ok"})
-
-
-# REMOVED: Granular ViewSets (MikrotikInterfaceViewSet, etc.)
-# We removed them because:
-# 1. Their serializers don't exist anymore
-# 2. The frontend only needs the main Router endpoints
-# 3. You can add them back later if needed
+        try:
+            # Try to parse JSON
+            if request.body:
+                try:
+                    data = json.loads(request.body.decode('utf-8'))
+                except:
+                    data = {}
+            else:
+                data = request.data if hasattr(request, 'data') else {}
+            
+            # Get key from various fields
+            key = None
+            for field in ['key', 'auth_key', 'authKey', 'token']:
+                if field in data:
+                    key = data.get(field)
+                    break
+            
+            if not key:
+                return Response({"error": "Missing key"}, status=status.HTTP_400_BAD_REQUEST)
+            
+            router = Router.objects.filter(auth_key=key).first()
+            if not router:
+                return Response({"error": "Invalid key"}, status=status.HTTP_404_NOT_FOUND)
+            
+            # Optionally update IP if provided
+            if 'ip' in data:
+                router.ip_address = data['ip']
+                update_fields = ['last_seen', 'status', 'ip_address']
+            else:
+                update_fields = ['last_seen', 'status']
+            
+            router.last_seen = timezone.now()
+            router.status = 'online'
+            router.save(update_fields=update_fields)
+            
+            logger.debug(f"Heartbeat from router {router.name} (ID: {router.id})")
+            
+            return Response({"status": "ok", "router_id": router.id})
+            
+        except Exception as e:
+            logger.error(f"Heartbeat error: {e}")
+            return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
