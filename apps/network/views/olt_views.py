@@ -85,6 +85,20 @@ class OLTDeviceViewSet(viewsets.ModelViewSet):
         }
         return Response(stats)
 
+    def get_queryset(self):
+        queryset = super().get_queryset()
+        user = self.request.user
+        
+        if user.is_superuser:
+            company_id = self.request.query_params.get('company_id')
+            if company_id:
+                return queryset.filter(company_id=company_id)
+            return queryset
+        
+        if hasattr(user, 'company') and user.company:
+            return queryset.filter(company=user.company)
+        
+        return queryset.none()
 
 class OLTPortViewSet(viewsets.ModelViewSet):
     queryset = OLTPort.objects.all().select_related('olt', 'olt__company')
@@ -114,6 +128,20 @@ class OLTPortViewSet(viewsets.ModelViewSet):
             'admin_state': port.admin_state
         })
 
+    def get_queryset(self):
+        queryset = super().get_queryset()
+        user = self.request.user
+        
+        if user.is_superuser:
+            company_id = self.request.query_params.get('company_id')
+            if company_id:
+                return queryset.filter(olt__company_id=company_id)
+            return queryset
+        
+        if hasattr(user, 'company') and user.company:
+            return queryset.filter(olt__company=user.company)
+        
+        return queryset.none()
 
 class PONPortViewSet(viewsets.ModelViewSet):
     queryset = PONPort.objects.all().select_related(
@@ -156,6 +184,20 @@ class PONPortViewSet(viewsets.ModelViewSet):
             'avg_tx_power': avg_tx,
         })
 
+    def get_queryset(self):
+        queryset = super().get_queryset()
+        user = self.request.user
+        
+        if user.is_superuser:
+            company_id = self.request.query_params.get('company_id')
+            if company_id:
+                return queryset.filter(olt_port__olt__company_id=company_id)
+            return queryset
+        
+        if hasattr(user, 'company') and user.company:
+            return queryset.filter(olt_port__olt__company=user.company)
+        
+        return queryset.none()
 
 class ONUDeviceViewSet(viewsets.ModelViewSet):
     queryset = ONUDevice.objects.all().select_related(
@@ -229,6 +271,20 @@ class ONUDeviceViewSet(viewsets.ModelViewSet):
                 'message': str(e)
             }, status=status.HTTP_400_BAD_REQUEST)
 
+    def get_queryset(self):
+        queryset = super().get_queryset()
+        user = self.request.user
+        
+        if user.is_superuser:
+            company_id = self.request.query_params.get('company_id')
+            if company_id:
+                return queryset.filter(pon_port__olt_port__olt__company_id=company_id)
+            return queryset
+        
+        if hasattr(user, 'company') and user.company:
+            return queryset.filter(pon_port__olt_port__olt__company=user.company)
+        
+        return queryset.none()
 
 class OLTConfigViewSet(viewsets.ModelViewSet):
     queryset = OLTConfig.objects.all().select_related('olt', 'olt__company', 'applied_by')
@@ -308,3 +364,18 @@ class OLTConfigViewSet(viewsets.ModelViewSet):
         }
         
         return Response(diff)
+    
+    def get_queryset(self):
+        queryset = super().get_queryset()
+        user = self.request.user
+        
+        if user.is_superuser:
+            company_id = self.request.query_params.get('company_id')
+            if company_id:
+                return queryset.filter(olt__company_id=company_id)
+            return queryset
+        
+        if hasattr(user, 'company') and user.company:
+            return queryset.filter(olt__company=user.company)
+        
+        return queryset.none()

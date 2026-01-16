@@ -143,6 +143,21 @@ class SubnetViewSet(viewsets.ModelViewSet):
             'data': serializer.data
         })
 
+    def get_queryset(self):
+        queryset = super().get_queryset()
+        user = self.request.user
+        
+        if user.is_superuser:
+            company_id = self.request.query_params.get('company_id')
+            if company_id:
+                return queryset.filter(company_id=company_id)
+            return queryset
+        
+        if hasattr(user, 'company') and user.company:
+            return queryset.filter(company=user.company)
+        
+        return queryset.none()
+
 
 class VLANViewSet(viewsets.ModelViewSet):
     queryset = VLAN.objects.all().select_related('company', 'subnet')
@@ -186,6 +201,20 @@ class VLANViewSet(viewsets.ModelViewSet):
             'total_available': len(available_vlans),
         })
 
+    def get_queryset(self):
+        queryset = super().get_queryset()
+        user = self.request.user
+        
+        if user.is_superuser:
+            company_id = self.request.query_params.get('company_id')
+            if company_id:
+                return queryset.filter(company_id=company_id)
+            return queryset
+        
+        if hasattr(user, 'company') and user.company:
+            return queryset.filter(company=user.company)
+        
+        return queryset.none()
 
 class IPPoolViewSet(viewsets.ModelViewSet):
     queryset = IPPool.objects.all().select_related('subnet', 'subnet__company')
@@ -272,6 +301,20 @@ class IPPoolViewSet(viewsets.ModelViewSet):
         
         return Response(stats)
 
+    def get_queryset(self):
+        queryset = super().get_queryset()
+        user = self.request.user
+        
+        if user.is_superuser:
+            company_id = self.request.query_params.get('company_id')
+            if company_id:
+                return queryset.filter(subnet__company_id=company_id)
+            return queryset
+        
+        if hasattr(user, 'company') and user.company:
+            return queryset.filter(subnet__company=user.company)
+        
+        return queryset.none()
 
 class IPAddressViewSet(viewsets.ModelViewSet):
     queryset = IPAddress.objects.all().select_related(
@@ -386,6 +429,20 @@ class IPAddressViewSet(viewsets.ModelViewSet):
             'results': serializer.data
         })
 
+    def get_queryset(self):
+        queryset = super().get_queryset()
+        user = self.request.user
+        
+        if user.is_superuser:
+            company_id = self.request.query_params.get('company_id')
+            if company_id:
+                return queryset.filter(subnet__company_id=company_id)
+            return queryset
+        
+        if hasattr(user, 'company') and user.company:
+            return queryset.filter(subnet__company=user.company)
+        
+        return queryset.none()
 
 class DHCPRangeViewSet(viewsets.ModelViewSet):
     queryset = DHCPRange.objects.all().select_related('ip_pool', 'ip_pool__subnet')
@@ -424,3 +481,18 @@ subnet {dhcp_range.ip_pool.subnet.network_address} netmask {dhcp_range.ip_pool.s
             'config': config.strip(),
             'format': 'isc-dhcpd',
         })
+    
+    def get_queryset(self):
+        queryset = super().get_queryset()
+        user = self.request.user
+        
+        if user.is_superuser:
+            company_id = self.request.query_params.get('company_id')
+            if company_id:
+                return queryset.filter(ip_pool__subnet__company_id=company_id)
+            return queryset
+        
+        if hasattr(user, 'company') and user.company:
+            return queryset.filter(ip_pool__subnet__company=user.company)
+        
+        return queryset.none()

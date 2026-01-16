@@ -76,6 +76,20 @@ class PaymentMethodViewSet(viewsets.ModelViewSet):
             'message': f'No test available for {method.method_type} {"(PayHero)" if method.is_payhero_enabled else ""}'
         })
 
+    def get_queryset(self):
+        user = self.request.user
+        
+        if user.is_superuser:
+            company_id = self.request.query_params.get('company_id')
+            if company_id:
+                return PaymentMethod.objects.filter(company_id=company_id)
+            return PaymentMethod.objects.all()
+        
+        # Users can only see payment methods from their company
+        if hasattr(user, 'company') and user.company:
+            return PaymentMethod.objects.filter(company=user.company)
+        
+        return PaymentMethod.objects.none()
 
 class PaymentViewSet(viewsets.ModelViewSet):
     """
@@ -526,6 +540,26 @@ class PaymentViewSet(viewsets.ModelViewSet):
         
         return Response(stats)
 
+    def get_queryset(self):
+        user = self.request.user
+        
+        if user.is_superuser:
+            company_id = self.request.query_params.get('company_id')
+            if company_id:
+                return Payment.objects.filter(company_id=company_id)
+            return Payment.objects.all()
+        
+        # Company users can only see payments from their company
+        if hasattr(user, 'company') and user.company:
+            queryset = Payment.objects.filter(company=user.company)
+            
+            # Customers can only see their own payments
+            if hasattr(user, 'customer_profile'):
+                return queryset.filter(customer=user.customer_profile)
+            
+            return queryset
+        
+        return Payment.objects.none()
 
 class ReceiptViewSet(viewsets.ModelViewSet):
     queryset = Receipt.objects.all()
@@ -579,3 +613,24 @@ class ReceiptViewSet(viewsets.ModelViewSet):
             except Exception as e:
                 return Response({'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
         return Response({'error': 'Invalid share method'}, status=status.HTTP_400_BAD_REQUEST)
+    
+    def get_queryset(self):
+        user = self.request.user
+        
+        if user.is_superuser:
+            company_id = self.request.query_params.get('company_id')
+            if company_id:
+                return Receipt.objects.filter(company_id=company_id)
+            return Receipt.objects.all()
+        
+        # Company users can only see receipts from their company
+        if hasattr(user, 'company') and user.company:
+            queryset = Receipt.objects.filter(company=user.company)
+            
+            # Customers can only see their own receipts
+            if hasattr(user, 'customer_profile'):
+                return queryset.filter(customer=user.customer_profile)
+            
+            return queryset
+        
+        return Receipt.objects.none()

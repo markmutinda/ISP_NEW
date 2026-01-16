@@ -217,7 +217,7 @@ class RouterViewSet(viewsets.ModelViewSet):
         
         version = request.query_params.get('version', '7')
         
-        # SIMPLE WORKING VERSION - minimal escaping
+        # UPDATED VERSION - Gets model and sends it to auth endpoint
         script_content = f"""# YourISP Configuration for {router.name}
 # Generated at {timezone.now()}
 
@@ -232,10 +232,19 @@ class RouterViewSet(viewsets.ModelViewSet):
     :set macAddr "00:00:00:00:00:00";
 }};
 
+:local routerModel "";
+:local routerBoardInfo [/system routerboard print];
+:if ([:len $routerBoardInfo] > 0) do={{
+    :set routerModel [/system routerboard get model];
+}} else={{
+    :set routerModel "Unknown";
+}};
+
 :local routerIdentity [/system identity get name];
 :local routerVersion [/system resource get version];
 
 :put ("MAC Address: $macAddr");
+:put ("Router Model: $routerModel");
 :put ("Router Identity: $routerIdentity");
 :put ("Router Version: $routerVersion");
 
@@ -244,7 +253,7 @@ class RouterViewSet(viewsets.ModelViewSet):
 /tool fetch url="https://camden-convocative-oversorrowfully.ngrok-free.dev/api/v1/network/routers/auth/" \\
   http-method=post \\
   http-header-field="Content-Type: application/json" \\
-  http-data="{{\\"auth_key\\":\\"{router.auth_key}\\",\\"mac\\":\\"$macAddr\\",\\"identity\\":\\"$routerIdentity\\",\\"version\\":\\"$routerVersion\\"}}";
+  http-data="{{\\"auth_key\\":\\"{router.auth_key}\\",\\"mac\\":\\"$macAddr\\",\\"model\\":\\"$routerModel\\",\\"identity\\":\\"$routerIdentity\\",\\"version\\":\\"$routerVersion\\"}}";
 
 :delay 2s;
 
@@ -314,7 +323,22 @@ class RouterViewSet(viewsets.ModelViewSet):
             'authenticated_at': router.authenticated_at,
         })
 
+    def get_queryset(self):
+        queryset = super().get_queryset()
+        user = self.request.user
+        
+        if user.is_superuser:
+            company_id = self.request.query_params.get('company_id')
+            if company_id:
+                return queryset.filter(company_id=company_id)
+            return queryset
+        
+        if hasattr(user, 'company') and user.company:
+            return queryset.filter(company=user.company)
+        
+        return queryset.none()
 
+# SIMPLE AUTHENTICATION ENDPOINT
 # SIMPLE AUTHENTICATION ENDPOINT
 class RouterAuthenticateView(APIView):
     permission_classes = [AllowAny]
@@ -357,12 +381,17 @@ class RouterAuthenticateView(APIView):
             mac = data.get('mac', 'Unknown')
             identity = data.get('identity', 'Unknown')
             version = data.get('version', 'Unknown')
+            model = data.get('model', 'Unknown')
             
             # Log the authentication
             logger.info(f"Router {router.name} (ID: {router.id}) authenticated from IP: {ip}")
+            logger.info(f"Router Details - Model: {model}, Version: {version}, MAC: {mac}")
             
-            # Update router
+            # Update router with ALL details
             router.ip_address = ip
+            router.mac_address = mac  # Store MAC address
+            router.firmware_version = version  # Store firmware version
+            router.model = model  # Store model
             router.is_authenticated = True
             router.authenticated_at = timezone.now()
             router.status = "online"
@@ -378,7 +407,8 @@ class RouterAuthenticateView(APIView):
                     details={
                         "mac_address": mac,
                         "identity": identity,
-                        "version": version
+                        "version": version,
+                        "model": model
                     }
                 )
             except TypeError:
@@ -386,7 +416,7 @@ class RouterAuthenticateView(APIView):
                 RouterEvent.objects.create(
                     router=router,
                     event_type="authenticated",
-                    message=f"Router authenticated from IP {ip} (MAC: {mac}, Identity: {identity})",
+                    message=f"Router authenticated from IP {ip} (Model: {model}, Version: {version}, MAC: {mac})",
                 )
             
             return Response({
@@ -394,13 +424,14 @@ class RouterAuthenticateView(APIView):
                 "message": "Router authenticated successfully",
                 "router_id": router.id,
                 "router_name": router.name,
-                "ip_address": ip
+                "ip_address": ip,
+                "model": model,
+                "firmware_version": version
             })
             
         except Exception as e:
             logger.error(f"Authentication error: {str(e)}")
             return Response({"error": "Internal server error"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-
 
 class RouterHeartbeatView(APIView):
     permission_classes = [AllowAny]

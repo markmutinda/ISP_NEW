@@ -13,9 +13,11 @@ from django.conf import settings
 from rest_framework_simplejwt.views import TokenRefreshView
 from rest_framework.views import APIView
 from rest_framework import generics
+from datetime import timedelta
 from .models import GlobalSystemSettings  # Add this
 from .serializers import GlobalSystemSettingsSerializer, CustomTokenRefreshSerializer  # Add this
 from rest_framework_simplejwt.exceptions import InvalidToken  # Already needed for token fix
+from .serializers import CompanyRegisterSerializer
 
 from .models import User, Company, SystemSettings, AuditLog, Tenant
 from .serializers import (
@@ -32,6 +34,8 @@ class CustomTokenObtainPairView(TokenObtainPairView):
     serializer_class = CustomTokenObtainPairSerializer
 
 
+# In RegisterView class, update the create method:
+
 class RegisterView(generics.CreateAPIView):
     """View for user registration"""
     permission_classes = [AllowAny]
@@ -40,7 +44,17 @@ class RegisterView(generics.CreateAPIView):
     def create(self, request, *args, **kwargs):
         serializer = self.get_serializer(data=request.data)
         if serializer.is_valid():
+            # Check if company/tenant should be assigned automatically
+            # For now, we'll allow it to be set via request data
+            # Later, we can add logic to auto-assign based on domain or other criteria
+            
             user = serializer.save()
+            
+            # If no company was set, try to assign based on registration context
+            if not user.company and not user.tenant:
+                # Placeholder for auto-assignment logic
+                # Example: Get company from subdomain, invite code, etc.
+                pass
             
             # Generate JWT tokens
             refresh = RefreshToken.for_user(user)
@@ -308,37 +322,81 @@ class ProfileView(generics.RetrieveUpdateAPIView):
         return self.request.user
 
 
+# In DashboardView class, update the get method:
+
 class DashboardView(APIView):
     """Dashboard view (class-based version)"""
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        # Reuse the logic from function-based dashboard
         user = request.user
         
-        if user.role == 'admin' or user.is_superuser:
-            stats = {
-                'total_users': User.objects.count(),
-                'total_companies': Company.objects.count(),
-                'total_customers': User.objects.filter(role='customer').count(),
-                'total_staff': User.objects.filter(
-                    role__in=['admin', 'staff', 'technician', 'accountant', 'support']
-                ).count(),
-                'recent_activity': list(AuditLog.objects.all().order_by('-timestamp')[:10].values(
-                    'id', 'user__email', 'action', 'model_name', 'object_repr', 'timestamp'
-                )),
-            }
-        elif user.role == 'staff':
-            stats = {
-                'total_customers': User.objects.filter(role='customer').count(),
-                'recent_activity': list(AuditLog.objects.all().order_by('-timestamp')[:10].values(
-                    'id', 'user__email', 'action', 'model_name', 'object_repr', 'timestamp'
-                )),
-            }
+        # Check if user has a company
+        if hasattr(user, 'company') and user.company:
+            # User belongs to a company - filter data by company
+            company = user.company
+            
+            if user.role == 'admin' or user.is_superuser:
+                # Company admin sees company-specific data
+                stats = {
+                    'total_users': User.objects.filter(company=company).count(),
+                    'total_customers': User.objects.filter(company=company, role='customer').count(),
+                    'total_staff': User.objects.filter(
+                        company=company,
+                        role__in=['admin', 'staff', 'technician', 'accountant', 'support']
+                    ).count(),
+                    'company_info': {
+                        'name': company.name,
+                        'total_customers': company.total_customers,
+                        'active_customers': company.active_customers,
+                    },
+                    'recent_activity': list(AuditLog.objects.filter(
+                        tenant=user.tenant
+                    ).order_by('-timestamp')[:10].values(
+                        'id', 'user__email', 'action', 'model_name', 'object_repr', 'timestamp'
+                    )),
+                }
+            elif user.role == 'staff':
+                # Staff sees limited company data
+                stats = {
+                    'total_customers': User.objects.filter(company=company, role='customer').count(),
+                    'company_info': {
+                        'name': company.name,
+                    },
+                    'recent_activity': list(AuditLog.objects.filter(
+                        tenant=user.tenant
+                    ).order_by('-timestamp')[:10].values(
+                        'id', 'user__email', 'action', 'model_name', 'object_repr', 'timestamp'
+                    )),
+                }
+            else:
+                # Customer sees only their info
+                stats = {
+                    'user_info': ProfileSerializer(user).data,
+                    'company_info': {
+                        'name': company.name,
+                    },
+                }
         else:
-            stats = {
-                'user_info': ProfileSerializer(user).data,
-            }
+            # Superuser or user without company (global view)
+            if user.is_superuser:
+                stats = {
+                    'total_users': User.objects.count(),
+                    'total_companies': Company.objects.count(),
+                    'total_customers': User.objects.filter(role='customer').count(),
+                    'total_staff': User.objects.filter(
+                        role__in=['admin', 'staff', 'technician', 'accountant', 'support']
+                    ).count(),
+                    'recent_activity': list(AuditLog.objects.all().order_by('-timestamp')[:10].values(
+                        'id', 'user__email', 'action', 'model_name', 'object_repr', 'timestamp'
+                    )),
+                }
+            else:
+                # Regular user without company assignment
+                stats = {
+                    'user_info': ProfileSerializer(user).data,
+                    'warning': 'No company assigned. Please contact administrator.',
+                }
         
         serializer = DashboardStatsSerializer(stats)
         return Response(serializer.data)
@@ -487,3 +545,106 @@ class GlobalSystemSettingsView(APIView):
 class CustomTokenRefreshView(TokenRefreshView):
     """Fix: Return 401 instead of 500 when user is deleted"""
     serializer_class = CustomTokenRefreshSerializer
+
+class CompanyRegisterView(generics.CreateAPIView):
+    """Public endpoint to register a new ISP/company + first admin user"""
+    permission_classes = [AllowAny]
+    serializer_class = CompanyRegisterSerializer
+    
+    def create(self, request, *args, **kwargs):
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
+        
+        # Create Company
+        company = Company.objects.create(
+            name=data['company_name'],
+            email=data['company_email'],
+            phone_number=data.get('company_phone', ''),
+            address=data.get('company_address', ''),
+            city=data.get('company_city', ''),
+            county=data.get('company_county', ''),
+            registration_number=data.get('company_registration_number', ''),
+            tax_pin=data.get('company_tax_pin', ''),
+            website=data.get('company_website', ''),
+            company_type='isp',  # Default for new ISPs
+            subscription_plan='basic',  # Or your default
+            is_active=True
+        )
+        
+        # Auto-generate slug if not set
+        if not company.slug:
+            from django.utils.text import slugify
+            base_slug = slugify(company.name) or 'company'  # fallback if name empty
+            slug = base_slug
+            counter = 1
+            while Company.objects.filter(slug=slug).exists():
+                slug = f"{base_slug}-{counter}"
+                counter += 1
+            company.slug = slug
+            company.save()
+        
+        # Create Tenant with 14-day trial
+        trial_end = timezone.now() + timedelta(days=14)
+        tenant = Tenant.objects.create(
+            company=company,
+            subdomain=company.slug,  # Use company slug as default subdomain
+            database_name=f"isp_{company.slug.replace('-', '_')}",  # Optional
+            status='trial',
+            max_users=10,
+            max_customers=100,
+            features={},  # Or default features dict
+            billing_cycle='monthly',
+            monthly_rate=0.00,
+            next_billing_date=trial_end.date(),
+            subscription_expiry=trial_end.date()
+        )
+        
+        # Create first admin user
+        user = User.objects.create(
+            email=data['admin_email'],
+            first_name=data['admin_first_name'],
+            last_name=data['admin_last_name'],
+            phone_number=data['admin_phone'],
+            role='admin',
+            company=company,
+            tenant=tenant,
+            is_active=True,
+            is_staff=True,  # Allow admin access
+            is_verified=False  # Or True if you skip verification
+        )
+        user.set_password(data['admin_password'])
+        user.save()
+        
+        # Generate JWT tokens
+        refresh = RefreshToken.for_user(user)
+        
+        # Optional: Log the creation
+        AuditLog.log_action(
+            user=user,
+            action='create',
+            model_name='Company',
+            object_id=str(company.id),
+            object_repr=company.name,
+            ip_address=request.META.get('REMOTE_ADDR'),
+            user_agent=request.META.get('HTTP_USER_AGENT', ''),
+            tenant=tenant
+        )
+        
+        return Response({
+            'message': 'Company and admin account created successfully. You are now logged in.',
+            'user': {
+                'id': user.id,
+                'email': user.email,
+                'first_name': user.first_name,
+                'last_name': user.last_name,
+                'role': user.role,
+                'company': {
+                    'id': company.id,
+                    'name': company.name,
+                    'email': company.email
+                }
+            },
+            'access': str(refresh.access_token),
+            'refresh': str(refresh),
+        }, status=status.HTTP_201_CREATED)

@@ -221,6 +221,25 @@ class PlanViewSet(viewsets.ModelViewSet):
         
         return Response(summary)
 
+    def get_queryset(self):
+        """Filter plans by company"""
+        # For public endpoint, show all active public plans (no company filter for public)
+        if self.action == 'public':
+            return Plan.objects.filter(is_active=True, is_public=True)
+        
+        user = self.request.user
+        
+        if user.is_superuser:
+            company_id = self.request.query_params.get('company_id')
+            if company_id:
+                return Plan.objects.filter(company_id=company_id)
+            return Plan.objects.all()
+        
+        # Regular users can only see plans from their company
+        if hasattr(user, 'company') and user.company:
+            return Plan.objects.filter(company=user.company)
+        
+        return Plan.objects.none()
 
 class BillingCycleViewSet(viewsets.ModelViewSet):
     """
@@ -324,6 +343,21 @@ class BillingCycleViewSet(viewsets.ModelViewSet):
         
         return Response(summary)
 
+    def get_queryset(self):
+        """Filter billing cycles by company"""
+        user = self.request.user
+        
+        if user.is_superuser:
+            company_id = self.request.query_params.get('company_id')
+            if company_id:
+                return BillingCycle.objects.filter(company_id=company_id)
+            return BillingCycle.objects.all()
+        
+        # Non-superusers can only see their company's billing cycles
+        if hasattr(user, 'company') and user.company:
+            return BillingCycle.objects.filter(company=user.company)
+        
+        return BillingCycle.objects.none()
 
 class InvoiceViewSet(viewsets.ModelViewSet):
     """
@@ -557,6 +591,28 @@ class InvoiceViewSet(viewsets.ModelViewSet):
         
         return Response(outstanding_data)
 
+    def get_queryset(self):
+        """Filter invoices by company and user role"""
+        user = self.request.user
+        
+        # Superusers can see everything
+        if user.is_superuser:
+            company_id = self.request.query_params.get('company_id')
+            if company_id:
+                return Invoice.objects.filter(company_id=company_id)
+            return Invoice.objects.all()
+        
+        # Company staff can see their company's invoices
+        if hasattr(user, 'company') and user.company:
+            queryset = Invoice.objects.filter(company=user.company)
+            
+            # Customers can only see their own invoices
+            if hasattr(user, 'customer_profile'):
+                return queryset.filter(customer=user.customer_profile)
+            
+            return queryset
+        
+        return Invoice.objects.none()
 
 class InvoiceItemViewSet(viewsets.ModelViewSet):
     """
@@ -588,3 +644,19 @@ class InvoiceItemViewSet(viewsets.ModelViewSet):
                 {'status': 'error', 'message': 'Invalid invoice'},
                 status=status.HTTP_400_BAD_REQUEST
             )
+        
+    def get_queryset(self):
+        """Filter invoice items by company"""
+        user = self.request.user
+        
+        if user.is_superuser:
+            company_id = self.request.query_params.get('company_id')
+            if company_id:
+                return InvoiceItem.objects.filter(invoice__company_id=company_id)
+            return InvoiceItem.objects.all()
+        
+        # Non-superusers can only see invoice items from their company
+        if hasattr(user, 'company') and user.company:
+            return InvoiceItem.objects.filter(invoice__company=user.company)
+        
+        return InvoiceItem.objects.none()

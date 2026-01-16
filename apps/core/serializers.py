@@ -20,6 +20,8 @@ class UserSerializer(serializers.ModelSerializer):
     confirm_password = serializers.CharField(write_only=True, required=False)
     role_display = serializers.CharField(source='get_role_display_name', read_only=True)
     full_name = serializers.SerializerMethodField()
+    company_name = serializers.CharField(source='company.name', read_only=True)  # NEW
+    tenant_subdomain = serializers.CharField(source='tenant.subdomain', read_only=True)  # NEW
     
     class Meta:
         model = User
@@ -28,6 +30,7 @@ class UserSerializer(serializers.ModelSerializer):
             'phone_number', 'id_number', 'gender', 'date_of_birth',
             'profile_picture', 'role', 'role_display', 'is_active',
             'is_verified', 'is_staff', 'is_superuser',
+            'company', 'company_name', 'tenant', 'tenant_subdomain',
             'password', 'confirm_password', 'created_at', 'updated_at'
         ]
         read_only_fields = ['id', 'created_at', 'updated_at', 'is_staff', 'is_superuser']
@@ -108,7 +111,7 @@ class UserCreateSerializer(serializers.ModelSerializer):
         fields = [
             'id', 'email', 'password', 'confirm_password',
             'first_name', 'last_name', 'phone_number', 'id_number',
-            'gender', 'date_of_birth', 'role'
+            'gender', 'date_of_birth', 'role', 'company', 'tenant' 
         ]
         read_only_fields = ['id']
     
@@ -468,3 +471,52 @@ class CustomTokenRefreshSerializer(TokenRefreshSerializer):
             return super().validate(attrs)
         except User.DoesNotExist:
             raise InvalidToken('User no longer exists')
+
+class CompanyRegisterSerializer(serializers.Serializer):
+    """Serializer for public ISP/company registration"""
+    
+    # Company fields (only name and email required)
+    company_name = serializers.CharField(max_length=255, required=True)
+    company_email = serializers.EmailField(required=True)
+    
+    # Optional company fields
+    company_phone = serializers.CharField(max_length=20, required=False, allow_blank=True)
+    company_address = serializers.CharField(required=False, allow_blank=True)
+    company_city = serializers.CharField(max_length=100, required=False, allow_blank=True)
+    company_county = serializers.CharField(max_length=100, required=False, allow_blank=True)
+    company_registration_number = serializers.CharField(max_length=100, required=False, allow_blank=True)
+    company_tax_pin = serializers.CharField(max_length=50, required=False, allow_blank=True)
+    company_website = serializers.URLField(required=False, allow_blank=True)
+    
+    # Admin user fields
+    admin_first_name = serializers.CharField(max_length=100, required=True)
+    admin_last_name = serializers.CharField(max_length=100, required=True)
+    admin_email = serializers.EmailField(required=True)
+    admin_phone = serializers.CharField(max_length=20, required=True)
+    admin_password = serializers.CharField(
+        write_only=True,
+        required=True,
+        style={'input_type': 'password'},
+        validators=[validate_password]
+    )
+    
+    def validate_company_email(self, value):
+        """Check company email uniqueness"""
+        if Company.objects.filter(email=value).exists():
+            raise serializers.ValidationError("A company with this email already exists.")
+        return value
+    
+    def validate_admin_email(self, value):
+        """Check admin email uniqueness"""
+        if User.objects.filter(email=value).exists():
+            raise serializers.ValidationError("A user with this email already exists.")
+        return value
+    
+    def validate(self, data):
+        """Additional cross-field validation if needed"""
+        # Optional: ensure admin_email != company_email if you want them separate
+        if data.get('admin_email') == data.get('company_email'):
+            raise serializers.ValidationError({
+                "admin_email": "Admin email should be different from company email."
+            })
+        return data

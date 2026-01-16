@@ -64,16 +64,38 @@ class CustomerViewSet(viewsets.ModelViewSet):
     
     def get_queryset(self):
         queryset = super().get_queryset()
+        user = self.request.user
         
-        # Filter by company for non-admin users
-        if not self.request.user.is_superuser:
-            if self.request.user.company:
-                queryset = queryset.filter(company=self.request.user.company)
+        # SUPERUSERS: can see everything (with optional company filter)
+        if user.is_superuser:
+            company_id = self.request.query_params.get('company_id')
+            if company_id:
+                return queryset.filter(company_id=company_id)
+            return queryset
         
-        return queryset
+        # COMPANY USERS: can only see customers from their company
+        if hasattr(user, 'company') and user.company:
+            return queryset.filter(company=user.company)
+        
+        # CUSTOMERS: can only see themselves
+        if hasattr(user, 'customer_profile'):
+            return queryset.filter(id=user.customer_profile.id)
+        
+        # No access
+        return queryset.none()
     
     def perform_create(self, serializer):
-        serializer.save()
+        """Auto-assign company when creating customers"""
+        user = self.request.user
+        
+        # If company not specified, use user's company
+        if 'company' not in serializer.validated_data:
+            if hasattr(user, 'company') and user.company:
+                serializer.save(company=user.company)
+            else:
+                serializer.save()
+        else:
+            serializer.save()
     
     @action(detail=True, methods=['get'])
     def dashboard(self, request, pk=None):

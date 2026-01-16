@@ -125,6 +125,27 @@ class User(AbstractUser, AuditMixin):
         default='customer',
         verbose_name='User Role'
     )
+    
+        # NEW FIELD: Add company relationship
+    company = models.ForeignKey(
+        'Company',
+        on_delete=models.CASCADE,
+        null=True,
+        blank=True,
+        related_name='employees',
+        verbose_name='ISP Company'
+    )
+    
+    # OPTIONAL: Also add tenant for direct access
+    tenant = models.ForeignKey(
+        'Tenant',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='users',
+        verbose_name='Tenant'
+    )
+
     is_verified = models.BooleanField(default=False)
     verification_token = models.UUIDField(default=uuid.uuid4, editable=False)
     verification_token_expiry = models.DateTimeField(null=True, blank=True)
@@ -169,7 +190,16 @@ class User(AbstractUser, AuditMixin):
     @property
     def is_customer(self):
         return self.role == 'customer'
-
+    
+    @property
+    def is_company_admin(self):
+        """Check if user is admin of their company"""
+        return self.role == 'admin' or self.is_superuser
+    
+    @property
+    def is_company_staff(self):
+        """Check if user is staff of their company"""
+        return self.role in ['admin', 'staff', 'accountant', 'support', 'technician']
 
 # Create a simplified BaseModel to avoid import issues
 class BaseModel(models.Model):
@@ -234,47 +264,105 @@ class Company(BaseModel):
 
 
 class Tenant(BaseModel):
-    """Tenant model for SaaS functionality"""
+    """Tenant model for SaaS multi-tenancy functionality"""
     
     STATUS_CHOICES = (
+        ('trial', 'Trial'),
         ('active', 'Active'),
         ('suspended', 'Suspended'),
-        ('trial', 'Trial'),
         ('cancelled', 'Cancelled'),
     )
     
     company = models.OneToOneField(
         Company,
         on_delete=models.CASCADE,
-        related_name='tenant'
+        related_name='tenant',
+        help_text="The ISP/company this tenant belongs to"
     )
-    subdomain = models.CharField(max_length=100, unique=True)
-    domain = models.CharField(max_length=255, null=True, blank=True)
-    database_name = models.CharField(max_length=100)
-    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='trial')
     
-    # Subscription details
-    max_users = models.IntegerField(default=10)
-    max_customers = models.IntegerField(default=100)
-    features = models.JSONField(default=dict)  # Store enabled features
+    subdomain = models.CharField(
+        max_length=100,
+        unique=True,
+        help_text="Unique subdomain for this ISP (e.g. bluenet)"
+    )
+    domain = models.CharField(
+        max_length=255,
+        null=True,
+        blank=True,
+        help_text="Custom domain if they have one (optional)"
+    )
+    database_name = models.CharField(
+        max_length=100,
+        help_text="Database/schema name prefix or identifier"
+    )
     
-    # Billing information
+    status = models.CharField(
+        max_length=20,
+        choices=STATUS_CHOICES,
+        default='trial',
+        help_text="Current status of this tenant account"
+    )
+    
+    # Trial & Subscription control
+    trial_start = models.DateField(
+        default=timezone.now,
+        help_text="When the trial period started (auto-set on creation)"
+    )
+    trial_days = models.PositiveIntegerField(
+        default=14,
+        help_text="Number of days for trial period (default 14)"
+    )
+    subscription_expiry = models.DateField(
+        null=True,
+        blank=True,
+        help_text="When subscription/trial expires. Auto-calculated on creation."
+    )
+    
+    # Limits & Features
+    max_users = models.PositiveIntegerField(default=10)
+    max_customers = models.PositiveIntegerField(default=100)
+    features = models.JSONField(
+        default=dict,
+        help_text="Enabled features as JSON (e.g. {'analytics': true, 'billing': true})"
+    )
+    
+    # Billing
     billing_cycle = models.CharField(max_length=20, default='monthly')
     monthly_rate = models.DecimalField(max_digits=10, decimal_places=2, default=0.00)
     next_billing_date = models.DateField(null=True, blank=True)
     
     class Meta:
         ordering = ['-created_at']
+        verbose_name = "Tenant"
+        verbose_name_plural = "Tenants"
     
     def __str__(self):
-        return f"{self.company.name} ({self.subdomain})"
+        return f"{self.company.name} ({self.subdomain}) - {self.status}"
+    
+    def save(self, *args, **kwargs):
+        """Auto-calculate subscription_expiry on first save (trial)"""
+        if not self.pk:  # New instance
+            if self.status == 'trial':
+                self.trial_start = timezone.now().date()
+                self.subscription_expiry = self.trial_start + timezone.timedelta(days=self.trial_days)
+                self.next_billing_date = self.subscription_expiry  # first billing after trial
+                
+        super().save(*args, **kwargs)
     
     @property
     def is_trial_expired(self):
-        if self.status == 'trial' and self.created_at:
-            trial_end = self.created_at + timezone.timedelta(days=14)
-            return timezone.now() > trial_end
-        return False
+        """Check if trial has expired (only relevant if status='trial')"""
+        if self.status != 'trial' or not self.subscription_expiry:
+            return False
+        return timezone.now().date() > self.subscription_expiry
+    
+    @property
+    def days_left_in_trial(self):
+        """How many days remain in trial"""
+        if self.status != 'trial' or not self.subscription_expiry:
+            return 0
+        remaining = self.subscription_expiry - timezone.now().date()
+        return max(remaining.days, 0)
 
 
 class SystemSettings(BaseModel):

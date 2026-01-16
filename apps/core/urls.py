@@ -22,7 +22,8 @@ urlpatterns = [
     path('auth/token/refresh/', views.CustomTokenRefreshView.as_view(), name='token_refresh'),
     path('auth/change-password/', views.PasswordChangeView.as_view(), name='change-password'),
     path('settings/', views.GlobalSystemSettingsView.as_view(), name='system-settings'),
-    
+    path('companies/register/', views.CompanyRegisterView.as_view(), name='company-register'),
+
     # Email verification
     path('auth/verify-email/<uuid:token>/', views.VerifyEmailView.as_view(), name='verify_email'),
     path('auth/resend-verification/', views.ResendVerificationView.as_view(), name='resend_verification'),
