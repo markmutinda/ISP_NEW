@@ -82,7 +82,7 @@ class RegisterView(generics.CreateAPIView):
 
 class UserViewSet(viewsets.ModelViewSet):
     """
-    ViewSet for User management
+    ViewSet for User management - filtered by company
     """
     queryset = User.objects.all()
     serializer_class = UserSerializer
@@ -97,12 +97,46 @@ class UserViewSet(viewsets.ModelViewSet):
     
     def get_permissions(self):
         if self.action in ['create', 'destroy']:
-            permission_classes = [IsAuthenticated, IsAdmin]
-        elif self.action in ['update', 'partial_update']:
-            permission_classes = [IsAuthenticated, IsAdminOrStaff]
+            return [IsAuthenticated(), IsAdmin()]
+        elif self.action in ['update', 'partial_update', 'me', 'update_profile', 'change_password']:
+            return [IsAuthenticated()]
+        return [IsAuthenticated(), IsAdminOrStaff()]
+    
+    def get_queryset(self):
+        """
+        Superuser sees all users.
+        Company admins/staff see only users in their company.
+        """
+        qs = super().get_queryset().select_related('company')
+        
+        if self.request.user.is_superuser:
+            # Optional: allow filtering by company via query param
+            company_id = self.request.query_params.get('company_id')
+            if company_id:
+                return qs.filter(company_id=company_id)
+            return qs
+        
+        # Company users only see their own company
+        if hasattr(self.request.user, 'company') and self.request.user.company:
+            return qs.filter(company=self.request.user.company)
+        
+        # Fallback: nothing
+        return qs.none()
+    
+    def perform_create(self, serializer):
+        """
+        When creating a user, auto-set company to current user's company
+        (unless superuser explicitly sets another)
+        """
+        if self.request.user.is_superuser:
+            # Superuser can set any company
+            serializer.save()
         else:
-            permission_classes = [IsAuthenticated, IsAdminOrStaff]
-        return [permission() for permission in permission_classes]
+            # Normal company admin/staff → force their company
+            if hasattr(self.request.user, 'company') and self.request.user.company:
+                serializer.save(company=self.request.user.company)
+            else:
+                serializer.save()  # fallback
     
     @action(detail=False, methods=['get'])
     def me(self, request):

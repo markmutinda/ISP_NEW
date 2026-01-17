@@ -65,6 +65,7 @@ MIDDLEWARE = [
     # Your custom middleware
     'apps.core.middleware.AuditLogMiddleware',
     'apps.core.middleware.TenantMiddleware',
+    'apps.core.middleware.CompanyContextMiddleware',
 ]
 
 if DEBUG:

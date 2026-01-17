@@ -4,6 +4,7 @@ from rest_framework.decorators import action
 from rest_framework.response import Response
 from django_filters.rest_framework import DjangoFilterBackend
 from django.utils import timezone
+from rest_framework import serializers
 from apps.network.models.tr069_models import (
     ACSConfiguration, CPEDevice, TR069Parameter, TR069Session
 )
@@ -27,9 +28,28 @@ class ACSConfigurationViewSet(viewsets.ModelViewSet):
     
     def get_queryset(self):
         user = self.request.user
+        qs = super().get_queryset()
+        
         if user.is_superuser:
-            return ACSConfiguration.objects.all()
-        return ACSConfiguration.objects.filter(company__in=user.companies.all())
+            company_id = self.request.query_params.get('company_id')
+            if company_id:
+                return qs.filter(company_id=company_id)
+            return qs
+        
+        if hasattr(user, 'company') and user.company:
+            return qs.filter(company=user.company)
+        
+        return qs.none()
+
+    def perform_create(self, serializer):
+        user = self.request.user
+        if user.is_superuser:
+            serializer.save()
+        else:
+            if hasattr(user, 'company') and user.company:
+                serializer.save(company=user.company)
+            else:
+                raise serializers.ValidationError("No company assigned")
 
 
 class CPEDeviceViewSet(viewsets.ModelViewSet):
@@ -45,9 +65,28 @@ class CPEDeviceViewSet(viewsets.ModelViewSet):
     
     def get_queryset(self):
         user = self.request.user
+        qs = super().get_queryset()
+        
         if user.is_superuser:
-            return CPEDevice.objects.all()
-        return CPEDevice.objects.filter(company__in=user.companies.all())
+            company_id = self.request.query_params.get('company_id')
+            if company_id:
+                return qs.filter(company_id=company_id)
+            return qs
+        
+        if hasattr(user, 'company') and user.company:
+            return qs.filter(company=user.company)
+        
+        return qs.none()
+
+    def perform_create(self, serializer):
+        user = self.request.user
+        if user.is_superuser:
+            serializer.save()
+        else:
+            if hasattr(user, 'company') and user.company:
+                serializer.save(company=user.company)
+            else:
+                raise serializers.ValidationError("No company assigned")
     
     @action(detail=True, methods=['post'])
     def provision(self, request, pk=None):
@@ -155,9 +194,28 @@ class TR069ParameterViewSet(viewsets.ModelViewSet):
     
     def get_queryset(self):
         user = self.request.user
+        qs = super().get_queryset()
+        
         if user.is_superuser:
-            return TR069Parameter.objects.all()
-        return TR069Parameter.objects.filter(cpe_device__company__in=user.companies.all())
+            company_id = self.request.query_params.get('company_id')
+            if company_id:
+                return qs.filter(company_id=company_id)
+            return qs
+        
+        if hasattr(user, 'company') and user.company:
+            return qs.filter(company=user.company)
+        
+        return qs.none()
+
+    def perform_create(self, serializer):
+        user = self.request.user
+        if user.is_superuser:
+            serializer.save()
+        else:
+            if hasattr(user, 'company') and user.company:
+                serializer.save(company=user.company)
+            else:
+                raise serializers.ValidationError("No company assigned")
     
     @action(detail=True, methods=['post'])
     def set_value(self, request, pk=None):
@@ -209,6 +267,25 @@ class TR069SessionViewSet(viewsets.ReadOnlyModelViewSet):
     
     def get_queryset(self):
         user = self.request.user
+        qs = super().get_queryset()
+        
         if user.is_superuser:
-            return TR069Session.objects.all()
-        return TR069Session.objects.filter(cpe_device__company__in=user.companies.all())
+            company_id = self.request.query_params.get('company_id')
+            if company_id:
+                return qs.filter(company_id=company_id)
+            return qs
+        
+        if hasattr(user, 'company') and user.company:
+            return qs.filter(company=user.company)
+        
+        return qs.none()
+
+    def perform_create(self, serializer):
+        user = self.request.user
+        if user.is_superuser:
+            serializer.save()
+        else:
+            if hasattr(user, 'company') and user.company:
+                serializer.save(company=user.company)
+            else:
+                raise serializers.ValidationError("No company assigned")

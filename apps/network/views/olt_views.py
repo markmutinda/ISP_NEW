@@ -2,6 +2,7 @@
 from rest_framework import viewsets, status, filters
 from rest_framework.decorators import action
 from rest_framework.response import Response
+from rest_framework import serializers
 from django_filters.rest_framework import DjangoFilterBackend
 from apps.network.models.olt_models import (
     OLTDevice, OLTPort, PONPort, ONUDevice, OLTConfig
@@ -29,9 +30,28 @@ class OLTDeviceViewSet(viewsets.ModelViewSet):
     
     def get_queryset(self):
         user = self.request.user
+        qs = super().get_queryset()
+        
         if user.is_superuser:
-            return OLTDevice.objects.all()
-        return OLTDevice.objects.filter(company__in=user.companies.all())
+            company_id = self.request.query_params.get('company_id')
+            if company_id:
+                return qs.filter(company_id=company_id)
+            return qs
+        
+        if hasattr(user, 'company') and user.company:
+            return qs.filter(company=user.company)
+        
+        return qs.none()
+
+    def perform_create(self, serializer):
+        user = self.request.user
+        if user.is_superuser:
+            serializer.save()
+        else:
+            if hasattr(user, 'company') and user.company:
+                serializer.save(company=user.company)
+            else:
+                raise serializers.ValidationError("No company assigned to user")
     
     @action(detail=True, methods=['post'])
     def sync(self, request, pk=None):
@@ -110,9 +130,33 @@ class OLTPortViewSet(viewsets.ModelViewSet):
     
     def get_queryset(self):
         user = self.request.user
+        qs = super().get_queryset()
+        
         if user.is_superuser:
-            return OLTPort.objects.all()
-        return OLTPort.objects.filter(olt__company__in=user.companies.all())
+            company_id = self.request.query_params.get('company_id')
+            if company_id:
+                return qs.filter(olt__company_id=company_id)
+            return qs
+        
+        if hasattr(user, 'company') and user.company:
+            return qs.filter(olt__company=user.company)
+        
+        return qs.none()
+
+    def perform_create(self, serializer):
+        user = self.request.user
+        if user.is_superuser:
+            serializer.save()
+        else:
+            if hasattr(user, 'company') and user.company:
+                # Optional: validate olt belongs to user company
+                olt = self.request.data.get('olt')
+                if olt and OLTDevice.objects.filter(id=olt, company=user.company).exists():
+                    serializer.save()
+                else:
+                    raise serializers.ValidationError("OLT not found or not in your company")
+            else:
+                raise serializers.ValidationError("No company assigned")
     
     @action(detail=True, methods=['post'])
     def toggle_state(self, request, pk=None):
@@ -155,9 +199,33 @@ class PONPortViewSet(viewsets.ModelViewSet):
     
     def get_queryset(self):
         user = self.request.user
+        qs = super().get_queryset()
+        
         if user.is_superuser:
-            return PONPort.objects.all()
-        return PONPort.objects.filter(olt_port__olt__company__in=user.companies.all())
+            company_id = self.request.query_params.get('company_id')
+            if company_id:
+                return qs.filter(olt__company_id=company_id)
+            return qs
+        
+        if hasattr(user, 'company') and user.company:
+            return qs.filter(olt__company=user.company)
+        
+        return qs.none()
+
+    def perform_create(self, serializer):
+        user = self.request.user
+        if user.is_superuser:
+            serializer.save()
+        else:
+            if hasattr(user, 'company') and user.company:
+                # Optional: validate olt belongs to user company
+                olt = self.request.data.get('olt')
+                if olt and OLTDevice.objects.filter(id=olt, company=user.company).exists():
+                    serializer.save()
+                else:
+                    raise serializers.ValidationError("OLT not found or not in your company")
+            else:
+                raise serializers.ValidationError("No company assigned")
     
     @action(detail=True, methods=['get'])
     def onus(self, request, pk=None):
@@ -212,12 +280,33 @@ class ONUDeviceViewSet(viewsets.ModelViewSet):
     
     def get_queryset(self):
         user = self.request.user
+        qs = super().get_queryset()
+        
         if user.is_superuser:
-            return ONUDevice.objects.all()
-        return ONUDevice.objects.filter(
-            pon_port__olt_port__olt__company__in=user.companies.all()
-        )
-    
+            company_id = self.request.query_params.get('company_id')
+            if company_id:
+                return qs.filter(olt__company_id=company_id)
+            return qs
+        
+        if hasattr(user, 'company') and user.company:
+            return qs.filter(olt__company=user.company)
+        
+        return qs.none()
+
+    def perform_create(self, serializer):
+        user = self.request.user
+        if user.is_superuser:
+            serializer.save()
+        else:
+            if hasattr(user, 'company') and user.company:
+                # Optional: validate olt belongs to user company
+                olt = self.request.data.get('olt')
+                if olt and OLTDevice.objects.filter(id=olt, company=user.company).exists():
+                    serializer.save()
+                else:
+                    raise serializers.ValidationError("OLT not found or not in your company")
+            else:
+                raise serializers.ValidationError("No company assigned")
     @action(detail=True, methods=['post'])
     def sync(self, request, pk=None):
         """Sync ONU information from OLT"""

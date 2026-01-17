@@ -11,6 +11,7 @@ from django.utils import timezone
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from django.db.models import Sum, Avg, F
 from django.http import HttpResponse
+from rest_framework import serializers
 from django.views.decorators.csrf import csrf_exempt
 from django.utils.decorators import method_decorator
 
@@ -43,9 +44,28 @@ class RouterViewSet(viewsets.ModelViewSet):
 
     def get_queryset(self):
         user = self.request.user
+        qs = super().get_queryset()
+        
         if user.is_superuser:
-            return Router.objects.all()
-        return Router.objects.filter(company__in=user.companies.all())
+            company_id = self.request.query_params.get('company_id')
+            if company_id:
+                return qs.filter(company_id=company_id)
+            return qs
+        
+        if hasattr(user, 'company') and user.company:
+            return qs.filter(company=user.company)
+        
+        return qs.none()
+
+    def perform_create(self, serializer):
+        user = self.request.user
+        if user.is_superuser:
+            serializer.save()
+        else:
+            if hasattr(user, 'company') and user.company:
+                serializer.save(company=user.company)
+            else:
+                raise serializers.ValidationError("No company assigned")
 
     @action(detail=False, methods=['get'])
     def dashboard_stats(self, request):

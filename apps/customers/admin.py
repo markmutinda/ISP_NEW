@@ -74,6 +74,19 @@ class CustomerAdmin(admin.ModelAdmin):
         }),
     )
     
+    def get_queryset(self, request):
+        qs = super().get_queryset(request).select_related('user', 'company')
+        if request.user.is_superuser:
+            return qs
+        if hasattr(request.user, 'company') and request.user.company:
+            return qs.filter(company=request.user.company)
+        return qs.none()
+    
+    def save_model(self, request, obj, form, change):
+        if not change:
+            obj.company = request.user.company
+        super().save_model(request, obj, form, change)
+
     def full_name_display(self, obj):
         return obj.user.get_full_name()
     full_name_display.short_description = 'Name'
@@ -345,17 +358,18 @@ class ServiceConnectionAdmin(admin.ModelAdmin):
     )
     
     def get_queryset(self, request):
-        qs = super().get_queryset(request)
-        qs = qs.select_related(
-            'customer', 'customer__user',
-            'installation_address', 'installed_by'
+        qs = super().get_queryset(request).select_related(
+            'customer', 'customer__user', 'customer__company'
         )
-        return qs
+        if request.user.is_superuser:
+            return qs
+        if hasattr(request.user, 'company') and request.user.company:
+            return qs.filter(customer__company=request.user.company)
+        return qs.none()
     
     def save_model(self, request, obj, form, change):
-        if not change and obj.status == 'ACTIVE' and not obj.activation_date:
-            obj.activation_date = timezone.now()
-            obj.installed_by = request.user
+        if not change:
+            obj.company = request.user.company
         super().save_model(request, obj, form, change)
     
     actions = ['activate_services', 'suspend_services']

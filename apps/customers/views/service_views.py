@@ -16,10 +16,11 @@ from utils.pagination import StandardResultsSetPagination
 
 
 class ServiceConnectionViewSet(viewsets.ModelViewSet):
-    """ViewSet for managing service connections"""
+    """ViewSet for managing service connections - company filtered"""
     queryset = ServiceConnection.objects.select_related(
-        'customer', 'customer__user', 'installation_address'
-    ).all()
+        'customer', 'customer__user', 'installation_address', 'customer__company'
+    ).prefetch_related('customer__company')
+    
     serializer_class = ServiceConnectionSerializer
     permission_classes = [IsAuthenticated, CustomerAccessPermission]
     filter_backends = [DjangoFilterBackend]
@@ -37,39 +38,53 @@ class ServiceConnectionViewSet(viewsets.ModelViewSet):
     
     def get_permissions(self):
         if self.action in ['create', 'update', 'partial_update', 'destroy']:
-            permission_classes = [IsAuthenticated, IsAdminOrStaff]
+            return [IsAuthenticated(), IsAdminOrStaff()]
         elif self.action in ['activate', 'suspend', 'terminate']:
-            permission_classes = [IsAuthenticated, IsAdminOrStaff | IsTechnician]
-        else:
-            permission_classes = [IsAuthenticated, CustomerAccessPermission]
-        return [permission() for permission in permission_classes]
+            return [IsAuthenticated(), IsAdminOrStaff() | IsTechnician()]
+        return [IsAuthenticated(), CustomerAccessPermission()]
     
     def get_queryset(self):
-        customer_id = self.kwargs.get('customer_pk', None)
+        """
+        - Superuser: sees everything (optional company filter)
+        - Company admin/staff: only their company's services
+        - Customer: only their own services
+        """
+        qs = super().get_queryset()
+        user = self.request.user
         
-        if customer_id:
-            customer = get_object_or_404(Customer, pk=customer_id)
-            # Check permissions
-            self.check_object_permissions(self.request, customer)
-            return ServiceConnection.objects.filter(customer=customer)
+        if user.is_superuser:
+            # Optional: filter by company via query param
+            company_id = self.request.query_params.get('company_id')
+            if company_id:
+                return qs.filter(customer__company_id=company_id)
+            return qs
         
-        # For listing all services (admin/staff only)
-        if self.request.user.role in ['ADMIN', 'STAFF']:
-            return ServiceConnection.objects.all()
+        # Company users only see their company's services
+        if hasattr(user, 'company') and user.company:
+            return qs.filter(customer__company=user.company)
         
-        # Customers can only see their own services
-        if hasattr(self.request.user, 'customer_profile'):
-            return ServiceConnection.objects.filter(
-                customer=self.request.user.customer_profile
-            )
+        # Customers see only their own
+        if hasattr(user, 'customer_profile'):
+            return qs.filter(customer=user.customer_profile)
         
-        return ServiceConnection.objects.none()
+        return qs.none()
     
     def perform_create(self, serializer):
-        customer_id = self.kwargs.get('customer_pk')
-        customer = get_object_or_404(Customer, pk=customer_id)
-        serializer.save(customer=customer)
-    
+        """
+        Auto-assign company when creating service
+        (via customer, since service belongs to customer)
+        """
+        # If customer_pk in URL (nested router), use that customer
+        customer_pk = self.kwargs.get('customer_pk')
+        if customer_pk:
+            customer = get_object_or_404(Customer, pk=customer_pk)
+            # Ensure customer belongs to user's company (security)
+            if not self.request.user.is_superuser and customer.company != self.request.user.company:
+                self.permission_denied(self.request)
+            serializer.save(customer=customer)
+        else:
+            # Fallback - should not happen if using nested router
+            serializer.save()
     @action(detail=True, methods=['post'])
     def activate(self, request, customer_pk=None, pk=None):
         """Activate a service"""

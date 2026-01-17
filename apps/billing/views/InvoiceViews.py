@@ -6,6 +6,7 @@ from rest_framework.permissions import IsAuthenticated
 from django_filters.rest_framework import DjangoFilterBackend
 from django.utils import timezone
 from django.db.models import Q, Sum
+from rest_framework import serializers
 from decimal import Decimal
 import json
 
@@ -49,38 +50,43 @@ class PlanViewSet(viewsets.ModelViewSet):
             return [IsAuthenticated(), IsCompanyStaff()]
     
     def get_queryset(self):
-        """Filter plans by company"""
+        """Strong company isolation"""
         user = self.request.user
         
-        # For public endpoint, show all active public plans
+        # Public endpoint: only active public plans (no company filter)
         if self.action == 'public':
             return Plan.objects.filter(is_active=True, is_public=True)
         
-        # For admin/staff, filter by their company
         if user.is_superuser:
+            # Superuser can optionally filter by company
+            company_id = self.request.query_params.get('company_id')
+            if company_id:
+                return Plan.objects.filter(company_id=company_id)
             return Plan.objects.all()
         
-        # For regular users, filter by their company
-        if hasattr(user, 'company'):
+        # Company users see only their own plans
+        if hasattr(user, 'company') and user.company:
             return Plan.objects.filter(company=user.company)
         
         return Plan.objects.none()
-    
+
     def perform_create(self, serializer):
-        """Set created_by and company on plan creation"""
-        # Get company from user if available, otherwise use first company
+        """Force company for non-superusers"""
         user = self.request.user
-        company = getattr(user, 'company', None)
-        if not company:
-            company = Company.objects.first()
-        
-        serializer.save(
-            created_by=user,
-            company=company
-        )
-    
+        if user.is_superuser:
+            # Superuser can set any company (via request data)
+            serializer.save(created_by=user)
+        else:
+            # Force current user's company
+            if hasattr(user, 'company') and user.company:
+                serializer.save(
+                    created_by=user,
+                    company=user.company
+                )
+            else:
+                raise serializers.ValidationError("No company assigned to user")
+
     def perform_update(self, serializer):
-        """Set updated_by on plan update"""
         serializer.save(updated_by=self.request.user)
     
     @action(detail=True, methods=['post'])
@@ -254,18 +260,30 @@ class BillingCycleViewSet(viewsets.ModelViewSet):
     ordering_fields = ['start_date', 'end_date', 'created_at']
     
     def get_queryset(self):
-        """Filter billing cycles by company"""
         user = self.request.user
         if user.is_superuser:
+            company_id = self.request.query_params.get('company_id')
+            if company_id:
+                return BillingCycle.objects.filter(company_id=company_id)
             return BillingCycle.objects.all()
-        return BillingCycle.objects.filter(company=user.company)
-    
+        
+        if hasattr(user, 'company') and user.company:
+            return BillingCycle.objects.filter(company=user.company)
+        
+        return BillingCycle.objects.none()
+
     def perform_create(self, serializer):
-        """Set created_by and company on creation"""
-        serializer.save(
-            created_by=self.request.user,
-            company=self.request.user.company
-        )
+        user = self.request.user
+        if user.is_superuser:
+            serializer.save(created_by=user)
+        else:
+            if hasattr(user, 'company') and user.company:
+                serializer.save(
+                    created_by=user,
+                    company=user.company
+                )
+            else:
+                raise serializers.ValidationError("No company assigned")
     
     @action(detail=True, methods=['post'])
     def close_cycle(self, request, pk=None):
@@ -379,27 +397,29 @@ class InvoiceViewSet(viewsets.ModelViewSet):
         return InvoiceSerializer
     
     def get_queryset(self):
-        """Filter invoices by company and user role"""
         user = self.request.user
-        queryset = Invoice.objects.all()
-        
         if user.is_superuser:
-            return queryset
+            company_id = self.request.query_params.get('company_id')
+            if company_id:
+                return InvoiceItem.objects.filter(invoice__company_id=company_id)
+            return InvoiceItem.objects.all()
         
-        queryset = queryset.filter(company=user.company)
+        if hasattr(user, 'company') and user.company:
+            return InvoiceItem.objects.filter(invoice__company=user.company)
         
-        # Customers can only see their own invoices
-        if user.role == 'customer' and hasattr(user, 'customer_profile'):
-            return queryset.filter(customer=user.customer_profile)
-        
-        return queryset
-    
+        return InvoiceItem.objects.none()
+
     def perform_create(self, serializer):
-        """Set created_by and company on invoice creation"""
-        serializer.save(
-            created_by=self.request.user,
-            company=self.request.user.company
-        )
+        user = self.request.user
+        invoice_id = self.request.data.get('invoice')
+        try:
+            invoice = Invoice.objects.get(id=invoice_id)
+            # Security: non-superuser can only add to own company's invoice
+            if not user.is_superuser and invoice.company != user.company:
+                raise serializers.ValidationError("Not authorized for this invoice")
+            serializer.save(invoice=invoice)
+        except Invoice.DoesNotExist:
+            raise serializers.ValidationError("Invalid invoice ID")
     
     @action(detail=True, methods=['post'])
     def issue(self, request, pk=None):

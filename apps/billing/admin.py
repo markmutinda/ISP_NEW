@@ -3,7 +3,7 @@ from django.utils.html import format_html
 from django.urls import reverse
 from django.utils import timezone
 from django.contrib import messages
-from apps.core.models import User
+from apps.core.models import Company, User
 from .models.billing_models import Plan, BillingCycle, Invoice, InvoiceItem
 from .models.payment_models import PaymentMethod, Payment, Receipt
 from .models.voucher_models import VoucherBatch, Voucher, VoucherUsage
@@ -46,7 +46,35 @@ class PlanAdmin(admin.ModelAdmin):
             'classes': ('collapse',)
         })
     )
-
+    
+    def get_queryset(self, request):
+        qs = super().get_queryset(request).select_related('company')
+        if request.user.is_superuser:
+            return qs
+        if hasattr(request.user, 'company') and request.user.company:
+            return qs.filter(company=request.user.company)
+        return qs.none()
+    
+    def save_model(self, request, obj, form, change):
+        if not change:
+            obj.company = request.user.company
+            obj.created_by = request.user
+        obj.updated_by = request.user
+        super().save_model(request, obj, form, change)
+    
+    def formfield_for_foreignkey(self, db_field, request, **kwargs):
+        if db_field.name in ['company']:  # add other FKs if needed
+            if not request.user.is_superuser:
+                if hasattr(request.user, 'company') and request.user.company:
+                    kwargs['queryset'] = Company.objects.filter(id=request.user.company.id)
+                else:
+                    kwargs['queryset'] = Company.objects.none()
+        return super().formfield_for_foreignkey(db_field, request, **kwargs)
+    
+    def has_delete_permission(self, request, obj=None):
+        if obj and not request.user.is_superuser:
+            return False
+        return super().has_delete_permission(request, obj)
 
 @admin.register(BillingCycle)
 class BillingCycleAdmin(admin.ModelAdmin):
@@ -90,7 +118,35 @@ class BillingCycleAdmin(admin.ModelAdmin):
                 cycle.close_cycle(request.user)
         self.message_user(request, f"Closed {queryset.count()} billing cycles.")
     close_cycle.short_description = "Close selected billing cycles"
-
+    
+    def get_queryset(self, request):
+        qs = super().get_queryset(request).select_related('company')
+        if request.user.is_superuser:
+            return qs
+        if hasattr(request.user, 'company') and request.user.company:
+            return qs.filter(company=request.user.company)
+        return qs.none()
+    
+    def save_model(self, request, obj, form, change):
+        if not change:
+            obj.company = request.user.company
+            obj.created_by = request.user
+        obj.updated_by = request.user
+        super().save_model(request, obj, form, change)
+    
+    def formfield_for_foreignkey(self, db_field, request, **kwargs):
+        if db_field.name in ['company']:  # add other FKs if needed
+            if not request.user.is_superuser:
+                if hasattr(request.user, 'company') and request.user.company:
+                    kwargs['queryset'] = Company.objects.filter(id=request.user.company.id)
+                else:
+                    kwargs['queryset'] = Company.objects.none()
+        return super().formfield_for_foreignkey(db_field, request, **kwargs)
+    
+    def has_delete_permission(self, request, obj=None):
+        if obj and not request.user.is_superuser:
+            return False
+        return super().has_delete_permission(request, obj)
 
 class InvoiceItemInline(admin.TabularInline):
     model = InvoiceItem
@@ -173,7 +229,35 @@ class InvoiceAdmin(admin.ModelAdmin):
             invoice.save()
         self.message_user(request, f"Marked {queryset.count()} invoices as paid.")
     mark_as_paid.short_description = "Mark as paid"
-
+    
+    def get_queryset(self, request):
+        qs = super().get_queryset(request).select_related('company')
+        if request.user.is_superuser:
+            return qs
+        if hasattr(request.user, 'company') and request.user.company:
+            return qs.filter(company=request.user.company)
+        return qs.none()
+    
+    def save_model(self, request, obj, form, change):
+        if not change:
+            obj.company = request.user.company
+            obj.created_by = request.user
+        obj.updated_by = request.user
+        super().save_model(request, obj, form, change)
+    
+    def formfield_for_foreignkey(self, db_field, request, **kwargs):
+        if db_field.name in ['company']:  # add other FKs if needed
+            if not request.user.is_superuser:
+                if hasattr(request.user, 'company') and request.user.company:
+                    kwargs['queryset'] = Company.objects.filter(id=request.user.company.id)
+                else:
+                    kwargs['queryset'] = Company.objects.none()
+        return super().formfield_for_foreignkey(db_field, request, **kwargs)
+    
+    def has_delete_permission(self, request, obj=None):
+        if obj and not request.user.is_superuser:
+            return False
+        return super().has_delete_permission(request, obj)
 
 # Payment Models Admin
 @admin.register(PaymentMethod)
