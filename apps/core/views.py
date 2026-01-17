@@ -590,7 +590,6 @@ class CompanyRegisterView(generics.CreateAPIView):
         serializer.is_valid(raise_exception=True)
         data = serializer.validated_data
         
-        # Create Company
         company = Company.objects.create(
             name=data['company_name'],
             email=data['company_email'],
@@ -601,11 +600,17 @@ class CompanyRegisterView(generics.CreateAPIView):
             registration_number=data.get('company_registration_number', ''),
             tax_pin=data.get('company_tax_pin', ''),
             website=data.get('company_website', ''),
-            company_type='isp',  # Default for new ISPs
-            subscription_plan='basic',  # Or your default
+            company_type='isp',
+            subscription_plan='basic',
             is_active=True
         )
         
+                # Prevent duplicate empty registration_number
+        if not company.registration_number.strip():  # if empty or whitespace
+            from uuid import uuid4
+            company.registration_number = f"REG-{uuid4().hex[:10].upper()}"
+            company.save()
+
         # Auto-generate slug if not set
         if not company.slug:
             from django.utils.text import slugify

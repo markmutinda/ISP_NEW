@@ -238,7 +238,14 @@ class Company(BaseModel):
     postal_code = models.CharField(max_length=20, null=True, blank=True)
     
     # Business Information
-    registration_number = models.CharField(max_length=100, unique=True)
+    registration_number = models.CharField(
+    max_length=100,
+    blank=True,                    # Allow empty input
+    null=True,                     # Allow null in DB (optional but safer)
+    unique=False,                  # ← Remove unique constraint
+    verbose_name="Registration Number",
+    help_text="Optional. Leave blank if not applicable."
+    )
     tax_pin = models.CharField(max_length=50, null=True, blank=True)
     website = models.URLField(null=True, blank=True)
     logo = models.ImageField(upload_to='company_logos/', null=True, blank=True)
