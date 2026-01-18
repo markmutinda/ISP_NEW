@@ -41,39 +41,31 @@ from apps.network.views.tr069_views import (
 # =========================
 router = DefaultRouter()
 
-# === Router Management (PROTECTED) ===
-router.register(r'routers', RouterViewSet, basename='router')
-
-# === IPAM ===
-router.register(r'subnets', SubnetViewSet, basename='subnet')
-router.register(r'vlans', VLANViewSet, basename='vlan')
-router.register(r'ip-pools', IPPoolViewSet, basename='ip-pool')
-router.register(r'ip-addresses', IPAddressViewSet, basename='ip-address')
-router.register(r'dhcp-ranges', DHCPRangeViewSet, basename='dhcp-range')
-
-# === OLT ===
-router.register(r'olts', OLTDeviceViewSet, basename='olt')
-router.register(r'olt-ports', OLTPortViewSet, basename='olt-port')
-router.register(r'pon-ports', PONPortViewSet, basename='pon-port')
-router.register(r'onus', ONUDeviceViewSet, basename='onu')
-router.register(r'olt-configs', OLTConfigViewSet, basename='olt-config')
-
-# === TR-069 ===
-router.register(r'acs-configs', ACSConfigurationViewSet, basename='acs-config')
-router.register(r'cpe-devices', CPEDeviceViewSet, basename='cpe-device')
-router.register(r'tr069-parameters', TR069ParameterViewSet, basename='tr069-parameter')
-router.register(r'tr069-sessions', TR069SessionViewSet, basename='tr069-session')
-
+# Register ALL viewsets - no basename conflicts
+router.register(r'routers', RouterViewSet)
+router.register(r'subnets', SubnetViewSet)
+router.register(r'vlans', VLANViewSet)
+router.register(r'ip-pools', IPPoolViewSet)
+router.register(r'ip-addresses', IPAddressViewSet)
+router.register(r'dhcp-ranges', DHCPRangeViewSet)
+router.register(r'olts', OLTDeviceViewSet)
+router.register(r'olt-ports', OLTPortViewSet)
+router.register(r'pon-ports', PONPortViewSet)
+router.register(r'onus', ONUDeviceViewSet)
+router.register(r'olt-configs', OLTConfigViewSet)
+router.register(r'acs-configs', ACSConfigurationViewSet)
+router.register(r'cpe-devices', CPEDeviceViewSet)
+router.register(r'tr069-parameters', TR069ParameterViewSet)
+router.register(r'tr069-sessions', TR069SessionViewSet)
 
 # =========================
-# URLPATTERNS
+# URLPATTERNS - Clean & Conflict-Free
 # =========================
 urlpatterns = [
+    # 1. All protected ViewSet routes (list + detail + actions)
+    path('', include(router.urls)),
 
-    # 🔓 PUBLIC ROUTER ENDPOINTS (MUST COME FIRST)
+    # 2. Public router endpoints (specific paths - placed AFTER router to avoid shadowing)
     path('routers/auth/', RouterAuthenticateView.as_view(), name='router-authenticate'),
     path('routers/heartbeat/', RouterHeartbeatView.as_view(), name='router-heartbeat'),
-
-    # 🔐 PROTECTED API (ViewSets)
-    path('', include(router.urls)),
 ]

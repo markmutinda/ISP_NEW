@@ -102,7 +102,7 @@ class UserCreateSerializer(serializers.ModelSerializer):
     )
     confirm_password = serializers.CharField(
         write_only=True, 
-        required=True,
+        required=False,
         style={'input_type': 'password'}
     )
     
