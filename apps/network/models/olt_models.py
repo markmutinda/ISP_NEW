@@ -1,4 +1,3 @@
-# apps/network/models/olt_models.py
 from django.db import models
 from django.conf import settings
 from django.core.validators import MinValueValidator, MaxValueValidator
@@ -6,7 +5,8 @@ from apps.core.models import Company, AuditMixin
 from apps.customers.models import ServiceConnection
 
 
-class OLTDevice(AuditMixin, models.Model):
+
+class OLTDevice(AuditMixin):
     """OLT Device Model"""
     VENDOR_CHOICES = [
         ('ZTE', 'ZTE'),
@@ -24,7 +24,6 @@ class OLTDevice(AuditMixin, models.Model):
         ('DECOMMISSIONED', 'Decommissioned'),
     ]
     
-    company = models.ForeignKey(Company, on_delete=models.CASCADE, related_name='olt_devices')
     name = models.CharField(max_length=100)
     hostname = models.CharField(max_length=200, unique=True)
     ip_address = models.GenericIPAddressField(protocol='IPv4')
@@ -42,17 +41,25 @@ class OLTDevice(AuditMixin, models.Model):
     last_sync = models.DateTimeField(null=True, blank=True)
     notes = models.TextField(blank=True)
     
+    # Tenant schema field
+    schema_name = models.SlugField(
+        max_length=63,
+        unique=True,
+        editable=False,
+        default="default_schema"
+    )
+    
     class Meta:
         verbose_name = 'OLT Device'
         verbose_name_plural = 'OLT Devices'
         ordering = ['name']
-        unique_together = [['company', 'serial_number']]
+        unique_together = [['serial_number']]
     
     def __str__(self):
         return f"{self.name} ({self.vendor})"
 
 
-class OLTPort(AuditMixin, models.Model):
+class OLTPort(AuditMixin):
     """OLT Port Model (Physical Ports)"""
     PORT_TYPE_CHOICES = [
         ('UPLINK', 'Uplink'),
@@ -72,6 +79,14 @@ class OLTPort(AuditMixin, models.Model):
     mtu = models.IntegerField(default=1500)
     last_change = models.DateTimeField(auto_now=True)
     
+    # Tenant schema field
+    schema_name = models.SlugField(
+        max_length=63,
+        unique=True,
+        editable=False,
+        default="default_schema"
+    )
+    
     class Meta:
         verbose_name = 'OLT Port'
         verbose_name_plural = 'OLT Ports'
@@ -82,7 +97,7 @@ class OLTPort(AuditMixin, models.Model):
         return f"{self.olt.name} - Port {self.port_number}"
 
 
-class PONPort(AuditMixin, models.Model):
+class PONPort(AuditMixin):
     """PON Port Model (Specifically for GPON/EPON)"""
     PON_TYPE_CHOICES = [
         ('GPON', 'GPON'),
@@ -106,6 +121,14 @@ class PONPort(AuditMixin, models.Model):
         ('FAILED', 'Failed'),
     ], default='OPERATIONAL')
     
+    # Tenant schema field
+    schema_name = models.SlugField(
+        max_length=63,
+        unique=True,
+        editable=False,
+        default="default_schema"
+    )
+    
     class Meta:
         verbose_name = 'PON Port'
         verbose_name_plural = 'PON Ports'
@@ -116,7 +139,7 @@ class PONPort(AuditMixin, models.Model):
         return f"PON {self.pon_index} - {self.pon_type}"
 
 
-class ONUDevice(AuditMixin, models.Model):
+class ONUDevice(AuditMixin):
     """ONU Device Model"""
     ONU_TYPE_CHOICES = [
         ('HG8245H', 'Huawei HG8245H'),
@@ -155,6 +178,14 @@ class ONUDevice(AuditMixin, models.Model):
     registration_date = models.DateTimeField(null=True, blank=True)
     config_version = models.CharField(max_length=50, blank=True)
     
+    # Tenant schema field
+    schema_name = models.SlugField(
+        max_length=63,
+        unique=True,
+        editable=False,
+        default="default_schema"
+    )
+    
     class Meta:
         verbose_name = 'ONU Device'
         verbose_name_plural = 'ONU Devices'
@@ -164,7 +195,7 @@ class ONUDevice(AuditMixin, models.Model):
         return f"ONU {self.serial_number[:8]} - {self.service_connection.customer.full_name if self.service_connection else 'Unassigned'}"
 
 
-class OLTConfig(AuditMixin, models.Model):
+class OLTConfig(AuditMixin):
     """OLT Configuration Snapshot"""
     olt = models.ForeignKey(OLTDevice, on_delete=models.CASCADE, related_name='configs')
     config_type = models.CharField(max_length=20, choices=[
@@ -178,6 +209,14 @@ class OLTConfig(AuditMixin, models.Model):
     applied_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True)
     applied_date = models.DateTimeField(auto_now_add=True)
     is_active = models.BooleanField(default=True)
+    
+    # Tenant schema field
+    schema_name = models.SlugField(
+        max_length=63,
+        unique=True,
+        editable=False,
+        default="default_schema"
+    )
     
     class Meta:
         verbose_name = 'OLT Configuration'

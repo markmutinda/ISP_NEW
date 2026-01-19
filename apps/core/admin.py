@@ -6,6 +6,8 @@ from django.contrib.auth.admin import UserAdmin as BaseUserAdmin
 from django.utils.translation import gettext_lazy as _
 from django.contrib.auth.forms import UserChangeForm, UserCreationForm
 from .models import User, Company, Tenant, SystemSettings, AuditLog, GlobalSystemSettings
+from django_tenants.admin import TenantAdminMixin
+from .models import Domain
 
 
 class UserCreationForm(UserCreationForm):
@@ -402,3 +404,6 @@ admin_site.register(SystemSettings, SystemSettingsAdmin)
 admin_site.register(AuditLog, AuditLogAdmin)
 admin_site.register(GlobalSystemSettings, GlobalSystemSettingsAdmin)
 
+@admin.register(Domain)
+class DomainAdmin(TenantAdminMixin, admin.ModelAdmin):
+    list_display = ('domain', 'tenant', 'is_primary')

@@ -1,13 +1,12 @@
-# apps/network/models/tr069_models.py
 from django.db import models
 from django.conf import settings
-from apps.core.models import  Company, AuditMixin
+from apps.core.models import Company, AuditMixin
 from apps.customers.models import ServiceConnection
 
 
-class ACSConfiguration(AuditMixin, models.Model):
+
+class ACSConfiguration(AuditMixin):
     """ACS (Auto Configuration Server) Configuration"""
-    company = models.ForeignKey(Company, on_delete=models.CASCADE, related_name='acs_configs')
     name = models.CharField(max_length=100)
     acs_url = models.URLField()
     acs_username = models.CharField(max_length=100, blank=True)
@@ -18,6 +17,14 @@ class ACSConfiguration(AuditMixin, models.Model):
     periodic_interval = models.IntegerField(default=86400)  # in seconds
     is_active = models.BooleanField(default=True)
     
+    # Tenant schema field
+    schema_name = models.SlugField(
+        max_length=63,
+        unique=True,
+        editable=False,
+        default="default_schema"
+    )
+    
     class Meta:
         verbose_name = 'ACS Configuration'
         verbose_name_plural = 'ACS Configurations'
@@ -26,7 +33,7 @@ class ACSConfiguration(AuditMixin, models.Model):
         return f"{self.name} ({self.acs_url})"
 
 
-class CPEDevice(AuditMixin, models.Model):
+class CPEDevice(AuditMixin):
     """CPE Device Model (TR-069 Enabled)"""
     MANUFACTURER_CHOICES = [
         ('HUAWEI', 'Huawei'),
@@ -45,7 +52,6 @@ class CPEDevice(AuditMixin, models.Model):
         ('ERROR', 'Error'),
     ]
     
-    company = models.ForeignKey(Company, on_delete=models.CASCADE, related_name='cpe_devices')
     service_connection = models.OneToOneField(
         ServiceConnection,
         on_delete=models.SET_NULL,
@@ -80,6 +86,14 @@ class CPEDevice(AuditMixin, models.Model):
     configuration_file = models.TextField(blank=True)  # TR-069 config file
     custom_parameters = models.JSONField(default=dict, blank=True)
     
+    # Tenant schema field
+    schema_name = models.SlugField(
+        max_length=63,
+        unique=True,
+        editable=False,
+        default="default_schema"
+    )
+    
     class Meta:
         verbose_name = 'CPE Device'
         verbose_name_plural = 'CPE Devices'
@@ -94,7 +108,7 @@ class CPEDevice(AuditMixin, models.Model):
         return f"{self.manufacturer} {self.model} - {self.serial_number[:8]}"
 
 
-class TR069Parameter(AuditMixin, models.Model):
+class TR069Parameter(AuditMixin):
     """TR-069 Parameter Model"""
     PARAMETER_TYPE = [
         ('STRING', 'String'),
@@ -125,6 +139,14 @@ class TR069Parameter(AuditMixin, models.Model):
     description = models.TextField(blank=True)
     last_updated = models.DateTimeField(auto_now=True)
     
+    # Tenant schema field
+    schema_name = models.SlugField(
+        max_length=63,
+        unique=True,
+        editable=False,
+        default="default_schema"
+    )
+    
     class Meta:
         verbose_name = 'TR-069 Parameter'
         verbose_name_plural = 'TR-069 Parameters'
@@ -135,7 +157,7 @@ class TR069Parameter(AuditMixin, models.Model):
         return f"{self.parameter_name.split('.')[-1]}"
 
 
-class TR069Session(AuditMixin, models.Model):
+class TR069Session(AuditMixin):
     """TR-069 Session Log"""
     SESSION_TYPE = [
         ('INFORM', 'Inform'),
@@ -166,6 +188,14 @@ class TR069Session(AuditMixin, models.Model):
     response_data = models.JSONField(null=True, blank=True)
     error_message = models.TextField(blank=True)
     initiated_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True)
+    
+    # Tenant schema field
+    schema_name = models.SlugField(
+        max_length=63,
+        unique=True,
+        editable=False,
+        default="default_schema"
+    )
     
     class Meta:
         verbose_name = 'TR-069 Session'

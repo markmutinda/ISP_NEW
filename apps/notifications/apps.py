@@ -137,3 +137,4 @@ Best regards,
             ).exists():
                 NotificationTemplate.objects.create(**template_data)
                 logger.info(f"Created default template: {template_data['name']}")
+

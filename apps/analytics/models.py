@@ -1,16 +1,17 @@
 from django.db import models
 from django.contrib.auth import get_user_model
 from django.db.models import JSONField
-from django.core.cache import cache
 from django.utils import timezone
+  # ← Add this import
 from apps.customers.models import Customer
-from apps.billing.models import Invoice, Payment
 from apps.network.models import OLTDevice, CPEDevice
 
 User = get_user_model()
 
 
 class ReportDefinition(models.Model):
+    """Definition of reports available to tenants"""
+    
     REPORT_TYPES = [
         ('financial', 'Financial Report'),
         ('network', 'Network Report'),
@@ -36,14 +37,18 @@ class ReportDefinition(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
     
+    # TenantMixin required field with default
     def __str__(self):
         return self.name
     
     class Meta:
+        app_label = 'analytics'
         ordering = ['-created_at']
 
 
 class DashboardWidget(models.Model):
+    """Widgets displayed on tenant dashboards"""
+    
     WIDGET_TYPES = [
         ('chart', 'Chart'),
         ('metric', 'Metric'),
@@ -70,19 +75,24 @@ class DashboardWidget(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
     
+    # TenantMixin required field with default
     def __str__(self):
         return self.name
     
     class Meta:
+        app_label = 'analytics'
         ordering = ['position']
 
 
 class AnalyticsCache(models.Model):
+    """Cached analytics data per tenant"""
+    
     cache_key = models.CharField(max_length=255, unique=True)
     data = JSONField(default=dict)
     expires_at = models.DateTimeField()
     created_at = models.DateTimeField(auto_now_add=True)
     
+    # TenantMixin required field with default
     def is_valid(self):
         return self.expires_at > timezone.now()
     
@@ -90,4 +100,5 @@ class AnalyticsCache(models.Model):
         return self.cache_key
     
     class Meta:
+        app_label = 'analytics'
         ordering = ['-created_at']

@@ -6,7 +6,6 @@ from .views import (
     TrafficRuleViewSet,
     DataUsageViewSet,
     BandwidthAlertViewSet,
-    SpeedTestResultViewSet,
     TrafficAnalysisViewSet
 )
 
@@ -15,7 +14,6 @@ router.register(r'profiles', BandwidthProfileViewSet, basename='bandwidth-profil
 router.register(r'traffic-rules', TrafficRuleViewSet, basename='traffic-rule')
 router.register(r'usage', DataUsageViewSet, basename='data-usage')
 router.register(r'alerts', BandwidthAlertViewSet, basename='bandwidth-alert')
-router.register(r'speed-tests', SpeedTestResultViewSet, basename='speed-test')
 router.register(r'analysis', TrafficAnalysisViewSet, basename='traffic-analysis')
 
 urlpatterns = [

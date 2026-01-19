@@ -15,10 +15,11 @@ from django_filters.rest_framework import DjangoFilterBackend
 from django.db.models import Q, Sum, Count
 
 # Custom permissions
+from ..models.payment_models import Payment
 from apps.core.permissions import IsCompanyAdmin, IsCompanyStaff
 from apps.customers.models import Customer
 from ..models.billing_models import Invoice
-from ..models.payment_models import Payment, PaymentMethod, Receipt
+# from ..models.payment_models import Payment, PaymentMethod, Receipt   # ← COMMENTED OUT to prevent circular/early import error
 from ..serializers import (
     PaymentSerializer, PaymentMethodSerializer, ReceiptSerializer,
     PaymentCreateSerializer, PaymentDetailSerializer, MpesaSTKPushSerializer
@@ -29,73 +30,61 @@ from ..integrations.africastalking import SMSService
 logger = logging.getLogger(__name__)
 
 
-class PaymentMethodViewSet(viewsets.ModelViewSet):
-    """
-    ViewSet for managing payment methods (including PayHero channels)
-    """
-    queryset = PaymentMethod.objects.all()
-    serializer_class = PaymentMethodSerializer
-    permission_classes = [IsAuthenticated, IsCompanyAdmin]
-    filter_backends = [DjangoFilterBackend, filters.SearchFilter]
-    filterset_fields = ['method_type', 'is_active', 'status', 'is_payhero_enabled']
-    search_fields = ['name', 'code', 'description', 'channel_id']
+# Temporarily disabled PaymentMethodViewSet to break import chain
+# Uncomment after migrations succeed and models are loadable
+# class PaymentMethodViewSet(viewsets.ModelViewSet):
+#     """
+#     ViewSet for managing payment methods (including PayHero channels)
+#     """
+#     queryset = PaymentMethod.objects.all()  # ← this line was causing the crash
+#     serializer_class = PaymentMethodSerializer
+#     permission_classes = [IsAuthenticated, IsCompanyAdmin]
+#     filter_backends = [DjangoFilterBackend, filters.SearchFilter]
+#     filterset_fields = ['method_type', 'is_active', 'status', 'is_payhero_enabled']
+#     search_fields = ['name', 'code', 'description', 'channel_id']
+#
+#     def get_queryset(self):
+#         user = self.request.user
+#         if user.is_superuser:
+#             return PaymentMethod.objects.all()
+#         return PaymentMethod.objects.filter(company=user.company)
+#
+#     def perform_create(self, serializer):
+#         serializer.save(
+#             created_by=self.request.user,
+#             company=self.request.user.company
+#         )
+#
+#     @action(detail=True, methods=['post'])
+#     def toggle_active(self, request, pk=None):
+#         method = self.get_object()
+#         method.is_active = not method.is_active
+#         method.save()
+#         return Response({'status': 'success', 'is_active': method.is_active})
+#
+#     @action(detail=True, methods=['post'])
+#     def test_connection(self, request, pk=None):
+#         method = self.get_object()
+#
+#         if method.method_type.startswith('MPESA') and not method.is_payhero_enabled:
+#             mpesa = MpesaSTKPush(method.company)
+#             token = mpesa._get_access_token()
+#             return Response({
+#                 'status': 'success' if token else 'error',
+#                 'message': 'M-Pesa connection successful' if token else 'M-Pesa connection failed'
+#             })
+#
+#         return Response({
+#             'status': 'info',
+#             'message': f'No test available for {method.method_type} {"(PayHero)" if method.is_payhero_enabled else ""}'
+#         })
 
-    def get_queryset(self):
-        user = self.request.user
-        if user.is_superuser:
-            return PaymentMethod.objects.all()
-        return PaymentMethod.objects.filter(company=user.company)
-
-    def perform_create(self, serializer):
-        serializer.save(
-            created_by=self.request.user,
-            company=self.request.user.company
-        )
-
-    @action(detail=True, methods=['post'])
-    def toggle_active(self, request, pk=None):
-        method = self.get_object()
-        method.is_active = not method.is_active
-        method.save()
-        return Response({'status': 'success', 'is_active': method.is_active})
-
-    @action(detail=True, methods=['post'])
-    def test_connection(self, request, pk=None):
-        method = self.get_object()
-
-        if method.method_type.startswith('MPESA') and not method.is_payhero_enabled:
-            mpesa = MpesaSTKPush(method.company)
-            token = mpesa._get_access_token()
-            return Response({
-                'status': 'success' if token else 'error',
-                'message': 'M-Pesa connection successful' if token else 'M-Pesa connection failed'
-            })
-
-        return Response({
-            'status': 'info',
-            'message': f'No test available for {method.method_type} {"(PayHero)" if method.is_payhero_enabled else ""}'
-        })
-
-    def get_queryset(self):
-        user = self.request.user
-        
-        if user.is_superuser:
-            company_id = self.request.query_params.get('company_id')
-            if company_id:
-                return PaymentMethod.objects.filter(company_id=company_id)
-            return PaymentMethod.objects.all()
-        
-        # Users can only see payment methods from their company
-        if hasattr(user, 'company') and user.company:
-            return PaymentMethod.objects.filter(company=user.company)
-        
-        return PaymentMethod.objects.none()
 
 class PaymentViewSet(viewsets.ModelViewSet):
     """
     ViewSet for managing payments with unified PayHero + fallback support
     """
-    queryset = Payment.objects.all()
+    # queryset = Payment.objects.all()  # ← Avoid direct queryset here to prevent early model load
     permission_classes = [IsAuthenticated, IsCompanyStaff]
     filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
     filterset_fields = ['status', 'payment_method', 'customer', 'is_reconciled']
@@ -105,26 +94,34 @@ class PaymentViewSet(viewsets.ModelViewSet):
     ]
     ordering_fields = ['payment_date', 'amount', 'created_at']
 
+    def get_queryset(self):
+        user = self.request.user
+        
+        if user.is_superuser:
+            company_id = self.request.query_params.get('company_id')
+            if company_id:
+                # Use string model name if needed, but Payment is safe here
+                return Payment.objects.filter(company_id=company_id)
+            return Payment.objects.all()
+        
+        # Company users can only see payments from their company
+        if hasattr(user, 'company') and user.company:
+            queryset = Payment.objects.filter(company=user.company)
+            
+            # Customers can only see their own payments
+            if hasattr(user, 'customer_profile'):
+                return queryset.filter(customer=user.customer_profile)
+            
+            return queryset
+        
+        return Payment.objects.none()
+
     def get_serializer_class(self):
         if self.action == 'create':
             return PaymentCreateSerializer
         elif self.action == 'retrieve':
             return PaymentDetailSerializer
         return PaymentSerializer
-
-    def get_queryset(self):
-        user = self.request.user
-        queryset = Payment.objects.all()
-
-        if user.is_superuser:
-            return queryset
-
-        queryset = queryset.filter(company=user.company)
-
-        if getattr(user, 'role', None) == 'customer' and hasattr(user, 'customer_profile'):
-            return queryset.filter(customer=user.customer_profile)
-
-        return queryset
 
     def perform_create(self, serializer):
         serializer.save(
@@ -190,6 +187,8 @@ class PaymentViewSet(viewsets.ModelViewSet):
             return Response({'error': 'Invalid amount or external_reference'}, status=status.HTTP_400_BAD_REQUEST)
 
         try:
+            # Use safe string-based lookup or delayed import
+            from ..models.payment_models import PaymentMethod
             if channel_id:
                 method = PaymentMethod.objects.get(
                     company=request.user.company,
@@ -204,6 +203,9 @@ class PaymentViewSet(viewsets.ModelViewSet):
                 )
         except PaymentMethod.DoesNotExist:
             return Response({'error': 'No valid payment method found'}, status=status.HTTP_400_BAD_REQUEST)
+        except Exception as e:
+            logger.error(f"Payment method lookup error: {str(e)}")
+            return Response({'error': 'Error finding payment method'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
         customer = getattr(request.user, 'customer_profile', None)
         payment = Payment.objects.create(
@@ -281,6 +283,7 @@ class PaymentViewSet(viewsets.ModelViewSet):
 
         try:
             with transaction.atomic():
+                from ..models.payment_models import Payment
                 payment = Payment.objects.select_for_update().get(
                     payhero_external_reference=external_ref
                 )
@@ -337,6 +340,7 @@ class PaymentViewSet(viewsets.ModelViewSet):
             return Response({'status': 'error', 'message': phone_error}, status=status.HTTP_400_BAD_REQUEST)
         
         try:
+            from ..models.payment_models import PaymentMethod
             payment_method = PaymentMethod.objects.get(
                 method_type='MPESA_STK',
                 company=request.user.company,
@@ -345,6 +349,7 @@ class PaymentViewSet(viewsets.ModelViewSet):
         except PaymentMethod.DoesNotExist:
             return Response({'status': 'error', 'message': 'M-Pesa payment method not configured'}, status=status.HTTP_400_BAD_REQUEST)
         
+        from ..models.payment_models import Payment
         payment = Payment.objects.create(
             company=request.user.company,
             customer=customer,
@@ -386,6 +391,8 @@ class PaymentViewSet(viewsets.ModelViewSet):
                 'error': result.get('message', 'Failed to initiate STK Push'),
                 'payment_id': payment.id
             }, status=status.HTTP_400_BAD_REQUEST)
+
+    # ... rest of the file remains unchanged ...
 
     @action(detail=False, methods=['post'])
     def mpesa_callback(self, request):
@@ -549,88 +556,90 @@ class PaymentViewSet(viewsets.ModelViewSet):
                 return Payment.objects.filter(company_id=company_id)
             return Payment.objects.all()
         
-        # Company users can only see payments from their company
         if hasattr(user, 'company') and user.company:
             queryset = Payment.objects.filter(company=user.company)
-            
-            # Customers can only see their own payments
             if hasattr(user, 'customer_profile'):
                 return queryset.filter(customer=user.customer_profile)
-            
             return queryset
         
         return Payment.objects.none()
 
-class ReceiptViewSet(viewsets.ModelViewSet):
-    queryset = Receipt.objects.all()
-    serializer_class = ReceiptSerializer
-    permission_classes = [IsAuthenticated, IsCompanyStaff]
-    filter_backends = [DjangoFilterBackend, filters.SearchFilter]
-    filterset_fields = ['status', 'customer', 'company']
-    search_fields = ['receipt_number', 'customer__customer_code']
 
-    def get_queryset(self):
-        user = self.request.user
-        queryset = Receipt.objects.all()
-        if user.is_superuser:
-            return queryset
-        queryset = queryset.filter(company=user.company)
-        if getattr(user, 'role', None) == 'customer' and hasattr(user, 'customer_profile'):
-            return queryset.filter(customer=user.customer_profile)
-        return queryset
-
-    def perform_create(self, serializer):
-        serializer.save(
-            created_by=self.request.user,
-            company=self.request.user.company
-        )
-
-    @action(detail=True, methods=['post'])
-    def issue(self, request, pk=None):
-        receipt = self.get_object()
-        if receipt.issue_receipt(request.user):
-            return Response({'status': 'success', 'message': 'Receipt issued'})
-        return Response({'error': 'Cannot issue receipt'}, status=status.HTTP_400_BAD_REQUEST)
-
-    @action(detail=True, methods=['get'])
-    def download_pdf(self, request, pk=None):
-        receipt = self.get_object()
-        serializer = self.get_serializer(receipt)
-        return Response(serializer.data)
-
-    @action(detail=True, methods=['get'])
-    def share(self, request, pk=None):
-        receipt = self.get_object()
-        share_method = request.query_params.get('method', 'email')
-        if share_method == 'sms':
-            try:
-                sms_service = SMSService(receipt.company)
-                message = f"Receipt {receipt.receipt_number} for KES {receipt.amount} issued. Thank you!"
-                result = sms_service.send_single_sms(receipt.customer.user.phone_number, message)
-                if result['success']:
-                    return Response({'status': 'success', 'message': 'Receipt sent via SMS'})
-                return Response({'error': 'Failed to send SMS'}, status=status.HTTP_400_BAD_REQUEST)
-            except Exception as e:
-                return Response({'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-        return Response({'error': 'Invalid share method'}, status=status.HTTP_400_BAD_REQUEST)
-    
-    def get_queryset(self):
-        user = self.request.user
-        
-        if user.is_superuser:
-            company_id = self.request.query_params.get('company_id')
-            if company_id:
-                return Receipt.objects.filter(company_id=company_id)
-            return Receipt.objects.all()
-        
-        # Company users can only see receipts from their company
-        if hasattr(user, 'company') and user.company:
-            queryset = Receipt.objects.filter(company=user.company)
-            
-            # Customers can only see their own receipts
-            if hasattr(user, 'customer_profile'):
-                return queryset.filter(customer=user.customer_profile)
-            
-            return queryset
-        
-        return Receipt.objects.none()
+# class ReceiptViewSet(viewsets.ModelViewSet):
+#     queryset = Receipt.objects.all()
+#     serializer_class = ReceiptSerializer
+#     permission_classes = [IsAuthenticated, IsCompanyStaff]
+#     filter_backends = [DjangoFilterBackend, filters.SearchFilter]
+#     filterset_fields = ['status', 'customer', 'company']
+#     search_fields = ['receipt_number', 'customer__customer_code']
+#
+#     def get_queryset(self):
+#         user = self.request.user
+#         queryset = Receipt.objects.all()
+#         if user.is_superuser:
+#             return queryset
+#         queryset = queryset.filter(company=user.company)
+#         if getattr(user, 'role', None) == 'customer' and hasattr(user, 'customer_profile'):
+#             return queryset.filter(customer=user.customer_profile)
+#         return queryset
+#
+#     def perform_create(self, serializer):
+#         serializer.save(
+#             created_by=self.request.user,
+#             company=self.request.user.company
+#         )
+#
+#     @action(detail=True, methods=['post'])
+#     def issue(self, request, pk=None):
+#         receipt = self.get_object()
+#         if receipt.issue_receipt(request.user):
+#             return Response({'status': 'success', 'message': 'Receipt issued'})
+#         return Response({'error': 'Cannot issue receipt'}, status=status.HTTP_400_BAD_REQUEST)
+#
+#     @action(detail=True, methods=['get'])
+#     def download_pdf(self, request, pk=None):
+#         receipt = self.get_object()
+#         serializer = self.get_serializer(receipt)
+#         return Response(serializer.data)
+#
+#     @action(detail=True, methods=['get'])
+#     def share(self, request, pk=None):
+#         receipt = self.get_object()
+#         share_method = request.query_params.get('method', 'email')
+#         if share_method == 'sms':
+#             try:
+#                 sms_service = SMSService(receipt.company)
+#                 message = f"Receipt {receipt.receipt_number} for KES {receipt.amount} issued. Thank you!"
+#                 result = sms_service.send_single_sms(
+#                     receipt.customer.user.phone_number, message
+#                 )
+#                 if result['success']:
+#                     return Response({'status': 'success', 'message': 'Receipt sent via SMS'})
+#                 return Response({'error': 'Failed to send SMS'}, status=status.HTTP_400_BAD_REQUEST)
+#             except Exception as e:
+#                 return Response(
+#                     {'error': str(e)},
+#                     status=status.HTTP_500_INTERNAL_SERVER_ERROR
+#                 )
+#         return Response({'error': 'Invalid share method'}, status=status.HTTP_400_BAD_REQUEST)
+#
+#     def get_queryset(self):
+#         user = self.request.user
+#
+#         if user.is_superuser:
+#             company_id = self.request.query_params.get('company_id')
+#             if company_id:
+#                 return Receipt.objects.filter(company_id=company_id)
+#             return Receipt.objects.all()
+#
+#         # Company users can only see receipts from their company
+#         if hasattr(user, 'company') and user.company:
+#             queryset = Receipt.objects.filter(company=user.company)
+#
+#             # Customers can only see their own receipts
+#             if hasattr(user, 'customer_profile'):
+#                 return queryset.filter(customer=user.customer_profile)
+#
+#             return queryset
+#
+#         return Receipt.objects.none()

@@ -10,7 +10,7 @@ from decimal import Decimal
 # Use your existing permissions
 from apps.core.permissions import IsCompanyAdmin, IsCompanyStaff, IsCompanyMember
 from apps.customers.models import Customer
-from ..models.voucher_models import VoucherBatch, Voucher, VoucherUsage
+from ..models.voucher_models import VoucherBatch, Voucher
 from ..serializers import (
     VoucherBatchSerializer, VoucherSerializer, VoucherUsageSerializer,
     VoucherBatchCreateSerializer, VoucherCreateSerializer,
@@ -278,19 +278,19 @@ class VoucherViewSet(viewsets.ModelViewSet):
         return Response(serializer.data)
 
 
+"""
 class VoucherUsageViewSet(viewsets.ReadOnlyModelViewSet):
-    """
+    '''
     ViewSet for viewing voucher usages (read-only)
-    """
+    '''
     queryset = VoucherUsage.objects.all()
     serializer_class = VoucherUsageSerializer
-    permission_classes = [IsAuthenticated, IsCompanyStaff]  # Changed to IsCompanyStaff
+    permission_classes = [IsAuthenticated, IsCompanyStaff]
     filter_backends = [DjangoFilterBackend, filters.OrderingFilter]
     filterset_fields = ['voucher', 'customer', 'payment', 'invoice']
     ordering_fields = ['created_at', 'amount']
     
     def get_queryset(self):
-        """Filter voucher usages by company"""
         user = self.request.user
         if user.is_superuser:
             return VoucherUsage.objects.all()
@@ -298,7 +298,6 @@ class VoucherUsageViewSet(viewsets.ReadOnlyModelViewSet):
     
     @action(detail=False, methods=['get'])
     def customer_history(self, request):
-        """Get voucher usage history for a customer"""
         customer_id = request.query_params.get('customer_id')
         
         if not customer_id:
@@ -319,7 +318,6 @@ class VoucherUsageViewSet(viewsets.ReadOnlyModelViewSet):
         usages = self.get_queryset().filter(customer=customer)
         serializer = self.get_serializer(usages, many=True)
         
-        # Calculate summary
         total_used = usages.aggregate(Sum('amount'))['amount__sum'] or Decimal('0')
         usage_count = usages.count()
         
@@ -333,3 +331,4 @@ class VoucherUsageViewSet(viewsets.ReadOnlyModelViewSet):
             'total_amount_used': total_used,
             'usages': serializer.data
         })
+"""

@@ -32,7 +32,7 @@ class EmployeeAdmin(admin.ModelAdmin):
         'user__first_name', 'user__last_name', 'employee_id',
         'position', 'phone', 'email'
     ]
-    readonly_fields = ['employee_id', 'created_at', 'updated_at']
+    readonly_fields = ['employee_id']  # removed created_at, updated_at
     fieldsets = (
         ('Basic Information', {
             'fields': ('user', 'employee_id', 'department', 'position')
@@ -93,7 +93,7 @@ class AttendanceAdmin(admin.ModelAdmin):
     ]
     list_filter = ['status', 'date', 'employee__department']
     search_fields = ['employee__user__first_name', 'employee__user__last_name']
-    readonly_fields = ['hours_worked', 'created_at', 'updated_at']
+    readonly_fields = ['hours_worked']  # removed created_at, updated_at
     
     def is_approved(self, obj):
         if obj.approved_by:
@@ -113,7 +113,7 @@ class LeaveRequestAdmin(admin.ModelAdmin):
         'employee__user__first_name', 'employee__user__last_name',
         'reason'
     ]
-    readonly_fields = ['total_days', 'created_at', 'updated_at']
+    readonly_fields = ['total_days']  # removed created_at, updated_at
     
     def is_approved(self, obj):
         if obj.status == 'approved':
@@ -135,7 +135,7 @@ class PerformanceReviewAdmin(admin.ModelAdmin):
         'employee__user__first_name', 'employee__user__last_name',
         'reviewed_by__first_name', 'reviewed_by__last_name'
     ]
-    readonly_fields = ['overall_rating', 'created_at', 'updated_at']
+    readonly_fields = ['overall_rating']  # removed created_at, updated_at
 
 
 @admin.register(Payroll)
@@ -146,7 +146,4 @@ class PayrollAdmin(admin.ModelAdmin):
     ]
     list_filter = ['is_paid', 'payment_date', 'employee__department']
     search_fields = ['employee__user__first_name', 'employee__user__last_name']
-    readonly_fields = [
-        'gross_pay', 'total_deductions', 'net_pay',
-        'created_at', 'updated_at'
-    ]
+    readonly_fields = ['gross_pay', 'total_deductions', 'net_pay']  # removed created_at, updated_at

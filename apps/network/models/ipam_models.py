@@ -1,4 +1,3 @@
-# apps/network/models/ipam_models.py
 from django.db import models
 from django.core.validators import MaxValueValidator, MinValueValidator
 from netaddr import IPNetwork, IPAddress as NetIPAddress
@@ -6,14 +5,13 @@ from apps.core.models import Company, AuditMixin
 from apps.customers.models import ServiceConnection
 
 
-class Subnet(AuditMixin, models.Model):
+class Subnet(AuditMixin):
     """IP Subnet Model"""
     VERSION_CHOICES = [
         ('IPv4', 'IPv4'),
         ('IPv6', 'IPv6'),
     ]
     
-    company = models.ForeignKey(Company, on_delete=models.CASCADE, related_name='subnets')
     name = models.CharField(max_length=100)
     network_address = models.GenericIPAddressField(protocol='IPv4')
     subnet_mask = models.GenericIPAddressField(protocol='IPv4')
@@ -30,10 +28,18 @@ class Subnet(AuditMixin, models.Model):
     available_ips = models.IntegerField(default=0)
     utilization_percentage = models.FloatField(default=0.0)
     
+    # Tenant schema field
+    schema_name = models.SlugField(
+        max_length=63,
+        unique=True,
+        editable=False,
+        default="default_schema"
+    )
+    
     class Meta:
         verbose_name = 'Subnet'
         verbose_name_plural = 'Subnets'
-        unique_together = [['company', 'network_address', 'cidr']]
+        unique_together = [['network_address', 'cidr']]
         ordering = ['network_address']
     
     def save(self, *args, **kwargs):
@@ -50,25 +56,32 @@ class Subnet(AuditMixin, models.Model):
         return f"{self.name} ({self.network_address}/{self.cidr})"
 
 
-class VLAN(AuditMixin, models.Model):
+class VLAN(AuditMixin):
     """VLAN Model"""
-    company = models.ForeignKey(Company, on_delete=models.CASCADE, related_name='vlans')
     vlan_id = models.IntegerField(validators=[MinValueValidator(1), MaxValueValidator(4095)])
     name = models.CharField(max_length=100)
     description = models.TextField(blank=True)
     subnet = models.ForeignKey(Subnet, on_delete=models.SET_NULL, null=True, blank=True, related_name='assigned_vlans')
     
+    # Tenant schema field
+    schema_name = models.SlugField(
+        max_length=63,
+        unique=True,
+        editable=False,
+        default="default_schema"
+    )
+    
     class Meta:
         verbose_name = 'VLAN'
         verbose_name_plural = 'VLANs'
-        unique_together = [['company', 'vlan_id']]
+        unique_together = [['vlan_id']]
         ordering = ['vlan_id']
     
     def __str__(self):
         return f"VLAN {self.vlan_id} - {self.name}"
 
 
-class IPPool(AuditMixin, models.Model):
+class IPPool(AuditMixin):
     """IP Pool Model for DHCP"""
     POOL_TYPE = [
         ('DHCP', 'DHCP Pool'),
@@ -91,6 +104,14 @@ class IPPool(AuditMixin, models.Model):
     total_ips = models.IntegerField(default=0)
     used_ips = models.IntegerField(default=0)
     
+    # Tenant schema field
+    schema_name = models.SlugField(
+        max_length=63,
+        unique=True,
+        editable=False,
+        default="default_schema"
+    )
+    
     class Meta:
         verbose_name = 'IP Pool'
         verbose_name_plural = 'IP Pools'
@@ -109,7 +130,7 @@ class IPPool(AuditMixin, models.Model):
         return f"{self.name} ({self.start_ip} - {self.end_ip})"
 
 
-class IPAddress(AuditMixin, models.Model):
+class IPAddress(AuditMixin):
     """IP Address Assignment Model"""
     ASSIGNMENT_TYPE = [
         ('DYNAMIC', 'Dynamic'),
@@ -158,6 +179,14 @@ class IPAddress(AuditMixin, models.Model):
     device_type = models.CharField(max_length=50, blank=True)
     manufacturer = models.CharField(max_length=100, blank=True)
     
+    # Tenant schema field
+    schema_name = models.SlugField(
+        max_length=63,
+        unique=True,
+        editable=False,
+        default="default_schema"
+    )
+    
     class Meta:
         verbose_name = 'IP Address'
         verbose_name_plural = 'IP Addresses'
@@ -173,7 +202,7 @@ class IPAddress(AuditMixin, models.Model):
         return f"{self.ip_address} - {self.hostname or self.description[:50]}"
 
 
-class DHCPRange(AuditMixin, models.Model):
+class DHCPRange(AuditMixin):
     """DHCP Range Configuration"""
     ip_pool = models.ForeignKey(IPPool, on_delete=models.CASCADE, related_name='dhcp_ranges')
     name = models.CharField(max_length=100)
@@ -184,6 +213,14 @@ class DHCPRange(AuditMixin, models.Model):
     domain_name = models.CharField(max_length=200, blank=True)
     lease_time = models.CharField(max_length=20, default='86400')  # in seconds
     is_active = models.BooleanField(default=True)
+    
+    # Tenant schema field
+    schema_name = models.SlugField(
+        max_length=63,
+        unique=True,
+        editable=False,
+        default="default_schema"
+    )
     
     class Meta:
         verbose_name = 'DHCP Range'

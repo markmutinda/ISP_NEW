@@ -2,6 +2,7 @@ from django.db import models
 from django.conf import settings
 from django.utils import timezone
 
+
 # Use settings.AUTH_USER_MODEL for User references
 User = settings.AUTH_USER_MODEL
 
@@ -60,11 +61,13 @@ class SupportTicket(models.Model):
     first_response_at = models.DateTimeField(null=True, blank=True)
     resolved_at = models.DateTimeField(null=True, blank=True)
     
+
     # Timestamps
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
     
     class Meta:
+        app_label = 'support'
         ordering = ['-created_at']
         indexes = [
             models.Index(fields=['ticket_number']),
@@ -128,9 +131,12 @@ class SupportTicketMessage(models.Model):
     message = models.TextField()
     is_internal = models.BooleanField(default=False)
     attachments = models.JSONField(default=list)
+    
+
     created_at = models.DateTimeField(auto_now_add=True)
     
     class Meta:
+        app_label = 'support'
         ordering = ['created_at']
     
     def __str__(self):

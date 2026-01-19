@@ -6,6 +6,7 @@ from decimal import Decimal
 import uuid
 from django.utils.text import slugify
 from apps.core.models import Company
+
 #from apps.customers.models import Customer, ServiceConnection
 from utils.constants import KENYAN_COUNTIES, TAX_RATES, TAX_TYPES
 
@@ -45,8 +46,13 @@ class Plan(models.Model):
     fup_limit = models.IntegerField(null=True, blank=True)  # GB before throttle
     fup_speed = models.IntegerField(null=True, blank=True)  # Reduced speed in Mbps
     
-    # Company (for multi-tenancy - hidden from frontend)
-    company = models.ForeignKey(Company, on_delete=models.CASCADE, related_name='plans')
+    # Tenant schema field
+    schema_name = models.SlugField(
+        max_length=63,
+        unique=True,
+        editable=False,
+        default="default_schema"
+    )
     
     # Visibility & Status
     is_active = models.BooleanField(default=True)
@@ -112,7 +118,6 @@ class BillingCycle(models.Model):
         ('VOIDED', 'Voided'),
     ]
 
-    company = models.ForeignKey(Company, on_delete=models.CASCADE, related_name='billing_cycles')
     name = models.CharField(max_length=100)
     cycle_code = models.CharField(max_length=50, unique=True)
     start_date = models.DateField()
@@ -120,6 +125,14 @@ class BillingCycle(models.Model):
     due_date = models.DateField()
     status = models.CharField(max_length=20, choices=CYCLE_STATUS, default='OPEN')
     is_locked = models.BooleanField(default=False)
+    
+    # Tenant schema field
+    schema_name = models.SlugField(
+        max_length=63,
+        unique=True,
+        editable=False,
+        default="default_schema"
+    )
     
     # Totals
     total_invoices = models.PositiveIntegerField(default=0)
@@ -197,7 +210,6 @@ class Invoice(models.Model):
 
     # Basic Information
     invoice_number = models.CharField(max_length=50, unique=True)
-    company = models.ForeignKey(Company, on_delete=models.CASCADE, related_name='invoices')
     customer = models.ForeignKey('customers.Customer', on_delete=models.CASCADE, related_name='invoices')
     
     # Billing Period
@@ -209,6 +221,14 @@ class Invoice(models.Model):
     # Service Period
     service_period_start = models.DateField()
     service_period_end = models.DateField()
+    
+    # Tenant schema field
+    schema_name = models.SlugField(
+        max_length=63,
+        unique=True,
+        editable=False,
+        default="default_schema"
+    )
     
     # Amounts
     subtotal = models.DecimalField(max_digits=12, decimal_places=2, default=0)
@@ -317,7 +337,7 @@ class Invoice(models.Model):
             customer=self.customer,
             amount=amount,
             payment_method=payment_method,
-            company=self.company,
+            
             created_by=self.created_by
         )
         
@@ -342,6 +362,14 @@ class InvoiceItem(models.Model):
     tax_rate = models.DecimalField(max_digits=5, decimal_places=2, default=16.0)
     tax_amount = models.DecimalField(max_digits=10, decimal_places=2, default=0)
     total = models.DecimalField(max_digits=10, decimal_places=2)
+    
+    # Tenant schema field
+    schema_name = models.SlugField(
+        max_length=63,
+        unique=True,
+        editable=False,
+        default="default_schema"
+    )
     
     # Reference to service/plan
     service_type = models.CharField(max_length=50, blank=True)

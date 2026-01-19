@@ -1,7 +1,8 @@
 from rest_framework import serializers
 from django.utils import timezone
 from decimal import Decimal
-from ..models.voucher_models import VoucherBatch, Voucher, VoucherUsage
+# from ..models.voucher_models import VoucherBatch, Voucher, VoucherUsage   # ← COMMENTED OUT to prevent early loading / circular import issues
+
 from customers.serializers import CustomerSerializer
 
 
@@ -12,7 +13,7 @@ class VoucherBatchSerializer(serializers.ModelSerializer):
     approved_by_name = serializers.CharField(source='approved_by.get_full_name', read_only=True)
     
     class Meta:
-        model = VoucherBatch
+        model = 'VoucherBatch'  # ← Changed to string literal (safe)
         fields = [
             'id', 'batch_number', 'company', 'company_name', 'name', 'description',
             'voucher_type', 'face_value', 'sale_price', 'valid_from', 'valid_to',
@@ -32,7 +33,7 @@ class VoucherBatchCreateSerializer(serializers.ModelSerializer):
     """Serializer for creating voucher batches"""
     
     class Meta:
-        model = VoucherBatch
+        model = 'VoucherBatch'  # ← Changed to string literal
         fields = [
             'name', 'description', 'voucher_type', 'face_value', 'sale_price',
             'valid_from', 'valid_to', 'is_reusable', 'max_uses', 'quantity',
@@ -76,7 +77,7 @@ class VoucherSerializer(serializers.ModelSerializer):
     is_valid = serializers.BooleanField(read_only=True)
     
     class Meta:
-        model = Voucher
+        model = 'Voucher'  # ← Changed to string literal
         fields = [
             'id', 'batch', 'batch_name', 'batch_number', 'voucher_type', 'code', 'pin',
             'face_value', 'sale_price', 'remaining_value', 'valid_from', 'valid_to',
@@ -94,7 +95,7 @@ class VoucherCreateSerializer(serializers.ModelSerializer):
     """Serializer for creating individual vouchers"""
     
     class Meta:
-        model = Voucher
+        model = 'Voucher'  # ← Changed to string literal
         fields = [
             'batch', 'code', 'pin', 'face_value', 'sale_price', 'valid_from',
             'valid_to', 'is_reusable', 'max_uses'
@@ -155,7 +156,7 @@ class VoucherUsageSerializer(serializers.ModelSerializer):
     invoice_number = serializers.CharField(source='invoice.invoice_number', read_only=True)
     
     class Meta:
-        model = VoucherUsage
+        model = 'VoucherUsage'  # ← Changed to string literal
         fields = [
             'id', 'voucher', 'voucher_code', 'customer', 'customer_name',
             'customer_code', 'amount', 'remaining_balance', 'description',

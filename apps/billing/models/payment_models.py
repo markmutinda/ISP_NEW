@@ -7,7 +7,8 @@ from apps.core.models import Company
 from .billing_models import Invoice
 
 
-class PaymentMethod(models.Model):
+
+class InvoiceItemPayment(models.Model):
     METHOD_TYPES = [
         ('MPESA_STK', 'M-Pesa STK Push'),
         ('MPESA_TILL', 'M-Pesa Till'),
@@ -29,7 +30,6 @@ class PaymentMethod(models.Model):
         ('MAINTENANCE', 'Under Maintenance'),
     ]
 
-    company = models.ForeignKey(Company, on_delete=models.CASCADE, related_name='payment_methods')
     name = models.CharField(max_length=100)
     code = models.CharField(max_length=20, unique=True)
     method_type = models.CharField(max_length=20, choices=METHOD_TYPES)
@@ -62,6 +62,14 @@ class PaymentMethod(models.Model):
     integration_class = models.CharField(max_length=100, blank=True)
     config_json = models.JSONField(default=dict, blank=True)
 
+    # Tenant schema field
+    schema_name = models.SlugField(
+        max_length=63,
+        unique=True,
+        editable=False,
+        default="default_schema"
+    )
+    
     # Status
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='ACTIVE')
     last_used = models.DateTimeField(null=True, blank=True)
@@ -84,7 +92,8 @@ class PaymentMethod(models.Model):
 
     def __str__(self):
         payhero_status = " (PayHero)" if self.is_payhero_enabled else ""
-        return f"{self.name} ({self.company.name}){payhero_status}"
+        return f"{self.name}{payhero_status}"
+
 
     def calculate_fee(self, amount):
         if self.fee_type == 'PERCENTAGE':
@@ -107,7 +116,6 @@ class Payment(models.Model):
     ]
 
     payment_number = models.CharField(max_length=50, unique=True)
-    company = models.ForeignKey(Company, on_delete=models.CASCADE, related_name='payments')
     customer = models.ForeignKey('customers.Customer', on_delete=models.CASCADE, related_name='payments')
     invoice = models.ForeignKey(Invoice, on_delete=models.SET_NULL, null=True, blank=True, related_name='payments')
 
@@ -116,7 +124,7 @@ class Payment(models.Model):
     net_amount = models.DecimalField(max_digits=12, decimal_places=2, default=0)
     currency = models.CharField(max_length=3, default='KES')
 
-    payment_method = models.ForeignKey(PaymentMethod, on_delete=models.PROTECT, related_name='payments')
+    payment_method = models.ForeignKey('billing.InvoiceItemPayment', on_delete=models.PROTECT, related_name='payments')
     payment_reference = models.CharField(max_length=100, blank=True)
     transaction_id = models.CharField(max_length=100, blank=True)
 
@@ -124,6 +132,14 @@ class Payment(models.Model):
     payhero_external_reference = models.CharField(max_length=255, blank=True, null=True, unique=True)
     raw_callback = models.JSONField(null=True, blank=True)
 
+    # Tenant schema field
+    schema_name = models.SlugField(
+        max_length=63,
+        unique=True,
+        editable=False,
+        default="default_schema"
+    )
+    
     status = models.CharField(max_length=20, choices=PAYMENT_STATUS, default='PENDING')
     is_reconciled = models.BooleanField(default=False)
 
@@ -217,7 +233,7 @@ class Payment(models.Model):
             return None
 
         refund_payment = Payment.objects.create(
-            company=self.company,
+            
             customer=self.customer,
             amount=-refund_amount,
             payment_method=self.payment_method,
@@ -248,7 +264,6 @@ class Receipt(models.Model):
 
     # Basic Information
     receipt_number = models.CharField(max_length=50, unique=True)
-    company = models.ForeignKey(Company, on_delete=models.CASCADE, related_name='receipts')
     customer = models.ForeignKey('customers.Customer', on_delete=models.CASCADE, related_name='receipts')
     
     # Payment Reference
@@ -262,6 +277,14 @@ class Receipt(models.Model):
     # Payment Details
     payment_method = models.CharField(max_length=100)
     payment_reference = models.CharField(max_length=100, blank=True)
+    
+    # Tenant schema field
+    schema_name = models.SlugField(
+        max_length=63,
+        unique=True,
+        editable=False,
+        default="default_schema"
+    )
     
     # Status
     status = models.CharField(max_length=20, choices=RECEIPT_STATUS, default='DRAFT')

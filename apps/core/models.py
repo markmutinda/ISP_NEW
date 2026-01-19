@@ -2,22 +2,27 @@
 Core models for ISP Management System
 """
 import uuid
+import json
 from django.db import models
 from django.contrib.auth.models import AbstractUser, BaseUserManager
 from django.utils import timezone
 from django.core.validators import RegexValidator
 from django.conf import settings
-from django.db.models.signals import post_save
-from django.dispatch import receiver
+from django_tenants.models import DomainMixin, TenantMixin
+
+
+class Domain(DomainMixin):
+    """Domain model for tenant-specific domains"""
+    
+    class Meta:
+        app_label = 'core'
 
 
 class AuditMixin(models.Model):
-    """
-    Mixin to add audit fields to models
-    """
+    """Mixin to add audit fields to models"""
+    
     created_at = models.DateTimeField(auto_now_add=True, db_index=True)
     updated_at = models.DateTimeField(auto_now=True)
-
     created_by = models.ForeignKey(
         settings.AUTH_USER_MODEL,
         on_delete=models.SET_NULL,
@@ -35,6 +40,8 @@ class AuditMixin(models.Model):
 
     class Meta:
         abstract = True
+        app_label = 'core'
+
 
 class UserManager(BaseUserManager):
     """Custom user manager for handling user creation"""
@@ -126,7 +133,7 @@ class User(AbstractUser, AuditMixin):
         verbose_name='User Role'
     )
     
-        # NEW FIELD: Add company relationship
+    # Company relationship
     company = models.ForeignKey(
         'Company',
         on_delete=models.CASCADE,
@@ -136,7 +143,7 @@ class User(AbstractUser, AuditMixin):
         verbose_name='ISP Company'
     )
     
-    # OPTIONAL: Also add tenant for direct access
+    # Tenant relationship
     tenant = models.ForeignKey(
         'Tenant',
         on_delete=models.SET_NULL,
@@ -150,9 +157,6 @@ class User(AbstractUser, AuditMixin):
     verification_token = models.UUIDField(default=uuid.uuid4, editable=False)
     verification_token_expiry = models.DateTimeField(null=True, blank=True)
     
-    # Remove the duplicate fields from AuditMixin
-    # created_at, updated_at, created_by are already in AuditMixin
-    
     # Set email as the username field
     USERNAME_FIELD = 'email'
     REQUIRED_FIELDS = ['phone_number', 'first_name', 'last_name']
@@ -160,6 +164,7 @@ class User(AbstractUser, AuditMixin):
     objects = UserManager()
     
     class Meta:
+        app_label = 'core'
         ordering = ['-created_at']
         verbose_name = 'User'
         verbose_name_plural = 'Users'
@@ -201,11 +206,10 @@ class User(AbstractUser, AuditMixin):
         """Check if user is staff of their company"""
         return self.role in ['admin', 'staff', 'accountant', 'support', 'technician']
 
-# Create a simplified BaseModel to avoid import issues
+
 class BaseModel(models.Model):
-    """
-    Base model with common fields
-    """
+    """Base model with common fields"""
+    
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     created_at = models.DateTimeField(auto_now_add=True, db_index=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -213,6 +217,7 @@ class BaseModel(models.Model):
     
     class Meta:
         abstract = True
+        app_label = 'core'
         ordering = ['-created_at']
 
 
@@ -239,12 +244,12 @@ class Company(BaseModel):
     
     # Business Information
     registration_number = models.CharField(
-    max_length=100,
-    blank=True,                    # Allow empty input
-    null=True,                     # Allow null in DB (optional but safer)
-    unique=False,                  # ← Remove unique constraint
-    verbose_name="Registration Number",
-    help_text="Optional. Leave blank if not applicable."
+        max_length=100,
+        blank=True,
+        null=True,
+        unique=False,
+        verbose_name="Registration Number",
+        help_text="Optional. Leave blank if not applicable."
     )
     tax_pin = models.CharField(max_length=50, null=True, blank=True)
     website = models.URLField(null=True, blank=True)
@@ -255,6 +260,7 @@ class Company(BaseModel):
     subscription_expiry = models.DateField(null=True, blank=True)
     
     class Meta:
+        app_label = 'core'
         ordering = ['name']
         verbose_name_plural = 'Companies'
     
@@ -263,30 +269,30 @@ class Company(BaseModel):
     
     @property
     def total_customers(self):
-        return self.customers.count()
+        return self.customers.count() if hasattr(self, 'customers') else 0
     
     @property
     def active_customers(self):
-        return self.customers.filter(is_active=True).count()
+        return self.customers.filter(is_active=True).count() if hasattr(self, 'customers') else 0
 
 
-class Tenant(BaseModel):
-    """Tenant model for SaaS multi-tenancy functionality"""
-    
+class Tenant(BaseModel, TenantMixin):
+    """Tenant model for SaaS multi-tenancy - ONLY model inheriting from TenantMixin"""
+
     STATUS_CHOICES = (
         ('trial', 'Trial'),
         ('active', 'Active'),
         ('suspended', 'Suspended'),
         ('cancelled', 'Cancelled'),
     )
-    
+
     company = models.OneToOneField(
         Company,
         on_delete=models.CASCADE,
         related_name='tenant',
         help_text="The ISP/company this tenant belongs to"
     )
-    
+
     subdomain = models.CharField(
         max_length=100,
         unique=True,
@@ -302,70 +308,74 @@ class Tenant(BaseModel):
         max_length=100,
         help_text="Database/schema name prefix or identifier"
     )
-    
+
     status = models.CharField(
         max_length=20,
         choices=STATUS_CHOICES,
         default='trial',
         help_text="Current status of this tenant account"
     )
-    
+
     # Trial & Subscription control
-    trial_start = models.DateField(
-        default=timezone.now,
-        help_text="When the trial period started (auto-set on creation)"
-    )
-    trial_days = models.PositiveIntegerField(
-        default=14,
-        help_text="Number of days for trial period (default 14)"
-    )
-    subscription_expiry = models.DateField(
-        null=True,
-        blank=True,
-        help_text="When subscription/trial expires. Auto-calculated on creation."
-    )
-    
+    trial_start = models.DateField(default=timezone.now)
+    trial_days = models.PositiveIntegerField(default=14)
+    subscription_expiry = models.DateField(null=True, blank=True)
+
     # Limits & Features
     max_users = models.PositiveIntegerField(default=10)
     max_customers = models.PositiveIntegerField(default=100)
-    features = models.JSONField(
-        default=dict,
-        help_text="Enabled features as JSON (e.g. {'analytics': true, 'billing': true})"
-    )
-    
+    features = models.JSONField(default=dict)
+
     # Billing
     billing_cycle = models.CharField(max_length=20, default='monthly')
     monthly_rate = models.DecimalField(max_digits=10, decimal_places=2, default=0.00)
     next_billing_date = models.DateField(null=True, blank=True)
-    
+
+    # Required for django-tenants - TenantMixin requires schema_name
+    schema_name = models.SlugField(
+        max_length=63,      # Max allowed length in PostgreSQL
+        unique=True,        # Must be unique per tenant
+        editable=False,     # User should not edit it manually
+        default="default_schema"  # Temporary default to satisfy migrations
+    )
+
     class Meta:
-        ordering = ['-created_at']
+        app_label = 'core'
+        ordering = ['subdomain']
         verbose_name = "Tenant"
         verbose_name_plural = "Tenants"
-    
+
+    def save(self, *args, **kwargs):
+        # Auto-create schema_name from subdomain if not set
+        if not self.schema_name or self.schema_name == "default_schema":
+            # Create a safe schema name
+            schema = self.subdomain.lower().replace('-', '_').replace('.', '_')
+            # Remove any non-alphanumeric characters except underscore
+            schema = ''.join(c for c in schema if c.isalnum() or c == '_')
+            # Ensure it starts with a letter or underscore
+            if schema and not schema[0].isalpha() and schema[0] != '_':
+                schema = '_' + schema
+            self.schema_name = schema[:63]  # Truncate to max length
+        
+        # Auto-calculate trial subscription fields for new tenants
+        if not self.pk and self.status == 'trial':
+            self.trial_start = timezone.now().date()
+            self.subscription_expiry = self.trial_start + timezone.timedelta(days=self.trial_days)
+            self.next_billing_date = self.subscription_expiry
+
+        super().save(*args, **kwargs)
+
     def __str__(self):
         return f"{self.company.name} ({self.subdomain}) - {self.status}"
-    
-    def save(self, *args, **kwargs):
-        """Auto-calculate subscription_expiry on first save (trial)"""
-        if not self.pk:  # New instance
-            if self.status == 'trial':
-                self.trial_start = timezone.now().date()
-                self.subscription_expiry = self.trial_start + timezone.timedelta(days=self.trial_days)
-                self.next_billing_date = self.subscription_expiry  # first billing after trial
-                
-        super().save(*args, **kwargs)
-    
+
     @property
     def is_trial_expired(self):
-        """Check if trial has expired (only relevant if status='trial')"""
         if self.status != 'trial' or not self.subscription_expiry:
             return False
         return timezone.now().date() > self.subscription_expiry
-    
+
     @property
     def days_left_in_trial(self):
-        """How many days remain in trial"""
         if self.status != 'trial' or not self.subscription_expiry:
             return 0
         remaining = self.subscription_expiry - timezone.now().date()
@@ -404,6 +414,7 @@ class SystemSettings(BaseModel):
     description = models.TextField(null=True, blank=True)
     
     class Meta:
+        app_label = 'core'
         ordering = ['setting_type', 'key']
         verbose_name = 'System Setting'
         verbose_name_plural = 'System Settings'
@@ -420,7 +431,6 @@ class SystemSettings(BaseModel):
         elif self.data_type == 'boolean':
             return self.value.lower() in ['true', '1', 'yes']
         elif self.data_type == 'json':
-            import json
             return json.loads(self.value)
         else:
             return self.value
@@ -477,6 +487,7 @@ class AuditLog(BaseModel):
     )
     
     class Meta:
+        app_label = 'core'
         ordering = ['-timestamp']
         indexes = [
             models.Index(fields=['timestamp']),
@@ -502,9 +513,11 @@ class AuditLog(BaseModel):
             user_agent=user_agent,
             tenant=tenant
         )
-    
+
 
 class GlobalSystemSettings(models.Model):
+    """Global system settings singleton"""
+    
     # RADIUS Settings
     primary_server = models.CharField(max_length=255, blank=True)
     primary_port = models.IntegerField(default=1812)
@@ -523,12 +536,16 @@ class GlobalSystemSettings(models.Model):
     auto_backup = models.BooleanField(default=False)
     auto_reports = models.BooleanField(default=True)
     grace_period = models.IntegerField(default=3)
-    backup_frequency = models.CharField(max_length=20, default='daily', choices=[
-        ('daily', 'Daily'), ('weekly', 'Weekly'), ('monthly', 'Monthly')
-    ])
-    report_frequency = models.CharField(max_length=20, default='weekly', choices=[
-        ('daily', 'Daily'), ('weekly', 'Weekly'), ('monthly', 'Monthly')
-    ])
+    backup_frequency = models.CharField(
+        max_length=20, 
+        default='daily', 
+        choices=[('daily', 'Daily'), ('weekly', 'Weekly'), ('monthly', 'Monthly')]
+    )
+    report_frequency = models.CharField(
+        max_length=20, 
+        default='weekly', 
+        choices=[('daily', 'Daily'), ('weekly', 'Weekly'), ('monthly', 'Monthly')]
+    )
    
     # Notification Settings
     email_enabled = models.BooleanField(default=True)
@@ -541,13 +558,15 @@ class GlobalSystemSettings(models.Model):
     sms_gateway = models.CharField(max_length=50, default='africastalking')
 
     class Meta:
-        verbose_name = 'System Settings'
-        verbose_name_plural = 'System Settings'
+        app_label = 'core'
+        verbose_name = 'Global System Settings'
+        verbose_name_plural = 'Global System Settings'
 
     def __str__(self):
         return "Global System Settings"
 
     @classmethod
     def get_solo(cls):
+        """Get or create the singleton instance"""
         obj, created = cls.objects.get_or_create(pk=1)
         return obj

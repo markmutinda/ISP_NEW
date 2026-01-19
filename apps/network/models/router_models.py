@@ -1,10 +1,11 @@
-# apps/network/models/router_models.py
 # FULL CONSOLIDATED FILE - Router + RouterEvent + all Mikrotik sub-models
 
+from operator import mod
 import secrets
 from django.db import models
 from django.core.validators import MinValueValidator, MaxValueValidator
 from django.utils import timezone
+
 
 from apps.core.models import Company, AuditMixin
 from apps.customers.models import ServiceConnection  # Keep if needed for future relations
@@ -20,7 +21,7 @@ def generate_shared_secret():
     return secrets.token_hex(16)
 
 
-class Router(AuditMixin, models.Model):
+class Router(AuditMixin):
     ROUTER_TYPES = [
         ('mikrotik', 'Mikrotik'),
         ('ubiquiti', 'Ubiquiti'),
@@ -36,12 +37,7 @@ class Router(AuditMixin, models.Model):
         ('error', 'Error'),
     ]
 
-    company = models.ForeignKey(
-        Company,
-        on_delete=models.CASCADE,
-        related_name='routers',
-        help_text="The ISP/company this router belongs to"
-    )
+
     name = models.CharField(max_length=255, help_text="Friendly name for the router")
     ip_address = models.GenericIPAddressField(
         protocol='both',
@@ -94,12 +90,20 @@ class Router(AuditMixin, models.Model):
         default=generate_shared_secret,
         help_text="RADIUS shared secret — used when configuring this router as a RADIUS client"
     )
+    
+    # Tenant schema field
+    schema_name = models.SlugField(
+        max_length=63,
+        unique=True,
+        editable=False,
+        default="default_schema"
+    )
 
     class Meta:
         verbose_name = 'Router'
         verbose_name_plural = 'Routers'
         ordering = ['-created_at']
-        unique_together = ['company', 'name']
+        unique_together = ['name']
         indexes = [
             models.Index(fields=['ip_address']),
             models.Index(fields=['status']),
@@ -111,7 +115,7 @@ class Router(AuditMixin, models.Model):
         ip = f" ({self.ip_address})" if self.ip_address else ""
         return f"{self.name}{ip}"
 
-class RouterEvent(AuditMixin, models.Model):
+class RouterEvent(AuditMixin):
     EVENT_TYPES = [
         ('up', 'Router Online'),
         ('down', 'Router Offline'),
@@ -128,6 +132,15 @@ class RouterEvent(AuditMixin, models.Model):
     router = models.ForeignKey(Router, on_delete=models.CASCADE, related_name='events')
     event_type = models.CharField(max_length=50, choices=EVENT_TYPES)
     message = models.TextField()
+    
+    # Tenant schema field
+    schema_name = models.SlugField(
+        max_length=63,
+        unique=True,
+        editable=False,
+        default="default_schema"
+    )
+    
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
@@ -136,7 +149,7 @@ class RouterEvent(AuditMixin, models.Model):
 
 # ====================== SUB-MODELS (formerly in mikrotik_models.py) ======================
 
-class MikrotikInterface(AuditMixin, models.Model):
+class MikrotikInterface(AuditMixin):
     router = models.ForeignKey(Router, on_delete=models.CASCADE, related_name='interfaces')
     interface_name = models.CharField(max_length=50)
     interface_type = models.CharField(max_length=20, choices=[
@@ -158,6 +171,14 @@ class MikrotikInterface(AuditMixin, models.Model):
     admin_state = models.BooleanField(default=True)
     operational_state = models.BooleanField(default=False)
     last_change = models.DateTimeField(auto_now=True)
+    
+    # Tenant schema field
+    schema_name = models.SlugField(
+        max_length=63,
+        unique=True,
+        editable=False,
+        default="default_schema"
+    )
 
     class Meta:
         unique_together = [['router', 'interface_name']]
@@ -167,7 +188,7 @@ class MikrotikInterface(AuditMixin, models.Model):
         return f"{self.router.name} - {self.interface_name}"
 
 
-class HotspotUser(AuditMixin, models.Model):
+class HotspotUser(AuditMixin):
     router = models.ForeignKey(Router, on_delete=models.CASCADE, related_name='hotspot_users')
     service_connection = models.OneToOneField(
         ServiceConnection,
@@ -189,6 +210,14 @@ class HotspotUser(AuditMixin, models.Model):
         ('BLOCKED', 'Blocked'),
     ], default='ACTIVE')
     profile = models.CharField(max_length=100, default='default')
+    
+    # Tenant schema field
+    schema_name = models.SlugField(
+        max_length=63,
+        unique=True,
+        editable=False,
+        default="default_schema"
+    )
 
     class Meta:
         unique_together = [['router', 'username']]
@@ -198,7 +227,7 @@ class HotspotUser(AuditMixin, models.Model):
         return f"{self.username}@{self.router.name}"
 
 
-class PPPoEUser(AuditMixin, models.Model):
+class PPPoEUser(AuditMixin):
     router = models.ForeignKey(Router, on_delete=models.CASCADE, related_name='pppoe_users')
     service_connection = models.OneToOneField(
         ServiceConnection,
@@ -220,6 +249,14 @@ class PPPoEUser(AuditMixin, models.Model):
         ('DISABLED', 'Disabled'),
     ], default='DISCONNECTED')
     profile = models.CharField(max_length=100, default='default-encryption')
+    
+    # Tenant schema field
+    schema_name = models.SlugField(
+        max_length=63,
+        unique=True,
+        editable=False,
+        default="default_schema"
+    )
 
     class Meta:
         unique_together = [['router', 'username']]
@@ -229,7 +266,7 @@ class PPPoEUser(AuditMixin, models.Model):
         return f"{self.username}@{self.router.name}"
 
 
-class MikrotikQueue(AuditMixin, models.Model):
+class MikrotikQueue(AuditMixin):
     router = models.ForeignKey(Router, on_delete=models.CASCADE, related_name='queues')
     queue_name = models.CharField(max_length=100)
     queue_type = models.CharField(max_length=20, default='SIMPLE')
@@ -242,6 +279,14 @@ class MikrotikQueue(AuditMixin, models.Model):
     # Optional links to users
     hotspot_user = models.ForeignKey(HotspotUser, on_delete=models.SET_NULL, null=True, blank=True)
     pppoe_user = models.ForeignKey(PPPoEUser, on_delete=models.SET_NULL, null=True, blank=True)
+    
+    # Tenant schema field
+    schema_name = models.SlugField(
+        max_length=63,
+        unique=True,
+        editable=False,
+        default="default_schema"
+    )
 
     class Meta:
         unique_together = [['router', 'queue_name']]

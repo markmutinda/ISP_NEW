@@ -7,3 +7,4 @@ class NetworkConfig(AppConfig):
     name = 'apps.network'
     verbose_name = 'Network Management'
     
+

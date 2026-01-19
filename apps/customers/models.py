@@ -7,7 +7,8 @@ from django.core.validators import MinValueValidator, MinLengthValidator
 from django.utils import timezone
 from django.utils.translation import gettext_lazy as _
 from django.conf import settings
-#from apps.billing.models.billing_models import Plan
+ 
+ # ← Add this import
 
 from apps.core.models import Company
 
@@ -127,18 +128,14 @@ KENYAN_COUNTIES = (
 )
 
 
-class Customer(models.Model):
+class Customer(models.Model):  
     """Main customer model"""
     user = models.OneToOneField(
-        settings.AUTH_USER_MODEL,  # FIXED: Use settings.AUTH_USER_MODEL
+        settings.AUTH_USER_MODEL,
         on_delete=models.CASCADE, 
         related_name='customer_profile'
     )
-    company = models.ForeignKey(
-        Company, 
-        on_delete=models.CASCADE, 
-        related_name='customers'
-    )
+    # company = models.ForeignKey(...)  # ← REMOVE this line (TenantMixin scopes automatically)
     
     # Personal Information
     customer_code = models.CharField(
@@ -166,7 +163,6 @@ class Customer(models.Model):
     )
     
     # Contact Information
-    
     alternative_phone = models.CharField(max_length=20, blank=True)
     
     # Customer Details
@@ -231,16 +227,17 @@ class Customer(models.Model):
     receive_email = models.BooleanField(default=True)
     receive_promotions = models.BooleanField(default=True)
     
-    # Audit fields (replacing AuditMixin)
+    # Tenant schema field
+    # Audit fields
     created_by = models.ForeignKey(
-        settings.AUTH_USER_MODEL,  # FIXED
+        settings.AUTH_USER_MODEL,
         on_delete=models.SET_NULL,
         null=True,
         blank=True,
         related_name='created_customers'
     )
     updated_by = models.ForeignKey(
-        settings.AUTH_USER_MODEL,  # FIXED
+        settings.AUTH_USER_MODEL,
         on_delete=models.SET_NULL,
         null=True,
         blank=True,
@@ -250,6 +247,7 @@ class Customer(models.Model):
     updated_at = models.DateTimeField(auto_now=True)
     
     class Meta:
+        app_label = 'customers'
         ordering = ['-created_at']
         indexes = [
             models.Index(fields=['customer_code']),
@@ -281,20 +279,19 @@ class Customer(models.Model):
     def save(self, *args, **kwargs):
         # Generate customer code if not exists
         if not self.customer_code:
-            # Format: CUS-{company_id}-{sequence}
-            last_customer = Customer.objects.filter(company=self.company).order_by('id').last()
+            # Format: CUS-{sequence} (no company ID needed - tenant scoped)
+            last_customer = Customer.objects.order_by('id').last()
             sequence = 1
             if last_customer and last_customer.customer_code:
                 try:
                     sequence = int(last_customer.customer_code.split('-')[-1]) + 1
                 except (IndexError, ValueError):
-                    sequence = Customer.objects.filter(company=self.company).count() + 1
-            self.customer_code = f"CUS-{self.company.id}-{sequence}"
+                    sequence = Customer.objects.count() + 1
+            self.customer_code = f"CUS-{sequence}"
         super().save(*args, **kwargs)
 
 
-class CustomerAddress(models.Model):
-    """Customer addresses (billing, installation, etc.)"""
+class CustomerAddress(models.Model):  
     customer = models.ForeignKey(
         Customer, 
         on_delete=models.CASCADE, 
@@ -344,16 +341,17 @@ class CustomerAddress(models.Model):
     # Additional info
     installation_notes = models.TextField(blank=True)
     
+    # Tenant schema field
     # Audit fields
     created_by = models.ForeignKey(
-        settings.AUTH_USER_MODEL,  # FIXED
+        settings.AUTH_USER_MODEL,
         on_delete=models.SET_NULL,
         null=True,
         blank=True,
         related_name='created_customer_addresses'
     )
     updated_by = models.ForeignKey(
-        settings.AUTH_USER_MODEL,  # FIXED
+        settings.AUTH_USER_MODEL,
         on_delete=models.SET_NULL,
         null=True,
         blank=True,
@@ -363,6 +361,7 @@ class CustomerAddress(models.Model):
     updated_at = models.DateTimeField(auto_now=True)
     
     class Meta:
+        app_label = 'customers'
         ordering = ['-is_primary', 'address_type']
         verbose_name_plural = "Customer addresses"
         unique_together = ['customer', 'address_type']
@@ -380,8 +379,7 @@ class CustomerAddress(models.Model):
         super().save(*args, **kwargs)
 
 
-class CustomerDocument(models.Model):
-    """Customer documents (ID, contract, etc.)"""
+class CustomerDocument(models.Model):  
     customer = models.ForeignKey(
         Customer, 
         on_delete=models.CASCADE, 
@@ -405,7 +403,7 @@ class CustomerDocument(models.Model):
     # Verification
     verified = models.BooleanField(default=False)
     verified_by = models.ForeignKey(
-        settings.AUTH_USER_MODEL,  # FIXED
+        settings.AUTH_USER_MODEL, 
         on_delete=models.SET_NULL, 
         null=True, 
         blank=True,
@@ -418,16 +416,17 @@ class CustomerDocument(models.Model):
     expiry_date = models.DateField(null=True, blank=True)
     is_expired = models.BooleanField(default=False)
     
+    # Tenant schema field
     # Audit fields
     created_by = models.ForeignKey(
-        settings.AUTH_USER_MODEL,  # FIXED
+        settings.AUTH_USER_MODEL,
         on_delete=models.SET_NULL,
         null=True,
         blank=True,
         related_name='created_customer_documents'
     )
     updated_by = models.ForeignKey(
-        settings.AUTH_USER_MODEL,  # FIXED
+        settings.AUTH_USER_MODEL,
         on_delete=models.SET_NULL,
         null=True,
         blank=True,
@@ -437,6 +436,7 @@ class CustomerDocument(models.Model):
     updated_at = models.DateTimeField(auto_now=True)
     
     class Meta:
+        app_label = 'customers'
         ordering = ['-created_at']
     
     def __str__(self):
@@ -452,8 +452,7 @@ class CustomerDocument(models.Model):
         return self.document_file.url if self.document_file else None
 
 
-class NextOfKin(models.Model):
-    """Customer's next of kin information"""
+class NextOfKin(models.Model):  
     customer = models.OneToOneField(
         Customer, 
         on_delete=models.CASCADE, 
@@ -496,16 +495,17 @@ class NextOfKin(models.Model):
     # Emergency contact priority
     is_primary_contact = models.BooleanField(default=True)
     
+    # Tenant schema field
     # Audit fields
     created_by = models.ForeignKey(
-        settings.AUTH_USER_MODEL,  # FIXED
+        settings.AUTH_USER_MODEL,
         on_delete=models.SET_NULL,
         null=True,
         blank=True,
         related_name='created_next_of_kins'
     )
     updated_by = models.ForeignKey(
-        settings.AUTH_USER_MODEL,  # FIXED
+        settings.AUTH_USER_MODEL,
         on_delete=models.SET_NULL,
         null=True,
         blank=True,
@@ -515,14 +515,14 @@ class NextOfKin(models.Model):
     updated_at = models.DateTimeField(auto_now=True)
     
     class Meta:
+        app_label = 'customers'
         verbose_name_plural = "Next of kin"
     
     def __str__(self):
         return f"{self.customer.customer_code} - {self.full_name}"
 
 
-class CustomerNotes(models.Model):
-    """Internal notes about customers"""
+class CustomerNotes(models.Model):  
     customer = models.ForeignKey(
         Customer, 
         on_delete=models.CASCADE, 
@@ -575,14 +575,15 @@ class CustomerNotes(models.Model):
         null=True
     )
     
+    # Tenant schema field
     # Audit fields
     created_by = models.ForeignKey(
-        settings.AUTH_USER_MODEL,  # FIXED
+        settings.AUTH_USER_MODEL,
         on_delete=models.CASCADE,
         related_name='created_customer_notes'
     )
     updated_by = models.ForeignKey(
-        settings.AUTH_USER_MODEL,  # FIXED
+        settings.AUTH_USER_MODEL,
         on_delete=models.SET_NULL,
         null=True,
         blank=True,
@@ -592,6 +593,7 @@ class CustomerNotes(models.Model):
     updated_at = models.DateTimeField(auto_now=True)
     
     class Meta:
+        app_label = 'customers'
         ordering = ['-created_at']
         verbose_name_plural = "Customer notes"
     
@@ -599,10 +601,7 @@ class CustomerNotes(models.Model):
         return f"Note for {self.customer.customer_code}"
 
 
-class ServiceConnection(models.Model):
-    """
-    Customer service connection details - links customer to a specific plan/service
-    """
+class ServiceConnection(models.Model):  
     customer = models.ForeignKey(
         Customer,
         on_delete=models.CASCADE,
@@ -627,7 +626,7 @@ class ServiceConnection(models.Model):
         verbose_name="Assigned Plan"
     )
 
-    # Authentication/connection method - CRITICAL for analytics (Priority 10)
+    # Authentication/connection method
     auth_connection_type = models.CharField(
         max_length=20,
         choices=AUTH_CONNECTION_TYPE_CHOICES,
@@ -732,6 +731,7 @@ class ServiceConnection(models.Model):
         verbose_name="Contract Period (months)"
     )
 
+    # Tenant schema field
     # === Audit Trail ===
     created_by = models.ForeignKey(
         settings.AUTH_USER_MODEL,
@@ -753,6 +753,7 @@ class ServiceConnection(models.Model):
     updated_at = models.DateTimeField(auto_now=True, verbose_name="Updated At")
 
     class Meta:
+        app_label = 'customers'
         ordering = ['-created_at']
         verbose_name = "Service Connection"
         verbose_name_plural = "Service Connections"
@@ -782,16 +783,14 @@ class ServiceConnection(models.Model):
         Auto-populate auth_connection_type from plan if not set
         """
         if self.plan and not self.auth_connection_type:
-            # Automatic mapping from Plan.plan_type
             mapping = {
                 'HOTSPOT': 'HOTSPOT',
                 'PPPOE': 'PPPOE',
                 'STATIC': 'STATIC',
-                'INTERNET': 'PPPOE',  # or 'DYNAMIC'
+                'INTERNET': 'PPPOE',
             }
             self.auth_connection_type = mapping.get(self.plan.plan_type, 'OTHER')
 
-        # Optional: sync speeds from plan if not manually overridden
         if self.plan and not self.download_speed:
             self.download_speed = self.plan.download_speed or 0
         if self.plan and not self.upload_speed:
@@ -800,7 +799,6 @@ class ServiceConnection(models.Model):
         super().save(*args, **kwargs)
 
     def activate_service(self, user=None):
-        """Activate the service"""
         if self.status != 'ACTIVE':
             self.status = 'ACTIVE'
             self.activation_date = timezone.now()
@@ -810,13 +808,11 @@ class ServiceConnection(models.Model):
             self.save()
 
     def suspend_service(self, reason="", user=None):
-        """Suspend the service"""
         self.status = 'SUSPENDED'
         self.suspension_date = timezone.now()
         if user:
             self.updated_by = user
         self.save()
-        # Log suspension note
         CustomerNotes.objects.create(
             customer=self.customer,
             note=f"Service suspended. Reason: {reason}",
@@ -826,13 +822,11 @@ class ServiceConnection(models.Model):
         )
 
     def terminate_service(self, reason="", user=None):
-        """Terminate the service"""
         self.status = 'TERMINATED'
         self.termination_date = timezone.now()
         if user:
             self.updated_by = user
         self.save()
-        # Log termination note
         CustomerNotes.objects.create(
             customer=self.customer,
             note=f"Service terminated. Reason: {reason}",

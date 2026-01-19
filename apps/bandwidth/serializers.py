@@ -3,7 +3,7 @@ from django.utils import timezone
 
 from .models import (
     BandwidthProfile, TrafficRule, DataUsage, 
-    BandwidthAlert, SpeedTestResult
+    BandwidthAlert
 )
 
 
@@ -133,14 +133,14 @@ class BandwidthAlertSerializer(serializers.ModelSerializer):
         return None
 
 
-class SpeedTestResultSerializer(serializers.ModelSerializer):
-    customer_name = serializers.CharField(source='customer.user.get_full_name', read_only=True)
-    customer_code = serializers.CharField(source='customer.customer_code', read_only=True)
+#class SpeedTestResultSerializer(serializers.ModelSerializer):
+ #   customer_name = serializers.CharField(source='customer.user.get_full_name', read_only=True)
+  #  customer_code = serializers.CharField(source='customer.customer_code', read_only=True)
     
-    class Meta:
-        model = SpeedTestResult
-        fields = '__all__'
-        read_only_fields = ['created_at']
+   # class Meta:
+   #     model = SpeedTestResult
+    #    fields = '__all__'
+     #   read_only_fields = ['created_at']
 
 
 class TrafficAnalysisSerializer(serializers.Serializer):

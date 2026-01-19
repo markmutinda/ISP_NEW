@@ -4,6 +4,7 @@ from django.core.validators import MinValueValidator
 from django.utils import timezone
 import uuid
 
+
 User = get_user_model()
 
 
@@ -22,6 +23,8 @@ class Supplier(models.Model):
     payment_terms = models.CharField(max_length=100, blank=True, null=True)
     notes = models.TextField(blank=True, null=True)
     is_active = models.BooleanField(default=True)
+    
+
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
     
@@ -33,8 +36,6 @@ class Supplier(models.Model):
     
     def __str__(self):
         return self.name
-
-# ... rest of inventory models with app_label = 'inventory' ...
 
 
 class EquipmentType(models.Model):
@@ -54,7 +55,9 @@ class EquipmentType(models.Model):
     has_serial_numbers = models.BooleanField(default=True)
     requires_assignment = models.BooleanField(default=False)
     
+
     class Meta:
+        app_label = 'inventory'
         ordering = ['name']
         verbose_name = "Equipment Type"
         verbose_name_plural = "Equipment Types"
@@ -141,7 +144,9 @@ class EquipmentItem(models.Model):
     ip_address = models.GenericIPAddressField(blank=True, null=True)
     firmware_version = models.CharField(max_length=50, blank=True, null=True)
     
+
     class Meta:
+        app_label = 'inventory'
         ordering = ['-id']
         indexes = [
             models.Index(fields=['serial_number']),
@@ -213,7 +218,9 @@ class Assignment(models.Model):
     purpose = models.TextField()
     notes = models.TextField(blank=True, null=True)
     
+
     class Meta:
+        app_label = 'inventory'
         ordering = ['-assigned_date']
         verbose_name = "Equipment Assignment"
         verbose_name_plural = "Equipment Assignments"
@@ -295,7 +302,9 @@ class PurchaseOrder(models.Model):
     
     notes = models.TextField(blank=True, null=True)
     
+
     class Meta:
+        app_label = 'inventory'
         ordering = ['-order_date']
     
     def __str__(self):
@@ -344,7 +353,9 @@ class PurchaseOrderItem(models.Model):
     
     received_quantity = models.PositiveIntegerField(default=0)
     
+
     class Meta:
+        app_label = 'inventory'
         verbose_name = "Purchase Order Item"
         verbose_name_plural = "Purchase Order Items"
     
@@ -404,7 +415,9 @@ class MaintenanceRecord(models.Model):
     )
     next_maintenance_date = models.DateField(null=True, blank=True)
     
+
     class Meta:
+        app_label = 'inventory'
         ordering = ['-scheduled_date']
     
     def __str__(self):
@@ -425,7 +438,9 @@ class StockAlert(models.Model):
     is_active = models.BooleanField(default=True)
     triggered_on = models.DateTimeField(auto_now_add=True)
     
+
     class Meta:
+        app_label = 'inventory'
         ordering = ['-triggered_on']
     
     def __str__(self):

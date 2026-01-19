@@ -69,3 +69,4 @@ urlpatterns = [
     path('routers/auth/', RouterAuthenticateView.as_view(), name='router-authenticate'),
     path('routers/heartbeat/', RouterHeartbeatView.as_view(), name='router-heartbeat'),
 ]
+

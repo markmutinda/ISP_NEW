@@ -492,3 +492,4 @@ VOUCHER_TYPES = [
     ('LOYALTY', 'Loyalty Reward'),
 ]
 
+

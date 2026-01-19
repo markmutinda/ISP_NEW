@@ -239,23 +239,37 @@ class NextOfKinForm(forms.ModelForm):
 class ServiceConnectionForm(forms.ModelForm):
     """Form for service connections"""
     
+    # Manually define the plan field with lazy queryset
+    plan = forms.ModelChoiceField(
+        queryset=None,  # Will be set in __init__
+        required=False,
+        widget=forms.Select(attrs={'class': 'form-control'}),
+        label="Plan"
+    )
+
     class Meta:
         model = ServiceConnection
         fields = [
-            'service_type','plan', 'connection_type', 'status',
+            'service_type', 'connection_type', 'status',
             'ip_address', 'mac_address', 'vlan_id',
             'router_model', 'router_serial', 'ont_model', 'ont_serial',
             'download_speed', 'upload_speed', 'data_cap', 'qos_profile',
             'installation_address', 'installation_notes',
             'monthly_price', 'setup_fee', 'prorated_billing',
             'auto_renew', 'contract_period'
-        ]
+        ]  # ← IMPORTANT: Do NOT include 'plan' here anymore
         widgets = {
             'installation_notes': forms.Textarea(attrs={'rows': 3}),
             'activation_date': forms.DateTimeInput(attrs={'type': 'datetime-local'}),
             'suspension_date': forms.DateTimeInput(attrs={'type': 'datetime-local'}),
             'termination_date': forms.DateTimeInput(attrs={'type': 'datetime-local'}),
         }
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # Lazy-load the Plan queryset
+        from apps.billing.models import Plan  # Import here, not at top
+        self.fields['plan'].queryset = Plan.objects.all()
     
     def clean_mac_address(self):
         mac_address = self.cleaned_data.get('mac_address')

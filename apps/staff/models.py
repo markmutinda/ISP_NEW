@@ -4,10 +4,11 @@ from django.core.validators import MinValueValidator
 from django.utils import timezone
 from apps.core.models import BaseModel
 
+
 User = get_user_model()
 
 
-class Department(BaseModel):
+class Department(models.Model):
     """
     Staff departments
     """
@@ -36,7 +37,9 @@ class Department(BaseModel):
     location = models.CharField(max_length=255, blank=True, null=True)
     is_active = models.BooleanField(default=True)
     
+
     class Meta:
+        app_label = 'staff'
         ordering = ['name']
         verbose_name = "Department"
         verbose_name_plural = "Departments"
@@ -49,7 +52,7 @@ class Department(BaseModel):
         return self.employees.filter(is_active=True).count()
 
 
-class Employee(BaseModel):
+class Employee(models.Model):
     """
     Employee profiles linked to User accounts
     """
@@ -166,7 +169,9 @@ class Employee(BaseModel):
     # Status Flags
     is_active = models.BooleanField(default=True)
     
+
     class Meta:
+        app_label = 'staff'
         ordering = ['employee_id']
         verbose_name = "Employee"
         verbose_name_plural = "Employees"
@@ -223,7 +228,7 @@ class Employee(BaseModel):
 
 
 
-class Attendance(BaseModel):
+class Attendance(models.Model):
     """
     Employee attendance tracking
     """
@@ -282,7 +287,9 @@ class Attendance(BaseModel):
         related_name='approved_attendances'
     )
     
+
     class Meta:
+        app_label = 'staff'
         ordering = ['-date', 'employee']
         verbose_name = "Attendance"
         verbose_name_plural = "Attendances"
@@ -327,7 +334,7 @@ class Attendance(BaseModel):
         return self.hours_worked + self.overtime_hours
 
 
-class LeaveRequest(BaseModel):
+class LeaveRequest(models.Model):
     """
     Employee leave requests
     """
@@ -390,8 +397,10 @@ class LeaveRequest(BaseModel):
     )
     handover_notes = models.TextField(blank=True, null=True)
     
+
     class Meta:
-        ordering = ['-created_at']
+        app_label = 'staff'
+        ordering = ['-start_date']
         verbose_name = "Leave Request"
         verbose_name_plural = "Leave Requests"
     
@@ -415,7 +424,7 @@ class LeaveRequest(BaseModel):
         return self.status == 'pending'
 
 
-class PerformanceReview(BaseModel):
+class PerformanceReview(models.Model):
     """
     Employee performance reviews
     """
@@ -475,7 +484,9 @@ class PerformanceReview(BaseModel):
     employee_acknowledged = models.BooleanField(default=False)
     employee_acknowledged_date = models.DateTimeField(null=True, blank=True)
     
+
     class Meta:
+        app_label = 'staff'
         ordering = ['-review_date']
         verbose_name = "Performance Review"
         verbose_name_plural = "Performance Reviews"
@@ -499,7 +510,7 @@ class PerformanceReview(BaseModel):
         super().save(*args, **kwargs)
 
 
-class Payroll(BaseModel):
+class Payroll(models.Model):
     """
     Employee payroll records
     """
@@ -594,7 +605,9 @@ class Payroll(BaseModel):
     
     notes = models.TextField(blank=True, null=True)
     
+
     class Meta:
+        app_label = 'staff'
         ordering = ['-payment_date']
         verbose_name = "Payroll"
         verbose_name_plural = "Payroll Records"

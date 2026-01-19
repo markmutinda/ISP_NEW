@@ -5,6 +5,7 @@ from datetime import datetime, timedelta
 from dateutil.relativedelta import relativedelta
 from apps.customers.models import ServiceConnection
 from django.utils import timezone
+
 from django.db.models import (
     Sum, Count, Avg, Max, Min, Q, F,
     Func, Value, CharField, IntegerField, FloatField
@@ -25,7 +26,8 @@ from io import StringIO
 # Import your models
 from rest_framework.permissions import IsAdminUser
 from apps.customers.models import Customer
-from apps.billing.models import Invoice, Payment, Plan
+from apps.billing.models.billing_models import Invoice, Plan
+from apps.billing.models.payment_models import Payment
 from apps.network.models import OLTDevice, CPEDevice, MikrotikQueue  
 from apps.bandwidth.models import DataUsage, BandwidthProfile
 

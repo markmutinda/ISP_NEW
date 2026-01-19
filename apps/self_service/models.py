@@ -2,8 +2,8 @@ from django.db import models
 from django.contrib.auth import get_user_model
 from django.utils import timezone
 from apps.customers.models import Customer
-from apps.billing.models import Invoice, Payment
 from apps.support.models import SupportTicket
+
 
 User = get_user_model()
 
@@ -21,10 +21,12 @@ class CustomerSession(models.Model):
     last_activity = models.DateTimeField(auto_now=True)
     is_active = models.BooleanField(default=True)
     
+
     def __str__(self):
         return f"{self.customer.name} - {self.login_time}"
     
     class Meta:
+        app_label = 'self_service'
         ordering = ['-login_time']
         indexes = [
             models.Index(fields=['customer', 'login_time']),
@@ -79,6 +81,7 @@ class ServiceRequest(models.Model):
     customer_notes = models.TextField(blank=True)
     staff_notes = models.TextField(blank=True)
     
+
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
     
@@ -86,6 +89,7 @@ class ServiceRequest(models.Model):
         return f"{self.customer.name} - {self.request_type} - {self.status}"
     
     class Meta:
+        app_label = 'self_service'
         ordering = ['-created_at']
         indexes = [
             models.Index(fields=['customer', 'status']),
@@ -123,10 +127,12 @@ class UsageAlert(models.Model):
     triggered_at = models.DateTimeField(auto_now_add=True)
     resolved_at = models.DateTimeField(null=True, blank=True)
     
+
     def __str__(self):
         return f"{self.customer.name} - {self.alert_type} - {self.trigger_type}"
     
     class Meta:
+        app_label = 'self_service'
         ordering = ['-triggered_at']
         indexes = [
             models.Index(fields=['customer', 'is_read']),

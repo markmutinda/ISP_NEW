@@ -1,4 +1,4 @@
-﻿import logging
+import logging
 from django.conf import settings
 from typing import Dict, List, Optional, Tuple
 import uuid
@@ -99,3 +99,4 @@ class PushNotificationService:
     def send_push(self, device_tokens, title, body, **kwargs):
         logger.info(f"[PUSH SIMULATION] Title: {title}")
         return True, f"PUSH_{uuid.uuid4().hex[:8]}", {'simulated': True}
+

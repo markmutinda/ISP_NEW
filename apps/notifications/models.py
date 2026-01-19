@@ -6,6 +6,7 @@ from django.utils import timezone
 from django.core.validators import MinValueValidator, MaxValueValidator
 from apps.core.models import AuditLog
 
+
 User = get_user_model()
 
 class NotificationTemplate(models.Model):
@@ -53,10 +54,12 @@ class NotificationTemplate(models.Model):
         help_text="List of available template variables, comma-separated"
     )
     
+
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
     
     class Meta:
+        app_label = 'notifications'
         ordering = ['-priority', 'name']
         indexes = [
             models.Index(fields=['trigger_event']),
@@ -131,10 +134,12 @@ class Notification(models.Model):
     metadata = models.JSONField(default=dict, blank=True)
     error_message = models.TextField(blank=True, null=True)
     
+
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
     
     class Meta:
+        app_label = 'notifications'
         ordering = ['-priority', '-created_at']
         indexes = [
             models.Index(fields=['user', 'status', 'created_at']),
@@ -241,12 +246,14 @@ class AlertRule(models.Model):
         help_text="Specific users to notify"
     )
     
+
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
     last_checked = models.DateTimeField(null=True, blank=True)
     last_triggered = models.DateTimeField(null=True, blank=True)
     
     class Meta:
+        app_label = 'notifications'
         ordering = ['name']
         indexes = [
             models.Index(fields=['is_active', 'alert_type']),
@@ -305,9 +312,11 @@ class NotificationPreference(models.Model):
         choices=[('en', 'English'), ('sw', 'Swahili')]
     )
     
+
     updated_at = models.DateTimeField(auto_now=True)
     
     class Meta:
+        app_label = 'notifications'
         verbose_name = "Notification Preference"
         verbose_name_plural = "Notification Preferences"
     
@@ -358,7 +367,9 @@ class NotificationLog(models.Model):  # Don't inherit from AuditLog
     timestamp = models.DateTimeField(auto_now_add=True)
     ip_address = models.GenericIPAddressField(null=True, blank=True)
     
+
     class Meta:
+        app_label = 'notifications'
         ordering = ['-timestamp']
         verbose_name = "Notification Log"
         verbose_name_plural = "Notification Logs"
@@ -406,11 +417,13 @@ class BulkNotification(models.Model):
     sent_count = models.IntegerField(default=0)
     failed_count = models.IntegerField(default=0)
     
+
     created_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
     
     class Meta:
+        app_label = 'notifications'
         ordering = ['-scheduled_for', '-created_at']
     
     def __str__(self):

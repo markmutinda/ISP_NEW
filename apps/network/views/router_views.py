@@ -38,7 +38,7 @@ class RouterViewSet(viewsets.ModelViewSet):
     serializer_class = RouterSerializer
     permission_classes = [HasCompanyAccess]
     filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
-    filterset_fields = ['company', 'router_type', 'status', 'is_active']
+    filterset_fields = [ 'router_type', 'status', 'is_active']
     search_fields = ['name', 'ip_address', 'model', 'location', 'tags']
     ordering_fields = ['name', 'last_seen', 'created_at']
 
@@ -328,7 +328,6 @@ class RouterViewSet(viewsets.ModelViewSet):
         response = HttpResponse(script_content, content_type='text/plain')
         response['Content-Disposition'] = f'attachment; filename="yourisp-config-{router.id}.rsc"'
         return response
-
     @action(detail=True, methods=['get'], url_path='auth-key')
     def auth_key(self, request, pk=None):
         router = self.get_object()
@@ -348,17 +347,26 @@ class RouterViewSet(viewsets.ModelViewSet):
         user = self.request.user
         
         if user.is_superuser:
+            # Superusers can see all routers, or optionally filter by company_id query param
             company_id = self.request.query_params.get('company_id')
             if company_id:
-                return queryset.filter(company_id=company_id)
+                # If company_id is passed, filter by that company's tenant
+                # (assuming Company has a 'tenant' field)
+                from apps.core.models import Company
+                try:
+                    company = Company.objects.get(id=company_id)
+                    return queryset.filter(tenant=company.tenant)
+                except Company.DoesNotExist:
+                    pass  # fallback to all
             return queryset
         
-        if hasattr(user, 'company') and user.company:
-            return queryset.filter(company=user.company)
+        # Normal users (staff, technicians, etc.) only see routers in their current tenant
+        if hasattr(self.request, 'tenant') and self.request.tenant:
+            return queryset.filter(tenant=self.request.tenant)
         
+        # Fallback: no tenant → empty queryset (prevents access)
         return queryset.none()
-
-# SIMPLE AUTHENTICATION ENDPOINT
+    
 # SIMPLE AUTHENTICATION ENDPOINT
 class RouterAuthenticateView(APIView):
     permission_classes = [AllowAny]

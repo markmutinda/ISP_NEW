@@ -7,13 +7,12 @@ from django.utils import timezone
 from datetime import timedelta
 import logging
 
-from .models import BandwidthProfile, TrafficRule, DataUsage, BandwidthAlert, SpeedTestResult
+from .models import BandwidthProfile, TrafficRule, DataUsage, BandwidthAlert
 from .serializers import (
     BandwidthProfileSerializer,
     TrafficRuleSerializer,
     DataUsageSerializer,
     BandwidthAlertSerializer,
-    SpeedTestResultSerializer,
     TrafficAnalysisSerializer
 )
 from apps.core.permissions import IsAdmin, IsAdminOrStaff, IsCustomer, IsTechnician
@@ -336,74 +335,73 @@ class BandwidthAlertViewSet(viewsets.ModelViewSet):
         return Response(serializer.data)
 
 
-class SpeedTestResultViewSet(viewsets.ModelViewSet):
-    """ViewSet for speed test results"""
-    serializer_class = SpeedTestResultSerializer
-    permission_classes = [IsAuthenticated]
-    
-    def get_queryset(self):
-        """Filter queryset based on user permissions"""
-        user = self.request.user
-        
-        if user.is_superuser or user.role in ['admin', 'staff']:
-            return SpeedTestResult.objects.all()
-        
-        # Customer can only see their own tests
-        from apps.customers.models import Customer
-        try:
-            customer = Customer.objects.get(user=user)
-            return SpeedTestResult.objects.filter(customer=customer)
-        except Customer.DoesNotExist:
-            return SpeedTestResult.objects.none()
-    
-    def create(self, request, *args, **kwargs):
-        """Create a new speed test result"""
-        user = request.user
-        
-        try:
-            from apps.customers.models import Customer
-            customer = Customer.objects.get(user=user)
-        except Customer.DoesNotExist:
-            return Response(
-                {'error': 'Customer profile not found'},
-                status=status.HTTP_404_NOT_FOUND
-            )
-        
-        # Add customer to request data
-        request.data['customer'] = customer.id
-        if hasattr(customer, 'company'):
-            request.data['company'] = customer.company.id
-        
-        return super().create(request, *args, **kwargs)
-    
-    @action(detail=False, methods=['get'])
-    def recent(self, request):
-        """Get recent speed test results"""
-        days = int(request.query_params.get('days', 7))
-        
-        cutoff_date = timezone.now() - timedelta(days=days)
-        queryset = self.get_queryset().filter(test_time__gte=cutoff_date)
-        
-        # Calculate averages
-        if queryset.exists():
-            avg_download = queryset.aggregate(Avg('download_speed'))['download_speed__avg']
-            avg_upload = queryset.aggregate(Avg('upload_speed'))['upload_speed__avg']
-            avg_latency = queryset.aggregate(Avg('latency'))['latency__avg']
-        else:
-            avg_download = avg_upload = avg_latency = 0
-        
-        serializer = self.get_serializer(queryset, many=True)
-        
-        return Response({
-            'results': serializer.data,
-            'summary': {
-                'average_download_mbps': round(avg_download, 2) if avg_download else 0,
-                'average_upload_mbps': round(avg_upload, 2) if avg_upload else 0,
-                'average_latency_ms': round(avg_latency, 2) if avg_latency else 0,
-                'total_tests': queryset.count()
-            }
-        })
-
+# class SpeedTestResultViewSet(viewsets.ModelViewSet):
+#     """ViewSet for speed test results"""
+#     serializer_class = SpeedTestResultSerializer
+#     permission_classes = [IsAuthenticated]
+#
+#     def get_queryset(self):
+#         """Filter queryset based on user permissions"""
+#         user = self.request.user
+#
+#         if user.is_superuser or user.role in ['admin', 'staff']:
+#             return SpeedTestResult.objects.all()
+#
+#         # Customer can only see their own tests
+#         from apps.customers.models import Customer
+#         try:
+#             customer = Customer.objects.get(user=user)
+#             return SpeedTestResult.objects.filter(customer=customer)
+#         except Customer.DoesNotExist:
+#             return SpeedTestResult.objects.none()
+#
+#     def create(self, request, *args, **kwargs):
+#         """Create a new speed test result"""
+#         user = request.user
+#
+#         try:
+#             from apps.customers.models import Customer
+#             customer = Customer.objects.get(user=user)
+#         except Customer.DoesNotExist:
+#             return Response(
+#                 {'error': 'Customer profile not found'},
+#                 status=status.HTTP_404_NOT_FOUND
+#             )
+#
+#         # Add customer to request data
+#         request.data['customer'] = customer.id
+#         if hasattr(customer, 'company'):
+#             request.data['company'] = customer.company.id
+#
+#         return super().create(request, *args, **kwargs)
+#
+#     @action(detail=False, methods=['get'])
+#     def recent(self, request):
+#         """Get recent speed test results"""
+#         days = int(request.query_params.get('days', 7))
+#
+#         cutoff_date = timezone.now() - timedelta(days=days)
+#         queryset = self.get_queryset().filter(test_time__gte=cutoff_date)
+#
+#         # Calculate averages
+#         if queryset.exists():
+#             avg_download = queryset.aggregate(Avg('download_speed'))['download_speed__avg']
+#             avg_upload = queryset.aggregate(Avg('upload_speed'))['upload_speed__avg']
+#             avg_latency = queryset.aggregate(Avg('latency'))['latency__avg']
+#         else:
+#             avg_download = avg_upload = avg_latency = 0
+#
+#         serializer = self.get_serializer(queryset, many=True)
+#
+#         return Response({
+#             'results': serializer.data,
+#             'summary': {
+#                 'average_download_mbps': round(avg_download, 2) if avg_download else 0,
+#                 'average_upload_mbps': round(avg_upload, 2) if avg_upload else 0,
+#                 'average_latency_ms': round(avg_latency, 2) if avg_latency else 0,
+#                 'total_tests': queryset.count()
+#             }
+#         })
 
 class TrafficAnalysisViewSet(viewsets.ViewSet):
     """ViewSet for traffic analysis"""

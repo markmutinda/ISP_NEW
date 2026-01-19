@@ -1,7 +1,8 @@
 from rest_framework import serializers
 from django.utils import timezone
 from decimal import Decimal
-from ..models.payment_models import PaymentMethod, Payment, Receipt
+# from ..models.payment_models import PaymentMethod, Payment, Receipt   # ← COMMENTED OUT to prevent early loading / circular import issues
+
 from customers.serializers import CustomerSerializer
 from ..serializers.invoice_serializers import InvoiceSerializer
 
@@ -12,7 +13,7 @@ class PaymentMethodSerializer(serializers.ModelSerializer):
     updated_by_name = serializers.CharField(source='updated_by.get_full_name', read_only=True)
 
     class Meta:
-        model = PaymentMethod
+        model = 'PaymentMethod'  # ← Changed to string literal (safe)
         fields = [
             'id', 'company', 'company_name', 'name', 'code', 'method_type', 'description',
             'channel_id', 'is_payhero_enabled',
@@ -43,7 +44,7 @@ class PaymentSerializer(serializers.ModelSerializer):
     payhero_external_reference = serializers.CharField(read_only=True)
 
     class Meta:
-        model = Payment
+        model = 'Payment'  # ← Changed to string literal
         fields = [
             'id', 'payment_number', 'company', 'company_name', 'customer', 'customer_name',
             'customer_code', 'invoice', 'invoice_number', 'amount', 'transaction_fee',
@@ -65,7 +66,7 @@ class PaymentSerializer(serializers.ModelSerializer):
 
 class PaymentCreateSerializer(serializers.ModelSerializer):
     class Meta:
-        model = Payment
+        model = 'Payment'  # ← Changed to string literal
         fields = [
             'customer', 'invoice', 'amount', 'payment_method', 'payment_reference',
             'transaction_id', 'payer_name', 'payer_phone', 'payer_email',
@@ -77,7 +78,6 @@ class PaymentCreateSerializer(serializers.ModelSerializer):
         amount = data.get('amount')
         if amount and amount <= 0:
             raise serializers.ValidationError("Amount must be greater than zero")
-
         payment_method = data.get('payment_method')
         if payment_method:
             if not payment_method.is_active:
@@ -119,7 +119,7 @@ class ReceiptSerializer(serializers.ModelSerializer):
     issued_by_name = serializers.CharField(source='issued_by.get_full_name', read_only=True)
 
     class Meta:
-        model = Receipt
+        model = 'Receipt'  # ← Changed to string literal
         fields = [
             'id', 'receipt_number', 'company', 'company_name', 'customer', 'customer_name',
             'customer_code', 'payment', 'payment_number', 'amount', 'amount_in_words',

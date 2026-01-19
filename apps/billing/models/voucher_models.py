@@ -8,6 +8,7 @@ from apps.core.models import Company
 from apps.customers.models import Customer
 from .billing_models import Invoice
 
+
 class VoucherBatch(models.Model):
     STATUS_CHOICES = [
         ('DRAFT', 'Draft'),
@@ -28,7 +29,6 @@ class VoucherBatch(models.Model):
 
     # Basic Information
     batch_number = models.CharField(max_length=50, unique=True)
-    company = models.ForeignKey(Company, on_delete=models.CASCADE, related_name='voucher_batches')
     name = models.CharField(max_length=200)
     description = models.TextField(blank=True)
     
@@ -48,6 +48,14 @@ class VoucherBatch(models.Model):
     issued_count = models.PositiveIntegerField(default=0)
     used_count = models.PositiveIntegerField(default=0)
     available_count = models.PositiveIntegerField(default=0)
+    
+    # Tenant schema field
+    schema_name = models.SlugField(
+        max_length=63,
+        unique=True,
+        editable=False,
+        default="default_schema"
+    )
     
     # Status
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='DRAFT')
@@ -181,6 +189,14 @@ class Voucher(models.Model):
     max_uses = models.PositiveIntegerField(default=1)
     use_count = models.PositiveIntegerField(default=0)
     
+    # Tenant schema field
+    schema_name = models.SlugField(
+        max_length=63,
+        unique=True,
+        editable=False,
+        default="default_schema"
+    )
+    
     # Status
     status = models.CharField(max_length=20, choices=VOUCHER_STATUS, default='ACTIVE')
     
@@ -266,13 +282,11 @@ class Voucher(models.Model):
         
         # Create payment record
         payment_method = PaymentMethod.objects.filter(
-            method_type='VOUCHER',
-            company=self.batch.company
+            method_type='VOUCHER',           
         ).first()
         
         if payment_method:
             payment = Payment.objects.create(
-                company=self.batch.company,
                 customer=customer,
                 amount=amount,
                 payment_method=payment_method,
@@ -311,6 +325,14 @@ class VoucherUsage(models.Model):
     # Reference to payment/invoice
     payment = models.ForeignKey('Payment', on_delete=models.SET_NULL, null=True, blank=True, related_name='voucher_usages')
     invoice = models.ForeignKey(Invoice, on_delete=models.SET_NULL, null=True, blank=True, related_name='voucher_usages')
+    
+    # Tenant schema field
+    schema_name = models.SlugField(
+        max_length=63,
+        unique=True,
+        editable=False,
+        default="default_schema"
+    )
     
     # Metadata
     created_by = models.ForeignKey('core.User', on_delete=models.SET_NULL, null=True, related_name='created_voucher_usages')
