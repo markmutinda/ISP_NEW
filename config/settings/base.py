@@ -225,13 +225,42 @@ SIMPLE_JWT = {
 # ────────────────────────────────────────────────────────────────
 #  CORS
 # ────────────────────────────────────────────────────────────────
-CORS_ALLOWED_ORIGINS = [
-    "http://localhost:3000",
-    "http://127.0.0.1:3000",
-]
+# CORS Configuration - Multi-Tenant Subdomains
+if DEBUG:
+    # Development: allow all subdomains of localhost + 127.0.0.1
+    CORS_ALLOWED_ORIGINS = [
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+        "http://*.localhost:3000",    # ← Add this for danstedd.localhost:3000
+        "http://*.127.0.0.1:3000",    # ← Add this for backup
+    ]
+else:
+    # Production: allow your main domain + all subdomains
+    CORS_ALLOWED_ORIGINS = [
+        "https://yourisp.com",
+        "https://*.yourisp.com",      # All subdomains like danstedd.yourisp.com
+    ]
+
+# Always allow credentials (cookies, auth headers)
 CORS_ALLOW_CREDENTIALS = True
 
-# ... rest of your settings remain the same ...
+# Allow all headers (JWT, Content-Type, etc.)
+CORS_ALLOW_ALL_HEADERS = True
+
+# Allow all methods (GET, POST, PUT, DELETE)
+CORS_ALLOW_METHODS = [
+    "DELETE",
+    "GET",
+    "OPTIONS",
+    "PATCH",
+    "POST",
+    "PUT",
+]
+
+# Allow all origins in development (ultra-safe for local testing)
+if DEBUG:
+    CORS_ALLOW_ALL_ORIGINS = True  # ← Add this line for dev - REM
+
 
 # ────────────────────────────────────────────────────────────────
 #  EMAIL (development)
