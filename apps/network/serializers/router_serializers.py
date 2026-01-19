@@ -79,38 +79,34 @@ class RouterSerializer(serializers.ModelSerializer):
         if request and request.user:
             if request.user.is_superuser:
                 return True
-            if hasattr(request.user, 'company') and request.user.company and obj.company:
-                return request.user.company.id == obj.company.id
+            # In multi-tenant mode, users can edit routers in their tenant schema
+            return True
         return False
 
     def create(self, validated_data):
-        request = self.context.get('request')
-        if request and request.user:
-            # If user has a company, assign it
-            if hasattr(request.user, 'company') and request.user.company:
-                validated_data['company'] = request.user.company
-            # If superuser and company not specified, use first company
-            elif request.user.is_superuser and 'company' not in validated_data:
-                company = Company.objects.first()
-                if company:
-                    validated_data['company'] = company
+        """
+        In multi-tenant mode, company FK is not used - tenant scoping replaces it.
+        We remove company from validated_data to avoid FK errors.
+        """
+        # Remove company from validated_data if present - not needed in tenant schema
+        validated_data.pop('company', None)
         return super().create(validated_data)
 
     def validate(self, data):
         """
-        Validate router data
+        Validate router data - tenant scoping handles isolation
         """
-        # Check for duplicate names within the same company
-        if 'name' in data and 'company' in data:
-            queryset = Router.objects.filter(name=data['name'], company=data['company'])
+        # Check for duplicate names within the tenant (no company filter needed)
+        if 'name' in data:
+            queryset = Router.objects.filter(name=data['name'])
             if self.instance:
                 queryset = queryset.exclude(pk=self.instance.pk)
             if queryset.exists():
                 raise serializers.ValidationError(
-                    {"name": "A router with this name already exists in this company."}
+                    {"name": "A router with this name already exists."}
                 )
         
-        # Check for duplicate IP addresses (optional)
+        # Check for duplicate IP addresses
         if 'ip_address' in data and data.get('ip_address'):
             queryset = Router.objects.filter(ip_address=data['ip_address'])
             if self.instance:

@@ -64,25 +64,12 @@ class PlanViewSet(viewsets.ModelViewSet):
                 return Plan.objects.filter(company_id=company_id)
             return Plan.objects.all()
         
-        # Company users see only their own plans
-        if hasattr(user, 'company') and user.company:
-            return Plan.objects.filter(company=user.company)
-        
-        return Plan.objects.none()
+        # In multi-tenant mode, tenant scoping handles filtering
+        return Plan.objects.all()
 
     def perform_create(self, serializer):
-        """Force company for non-superusers"""
-        user = self.request.user
-        if user.is_superuser:
-            # Superuser can set any company (via request data)
-            serializer.save(created_by=user)
-        else:
-            # Force current user's company
-            if hasattr(user, 'company') and user.company:
-                serializer.save(
-                    created_by=user,
-                    company=user.company
-                )
+        """In multi-tenant mode, tenant scoping replaces company filtering"""
+        serializer.save(created_by=self.request.user)
             else:
                 raise serializers.ValidationError("No company assigned to user")
 
