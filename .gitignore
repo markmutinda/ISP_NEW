@@ -51,6 +51,10 @@ htmlcov/
 local_settings.py
 config/settings/local.py
 
+# Migrations (generated locally, sync via backend)
+**/migrations/*.py
+!**/migrations/__init__.py
+
 # Jupyter Notebooks
 .ipynb_checkpoints/
 
@@ -58,3 +62,18 @@ config/settings/local.py
 dist/
 build/
 *.egg-info/
+apps/analytics/migrations/0001_initial.py
+apps/analytics/migrations/0002_initial.py
+apps/bandwidth/migrations/0001_initial.py
+apps/bandwidth/migrations/0002_initial.py
+apps/billing/migrations/0001_initial.py
+apps/billing/migrations/0002_initial.py
+apps/core/migrations/0001_initial.py
+apps/customers/migrations/0001_initial.py
+apps/inventory/migrations/0001_initial.py
+apps/messaging/migrations/0001_initial.py
+apps/network/migrations/0001_initial.py
+apps/notifications/migrations/0001_initial.py
+apps/self_service/migrations/0001_initial.py
+apps/staff/migrations/0001_initial.py
+apps/support/migrations/0001_initial.py
