@@ -18,6 +18,10 @@ from .models import GlobalSystemSettings  # Add this
 from .serializers import GlobalSystemSettingsSerializer, CustomTokenRefreshSerializer  # Add this
 from rest_framework_simplejwt.exceptions import InvalidToken  # Already needed for token fix
 from .serializers import CompanyRegisterSerializer
+from django.core.mail import send_mail  # Add this for email
+from django.template.loader import render_to_string  # For email template
+from django.utils.html import strip_tags  # For plain text email
+from .models import Domain   # ← This is your custom Domain in core/models.py
 
 from .models import User, Company, SystemSettings, AuditLog, Tenant
 from .serializers import (
@@ -590,6 +594,7 @@ class CompanyRegisterView(generics.CreateAPIView):
         serializer.is_valid(raise_exception=True)
         data = serializer.validated_data
         
+        # Create company
         company = Company.objects.create(
             name=data['company_name'],
             email=data['company_email'],
@@ -605,7 +610,7 @@ class CompanyRegisterView(generics.CreateAPIView):
             is_active=True
         )
         
-                # Prevent duplicate empty registration_number
+        # Prevent duplicate empty registration_number
         if not company.registration_number.strip():  # if empty or whitespace
             from uuid import uuid4
             company.registration_number = f"REG-{uuid4().hex[:10].upper()}"
@@ -639,6 +644,16 @@ class CompanyRegisterView(generics.CreateAPIView):
             subscription_expiry=trial_end.date()
         )
         
+        # Create Domain mapping for subdomain (required for django-tenants)
+        domain_name = f"{tenant.subdomain}.localhost"  # Dev example
+        # In production: f"{tenant.subdomain}.{settings.MAIN_DOMAIN}" e.g. bluenet.example.com
+        
+        Domain.objects.create(
+            domain=domain_name,
+            tenant=tenant,
+            is_primary=True
+        )
+
         # Create first admin user
         user = User.objects.create(
             email=data['admin_email'],
@@ -658,7 +673,7 @@ class CompanyRegisterView(generics.CreateAPIView):
         # Generate JWT tokens
         refresh = RefreshToken.for_user(user)
         
-        # Optional: Log the creation
+        # Log the creation
         AuditLog.log_action(
             user=user,
             action='create',
@@ -670,6 +685,9 @@ class CompanyRegisterView(generics.CreateAPIView):
             tenant=tenant
         )
         
+        # Send email with subdomain, username, password
+        self.send_welcome_email(user, tenant, domain_name, data['admin_password'])
+
         return Response({
             'message': 'Company and admin account created successfully. You are now logged in.',
             'user': {
@@ -687,3 +705,29 @@ class CompanyRegisterView(generics.CreateAPIView):
             'access': str(refresh.access_token),
             'refresh': str(refresh),
         }, status=status.HTTP_201_CREATED)
+
+    def send_welcome_email(self, user, tenant, domain_name, password):
+        """Send welcome email with subdomain and credentials"""
+        subject = f"Welcome to {tenant.company.name} - Your Account Details"
+        context = {
+            'user': user,
+            'company': tenant.company,
+            'subdomain_url': f"http://{domain_name}:8000/",  # Dev - in production: https://{domain_name}/
+            'username': user.email,
+            'password': password,  # Note: Sending plain password is insecure - consider reset link instead
+            'expiry': tenant.subscription_expiry,
+        }
+        
+        # Render HTML message from template (create this file later)
+        html_message = render_to_string('emails/welcome_email.html', context)
+        plain_message = strip_tags(html_message)
+        
+        # Send email
+        send_mail(
+            subject,
+            plain_message,
+            settings.DEFAULT_FROM_EMAIL,
+            [user.email],
+            html_message=html_message,
+            fail_silently=False,
+        )

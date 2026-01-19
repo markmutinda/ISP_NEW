@@ -2,7 +2,7 @@
 
 from rest_framework import serializers
 from apps.network.models.router_models import Router, RouterEvent
-from apps.core.models import Company  # Import Company here for the quick fix
+from apps.core.models import Company
 
 
 class RouterEventSerializer(serializers.ModelSerializer):
@@ -29,6 +29,7 @@ class RouterSerializer(serializers.ModelSerializer):
     router_type_display = serializers.CharField(source='get_router_type_display', read_only=True)
     status_display = serializers.CharField(source='get_status_display', read_only=True)
     auth_status = serializers.SerializerMethodField()
+    is_editable = serializers.SerializerMethodField()
 
     class Meta:
         model = Router
@@ -39,12 +40,12 @@ class RouterSerializer(serializers.ModelSerializer):
             'status', 'status_display', 'total_users', 'active_users', 'uptime',
             'uptime_percentage', 'sla_target', 'last_seen', 'tags', 'notes',
             'is_active', 'auth_key', 'is_authenticated', 'authenticated_at',
-            'auth_status', 'created_at', 'updated_at',
+            'auth_status', 'shared_secret', 'is_editable', 'created_at', 'updated_at',
         ]
         extra_kwargs = {
             'api_password': {'write_only': True, 'required': False, 'allow_blank': True},
             'auth_key': {'read_only': True},
-            'company': {'required': False, 'read_only': True},
+            'company': {'required': False},
             'ip_address': {'required': False, 'allow_blank': True, 'allow_null': True},
             'mac_address': {'required': False, 'allow_blank': True, 'allow_null': True},
             'api_username': {'required': False, 'allow_blank': True, 'allow_null': True},
@@ -63,6 +64,7 @@ class RouterSerializer(serializers.ModelSerializer):
             'last_seen': {'read_only': True},
             'is_authenticated': {'read_only': True},
             'authenticated_at': {'read_only': True},
+            'shared_secret': {'read_only': True},
         }
 
     def get_auth_status(self, obj):
@@ -71,29 +73,51 @@ class RouterSerializer(serializers.ModelSerializer):
         elif obj.auth_key:
             return "Pending Authentication"
         return "Not Configured"
+    
+    def get_is_editable(self, obj):
+        request = self.context.get('request')
+        if request and request.user:
+            if request.user.is_superuser:
+                return True
+            if hasattr(request.user, 'company') and request.user.company and obj.company:
+                return request.user.company.id == obj.company.id
+        return False
 
     def create(self, validated_data):
-        """
-        TEMPORARY WORKING FIX:
-        Assign the first company in the database (we have "Default ISP").
-        This lets router creation work immediately.
-        We'll replace with proper user-profile logic later.
-        """
-        company = Company.objects.first()
-        if not company:
-            raise serializers.ValidationError("No companies exist in the database. Please create one first.")
-
-        validated_data['company'] = company
+        request = self.context.get('request')
+        if request and request.user:
+            # If user has a company, assign it
+            if hasattr(request.user, 'company') and request.user.company:
+                validated_data['company'] = request.user.company
+            # If superuser and company not specified, use first company
+            elif request.user.is_superuser and 'company' not in validated_data:
+                company = Company.objects.first()
+                if company:
+                    validated_data['company'] = company
         return super().create(validated_data)
 
     def validate(self, data):
         """
-        Prevent duplicate IP addresses (optional but nice)
+        Validate router data
         """
-        if data.get('ip_address'):
+        # Check for duplicate names within the same company
+        if 'name' in data and 'company' in data:
+            queryset = Router.objects.filter(name=data['name'], company=data['company'])
+            if self.instance:
+                queryset = queryset.exclude(pk=self.instance.pk)
+            if queryset.exists():
+                raise serializers.ValidationError(
+                    {"name": "A router with this name already exists in this company."}
+                )
+        
+        # Check for duplicate IP addresses (optional)
+        if 'ip_address' in data and data.get('ip_address'):
             queryset = Router.objects.filter(ip_address=data['ip_address'])
             if self.instance:
                 queryset = queryset.exclude(pk=self.instance.pk)
             if queryset.exists():
-                raise serializers.ValidationError("A router with this IP address already exists.")
+                raise serializers.ValidationError(
+                    {"ip_address": "A router with this IP address already exists."}
+                )
+        
         return data
