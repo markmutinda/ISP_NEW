@@ -1,0 +1,13 @@
+<!DOCTYPE html>
+<html>
+<body>
+    <p>Dear {{ user.first_name }},</p>
+    <p>Welcome to {{ company.name }}!</p>
+    <p>Your admin account is ready. Access your ISP dashboard at:</p>
+    <p><a href="{{ subdomain_url }}">{{ subdomain_url }}</a></p>
+    <p>Username: {{ username }}</p>
+    <p>Password: {{ password }} (Change it immediately after login!)</p>
+    <p>Your trial expires on {{ expiry }}. Enjoy!</p>
+    <p>Best,<br>{{ company.name }} Team</p>
+</body>
+</html>

@@ -1,14 +1,12 @@
-# FULL CONSOLIDATED FILE - Router + RouterEvent + all Mikrotik sub-models
-
+# apps/network/models/router_models.py
 from operator import mod
 import secrets
 from django.db import models
 from django.core.validators import MinValueValidator, MaxValueValidator
 from django.utils import timezone
 
-
-from apps.core.models import Company, AuditMixin
-from apps.customers.models import ServiceConnection  # Keep if needed for future relations
+from apps.core.models import Company, AuditMixin, Tenant  # ADD Tenant import
+from apps.customers.models import ServiceConnection
 
 
 def generate_auth_key():
@@ -37,6 +35,15 @@ class Router(AuditMixin):
         ('error', 'Error'),
     ]
 
+    # ADD THIS COMPANY RELATIONSHIP
+    company = models.ForeignKey(
+        Company,
+        on_delete=models.CASCADE,
+        related_name='routers',
+        null=True,  # Make nullable temporarily for existing data
+        blank=True,
+        help_text="Company this router belongs to"
+    )
 
     name = models.CharField(max_length=255, help_text="Friendly name for the router")
     ip_address = models.GenericIPAddressField(
@@ -84,36 +91,47 @@ class Router(AuditMixin):
     is_authenticated = models.BooleanField(default=False)
     authenticated_at = models.DateTimeField(null=True, blank=True)
 
-    # NEW: Shared secret for RADIUS communication with this router
+    # Shared secret for RADIUS communication with this router
     shared_secret = models.CharField(
         max_length=255,
         default=generate_shared_secret,
         help_text="RADIUS shared secret — used when configuring this router as a RADIUS client"
     )
     
-    # Tenant schema field
+    # Tenant schema field - REMOVE OR MAKE NON-UNIQUE
     schema_name = models.SlugField(
         max_length=63,
-        unique=True,
         editable=False,
-        default="default_schema"
+        null=True,
+        blank=True,
+        help_text="Tenant schema name (auto-filled from company)"
     )
 
     class Meta:
         verbose_name = 'Router'
         verbose_name_plural = 'Routers'
         ordering = ['-created_at']
-        unique_together = ['name']
+        # REMOVE unique_together for name or make it unique per company
+        # unique_together = ['name']
         indexes = [
             models.Index(fields=['ip_address']),
             models.Index(fields=['status']),
             models.Index(fields=['last_seen']),
             models.Index(fields=['auth_key']),
+            models.Index(fields=['company']),  # ADD this index
         ]
 
     def __str__(self):
         ip = f" ({self.ip_address})" if self.ip_address else ""
-        return f"{self.name}{ip}"
+        company = f" - {self.company.name}" if self.company else ""
+        return f"{self.name}{ip}{company}"
+    
+    def save(self, *args, **kwargs):
+        # Auto-fill schema_name from company's tenant if available
+        if self.company and hasattr(self.company, 'tenant') and self.company.tenant:
+            self.schema_name = self.company.tenant.schema_name
+        super().save(*args, **kwargs)
+
 
 class RouterEvent(AuditMixin):
     EVENT_TYPES = [
@@ -133,21 +151,27 @@ class RouterEvent(AuditMixin):
     event_type = models.CharField(max_length=50, choices=EVENT_TYPES)
     message = models.TextField()
     
-    # Tenant schema field
+    # Make schema_name non-unique
     schema_name = models.SlugField(
         max_length=63,
-        unique=True,
         editable=False,
-        default="default_schema"
+        null=True,
+        blank=True
     )
     
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
         ordering = ['-created_at']
+    
+    def save(self, *args, **kwargs):
+        # Auto-fill schema_name from router
+        if self.router and self.router.schema_name:
+            self.schema_name = self.router.schema_name
+        super().save(*args, **kwargs)
 
 
-# ====================== SUB-MODELS (formerly in mikrotik_models.py) ======================
+# ====================== SUB-MODELS ======================
 
 class MikrotikInterface(AuditMixin):
     router = models.ForeignKey(Router, on_delete=models.CASCADE, related_name='interfaces')
@@ -172,12 +196,12 @@ class MikrotikInterface(AuditMixin):
     operational_state = models.BooleanField(default=False)
     last_change = models.DateTimeField(auto_now=True)
     
-    # Tenant schema field
+    # Make schema_name non-unique
     schema_name = models.SlugField(
         max_length=63,
-        unique=True,
         editable=False,
-        default="default_schema"
+        null=True,
+        blank=True
     )
 
     class Meta:
@@ -186,6 +210,11 @@ class MikrotikInterface(AuditMixin):
 
     def __str__(self):
         return f"{self.router.name} - {self.interface_name}"
+    
+    def save(self, *args, **kwargs):
+        if self.router and self.router.schema_name:
+            self.schema_name = self.router.schema_name
+        super().save(*args, **kwargs)
 
 
 class HotspotUser(AuditMixin):
@@ -211,12 +240,12 @@ class HotspotUser(AuditMixin):
     ], default='ACTIVE')
     profile = models.CharField(max_length=100, default='default')
     
-    # Tenant schema field
+    # Make schema_name non-unique
     schema_name = models.SlugField(
         max_length=63,
-        unique=True,
         editable=False,
-        default="default_schema"
+        null=True,
+        blank=True
     )
 
     class Meta:
@@ -225,6 +254,11 @@ class HotspotUser(AuditMixin):
 
     def __str__(self):
         return f"{self.username}@{self.router.name}"
+    
+    def save(self, *args, **kwargs):
+        if self.router and self.router.schema_name:
+            self.schema_name = self.router.schema_name
+        super().save(*args, **kwargs)
 
 
 class PPPoEUser(AuditMixin):
@@ -250,12 +284,12 @@ class PPPoEUser(AuditMixin):
     ], default='DISCONNECTED')
     profile = models.CharField(max_length=100, default='default-encryption')
     
-    # Tenant schema field
+    # Make schema_name non-unique
     schema_name = models.SlugField(
         max_length=63,
-        unique=True,
         editable=False,
-        default="default_schema"
+        null=True,
+        blank=True
     )
 
     class Meta:
@@ -264,6 +298,11 @@ class PPPoEUser(AuditMixin):
 
     def __str__(self):
         return f"{self.username}@{self.router.name}"
+    
+    def save(self, *args, **kwargs):
+        if self.router and self.router.schema_name:
+            self.schema_name = self.router.schema_name
+        super().save(*args, **kwargs)
 
 
 class MikrotikQueue(AuditMixin):
@@ -280,12 +319,12 @@ class MikrotikQueue(AuditMixin):
     hotspot_user = models.ForeignKey(HotspotUser, on_delete=models.SET_NULL, null=True, blank=True)
     pppoe_user = models.ForeignKey(PPPoEUser, on_delete=models.SET_NULL, null=True, blank=True)
     
-    # Tenant schema field
+    # Make schema_name non-unique
     schema_name = models.SlugField(
         max_length=63,
-        unique=True,
         editable=False,
-        default="default_schema"
+        null=True,
+        blank=True
     )
 
     class Meta:
@@ -294,3 +333,8 @@ class MikrotikQueue(AuditMixin):
 
     def __str__(self):
         return f"{self.queue_name} - {self.router.name}"
+    
+    def save(self, *args, **kwargs):
+        if self.router and self.router.schema_name:
+            self.schema_name = self.router.schema_name
+        super().save(*args, **kwargs)
