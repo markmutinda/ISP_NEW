@@ -22,6 +22,8 @@ from django.core.mail import send_mail  # Add this for email
 from django.template.loader import render_to_string  # For email template
 from django.utils.html import strip_tags  # For plain text email
 from .models import Domain   # ← This is your custom Domain in core/models.py
+from django_tenants.utils import tenant_context, schema_context
+from django.core.management import call_command
 
 from .models import User, Company, SystemSettings, AuditLog, Tenant
 from .serializers import (
@@ -654,7 +656,36 @@ class CompanyRegisterView(generics.CreateAPIView):
             is_primary=True
         )
 
-        # Create first admin user
+        # Run migrations for the new tenant schema
+        # This creates the schema and all tables for this tenant
+        try:
+            call_command('migrate_schemas', schema_name=tenant.schema_name, interactive=False, verbosity=0)
+        except Exception as e:
+            # Log the error but continue - schema might already exist
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.warning(f"Error running migrations for tenant {tenant.schema_name}: {e}")
+
+        # Create first admin user in the TENANT schema (not public)
+        # This ensures the user can authenticate when accessing via subdomain
+        # NOTE: Don't set company/tenant FKs - those tables are in public schema only
+        with tenant_context(tenant):
+            tenant_user = User.objects.create(
+                email=data['admin_email'],
+                first_name=data['admin_first_name'],
+                last_name=data['admin_last_name'],
+                phone_number=data['admin_phone'],
+                role='admin',
+                # company and tenant are NOT set here - they don't exist in tenant schema
+                is_active=True,
+                is_staff=True,  # Allow admin access
+                is_superuser=True,  # First user is superuser
+                is_verified=False  # Or True if you skip verification
+            )
+            tenant_user.set_password(data['admin_password'])
+            tenant_user.save()
+        
+        # Also create user in PUBLIC schema for cross-schema reference
         user = User.objects.create(
             email=data['admin_email'],
             first_name=data['admin_first_name'],
@@ -670,7 +701,7 @@ class CompanyRegisterView(generics.CreateAPIView):
         user.set_password(data['admin_password'])
         user.save()
         
-        # Generate JWT tokens
+        # Generate JWT tokens (use the public user for now)
         refresh = RefreshToken.for_user(user)
         
         # Log the creation
