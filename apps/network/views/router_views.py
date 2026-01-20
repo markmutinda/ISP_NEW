@@ -385,13 +385,12 @@ class RouterViewSet(viewsets.ModelViewSet):
     :set macAddr "00:00:00:00:00:00";
 }};
 
-:local routerModel "";
-:local routerBoardInfo [/system routerboard print];
-:if ([:len $routerBoardInfo] > 0) do={{
-    :set routerModel [/system routerboard get model];
-}} else={{
+:local routerModel [/system routerboard get model];
+:if ([:len $routerModel] = 0) do={{
     :set routerModel "Unknown";
 }};
+
+:put ("Router Model: $routerModel");
 
 :local routerIdentity [/system identity get name];
 :local routerVersion [/system resource get version];
