@@ -19,7 +19,7 @@ SECRET_KEY = os.environ.get('SECRET_KEY', 'django-insecure-development-key-chang
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = True
 
-ALLOWED_HOSTS = []
+ALLOWED_HOSTS = ['localhost', '127.0.0.1', '.localhost']
 
 # ────────────────────────────────────────────────────────────────
 #  BASE + THIRD-PARTY + DJANGO CONTRIB APPS (these must always exist)
@@ -52,12 +52,12 @@ SHARED_APPS = (
 )
 
 TENANT_APPS = (
-    'django.contrib.contenttypes',     # 🚨 MUST BE HERE TOO - THIS WAS MISSING!
-    'django.contrib.auth',
-    'django.contrib.sessions',
-    'django.contrib.messages',
-    'django.contrib.admin',
-    'apps.core',                       # 🚨 MUST BE HERE TOO!
+    'django.contrib.contenttypes',     # 🚨 MUST BE HERE TOO
+    'django.contrib.auth',             # 🚨 MUST BE HERE TOO
+    'django.contrib.sessions',         # 🚨 MUST BE HERE TOO
+    'django.contrib.messages',         # 🚨 MUST BE HERE TOO
+    'django.contrib.admin',           # 🚨 MUST BE HERE TOO
+    'apps.core',                       # 🚨 MUST BE HERE TOO - THIS IS CRITICAL!
     'apps.customers',
     'apps.messaging',
     'apps.network',
@@ -88,7 +88,7 @@ if DEBUG:
 #  MIDDLEWARE — TenantMainMiddleware must be very early
 # ────────────────────────────────────────────────────────────────
 MIDDLEWARE = [
-    'django_tenants.middleware.main.TenantMainMiddleware',  # MUST be first or second
+    'apps.core.middleware.TenantMainMiddleware',  # MUST be first
     'corsheaders.middleware.CorsMiddleware',
     'django.middleware.security.SecurityMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
@@ -98,11 +98,9 @@ MIDDLEWARE = [
     'django.contrib.messages.middleware.MessageMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
     'apps.core.middleware.AuditLogMiddleware',
-    'apps.core.middleware.TenantMiddleware',
     'apps.core.middleware.CompanyContextMiddleware',
-    # Removed duplicate AuditLogMiddleware
+    # REMOVED: 'apps.core.middleware.TenantMiddleware',
 ]
-
 if DEBUG:
     MIDDLEWARE.insert(1, 'debug_toolbar.middleware.DebugToolbarMiddleware')  # After TenantMainMiddleware
     INTERNAL_IPS = ['127.0.0.1', 'localhost', 'camden-convocative-oversorrowfully.ngrok-free.dev']
@@ -123,6 +121,8 @@ DATABASE_ROUTERS = [
 TENANT_COLOR_ADMIN_APPS = False
 TENANT_LIMIT_ADMIN_ACCESS = True
 SHOW_PUBLIC_IF_NO_TENANT_FOUND = True
+
+
 
 # ────────────────────────────────────────────────────────────────
 #  DATABASE

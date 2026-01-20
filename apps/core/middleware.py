@@ -1,4 +1,4 @@
-"""
+""""
 Middleware for core functionality: audit logging, tenant switching, company context
 """
 
@@ -10,7 +10,7 @@ from django.conf import settings
 from django.http import HttpResponseForbidden
 from django.core.exceptions import PermissionDenied
 
-from .models import AuditLog, Tenant
+from .models import AuditLog, Tenant, Domain, Company
 
 
 # ================================
@@ -20,63 +20,109 @@ from .models import AuditLog, Tenant
 PUBLIC_ROUTER_PATHS = (
     '/api/v1/network/routers/auth/',
     '/api/v1/network/routers/heartbeat/',
-    '/api/v1/network/routers/script/',           # if you have public script endpoints
-    '/api/v1/network/routers/config/',           # add others if needed
+    '/api/v1/network/routers/script/',
+    '/api/v1/network/routers/config/',
 )
+
+
+class TenantMainMiddleware(MiddlewareMixin):
+    """
+    Custom tenant middleware that properly handles subdomain.localhost
+    This replaces django_tenants.middleware.main.TenantMainMiddleware
+    """
+    
+    def process_request(self, request):
+        # Get the host from the request
+        host = request.get_host().split(':')[0]  # Remove port
+        
+        # Skip if it's a public router endpoint or API endpoint
+        if request.path.startswith('/api/v1/network/routers/'):
+            return None
+        
+        # Check for subdomain.localhost pattern
+        if host.endswith('.localhost') and host != 'localhost':
+            # Extract subdomain (e.g., "dansted" from "dansted.localhost")
+            subdomain = host.split('.')[0]
+            
+            try:
+                # First, ensure we're in public schema to find tenant
+                connection.set_schema_to_public()
+                
+                # Find the tenant by subdomain in public schema
+                tenant = Tenant.objects.get(subdomain=subdomain, is_active=True)
+                
+                # Get company from tenant (in public schema)
+                company = None
+                try:
+                    company = tenant.company
+                except:
+                    # Company might not be accessible or doesn't exist
+                    pass
+                
+                # Now switch to tenant schema for the rest of the request
+                connection.set_tenant(tenant)
+                
+                # Set request attributes
+                request.tenant = tenant
+                request.company = company  # This is the company object from public schema
+                
+                print(f"DEBUG: Switched to tenant: {tenant.subdomain}, company: {company.name if company else 'None'}")  # Debug
+                
+            except Tenant.DoesNotExist:
+                # Tenant not found - check if we have a domain record
+                try:
+                    # Check Domain model for the exact domain
+                    domain = Domain.objects.get(domain=host)
+                    tenant = domain.tenant
+                    
+                    # Get company
+                    company = None
+                    try:
+                        company = tenant.company
+                    except:
+                        pass
+                    
+                    connection.set_tenant(tenant)
+                    request.tenant = tenant
+                    request.company = company
+                    
+                    print(f"DEBUG: Switched to tenant via Domain: {tenant.subdomain}")  # Debug
+                    
+                except Domain.DoesNotExist:
+                    # No tenant found - use public schema
+                    connection.set_schema_to_public()
+                    request.tenant = None
+                    request.company = None
+                    print(f"DEBUG: No tenant found for host: {host}, using public schema")  # Debug
+        
+        else:
+            # For localhost or other hosts, use public schema
+            connection.set_schema_to_public()
+            request.tenant = None
+            request.company = None
+        
+        return None
 
 
 class CompanyContextMiddleware(MiddlewareMixin):
     """
-    Attaches request.company and request.tenant for authenticated users.
-    Enforces company isolation and provides context for views.
+    Attaches request.company and request.tenant for authenticated users
     """
-
     def process_request(self, request):
-        # 1. Skip completely for public router/machine endpoints
-        if any(request.path.startswith(path) for path in PUBLIC_ROUTER_PATHS):
+        # Skip for public router endpoints
+        if request.path.startswith('/api/v1/network/routers/'):
             return None
-
-        # 2. Skip if no user or not authenticated
-        if not hasattr(request, 'user') or not request.user.is_authenticated:
+        
+        # If tenant is already set by TenantMainMiddleware, use it
+        if hasattr(request, 'tenant') and request.tenant:
+            # Company is already set by TenantMainMiddleware
             return None
-
-        user = request.user
-
-        # 3. Superuser: allow optional company/tenant override via query param
-        if user.is_superuser:
-            company_id = request.GET.get('company_id')
-            tenant_id = request.GET.get('tenant_id')
-
-            if company_id:
-                from .models import Company
-                try:
-                    request.company = Company.objects.get(id=company_id)
-                except Company.DoesNotExist:
-                    request.company = None
-            else:
-                request.company = None
-
-            if tenant_id:
-                try:
-                    request.tenant = Tenant.objects.get(id=tenant_id)
-                except Tenant.DoesNotExist:
-                    request.tenant = None
-            else:
-                request.tenant = None
-
-            return None
-
-        # 4. Normal authenticated user: use their assigned company/tenant
-        request.company = getattr(user, 'company', None)
-        request.tenant = getattr(user, 'tenant', None)
-
-        # 5. Optional: strict enforcement — raise 403 if no company on protected paths
-        # Uncomment if you want hard enforcement
-        # protected_paths = ['/api/v1/customers/', '/api/v1/billing/', '/api/v1/network/']
-        # if any(request.path.startswith(p) for p in protected_paths):
-        #     if not request.company:
-        #         raise PermissionDenied("No company context available for this request")
-
+        
+        # For authenticated users, get their company/tenant
+        if hasattr(request, 'user') and request.user.is_authenticated:
+            request.company = getattr(request.user, 'company', None)
+            request.tenant = getattr(request.user, 'tenant', None)
+        
         return None
 
 
@@ -132,9 +178,7 @@ class AuditLogMiddleware(MiddlewareMixin):
                 except Exception:
                     changes = {'data': 'Unable to parse'}
 
-            # Use request.company / request.tenant if available
             tenant = getattr(request, 'tenant', None)
-            company = getattr(request, 'company', None)
 
             AuditLog.objects.create(
                 user=request.user,
@@ -146,7 +190,6 @@ class AuditLogMiddleware(MiddlewareMixin):
                 ip_address=request.audit_log_info.get('ip_address'),
                 user_agent=request.audit_log_info.get('user_agent'),
                 tenant=tenant,
-                company=company,  # if your AuditLog model has company field
             )
         except Exception:
             # Never break the request due to logging failure
@@ -167,40 +210,3 @@ class AuditLogMiddleware(MiddlewareMixin):
             'PATCH': 'update',
             'DELETE': 'delete',
         }.get(method, 'view')
-
-
-class TenantMiddleware(MiddlewareMixin):
-    """
-    Middleware for multi-tenancy support using subdomain.
-    Skips public router endpoints.
-    """
-
-    def process_request(self, request):
-        if any(request.path.startswith(path) for path in PUBLIC_ROUTER_PATHS):
-            return None
-
-        host = request.get_host().split(':')[0]  # remove port if present
-        parts = host.split('.')
-
-        # Skip if no subdomain or localhost/dev
-        if len(parts) < 3 or 'localhost' in host or '127.0.0.1' in host:
-            return None
-
-        subdomain = parts[0].lower()
-
-        # Skip common subdomains (www, api, admin, etc.)
-        if subdomain in ('www', 'api', 'admin', 'app', 'staging', 'dev'):
-            return None
-
-        try:
-            tenant = Tenant.objects.get(subdomain=subdomain, is_active=True)
-            connection.set_tenant(tenant)  # if you're using django-tenants
-            request.tenant = tenant
-        except Tenant.DoesNotExist:
-            # Fail silently or return 404 - depending on your preference
-            pass
-        except Exception as e:
-            # Log but don't crash
-            pass
-
-        return None

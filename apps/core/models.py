@@ -133,17 +133,16 @@ class User(AbstractUser, AuditMixin):
         verbose_name='User Role'
     )
     
-    # Company relationship
     company = models.ForeignKey(
         'Company',
-        on_delete=models.CASCADE,
+        on_delete=models.SET_NULL,
         null=True,
         blank=True,
         related_name='employees',
         verbose_name='ISP Company'
     )
     
-    # Tenant relationship
+    # Tenant relationship - make it nullable
     tenant = models.ForeignKey(
         'Tenant',
         on_delete=models.SET_NULL,
@@ -153,6 +152,8 @@ class User(AbstractUser, AuditMixin):
         verbose_name='Tenant'
     )
 
+    company_name = models.CharField(max_length=255, blank=True, null=True)
+    tenant_subdomain = models.CharField(max_length=100, blank=True, null=True)
     is_verified = models.BooleanField(default=False)
     verification_token = models.UUIDField(default=uuid.uuid4, editable=False)
     verification_token_expiry = models.DateTimeField(null=True, blank=True)
@@ -180,6 +181,16 @@ class User(AbstractUser, AuditMixin):
         """Return the human-readable role name"""
         return dict(self.USER_ROLES).get(self.role, self.role)
     
+    def save(self, *args, **kwargs):
+        # Set denormalized fields from foreign keys if available
+        if self.company and not self.company_name:
+            self.company_name = self.company.name
+        
+        if self.tenant and not self.tenant_subdomain:
+            self.tenant_subdomain = self.tenant.subdomain
+        
+        super().save(*args, **kwargs)
+
     @property
     def is_admin(self):
         return self.role == 'admin' or self.is_superuser

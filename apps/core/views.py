@@ -37,6 +37,20 @@ class CustomTokenObtainPairView(TokenObtainPairView):
     """Custom JWT token view with additional user data"""
     serializer_class = CustomTokenObtainPairSerializer
 
+    def post(self, request, *args, **kwargs):
+        print(f"DEBUG: Request data: {request.data}")
+        print(f"DEBUG: Content-Type: {request.content_type}")
+        
+        try:
+            response = super().post(request, *args, **kwargs)
+            print(f"DEBUG: Response: {response.data}")
+            return response
+        except Exception as e:
+            print(f"DEBUG: Exception: {str(e)}")
+            print(f"DEBUG: Exception type: {type(e)}")
+            import traceback
+            traceback.print_exc()
+            raise
 
 # In RegisterView class, update the create method:
 
@@ -594,7 +608,11 @@ class CompanyRegisterView(generics.CreateAPIView):
         serializer.is_valid(raise_exception=True)
         data = serializer.validated_data
         
-        # Create company
+        # Start in public schema
+        from django.db import connection
+        connection.set_schema_to_public()
+        
+        # Create company in public schema
         company = Company.objects.create(
             name=data['company_name'],
             email=data['company_email'],
@@ -610,100 +628,81 @@ class CompanyRegisterView(generics.CreateAPIView):
             is_active=True
         )
         
-        # Prevent duplicate empty registration_number
-        if not company.registration_number.strip():  # if empty or whitespace
-            from uuid import uuid4
-            company.registration_number = f"REG-{uuid4().hex[:10].upper()}"
-            company.save()
-
-        # Auto-generate slug if not set
+        # Generate slug
         if not company.slug:
             from django.utils.text import slugify
-            base_slug = slugify(company.name) or 'company'  # fallback if name empty
-            slug = base_slug
-            counter = 1
-            while Company.objects.filter(slug=slug).exists():
-                slug = f"{base_slug}-{counter}"
-                counter += 1
+            slug = slugify(company.name) or 'company'
             company.slug = slug
             company.save()
         
-        # Create Tenant with 14-day trial
+        # Create Tenant in public schema
         trial_end = timezone.now() + timedelta(days=14)
         tenant = Tenant.objects.create(
             company=company,
-            subdomain=company.slug,  # Use company slug as default subdomain
-            database_name=f"isp_{company.slug.replace('-', '_')}",  # Optional
+            subdomain=company.slug,
+            schema_name=f"tenant_{company.slug.replace('-', '_')}",
+            database_name=f"isp_{company.slug.replace('-', '_')}",
             status='trial',
             max_users=10,
             max_customers=100,
-            features={},  # Or default features dict
+            features={},
             billing_cycle='monthly',
             monthly_rate=0.00,
             next_billing_date=trial_end.date(),
             subscription_expiry=trial_end.date()
         )
         
-        # Create Domain mapping for subdomain (required for django-tenants)
-        domain_name = f"{tenant.subdomain}.localhost"  # Dev example
-        # In production: f"{tenant.subdomain}.{settings.MAIN_DOMAIN}" e.g. bluenet.example.com
-        
+        # Create Domain in public schema
+        domain_name = f"{tenant.subdomain}.localhost"
         Domain.objects.create(
             domain=domain_name,
             tenant=tenant,
             is_primary=True
         )
-
-        # Create first admin user
+        
+        # Create schema and run migrations
+        from django.core.management import call_command
+        call_command('migrate_schemas', schema_name=tenant.schema_name, interactive=False)
+        
+         # Switch to tenant schema
+        connection.set_tenant(tenant)
+    
+         # Create user with all necessary info
         user = User.objects.create(
-            email=data['admin_email'],
-            first_name=data['admin_first_name'],
-            last_name=data['admin_last_name'],
-            phone_number=data['admin_phone'],
-            role='admin',
-            company=company,
-            tenant=tenant,
+           email=data['admin_email'],
+           first_name=data['admin_first_name'],
+           last_name=data['admin_last_name'],
+           phone_number=data['admin_phone'],
+           role='admin',
+           # Foreign keys remain None (can't reference public schema from tenant schema)
+           company=None,
+           tenant=None,
+            # Store denormalized info
+            company_name=company.name,
+            tenant_subdomain=tenant.subdomain,
             is_active=True,
-            is_staff=True,  # Allow admin access
-            is_verified=False  # Or True if you skip verification
+            is_staff=True,
+            is_superuser=True,
+            is_verified=True
         )
         user.set_password(data['admin_password'])
         user.save()
+    
+        print(f"DEBUG: Created user {user.email} with company_name={user.company_name}, tenant_subdomain={user.tenant_subdomain}")
+    
+          # Switch back to public schema
+        connection.set_schema_to_public()
         
-        # Generate JWT tokens
+        # Generate tokens
         refresh = RefreshToken.for_user(user)
         
-        # Log the creation
-        AuditLog.log_action(
-            user=user,
-            action='create',
-            model_name='Company',
-            object_id=str(company.id),
-            object_repr=company.name,
-            ip_address=request.META.get('REMOTE_ADDR'),
-            user_agent=request.META.get('HTTP_USER_AGENT', ''),
-            tenant=tenant
-        )
-        
-        # Send email with subdomain, username, password
-        self.send_welcome_email(user, tenant, domain_name, data['admin_password'])
-
         return Response({
-            'message': 'Company and admin account created successfully. You are now logged in.',
-            'user': {
-                'id': user.id,
-                'email': user.email,
-                'first_name': user.first_name,
-                'last_name': user.last_name,
-                'role': user.role,
-                'company': {
-                    'id': company.id,
-                    'name': company.name,
-                    'email': company.email
-                }
-            },
+            'message': 'Company created successfully',
+            'company': company.name,
+            'tenant': tenant.subdomain,
+            'login_url': f'http://{domain_name}:3000/admin/login/',
+            'email': user.email,
             'access': str(refresh.access_token),
-            'refresh': str(refresh),
         }, status=status.HTTP_201_CREATED)
 
     def send_welcome_email(self, user, tenant, domain_name, password):

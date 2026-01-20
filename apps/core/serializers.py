@@ -20,8 +20,8 @@ class UserSerializer(serializers.ModelSerializer):
     confirm_password = serializers.CharField(write_only=True, required=False)
     role_display = serializers.CharField(source='get_role_display_name', read_only=True)
     full_name = serializers.SerializerMethodField()
-    company_name = serializers.CharField(source='company.name', read_only=True)  # NEW
-    tenant_subdomain = serializers.CharField(source='tenant.subdomain', read_only=True)  # NEW
+    company_name = serializers.CharField(read_only=True)  # Use denormalized field
+    tenant_subdomain = serializers.CharField(read_only=True)  # Use denormalized field
     
     class Meta:
         model = User
@@ -265,6 +265,8 @@ class ProfileSerializer(serializers.ModelSerializer):
     
     full_name = serializers.SerializerMethodField()
     role_display = serializers.CharField(source='get_role_display_name', read_only=True)
+    company_name = serializers.CharField(read_only=True)
+    tenant_subdomain = serializers.CharField(read_only=True)
     
     class Meta:
         model = User
@@ -272,13 +274,13 @@ class ProfileSerializer(serializers.ModelSerializer):
             'id', 'email', 'first_name', 'last_name', 'full_name',
             'phone_number', 'id_number', 'gender', 'date_of_birth',
             'profile_picture', 'role', 'role_display', 'is_verified',
-            'last_login', 'created_at', 'updated_at'
+            'last_login', 'created_at', 'updated_at',
+            'company_name', 'tenant_subdomain'  # Add these
         ]
         read_only_fields = ['id', 'email', 'role', 'is_verified', 'last_login', 'created_at', 'updated_at']
     
     def get_full_name(self, obj):
         return obj.get_full_name()
-
 
 class PasswordChangeSerializer(serializers.Serializer):
     current_password = serializers.CharField(required=True, write_only=True)
@@ -427,23 +429,44 @@ class AuditLogSerializer(serializers.ModelSerializer):
 
 
 class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
-    """Custom token serializer with additional user data"""
+    """Custom token serializer with additional user data - SIMPLE FIX"""
+    
+    # Add email field
+    email = serializers.EmailField()
     
     def validate(self, attrs):
-        data = super().validate(attrs)
+        print(f"DEBUG: Login attempt with attrs: {attrs}")
         
-        # Add user data to response
-        user = self.user
-        data['user'] = {
-            'id': user.id,
-            'email': user.email,
-            'first_name': user.first_name,
-            'last_name': user.last_name,
-            'role': user.role,
-            'is_verified': user.is_verified,
-        }
+        # Get email from attrs
+        email = attrs.get('email')
+        if not email:
+            raise serializers.ValidationError("Email is required")
         
-        return data
+        # Map email to username for parent class
+        attrs['username'] = email
+        
+        try:
+            data = super().validate(attrs)
+            
+            # Add user data to response
+            user = self.user
+            data['user'] = {
+                'id': user.id,
+                'email': user.email,
+                'first_name': user.first_name,
+                'last_name': user.last_name,
+                'role': user.role,
+                'is_verified': user.is_verified,
+            }
+            
+            print(f"DEBUG: Login successful for {user.email}")
+            return data
+            
+        except Exception as e:
+            print(f"DEBUG: JWT authentication error: {str(e)}")
+            raise serializers.ValidationError({
+                "detail": "Invalid email or password."
+            })
 
 
 class DashboardStatsSerializer(serializers.Serializer):
