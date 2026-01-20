@@ -25,7 +25,8 @@ class RouterEventSerializer(serializers.ModelSerializer):
 
 
 class RouterSerializer(serializers.ModelSerializer):
-    company_name = serializers.CharField(source='company.name', read_only=True)
+    company_name = serializers.CharField(read_only=True)
+    tenant_subdomain = serializers.CharField(read_only=True)  # This field is declared here
     router_type_display = serializers.CharField(source='get_router_type_display', read_only=True)
     status_display = serializers.CharField(source='get_status_display', read_only=True)
     auth_status = serializers.SerializerMethodField()
@@ -34,7 +35,7 @@ class RouterSerializer(serializers.ModelSerializer):
     class Meta:
         model = Router
         fields = [
-            'id', 'company', 'company_name', 'name', 'ip_address', 'mac_address',
+            'id', 'company_name', 'tenant_subdomain', 'name', 'ip_address', 'mac_address',
             'api_port', 'api_username', 'api_password', 'router_type', 'router_type_display',
             'model', 'firmware_version', 'location', 'latitude', 'longitude',
             'status', 'status_display', 'total_users', 'active_users', 'uptime',
@@ -45,7 +46,6 @@ class RouterSerializer(serializers.ModelSerializer):
         extra_kwargs = {
             'api_password': {'write_only': True, 'required': False, 'allow_blank': True},
             'auth_key': {'read_only': True},
-            'company': {'required': False},
             'ip_address': {'required': False, 'allow_blank': True, 'allow_null': True},
             'mac_address': {'required': False, 'allow_blank': True, 'allow_null': True},
             'api_username': {'required': False, 'allow_blank': True, 'allow_null': True},
@@ -77,32 +77,56 @@ class RouterSerializer(serializers.ModelSerializer):
     def get_is_editable(self, obj):
         request = self.context.get('request')
         if request and request.user:
-            if request.user.is_superuser:
-                return True
-            if hasattr(request.user, 'company') and request.user.company and obj.company:
-                return request.user.company.id == obj.company.id
+           if request.user.is_superuser:
+             return True
+          # Check if user is in the same tenant
+           if hasattr(request, 'tenant') and request.tenant and obj.tenant_subdomain:
+             return request.tenant.subdomain == obj.tenant_subdomain
         return False
-
+    
     def create(self, validated_data):
         request = self.context.get('request')
-        if request and request.user:
-            # If user has a company, assign it
-            if hasattr(request.user, 'company') and request.user.company:
-                validated_data['company'] = request.user.company
-            # If superuser and company not specified, use first company
-            elif request.user.is_superuser and 'company' not in validated_data:
-                company = Company.objects.first()
-                if company:
-                    validated_data['company'] = company
+        if request:
+            # Safely get company and tenant info from request
+            company = getattr(request, 'company', None)
+            tenant = getattr(request, 'tenant', None)
+            
+            if company:
+                validated_data['company_name'] = company.name
+            else:
+                # Try to get from user if company not on request
+                user = request.user
+                if hasattr(user, 'company') and user.company:
+                    validated_data['company_name'] = user.company.name
+                elif hasattr(user, 'company_name') and user.company_name:
+                    validated_data['company_name'] = user.company_name
+                else:
+                    validated_data['company_name'] = None
+            
+            if tenant:
+                validated_data['tenant_subdomain'] = tenant.subdomain
+            else:
+                # Try to get from user if tenant not on request
+                user = request.user
+                if hasattr(user, 'tenant') and user.tenant:
+                    validated_data['tenant_subdomain'] = user.tenant.subdomain
+                elif hasattr(user, 'tenant_subdomain') and user.tenant_subdomain:
+                    validated_data['tenant_subdomain'] = user.tenant_subdomain
+                else:
+                    validated_data['tenant_subdomain'] = None
+        
         return super().create(validated_data)
 
     def validate(self, data):
         """
         Validate router data
         """
-        # Check for duplicate names within the same company
-        if 'name' in data and 'company' in data:
-            queryset = Router.objects.filter(name=data['name'], company=data['company'])
+        request = self.context.get('request')
+        
+        # Check for duplicate names within the same tenant
+        if 'name' in data and request and hasattr(request, 'tenant'):
+            tenant_subdomain = request.tenant.subdomain
+            queryset = Router.objects.filter(name=data['name'], tenant_subdomain=tenant_subdomain)
             if self.instance:
                 queryset = queryset.exclude(pk=self.instance.pk)
             if queryset.exists():
@@ -110,14 +134,15 @@ class RouterSerializer(serializers.ModelSerializer):
                     {"name": "A router with this name already exists in this company."}
                 )
         
-        # Check for duplicate IP addresses (optional)
-        if 'ip_address' in data and data.get('ip_address'):
-            queryset = Router.objects.filter(ip_address=data['ip_address'])
+        # Check for duplicate IP addresses within the same tenant
+        if 'ip_address' in data and data.get('ip_address') and request and hasattr(request, 'tenant'):
+            tenant_subdomain = request.tenant.subdomain
+            queryset = Router.objects.filter(ip_address=data['ip_address'], tenant_subdomain=tenant_subdomain)
             if self.instance:
                 queryset = queryset.exclude(pk=self.instance.pk)
             if queryset.exists():
                 raise serializers.ValidationError(
-                    {"ip_address": "A router with this IP address already exists."}
+                    {"ip_address": "A router with this IP address already exists in this company."}
                 )
         
         return data

@@ -1,6 +1,7 @@
 """
 Core views for ISP Management System
 """
+from venv import logger
 from rest_framework import viewsets, status, generics, permissions
 from rest_framework.response import Response
 from rest_framework.decorators import action, api_view, permission_classes
@@ -21,7 +22,8 @@ from .serializers import CompanyRegisterSerializer
 from django.core.mail import send_mail  # Add this for email
 from django.template.loader import render_to_string  # For email template
 from django.utils.html import strip_tags  # For plain text email
-from .models import Domain   # ← This is your custom Domain in core/models.py
+from .models import Domain   # ← This is your custom Domain in core/models.
+import logging
 
 from .models import User, Company, SystemSettings, AuditLog, Tenant
 from .serializers import (
@@ -32,7 +34,36 @@ from .serializers import (
 )
 from .permissions import IsAdmin, IsAdminOrStaff, IsCustomer, IsTechnician
 
+logger = logging.getLogger(__name__)
 
+
+class DebugAuthView(APIView):
+    permission_classes = [IsAuthenticated]
+    
+    def get(self, request):
+        # Debug information
+        debug_info = {
+            'user': {
+                'id': request.user.id,
+                'email': request.user.email,
+                'is_authenticated': request.user.is_authenticated,
+                'is_superuser': request.user.is_superuser,
+                'tenant_subdomain': getattr(request.user, 'tenant_subdomain', None),
+                'company_name': getattr(request.user, 'company_name', None),
+            },
+            'request': {
+                'has_tenant': hasattr(request, 'tenant'),
+                'has_company': hasattr(request, 'company'),
+                'tenant_subdomain': getattr(request.tenant, 'subdomain', None) if hasattr(request, 'tenant') else None,
+                'company_name': getattr(request.company, 'name', None) if hasattr(request, 'company') else None,
+            },
+            'auth_header': request.META.get('HTTP_AUTHORIZATION', 'None'),
+            'path': request.path,
+        }
+        
+        logger.debug(f"DebugAuthView: {debug_info}")
+        return Response(debug_info)
+        
 class CustomTokenObtainPairView(TokenObtainPairView):
     """Custom JWT token view with additional user data"""
     serializer_class = CustomTokenObtainPairSerializer

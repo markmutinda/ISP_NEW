@@ -62,11 +62,13 @@ router.register(r'tr069-sessions', TR069SessionViewSet)
 # URLPATTERNS - Clean & Conflict-Free
 # =========================
 urlpatterns = [
-    # 1. All protected ViewSet routes (list + detail + actions)
-    path('', include(router.urls)),
-
-    # 2. Public router endpoints (specific paths - placed AFTER router to avoid shadowing)
+    
+    
     path('routers/auth/', RouterAuthenticateView.as_view(), name='router-authenticate'),
     path('routers/heartbeat/', RouterHeartbeatView.as_view(), name='router-heartbeat'),
+
+    
+    path('', include(router.urls)),
+
 ]
 

@@ -26,7 +26,7 @@ class RouterViewSet(viewsets.ModelViewSet):
     serializer_class = RouterSerializer
     permission_classes = [IsAuthenticated, HasCompanyAccess]
     filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
-    filterset_fields = ['router_type', 'status', 'is_active', 'company']
+    filterset_fields = ['router_type', 'status', 'is_active']
     search_fields = ['name', 'ip_address', 'model', 'location', 'tags']
     ordering_fields = ['name', 'last_seen', 'created_at', 'status']
 
@@ -34,44 +34,31 @@ class RouterViewSet(viewsets.ModelViewSet):
     
     def get_queryset(self):
         user = self.request.user
-        qs = Router.objects.all().select_related('company')
         
-        # Superusers can see all routers or filter by company
-        if user.is_superuser:
-            company_id = self.request.query_params.get('company_id')
-            if company_id:
-                return qs.filter(company_id=company_id)
-            return qs
+        # All users in a tenant see only their tenant's routers
+        qs = Router.objects.all()
         
-        # Non-superusers only see routers in their company
-        if hasattr(user, 'company') and user.company:
-            return qs.filter(company=user.company)
+        # Filter by tenant_subdomain if available
+        if hasattr(self.request, 'tenant') and self.request.tenant:
+            qs = qs.filter(tenant_subdomain=self.request.tenant.subdomain)
         
-        # Users without company see nothing
-        return qs.none()
+        return qs
 
     def perform_create(self, serializer):
-        user = self.request.user
+        # The serializer will handle adding company_name and tenant_subdomain
+        # We just need to ensure the context has the request
+        serializer.save()
         
-        # For superusers, allow setting any company
-        if user.is_superuser:
-            company = serializer.validated_data.get('company')
-            if not company:
-                # Auto-assign first company if none specified
-                from apps.core.models import Company
-                company = Company.objects.first()
-                if company:
-                    serializer.save(company=company)
-                else:
-                    raise serializers.ValidationError("No companies exist. Please create a company first.")
-            else:
-                serializer.save()
-        else:
-            # Non-superusers: auto-assign their company
-            if hasattr(user, 'company') and user.company:
-                serializer.save(company=user.company)
-            else:
-                raise serializers.ValidationError("User has no company assigned")
+    # Optional: Add this method to debug the request
+    def create(self, request, *args, **kwargs):
+        logger.debug(f"Create router - Request has company: {hasattr(request, 'company')}")
+        logger.debug(f"Create router - Request has tenant: {hasattr(request, 'tenant')}")
+        if hasattr(request, 'company'):
+            logger.debug(f"Create router - Company: {request.company}")
+        if hasattr(request, 'tenant'):
+            logger.debug(f"Create router - Tenant: {request.tenant}")
+        
+        return super().create(request, *args, **kwargs)
 
     @action(detail=False, methods=['get'])
     def dashboard_stats(self, request):
@@ -292,14 +279,35 @@ class RouterViewSet(viewsets.ModelViewSet):
     @action(detail=True, methods=['get'], url_path='script', permission_classes=[AllowAny])
     def script(self, request, pk=None):
         """Public endpoint for router to download script"""
-        router = Router.objects.filter(id=pk).first()
+        
+        # IDENTICAL SCHEMA LOGIC AS ABOVE
+        from django.db import connection
+        connection.set_schema_to_public()
+        
+        from apps.core.models import Tenant
+        from apps.network.models.router_models import Router
+        
+        tenants = Tenant.objects.filter(is_active=True)
+        router = None
+        
+        for tenant in tenants:
+            try:
+                connection.set_tenant(tenant)
+                try:
+                    router = Router.objects.filter(id=pk).first()
+                    if router:
+                        break
+                except Exception:
+                    continue
+            except Exception:
+                continue
+        
         if not router:
+            connection.set_schema_to_public()
             return Response({"error": "Router not found"}, status=404)
         
-        # Get version from query params
+        # Generate simple script
         version = request.query_params.get('version', '7')
-        
-        # Simple script
         script_content = f"""# YourISP Configuration Script for Router ID: {router.id}
 # This script will configure your router for YourISP service
 
@@ -312,6 +320,7 @@ class RouterViewSet(viewsets.ModelViewSet):
 
 :put "Configuration completed!";
 """
+        connection.set_schema_to_public()
         
         response = HttpResponse(script_content, content_type='text/plain')
         response['Content-Disposition'] = f'attachment; filename="yourisp-{router.id}.rsc"'
@@ -320,18 +329,48 @@ class RouterViewSet(viewsets.ModelViewSet):
     @action(detail=True, methods=['get'], url_path='config', permission_classes=[AllowAny])
     def config_script(self, request, pk=None):
         """Public endpoint for router to download configuration script"""
-        router = Router.objects.filter(id=pk).first()
-        if not router:
-            return Response({"error": "Router not found"}, status=404)
         
-        # Verify auth_key
+        # STEP 1: Start in PUBLIC schema to find tenant
+        from django.db import connection
+        connection.set_schema_to_public()
+        
+        from apps.core.models import Tenant, Domain
+        from apps.network.models.router_models import Router
+        
+        # STEP 2: Find tenant by router ID (search across ALL tenants)
+        tenants = Tenant.objects.filter(is_active=True)
+        router = None
+        
+        for tenant in tenants:
+            try:
+                # Switch to THIS tenant's schema
+                connection.set_tenant(tenant)
+                
+                # Try to find router in this tenant
+                try:
+                    router = Router.objects.filter(id=pk).first()
+                    if router:
+                        break  # Found it!
+                except Exception:
+                    continue  # Router table missing in this tenant, try next
+                    
+            except Exception as e:
+                print(f"DEBUG: Error checking tenant {tenant.subdomain}: {e}")
+                continue
+        
+        # STEP 3: If no router found, 404
+        if not router:
+            connection.set_schema_to_public()
+            return Response({"error": "Router not found or access denied"}, status=404)
+        
+        # STEP 4: Verify auth_key
         auth_key = request.query_params.get('auth_key')
         if not auth_key or auth_key != router.auth_key:
+            connection.set_schema_to_public()
             return Response({"error": "Invalid auth key"}, status=401)
         
+        # STEP 5: Generate config (same as before)
         version = request.query_params.get('version', '7')
-        
-        # Configuration script
         script_content = f"""# YourISP Configuration for {router.name}
 # Generated at {timezone.now()}
 
@@ -418,7 +457,9 @@ class RouterViewSet(viewsets.ModelViewSet):
 :put "YourISP configuration completed successfully!";
 :put "Router is now ready for service.";
 """
-        
+        # STEP 6: Switch back to public BEFORE response
+        connection.set_schema_to_public()
+
         response = HttpResponse(script_content, content_type='text/plain')
         response['Content-Disposition'] = f'attachment; filename="yourisp-config-{router.id}.rsc"'
         return response
@@ -452,9 +493,39 @@ class RouterAuthenticateView(APIView):
             if not auth_key:
                 return Response({"error": "Missing auth_key"}, status=400)
             
-            # Find router
-            router = Router.objects.filter(auth_key=auth_key).first()
-            if not router:
+            # IMPORTANT: We need to search across ALL tenant schemas
+            # First, switch to public schema
+            from django.db import connection
+            connection.set_schema_to_public()
+            
+            # Get all tenants - IMPORT DIRECTLY FROM YOUR CORE MODELS
+            from apps.core.models import Tenant  # Import from your app
+            tenants = Tenant.objects.all()
+            
+            found_router = None
+            found_tenant = None
+            
+            # Search through each tenant's schema
+            for tenant in tenants:
+                try:
+                    # Switch to tenant schema
+                    connection.set_tenant(tenant)
+                    
+                    # Try to find router in this tenant's schema
+                    from apps.network.models.router_models import Router
+                    router = Router.objects.filter(auth_key=auth_key).first()
+                    
+                    if router:
+                        found_router = router
+                        found_tenant = tenant
+                        break
+                except Exception as e:
+                    logger.warning(f"Error searching in tenant {tenant.schema_name}: {str(e)}")
+                    continue
+            
+            if not found_router:
+                # Switch back to public schema
+                connection.set_schema_to_public()
                 return Response({"error": "Invalid authentication key"}, status=404)
             
             # Get IP address
@@ -464,35 +535,45 @@ class RouterAuthenticateView(APIView):
             else:
                 ip = request.META.get('REMOTE_ADDR', 'Unknown')
             
-            # Update router
-            router.ip_address = ip
-            router.mac_address = data.get('mac', 'Unknown')
-            router.firmware_version = data.get('version', 'Unknown')
-            router.model = data.get('model', 'Unknown')
-            router.is_authenticated = True
-            router.authenticated_at = timezone.now()
-            router.status = "online"
-            router.last_seen = timezone.now()
-            router.save()
+            # Update router (we're already in the correct tenant schema)
+            found_router.ip_address = ip
+            found_router.mac_address = data.get('mac', 'Unknown')
+            found_router.firmware_version = data.get('version', 'Unknown')
+            found_router.model = data.get('model', 'Unknown')
+            found_router.is_authenticated = True
+            found_router.authenticated_at = timezone.now()
+            found_router.status = "online"
+            found_router.last_seen = timezone.now()
+            found_router.save()
             
             # Create event
+            from apps.network.models.router_models import RouterEvent
             RouterEvent.objects.create(
-                router=router,
+                router=found_router,
                 event_type="auth_success",
                 message=f"Router authenticated from {ip}",
             )
             
+            # Switch back to public schema for response
+            connection.set_schema_to_public()
+            
             return Response({
                 "status": "success",
                 "message": "Router authenticated successfully",
-                "router_id": router.id,
-                "router_name": router.name,
+                "router_id": found_router.id,
+                "router_name": found_router.name,
+                "tenant": found_tenant.subdomain if found_tenant else None,
             })
             
         except Exception as e:
             logger.error(f"Router authentication error: {str(e)}")
+            # Ensure we're back in public schema on error
+            try:
+                from django.db import connection
+                connection.set_schema_to_public()
+            except:
+                pass
             return Response({"error": "Internal server error"}, status=500)
-
 
 class RouterHeartbeatView(APIView):
     """Public endpoint for router heartbeats"""
@@ -506,25 +587,64 @@ class RouterHeartbeatView(APIView):
             if not auth_key:
                 return Response({"error": "Missing auth_key"}, status=400)
             
-            router = Router.objects.filter(auth_key=auth_key).first()
-            if not router:
+            # Switch to public schema
+            from django.db import connection
+            connection.set_schema_to_public()
+            
+            # Get all tenants - IMPORT DIRECTLY FROM YOUR CORE MODELS
+            from apps.core.models import Tenant  # Import from your app
+            tenants = Tenant.objects.all()
+            
+            found_router = None
+            current_tenant = None
+            
+            # Search through each tenant's schema
+            for tenant in tenants:
+                try:
+                    # Switch to tenant schema
+                    connection.set_tenant(tenant)
+                    
+                    # Try to find router in this tenant's schema
+                    from apps.network.models.router_models import Router
+                    router = Router.objects.filter(auth_key=auth_key).first()
+                    
+                    if router:
+                        found_router = router
+                        current_tenant = tenant
+                        break
+                except Exception as e:
+                    logger.warning(f"Error searching in tenant {tenant.schema_name}: {str(e)}")
+                    continue
+            
+            if not found_router:
+                # Switch back to public schema
+                connection.set_schema_to_public()
                 return Response({"error": "Invalid key"}, status=404)
             
             # Update heartbeat
-            router.last_seen = timezone.now()
-            router.status = 'online'
+            found_router.last_seen = timezone.now()
+            found_router.status = 'online'
             
             # Optional: Update IP if provided
             if 'ip' in data:
-                router.ip_address = data['ip']
-                router.save(update_fields=['last_seen', 'status', 'ip_address'])
+                found_router.ip_address = data['ip']
+                found_router.save(update_fields=['last_seen', 'status', 'ip_address'])
             else:
-                router.save(update_fields=['last_seen', 'status'])
+                found_router.save(update_fields=['last_seen', 'status'])
             
-            logger.debug(f"Heartbeat from router {router.name} (ID: {router.id})")
+            logger.debug(f"Heartbeat from router {found_router.name} (ID: {found_router.id}) in tenant {current_tenant.schema_name}")
             
-            return Response({"status": "ok", "router_id": router.id})
+            # Switch back to public schema
+            connection.set_schema_to_public()
+            
+            return Response({"status": "ok", "router_id": found_router.id})
             
         except Exception as e:
             logger.error(f"Heartbeat error: {e}")
+            # Ensure we're back in public schema
+            try:
+                from django.db import connection
+                connection.set_schema_to_public()
+            except:
+                pass
             return Response({"error": str(e)}, status=400)

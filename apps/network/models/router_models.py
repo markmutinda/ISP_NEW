@@ -1,11 +1,12 @@
 # apps/network/models/router_models.py
+
 from operator import mod
 import secrets
 from django.db import models
 from django.core.validators import MinValueValidator, MaxValueValidator
 from django.utils import timezone
 
-from apps.core.models import Company, AuditMixin, Tenant  # ADD Tenant import
+from apps.core.models import AuditMixin, Tenant  # ADD Tenant import
 from apps.customers.models import ServiceConnection
 
 
@@ -35,14 +36,19 @@ class Router(AuditMixin):
         ('error', 'Error'),
     ]
 
-    # ADD THIS COMPANY RELATIONSHIP
-    company = models.ForeignKey(
-        Company,
-        on_delete=models.CASCADE,
-        related_name='routers',
-        null=True,  # Make nullable temporarily for existing data
+    # DENORMALIZED FIELDS (replace ForeignKey to Company)
+    company_name = models.CharField(
+        max_length=255,
         blank=True,
-        help_text="Company this router belongs to"
+        null=True,
+        help_text="Company name (denormalized from public schema)"
+    )
+    
+    tenant_subdomain = models.CharField(
+        max_length=100,
+        blank=True,
+        null=True,
+        help_text="Tenant subdomain (denormalized from public schema)"
     )
 
     name = models.CharField(max_length=255, help_text="Friendly name for the router")
@@ -118,20 +124,21 @@ class Router(AuditMixin):
             models.Index(fields=['status']),
             models.Index(fields=['last_seen']),
             models.Index(fields=['auth_key']),
-            models.Index(fields=['company']),  # ADD this index
+            # REMOVE the company index - Add these instead:
+            models.Index(fields=['company_name']),  # New index
+            models.Index(fields=['tenant_subdomain']),  # New index
         ]
 
     def __str__(self):
         ip = f" ({self.ip_address})" if self.ip_address else ""
-        company = f" - {self.company.name}" if self.company else ""
+        company = f" - {self.company_name}" if self.company_name else ""
         return f"{self.name}{ip}{company}"
     
     def save(self, *args, **kwargs):
-        # Auto-fill schema_name from company's tenant if available
-        if self.company and hasattr(self.company, 'tenant') and self.company.tenant:
-            self.schema_name = self.company.tenant.schema_name
+        # Auto-fill schema_name from tenant_subdomain if available
+        if self.tenant_subdomain:
+            self.schema_name = f"tenant_{self.tenant_subdomain}"
         super().save(*args, **kwargs)
-
 
 class RouterEvent(AuditMixin):
     EVENT_TYPES = [
