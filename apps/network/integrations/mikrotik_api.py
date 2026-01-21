@@ -4,12 +4,13 @@ from librouteros.query import Key
 import logging
 from typing import Dict, List, Optional, Any
 import time
+import re
 
 logger = logging.getLogger(__name__)
 
 
 class MikrotikAPI:
-    """Mikrotik RouterOS API Client"""
+    """Mikrotik RouterOS API Client - Enhanced for ISP Management"""
     
     def __init__(self, mikrotik_device):
         self.device = mikrotik_device
@@ -22,13 +23,13 @@ class MikrotikAPI:
                 username=self.device.api_username,
                 password=self.device.api_password,
                 host=self.device.ip_address,
-                port=self.device.api_port,
+                port=self.device.api_port or 8728,  # Use default 8728 if not set
                 timeout=10
             )
-            logger.info(f"Connected to Mikrotik {self.device.name}")
+            logger.info(f"Connected to Mikrotik {self.device.name} ({self.device.ip_address})")
             return True
         except Exception as e:
-            logger.error(f"Failed to connect to Mikrotik {self.device.name}: {str(e)}")
+            logger.error(f"Failed to connect to {self.device.name}: {str(e)}")
             return False
     
     def disconnect(self):
@@ -37,49 +38,72 @@ class MikrotikAPI:
             self.api.close()
             self.api = None
     
-    def _execute_command(self, path: str, command: str, **kwargs) -> List[Dict]:
-        """Execute Mikrotik API command"""
-        if not self.api:
-            if not self.connect():
-                raise ConnectionError(f"Failed to connect to Mikrotik {self.device.name}")
-        
+    def _execute(self, path: str, **kwargs) -> Any:
+        """Unified execute method with better error handling"""
+        if not self.api and not self.connect():
+            raise ConnectionError(f"Cannot connect to {self.device.name}")
         try:
-            # Get the appropriate API path
-            api_path = self.api.path(path)
-            
-            # Execute command
-            if command == 'print':
-                result = list(api_path)
-            elif command == 'add':
-                result = api_path.add(**kwargs)
-            elif command == 'set':
-                result = api_path.update(**kwargs)
-            elif command == 'remove':
-                result = api_path.remove(**kwargs)
-            elif command == 'enable':
-                result = api_path.update(disabled='no', **kwargs)
-            elif command == 'disable':
-                result = api_path.update(disabled='yes', **kwargs)
+            path_obj = self.api.path(path)
+            if 'get' in kwargs:
+                return list(path_obj(**kwargs['get']))
+            elif 'add' in kwargs:
+                return path_obj.add(**kwargs['add'])
+            elif 'set' in kwargs:
+                return path_obj.set(**kwargs['set'])
+            elif 'remove' in kwargs:
+                return path_obj.remove(**kwargs['remove'])
             else:
-                raise ValueError(f"Unknown command: {command}")
-            
-            return result if isinstance(result, list) else [result]
-            
+                return list(path_obj)
         except Exception as e:
-            logger.error(f"Mikrotik API command failed: {str(e)}")
+            logger.error(f"API error on {path}: {str(e)}")
             raise
+    
+    # ────────────────────────────────────────────────────────────────
+    # LIVE STATUS & HEALTH MONITORING
+    # ────────────────────────────────────────────────────────────────
+    
+    def get_live_status(self) -> Dict[str, Any]:
+        """Get real-time router status"""
+        try:
+            if not self.connect():
+                return {"online": False, "error": "Connection failed"}
+            
+            resource = self._execute('/system/resource')[0]
+            identity = self._execute('/system/identity')[0]
+            routerboard = self._execute('/system/routerboard') or [{}]
+            
+            return {
+                "online": True,
+                "identity": identity.get('name', 'Unknown'),
+                "model": routerboard[0].get('model', resource.get('board-name', 'Unknown')),
+                "serial": routerboard[0].get('serial-number', 'Unknown'),
+                "firmware": resource.get('version', 'Unknown'),
+                "uptime": resource.get('uptime', '0s'),
+                "cpu_load": resource.get('cpu-load', '0%'),
+                "free_memory": resource.get('free-memory', '0'),
+                "total_memory": resource.get('total-memory', '0'),
+                "free_hdd": resource.get('free-hdd-space', '0'),
+                "architecture": resource.get('architecture-name', 'Unknown'),
+            }
+        except Exception as e:
+            return {"online": False, "error": str(e)}
+        finally:
+            self.disconnect()
     
     def sync_device_info(self) -> Dict[str, Any]:
         """Sync device information from Mikrotik"""
         try:
+            if not self.connect():
+                raise ConnectionError(f"Failed to connect to Mikrotik {self.device.name}")
+            
             # Get system resources
-            resources = self._execute_command('/system/resource', 'print')[0]
+            resources = self._execute('/system/resource')[0]
             
             # Get system identity
-            identity = self._execute_command('/system/identity', 'print')[0]
+            identity = self._execute('/system/identity')[0]
             
             # Get interfaces
-            interfaces = self._execute_command('/interface', 'print')
+            interfaces = self._execute('/interface')
             
             # Parse interface data
             interface_list = []
@@ -89,8 +113,8 @@ class MikrotikAPI:
                     'type': iface.get('type', 'ether'),
                     'mac_address': iface.get('mac-address', ''),
                     'mtu': iface.get('mtu', 1500),
-                    'rx_bytes': iface.get('rx-byte', 0),
-                    'tx_bytes': iface.get('tx-byte', 0),
+                    'rx_bytes': int(iface.get('rx-byte', 0)),
+                    'tx_bytes': int(iface.get('tx-byte', 0)),
                     'admin_state': iface.get('disabled', 'true') == 'false',
                     'operational_state': iface.get('running', 'false') == 'true',
                 })
@@ -110,11 +134,38 @@ class MikrotikAPI:
         except Exception as e:
             logger.error(f"Failed to sync device info: {str(e)}")
             raise
+        finally:
+            self.disconnect()
+    
+    # ────────────────────────────────────────────────────────────────
+    # CONNECTED USERS MONITORING
+    # ────────────────────────────────────────────────────────────────
+    
+    def get_active_hotspot_users(self) -> List[Dict]:
+        """Get currently connected hotspot users"""
+        try:
+            if not self.connect():
+                return []
+            return list(self._execute('/ip/hotspot/active'))
+        finally:
+            self.disconnect()
+    
+    def get_active_pppoe_sessions(self) -> List[Dict]:
+        """Get active PPPoE sessions"""
+        try:
+            if not self.connect():
+                return []
+            return list(self._execute('/ppp/active'))
+        finally:
+            self.disconnect()
     
     def get_hotspot_users(self) -> List[Dict[str, Any]]:
         """Get all hotspot users"""
         try:
-            users = self._execute_command('/ip/hotspot/user', 'print')
+            if not self.connect():
+                return []
+            
+            users = self._execute('/ip/hotspot/user')
             
             user_list = []
             for user in users:
@@ -135,12 +186,17 @@ class MikrotikAPI:
         except Exception as e:
             logger.error(f"Failed to get hotspot users: {str(e)}")
             raise
+        finally:
+            self.disconnect()
     
     def get_hotspot_user_stats(self, username: str) -> Optional[Dict[str, Any]]:
         """Get hotspot user active session stats"""
         try:
+            if not self.connect():
+                return None
+            
             # Get active hosts
-            active_hosts = self._execute_command('/ip/hotspot/active', 'print')
+            active_hosts = self._execute('/ip/hotspot/active')
             
             for host in active_hosts:
                 if host.get('user', '').lower() == username.lower():
@@ -161,75 +217,16 @@ class MikrotikAPI:
         except Exception as e:
             logger.error(f"Failed to get hotspot user stats: {str(e)}")
             raise
-    
-    def create_hotspot_user(self, username: str, password: str, profile: str = 'default', 
-                           limit_uptime: str = '', limit_bytes: str = '') -> bool:
-        """Create hotspot user"""
-        try:
-            result = self._execute_command(
-                '/ip/hotspot/user',
-                'add',
-                name=username,
-                password=password,
-                profile=profile,
-                **({'limit-uptime': limit_uptime} if limit_uptime else {}),
-                **({'limit-bytes-total': limit_bytes} if limit_bytes else {})
-            )
-            return 'id' in result[0]
-        except Exception as e:
-            logger.error(f"Failed to create hotspot user: {str(e)}")
-            raise
-    
-    def enable_hotspot_user(self, username: str) -> bool:
-        """Enable hotspot user"""
-        try:
-            # Find user ID
-            users = self._execute_command('/ip/hotspot/user', 'print')
-            user_id = None
-            
-            for user in users:
-                if user.get('name', '').lower() == username.lower():
-                    user_id = user.get('.id')
-                    break
-            
-            if not user_id:
-                raise ValueError(f"Hotspot user {username} not found")
-            
-            # Enable user
-            self._execute_command('/ip/hotspot/user', 'enable', **{'.id': user_id})
-            return True
-            
-        except Exception as e:
-            logger.error(f"Failed to enable hotspot user: {str(e)}")
-            raise
-    
-    def disable_hotspot_user(self, username: str) -> bool:
-        """Disable hotspot user"""
-        try:
-            # Find user ID
-            users = self._execute_command('/ip/hotspot/user', 'print')
-            user_id = None
-            
-            for user in users:
-                if user.get('name', '').lower() == username.lower():
-                    user_id = user.get('.id')
-                    break
-            
-            if not user_id:
-                raise ValueError(f"Hotspot user {username} not found")
-            
-            # Disable user
-            self._execute_command('/ip/hotspot/user', 'disable', **{'.id': user_id})
-            return True
-            
-        except Exception as e:
-            logger.error(f"Failed to disable hotspot user: {str(e)}")
-            raise
+        finally:
+            self.disconnect()
     
     def get_pppoe_users(self) -> List[Dict[str, Any]]:
         """Get all PPPoE users"""
         try:
-            secrets = self._execute_command('/ppp/secret', 'print')
+            if not self.connect():
+                return []
+            
+            secrets = self._execute('/ppp/secret')
             
             user_list = []
             for secret in secrets:
@@ -250,12 +247,17 @@ class MikrotikAPI:
         except Exception as e:
             logger.error(f"Failed to get PPPoE users: {str(e)}")
             raise
+        finally:
+            self.disconnect()
     
     def get_pppoe_user_stats(self, username: str) -> Optional[Dict[str, Any]]:
         """Get PPPoE user active session stats"""
         try:
+            if not self.connect():
+                return None
+            
             # Get active PPPoE sessions
-            active_sessions = self._execute_command('/ppp/active', 'print')
+            active_sessions = self._execute('/ppp/active')
             
             for session in active_sessions:
                 if session.get('name', '').lower() == username.lower():
@@ -281,30 +283,281 @@ class MikrotikAPI:
         except Exception as e:
             logger.error(f"Failed to get PPPoE user stats: {str(e)}")
             raise
+        finally:
+            self.disconnect()
+    
+    # ────────────────────────────────────────────────────────────────
+    # USER MANAGEMENT
+    # ────────────────────────────────────────────────────────────────
+    
+    def create_hotspot_user(self, username: str, password: str, profile: str = 'default', 
+                           limit_uptime: str = '', limit_bytes: str = '') -> bool:
+        """Create hotspot user"""
+        try:
+            if not self.connect():
+                return False
+            
+            add_params = {
+                'name': username,
+                'password': password,
+                'profile': profile,
+            }
+            
+            if limit_uptime:
+                add_params['limit-uptime'] = limit_uptime
+            if limit_bytes:
+                add_params['limit-bytes-total'] = limit_bytes
+            
+            result = self._execute('/ip/hotspot/user', add=add_params)
+            return 'id' in result
+        except Exception as e:
+            logger.error(f"Failed to create hotspot user: {str(e)}")
+            return False
+        finally:
+            self.disconnect()
     
     def create_pppoe_user(self, username: str, password: str, profile: str = 'default-encryption',
                          local_address: str = '', remote_address: str = '') -> bool:
         """Create PPPoE user"""
         try:
-            result = self._execute_command(
-                '/ppp/secret',
-                'add',
-                name=username,
-                password=password,
-                service='pppoe',
-                profile=profile,
-                **({'local-address': local_address} if local_address else {}),
-                **({'remote-address': remote_address} if remote_address else {})
-            )
-            return 'id' in result[0]
+            if not self.connect():
+                return False
+            
+            add_params = {
+                'name': username,
+                'password': password,
+                'service': 'pppoe',
+                'profile': profile,
+            }
+            
+            if local_address:
+                add_params['local-address'] = local_address
+            if remote_address:
+                add_params['remote-address'] = remote_address
+            
+            result = self._execute('/ppp/secret', add=add_params)
+            return 'id' in result
         except Exception as e:
             logger.error(f"Failed to create PPPoE user: {str(e)}")
+            return False
+        finally:
+            self.disconnect()
+    
+    def enable_hotspot_user(self, username: str) -> bool:
+        """Enable hotspot user"""
+        try:
+            if not self.connect():
+                return False
+            
+            # Find user ID
+            users = self._execute('/ip/hotspot/user')
+            user_id = None
+            
+            for user in users:
+                if user.get('name', '').lower() == username.lower():
+                    user_id = user.get('.id')
+                    break
+            
+            if not user_id:
+                raise ValueError(f"Hotspot user {username} not found")
+            
+            # Enable user
+            self._execute('/ip/hotspot/user', set={'.id': user_id, 'disabled': 'no'})
+            return True
+            
+        except Exception as e:
+            logger.error(f"Failed to enable hotspot user: {str(e)}")
+            return False
+        finally:
+            self.disconnect()
+    
+    def disable_hotspot_user(self, username: str) -> bool:
+        """Disable hotspot user"""
+        try:
+            if not self.connect():
+                return False
+            
+            # Find user ID
+            users = self._execute('/ip/hotspot/user')
+            user_id = None
+            
+            for user in users:
+                if user.get('name', '').lower() == username.lower():
+                    user_id = user.get('.id')
+                    break
+            
+            if not user_id:
+                raise ValueError(f"Hotspot user {username} not found")
+            
+            # Disable user
+            self._execute('/ip/hotspot/user', set={'.id': user_id, 'disabled': 'yes'})
+            return True
+            
+        except Exception as e:
+            logger.error(f"Failed to disable hotspot user: {str(e)}")
+            return False
+        finally:
+            self.disconnect()
+    
+    # ────────────────────────────────────────────────────────────────
+    # FIREWALL & QUEUES MANAGEMENT
+    # ────────────────────────────────────────────────────────────────
+    
+    def get_firewall_filter_rules(self) -> List[Dict]:
+        """Get all firewall filter rules"""
+        try:
+            if not self.connect():
+                return []
+            return list(self._execute('/ip/firewall/filter'))
+        finally:
+            self.disconnect()
+    
+    def get_queues(self) -> List[Dict[str, Any]]:
+        """Get all queues"""
+        try:
+            if not self.connect():
+                return []
+            
+            queues = self._execute('/queue/simple')
+            
+            queue_list = []
+            for queue in queues:
+                queue_list.append({
+                    'name': queue.get('name', ''),
+                    'target': queue.get('target', ''),
+                    'max_limit': queue.get('max-limit', ''),
+                    'burst_limit': queue.get('burst-limit', ''),
+                    'burst_threshold': queue.get('burst-threshold', ''),
+                    'burst_time': queue.get('burst-time', ''),
+                    'priority': queue.get('priority', '8'),
+                    'disabled': queue.get('disabled', 'false') == 'true',
+                    'packet_mark': queue.get('packet-marks', ''),
+                })
+            
+            return queue_list
+            
+        except Exception as e:
+            logger.error(f"Failed to get queues: {str(e)}")
             raise
+        finally:
+            self.disconnect()
+    
+    def add_simple_queue(self, name: str, target: str, max_limit: str = "5M/5M") -> bool:
+        """Add a simple queue for rate limiting"""
+        try:
+            if not self.connect():
+                return False
+            
+            self._execute('/queue/simple', add={
+                'name': name,
+                'target': target,
+                'max-limit': max_limit,
+                'comment': 'Added by YourISP backend'
+            })
+            return True
+        except Exception as e:
+            logger.error(f"Queue creation failed: {e}")
+            return False
+        finally:
+            self.disconnect()
+    
+    def create_queue(self, name: str, target: str, max_limit: str, 
+                    burst_limit: str = '', priority: str = '8') -> bool:
+        """Create queue"""
+        try:
+            if not self.connect():
+                return False
+            
+            add_params = {
+                'name': name,
+                'target': target,
+                'max-limit': max_limit,
+                'priority': priority
+            }
+            
+            if burst_limit:
+                add_params['burst-limit'] = burst_limit
+            
+            result = self._execute('/queue/simple', add=add_params)
+            return 'id' in result
+        except Exception as e:
+            logger.error(f"Failed to create queue: {str(e)}")
+            return False
+        finally:
+            self.disconnect()
+    
+    def enable_queue(self, queue_name: str) -> bool:
+        """Enable queue"""
+        try:
+            if not self.connect():
+                return False
+            
+            self._execute('/queue/simple', set={'.id': queue_name, 'disabled': 'no'})
+            return True
+        except Exception as e:
+            logger.error(f"Failed to enable queue {queue_name}: {str(e)}")
+            return False
+        finally:
+            self.disconnect()
+    
+    def disable_queue(self, queue_name: str) -> bool:
+        """Disable queue"""
+        try:
+            if not self.connect():
+                return False
+            
+            self._execute('/queue/simple', set={'.id': queue_name, 'disabled': 'yes'})
+            return True
+        except Exception as e:
+            logger.error(f"Failed to disable queue {queue_name}: {str(e)}")
+            return False
+        finally:
+            self.disconnect()
+    
+    def add_firewall_rule(self, chain: str, action: str, src_address: str = '',
+                         dst_address: str = '', protocol: str = '', 
+                         dst_port: str = '', comment: str = '') -> bool:
+        """Add firewall rule"""
+        try:
+            if not self.connect():
+                return False
+            
+            params = {
+                'chain': chain,
+                'action': action,
+            }
+            
+            if src_address:
+                params['src-address'] = src_address
+            if dst_address:
+                params['dst-address'] = dst_address
+            if protocol:
+                params['protocol'] = protocol
+            if dst_port:
+                params['dst-port'] = dst_port
+            if comment:
+                params['comment'] = comment
+            
+            result = self._execute('/ip/firewall/filter', add=params)
+            return 'id' in result
+            
+        except Exception as e:
+            logger.error(f"Failed to add firewall rule: {str(e)}")
+            return False
+        finally:
+            self.disconnect()
+    
+    # ────────────────────────────────────────────────────────────────
+    # INTERFACE MANAGEMENT
+    # ────────────────────────────────────────────────────────────────
     
     def get_interfaces(self) -> List[Dict[str, Any]]:
         """Get all interfaces"""
         try:
-            interfaces = self._execute_command('/interface', 'print')
+            if not self.connect():
+                return []
+            
+            interfaces = self._execute('/interface')
             
             interface_list = []
             for iface in interfaces:
@@ -329,90 +582,48 @@ class MikrotikAPI:
         except Exception as e:
             logger.error(f"Failed to get interfaces: {str(e)}")
             raise
+        finally:
+            self.disconnect()
     
     def enable_interface(self, interface_name: str) -> bool:
         """Enable interface"""
         try:
-            self._execute_command('/interface', 'enable', **{'.id': interface_name})
+            if not self.connect():
+                return False
+            
+            self._execute('/interface', set={'.id': interface_name, 'disabled': 'no'})
             return True
         except Exception as e:
             logger.error(f"Failed to enable interface {interface_name}: {str(e)}")
-            raise
+            return False
+        finally:
+            self.disconnect()
     
     def disable_interface(self, interface_name: str) -> bool:
         """Disable interface"""
         try:
-            self._execute_command('/interface', 'disable', **{'.id': interface_name})
+            if not self.connect():
+                return False
+            
+            self._execute('/interface', set={'.id': interface_name, 'disabled': 'yes'})
             return True
         except Exception as e:
             logger.error(f"Failed to disable interface {interface_name}: {str(e)}")
-            raise
+            return False
+        finally:
+            self.disconnect()
     
-    def get_queues(self) -> List[Dict[str, Any]]:
-        """Get all queues"""
-        try:
-            queues = self._execute_command('/queue/simple', 'print')
-            
-            queue_list = []
-            for queue in queues:
-                queue_list.append({
-                    'name': queue.get('name', ''),
-                    'target': queue.get('target', ''),
-                    'max_limit': queue.get('max-limit', ''),
-                    'burst_limit': queue.get('burst-limit', ''),
-                    'burst_threshold': queue.get('burst-threshold', ''),
-                    'burst_time': queue.get('burst-time', ''),
-                    'priority': queue.get('priority', '8'),
-                    'disabled': queue.get('disabled', 'false') == 'true',
-                    'packet_mark': queue.get('packet-marks', ''),
-                })
-            
-            return queue_list
-            
-        except Exception as e:
-            logger.error(f"Failed to get queues: {str(e)}")
-            raise
-    
-    def create_queue(self, name: str, target: str, max_limit: str, 
-                    burst_limit: str = '', priority: str = '8') -> bool:
-        """Create queue"""
-        try:
-            result = self._execute_command(
-                '/queue/simple',
-                'add',
-                name=name,
-                target=target,
-                max_limit=max_limit,
-                **({'burst-limit': burst_limit} if burst_limit else {}),
-                priority=priority
-            )
-            return 'id' in result[0]
-        except Exception as e:
-            logger.error(f"Failed to create queue: {str(e)}")
-            raise
-    
-    def enable_queue(self, queue_name: str) -> bool:
-        """Enable queue"""
-        try:
-            self._execute_command('/queue/simple', 'enable', **{'.id': queue_name})
-            return True
-        except Exception as e:
-            logger.error(f"Failed to enable queue {queue_name}: {str(e)}")
-            raise
-    
-    def disable_queue(self, queue_name: str) -> bool:
-        """Disable queue"""
-        try:
-            self._execute_command('/queue/simple', 'disable', **{'.id': queue_name})
-            return True
-        except Exception as e:
-            logger.error(f"Failed to disable queue {queue_name}: {str(e)}")
-            raise
+    # ────────────────────────────────────────────────────────────────
+    # DHCP MANAGEMENT
+    # ────────────────────────────────────────────────────────────────
     
     def get_dhcp_leases(self) -> List[Dict[str, Any]]:
         """Get DHCP leases"""
         try:
-            leases = self._execute_command('/ip/dhcp-server/lease', 'print')
+            if not self.connect():
+                return []
+            
+            leases = self._execute('/ip/dhcp-server/lease')
             
             lease_list = []
             for lease in leases:
@@ -432,58 +643,121 @@ class MikrotikAPI:
         except Exception as e:
             logger.error(f"Failed to get DHCP leases: {str(e)}")
             raise
+        finally:
+            self.disconnect()
     
-    def add_firewall_rule(self, chain: str, action: str, src_address: str = '',
-                         dst_address: str = '', protocol: str = '', 
-                         dst_port: str = '', comment: str = '') -> bool:
-        """Add firewall rule"""
-        try:
-            params = {
-                'chain': chain,
-                'action': action,
-            }
-            
-            if src_address:
-                params['src-address'] = src_address
-            if dst_address:
-                params['dst-address'] = dst_address
-            if protocol:
-                params['protocol'] = protocol
-            if dst_port:
-                params['dst-port'] = dst_port
-            if comment:
-                params['comment'] = comment
-            
-            result = self._execute_command('/ip/firewall/filter', 'add', **params)
-            return 'id' in result[0]
-            
-        except Exception as e:
-            logger.error(f"Failed to add firewall rule: {str(e)}")
-            raise
+    # ────────────────────────────────────────────────────────────────
+    # BASIC CONTROL & DIAGNOSTICS
+    # ────────────────────────────────────────────────────────────────
     
     def reboot_device(self) -> bool:
         """Reboot Mikrotik device"""
         try:
-            self._execute_command('/system', 'reboot')
+            if not self.connect():
+                return False
+            
+            self._execute('/system/reboot')
             return True
         except Exception as e:
             logger.error(f"Failed to reboot device: {str(e)}")
-            raise
+            return False
+        finally:
+            self.disconnect()
+    
+    def reboot(self) -> bool:
+        """Reboot Mikrotik device (alias for reboot_device)"""
+        return self.reboot_device()
+    
+    def ping(self, target: str = "8.8.8.8", count: int = 3) -> Dict:
+        """Run ping from router"""
+        try:
+            if not self.connect():
+                return {"success": False, "error": "Connection failed"}
+            
+            result = self._execute('/ping', add={'address': target, 'count': str(count)})
+            return {"success": True, "result": result}
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+        finally:
+            self.disconnect()
     
     def backup_config(self) -> str:
         """Backup configuration"""
         try:
+            if not self.connect():
+                return "Backup failed: Connection failed"
+            
             # Export configuration
-            result = self._execute_command('/system/backup', 'save', name='backup')
+            result = self._execute('/system/backup/save', add={'name': 'yourisp-backup'})
             
             # Get backup file (simplified - in reality you'd need to download it)
             return "Backup created successfully"
             
         except Exception as e:
             logger.error(f"Failed to backup configuration: {str(e)}")
-            raise
+            return f"Backup failed: {str(e)}"
+        finally:
+            self.disconnect()
     
-    # Helper methods
+    def traceroute(self, target: str = "8.8.8.8") -> Dict:
+        """Run traceroute from router"""
+        try:
+            if not self.connect():
+                return {"success": False, "error": "Connection failed"}
+            
+            result = self._execute('/tool/traceroute', add={'address': target})
+            return {"success": True, "result": result}
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+        finally:
+            self.disconnect()
+    
+    def get_system_logs(self, lines: int = 50) -> List[Dict]:
+        """Get system logs"""
+        try:
+            if not self.connect():
+                return []
+            
+            logs = self._execute('/log/print', get={'lines': str(lines)})
+            return list(logs)
+        except Exception as e:
+            logger.error(f"Failed to get system logs: {str(e)}")
+            return []
+        finally:
+            self.disconnect()
+    
+    def get_wireless_interfaces(self) -> List[Dict]:
+        """Get wireless interface information"""
+        try:
+            if not self.connect():
+                return []
+            
+            wireless = self._execute('/interface/wireless')
+            return list(wireless)
+        except Exception as e:
+            logger.error(f"Failed to get wireless interfaces: {str(e)}")
+            return []
+        finally:
+            self.disconnect()
+    
+    def get_wireless_registrations(self) -> List[Dict]:
+        """Get wireless client registrations"""
+        try:
+            if not self.connect():
+                return []
+            
+            registrations = self._execute('/interface/wireless/registration-table')
+            return list(registrations)
+        except Exception as e:
+            logger.error(f"Failed to get wireless registrations: {str(e)}")
+            return []
+        finally:
+            self.disconnect()
+    
+    # ────────────────────────────────────────────────────────────────
+    # HELPER METHODS
+    # ────────────────────────────────────────────────────────────────
+    
     def _parse_memory_usage(self, free_memory: str, total_memory: str) -> float:
         """Parse memory usage percentage"""
         try:
@@ -516,7 +790,6 @@ class MikrotikAPI:
             size_str = size_str.lower().replace(' ', '')
             
             # Remove non-numeric characters
-            import re
             number = float(re.findall(r'[\d.]+', size_str)[0])
             
             # Convert based on unit
@@ -534,3 +807,69 @@ class MikrotikAPI:
                 return int(number)
         except:
             return 0
+    
+    def get_interface_traffic(self, interface_name: str) -> Dict:
+        """Get traffic statistics for specific interface"""
+        try:
+            if not self.connect():
+                return {"error": "Connection failed"}
+            
+            # Get interface stats
+            interfaces = self._execute('/interface')
+            for iface in interfaces:
+                if iface.get('name', '') == interface_name:
+                    return {
+                        'name': interface_name,
+                        'rx_bytes': int(iface.get('rx-byte', 0)),
+                        'tx_bytes': int(iface.get('tx-byte', 0)),
+                        'rx_packets': int(iface.get('rx-packet', 0)),
+                        'tx_packets': int(iface.get('tx-packet', 0)),
+                        'rx_errors': int(iface.get('rx-error', 0)),
+                        'tx_errors': int(iface.get('tx-error', 0)),
+                        'running': iface.get('running', 'false') == 'true',
+                        'disabled': iface.get('disabled', 'false') == 'true',
+                    }
+            
+            return {"error": f"Interface {interface_name} not found"}
+        except Exception as e:
+            return {"error": str(e)}
+        finally:
+            self.disconnect()
+    
+    def get_system_health(self) -> Dict:
+        """Get comprehensive system health information"""
+        status = self.get_live_status()
+        
+        if not status.get('online', False):
+            return status
+        
+        try:
+            # Add additional health metrics
+            interfaces = self.get_interfaces()
+            queues = self.get_queues()
+            firewall_rules = len(self.get_firewall_filter_rules())
+            dhcp_leases = self.get_dhcp_leases()
+            hotspot_active = len(self.get_active_hotspot_users())
+            pppoe_active = len(self.get_active_pppoe_sessions())
+            
+            # Calculate interface health
+            total_interfaces = len(interfaces)
+            up_interfaces = sum(1 for iface in interfaces if iface.get('running', False))
+            
+            status.update({
+                'interfaces_total': total_interfaces,
+                'interfaces_up': up_interfaces,
+                'interface_health': f"{up_interfaces}/{total_interfaces}",
+                'queues_total': len(queues),
+                'firewall_rules': firewall_rules,
+                'dhcp_leases': len(dhcp_leases),
+                'hotspot_active': hotspot_active,
+                'pppoe_active': pppoe_active,
+                'total_active_users': hotspot_active + pppoe_active,
+                'timestamp': time.time(),
+            })
+            
+            return status
+        except Exception as e:
+            status['health_error'] = str(e)
+            return status

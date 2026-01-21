@@ -60,6 +60,785 @@ class RouterViewSet(viewsets.ModelViewSet):
         
         return super().create(request, *args, **kwargs)
 
+    # ────────────────────────────────────────────────────────────────
+    # MIKROTIK API ENDPOINTS - LIVE STATUS & HEALTH
+    # ────────────────────────────────────────────────────────────────
+
+    @action(detail=True, methods=['get'], permission_classes=[IsAuthenticated, HasCompanyAccess])
+    def live_status(self, request, pk=None):
+        """Get real-time router status"""
+        router = self.get_object()
+        if router.router_type != 'mikrotik':
+            return Response({"error": "This action is only available for Mikrotik routers"}, status=400)
+        
+        if not router.api_username or not router.api_password:
+            return Response({"error": "API credentials not configured for this router"}, status=400)
+        
+        try:
+            api = mikrotik_api_module.MikrotikAPI(router)
+            status = api.get_live_status()
+            return Response(status)
+        except Exception as e:
+            logger.error(f"Failed to get live status for router {router.name}: {str(e)}")
+            return Response({"error": str(e)}, status=400)
+
+    @action(detail=True, methods=['get'], permission_classes=[IsAuthenticated, HasCompanyAccess])
+    def system_health(self, request, pk=None):
+        """Get comprehensive system health information"""
+        router = self.get_object()
+        if router.router_type != 'mikrotik':
+            return Response({"error": "This action is only available for Mikrotik routers"}, status=400)
+        
+        if not router.api_username or not router.api_password:
+            return Response({"error": "API credentials not configured for this router"}, status=400)
+        
+        try:
+            api = mikrotik_api_module.MikrotikAPI(router)
+            health = api.get_system_health()
+            return Response(health)
+        except Exception as e:
+            logger.error(f"Failed to get system health for router {router.name}: {str(e)}")
+            return Response({"error": str(e)}, status=400)
+
+    @action(detail=True, methods=['get'], permission_classes=[IsAuthenticated, HasCompanyAccess])
+    def sync_device_info(self, request, pk=None):
+        """Sync device information from Mikrotik"""
+        router = self.get_object()
+        if router.router_type != 'mikrotik':
+            return Response({"error": "This action is only available for Mikrotik routers"}, status=400)
+        
+        if not router.api_username or not router.api_password:
+            return Response({"error": "API credentials not configured for this router"}, status=400)
+        
+        try:
+            api = mikrotik_api_module.MikrotikAPI(router)
+            device_info = api.sync_device_info()
+            
+            # Update router model with synced data if needed
+            router.model = device_info.get('model', router.model)
+            router.firmware_version = device_info.get('firmware_version', router.firmware_version)
+            router.save(update_fields=['model', 'firmware_version'])
+            
+            return Response(device_info)
+        except Exception as e:
+            logger.error(f"Failed to sync device info for router {router.name}: {str(e)}")
+            return Response({"error": str(e)}, status=400)
+
+    # ────────────────────────────────────────────────────────────────
+    # MIKROTIK API ENDPOINTS - CONNECTED USERS
+    # ────────────────────────────────────────────────────────────────
+
+    @action(detail=True, methods=['get'], permission_classes=[IsAuthenticated, HasCompanyAccess])
+    def active_hotspot_users(self, request, pk=None):
+        """Get currently connected hotspot users"""
+        router = self.get_object()
+        if router.router_type != 'mikrotik':
+            return Response({"error": "This action is only available for Mikrotik routers"}, status=400)
+        
+        if not router.api_username or not router.api_password:
+            return Response({"error": "API credentials not configured for this router"}, status=400)
+        
+        try:
+            api = mikrotik_api_module.MikrotikAPI(router)
+            users = api.get_active_hotspot_users()
+            return Response(users)
+        except Exception as e:
+            logger.error(f"Failed to get active hotspot users for router {router.name}: {str(e)}")
+            return Response({"error": str(e)}, status=400)
+
+    @action(detail=True, methods=['get'], permission_classes=[IsAuthenticated, HasCompanyAccess])
+    def active_pppoe_sessions(self, request, pk=None):
+        """Get active PPPoE sessions"""
+        router = self.get_object()
+        if router.router_type != 'mikrotik':
+            return Response({"error": "This action is only available for Mikrotik routers"}, status=400)
+        
+        if not router.api_username or not router.api_password:
+            return Response({"error": "API credentials not configured for this router"}, status=400)
+        
+        try:
+            api = mikrotik_api_module.MikrotikAPI(router)
+            sessions = api.get_active_pppoe_sessions()
+            return Response(sessions)
+        except Exception as e:
+            logger.error(f"Failed to get active PPPoE sessions for router {router.name}: {str(e)}")
+            return Response({"error": str(e)}, status=400)
+
+    @action(detail=True, methods=['get'], permission_classes=[IsAuthenticated, HasCompanyAccess])
+    def hotspot_users(self, request, pk=None):
+        """Get all hotspot users"""
+        router = self.get_object()
+        if router.router_type != 'mikrotik':
+            return Response({"error": "This action is only available for Mikrotik routers"}, status=400)
+        
+        if not router.api_username or not router.api_password:
+            return Response({"error": "API credentials not configured for this router"}, status=400)
+        
+        try:
+            api = mikrotik_api_module.MikrotikAPI(router)
+            users = api.get_hotspot_users()
+            return Response(users)
+        except Exception as e:
+            logger.error(f"Failed to get hotspot users for router {router.name}: {str(e)}")
+            return Response({"error": str(e)}, status=400)
+
+    @action(detail=True, methods=['get'], permission_classes=[IsAuthenticated, HasCompanyAccess])
+    def hotspot_user_stats(self, request, pk=None):
+        """Get hotspot user active session stats"""
+        router = self.get_object()
+        username = request.query_params.get('username')
+        
+        if not username:
+            return Response({"error": "Username parameter is required"}, status=400)
+        
+        if router.router_type != 'mikrotik':
+            return Response({"error": "This action is only available for Mikrotik routers"}, status=400)
+        
+        if not router.api_username or not router.api_password:
+            return Response({"error": "API credentials not configured for this router"}, status=400)
+        
+        try:
+            api = mikrotik_api_module.MikrotikAPI(router)
+            stats = api.get_hotspot_user_stats(username)
+            return Response(stats if stats else {"error": "User not found or not active"})
+        except Exception as e:
+            logger.error(f"Failed to get hotspot user stats for router {router.name}: {str(e)}")
+            return Response({"error": str(e)}, status=400)
+
+    @action(detail=True, methods=['get'], permission_classes=[IsAuthenticated, HasCompanyAccess])
+    def pppoe_users(self, request, pk=None):
+        """Get all PPPoE users"""
+        router = self.get_object()
+        if router.router_type != 'mikrotik':
+            return Response({"error": "This action is only available for Mikrotik routers"}, status=400)
+        
+        if not router.api_username or not router.api_password:
+            return Response({"error": "API credentials not configured for this router"}, status=400)
+        
+        try:
+            api = mikrotik_api_module.MikrotikAPI(router)
+            users = api.get_pppoe_users()
+            return Response(users)
+        except Exception as e:
+            logger.error(f"Failed to get PPPoE users for router {router.name}: {str(e)}")
+            return Response({"error": str(e)}, status=400)
+
+    @action(detail=True, methods=['get'], permission_classes=[IsAuthenticated, HasCompanyAccess])
+    def pppoe_user_stats(self, request, pk=None):
+        """Get PPPoE user active session stats"""
+        router = self.get_object()
+        username = request.query_params.get('username')
+        
+        if not username:
+            return Response({"error": "Username parameter is required"}, status=400)
+        
+        if router.router_type != 'mikrotik':
+            return Response({"error": "This action is only available for Mikrotik routers"}, status=400)
+        
+        if not router.api_username or not router.api_password:
+            return Response({"error": "API credentials not configured for this router"}, status=400)
+        
+        try:
+            api = mikrotik_api_module.MikrotikAPI(router)
+            stats = api.get_pppoe_user_stats(username)
+            return Response(stats)
+        except Exception as e:
+            logger.error(f"Failed to get PPPoE user stats for router {router.name}: {str(e)}")
+            return Response({"error": str(e)}, status=400)
+
+    # ────────────────────────────────────────────────────────────────
+    # MIKROTIK API ENDPOINTS - USER MANAGEMENT
+    # ────────────────────────────────────────────────────────────────
+
+    @action(detail=True, methods=['post'], permission_classes=[IsAuthenticated, HasCompanyAccess])
+    def create_hotspot_user(self, request, pk=None):
+        """Create hotspot user"""
+        router = self.get_object()
+        if router.router_type != 'mikrotik':
+            return Response({"error": "This action is only available for Mikrotik routers"}, status=400)
+        
+        if not router.api_username or not router.api_password:
+            return Response({"error": "API credentials not configured for this router"}, status=400)
+        
+        username = request.data.get('username')
+        password = request.data.get('password')
+        profile = request.data.get('profile', 'default')
+        limit_uptime = request.data.get('limit_uptime', '')
+        limit_bytes = request.data.get('limit_bytes', '')
+        
+        if not username or not password:
+            return Response({"error": "Username and password are required"}, status=400)
+        
+        try:
+            api = mikrotik_api_module.MikrotikAPI(router)
+            success = api.create_hotspot_user(username, password, profile, limit_uptime, limit_bytes)
+            
+            if success:
+                RouterEvent.objects.create(
+                    router=router,
+                    event_type='user_created',
+                    message=f"Hotspot user {username} created"
+                )
+                return Response({"status": "success", "message": "Hotspot user created"})
+            else:
+                return Response({"error": "Failed to create hotspot user"}, status=400)
+        except Exception as e:
+            logger.error(f"Failed to create hotspot user for router {router.name}: {str(e)}")
+            return Response({"error": str(e)}, status=400)
+
+    @action(detail=True, methods=['post'], permission_classes=[IsAuthenticated, HasCompanyAccess])
+    def create_pppoe_user(self, request, pk=None):
+        """Create PPPoE user"""
+        router = self.get_object()
+        if router.router_type != 'mikrotik':
+            return Response({"error": "This action is only available for Mikrotik routers"}, status=400)
+        
+        if not router.api_username or not router.api_password:
+            return Response({"error": "API credentials not configured for this router"}, status=400)
+        
+        username = request.data.get('username')
+        password = request.data.get('password')
+        profile = request.data.get('profile', 'default-encryption')
+        local_address = request.data.get('local_address', '')
+        remote_address = request.data.get('remote_address', '')
+        
+        if not username or not password:
+            return Response({"error": "Username and password are required"}, status=400)
+        
+        try:
+            api = mikrotik_api_module.MikrotikAPI(router)
+            success = api.create_pppoe_user(username, password, profile, local_address, remote_address)
+            
+            if success:
+                RouterEvent.objects.create(
+                    router=router,
+                    event_type='user_created',
+                    message=f"PPPoE user {username} created"
+                )
+                return Response({"status": "success", "message": "PPPoE user created"})
+            else:
+                return Response({"error": "Failed to create PPPoE user"}, status=400)
+        except Exception as e:
+            logger.error(f"Failed to create PPPoE user for router {router.name}: {str(e)}")
+            return Response({"error": str(e)}, status=400)
+
+    @action(detail=True, methods=['post'], permission_classes=[IsAuthenticated, HasCompanyAccess])
+    def enable_hotspot_user(self, request, pk=None):
+        """Enable hotspot user"""
+        router = self.get_object()
+        username = request.data.get('username')
+        
+        if not username:
+            return Response({"error": "Username is required"}, status=400)
+        
+        if router.router_type != 'mikrotik':
+            return Response({"error": "This action is only available for Mikrotik routers"}, status=400)
+        
+        if not router.api_username or not router.api_password:
+            return Response({"error": "API credentials not configured for this router"}, status=400)
+        
+        try:
+            api = mikrotik_api_module.MikrotikAPI(router)
+            success = api.enable_hotspot_user(username)
+            
+            if success:
+                RouterEvent.objects.create(
+                    router=router,
+                    event_type='user_enabled',
+                    message=f"Hotspot user {username} enabled"
+                )
+                return Response({"status": "success", "message": f"User {username} enabled"})
+            else:
+                return Response({"error": f"Failed to enable user {username}"}, status=400)
+        except Exception as e:
+            logger.error(f"Failed to enable hotspot user for router {router.name}: {str(e)}")
+            return Response({"error": str(e)}, status=400)
+
+    @action(detail=True, methods=['post'], permission_classes=[IsAuthenticated, HasCompanyAccess])
+    def disable_hotspot_user(self, request, pk=None):
+        """Disable hotspot user"""
+        router = self.get_object()
+        username = request.data.get('username')
+        
+        if not username:
+            return Response({"error": "Username is required"}, status=400)
+        
+        if router.router_type != 'mikrotik':
+            return Response({"error": "This action is only available for Mikrotik routers"}, status=400)
+        
+        if not router.api_username or not router.api_password:
+            return Response({"error": "API credentials not configured for this router"}, status=400)
+        
+        try:
+            api = mikrotik_api_module.MikrotikAPI(router)
+            success = api.disable_hotspot_user(username)
+            
+            if success:
+                RouterEvent.objects.create(
+                    router=router,
+                    event_type='user_disabled',
+                    message=f"Hotspot user {username} disabled"
+                )
+                return Response({"status": "success", "message": f"User {username} disabled"})
+            else:
+                return Response({"error": f"Failed to disable user {username}"}, status=400)
+        except Exception as e:
+            logger.error(f"Failed to disable hotspot user for router {router.name}: {str(e)}")
+            return Response({"error": str(e)}, status=400)
+
+    # ────────────────────────────────────────────────────────────────
+    # MIKROTIK API ENDPOINTS - FIREWALL & QUEUES
+    # ────────────────────────────────────────────────────────────────
+
+    @action(detail=True, methods=['get'], permission_classes=[IsAuthenticated, HasCompanyAccess])
+    def firewall_filter_rules(self, request, pk=None):
+        """Get all firewall filter rules"""
+        router = self.get_object()
+        if router.router_type != 'mikrotik':
+            return Response({"error": "This action is only available for Mikrotik routers"}, status=400)
+        
+        if not router.api_username or not router.api_password:
+            return Response({"error": "API credentials not configured for this router"}, status=400)
+        
+        try:
+            api = mikrotik_api_module.MikrotikAPI(router)
+            rules = api.get_firewall_filter_rules()
+            return Response(rules)
+        except Exception as e:
+            logger.error(f"Failed to get firewall rules for router {router.name}: {str(e)}")
+            return Response({"error": str(e)}, status=400)
+
+    @action(detail=True, methods=['get'], permission_classes=[IsAuthenticated, HasCompanyAccess])
+    def queues(self, request, pk=None):
+        """Get all queues"""
+        router = self.get_object()
+        if router.router_type != 'mikrotik':
+            return Response({"error": "This action is only available for Mikrotik routers"}, status=400)
+        
+        if not router.api_username or not router.api_password:
+            return Response({"error": "API credentials not configured for this router"}, status=400)
+        
+        try:
+            api = mikrotik_api_module.MikrotikAPI(router)
+            queues = api.get_queues()
+            return Response(queues)
+        except Exception as e:
+            logger.error(f"Failed to get queues for router {router.name}: {str(e)}")
+            return Response({"error": str(e)}, status=400)
+
+    @action(detail=True, methods=['post'], permission_classes=[IsAuthenticated, HasCompanyAccess])
+    def add_simple_queue(self, request, pk=None):
+        """Add a simple queue for rate limiting"""
+        router = self.get_object()
+        if router.router_type != 'mikrotik':
+            return Response({"error": "This action is only available for Mikrotik routers"}, status=400)
+        
+        if not router.api_username or not router.api_password:
+            return Response({"error": "API credentials not configured for this router"}, status=400)
+        
+        name = request.data.get('name')
+        target = request.data.get('target')
+        max_limit = request.data.get('max_limit', '5M/5M')
+        
+        if not name or not target:
+            return Response({"error": "Name and target are required"}, status=400)
+        
+        try:
+            api = mikrotik_api_module.MikrotikAPI(router)
+            success = api.add_simple_queue(name, target, max_limit)
+            
+            if success:
+                RouterEvent.objects.create(
+                    router=router,
+                    event_type='queue_created',
+                    message=f"Queue {name} created for {target}"
+                )
+                return Response({"status": "success", "message": "Queue created"})
+            else:
+                return Response({"error": "Failed to create queue"}, status=400)
+        except Exception as e:
+            logger.error(f"Failed to add queue for router {router.name}: {str(e)}")
+            return Response({"error": str(e)}, status=400)
+
+    @action(detail=True, methods=['post'], permission_classes=[IsAuthenticated, HasCompanyAccess])
+    def create_queue(self, request, pk=None):
+        """Create queue"""
+        router = self.get_object()
+        if router.router_type != 'mikrotik':
+            return Response({"error": "This action is only available for Mikrotik routers"}, status=400)
+        
+        if not router.api_username or not router.api_password:
+            return Response({"error": "API credentials not configured for this router"}, status=400)
+        
+        name = request.data.get('name')
+        target = request.data.get('target')
+        max_limit = request.data.get('max_limit')
+        burst_limit = request.data.get('burst_limit', '')
+        priority = request.data.get('priority', '8')
+        
+        if not name or not target or not max_limit:
+            return Response({"error": "Name, target and max_limit are required"}, status=400)
+        
+        try:
+            api = mikrotik_api_module.MikrotikAPI(router)
+            success = api.create_queue(name, target, max_limit, burst_limit, priority)
+            
+            if success:
+                RouterEvent.objects.create(
+                    router=router,
+                    event_type='queue_created',
+                    message=f"Queue {name} created"
+                )
+                return Response({"status": "success", "message": "Queue created"})
+            else:
+                return Response({"error": "Failed to create queue"}, status=400)
+        except Exception as e:
+            logger.error(f"Failed to create queue for router {router.name}: {str(e)}")
+            return Response({"error": str(e)}, status=400)
+
+    @action(detail=True, methods=['post'], permission_classes=[IsAuthenticated, HasCompanyAccess])
+    def enable_queue(self, request, pk=None):
+        """Enable queue"""
+        router = self.get_object()
+        queue_name = request.data.get('queue_name')
+        
+        if not queue_name:
+            return Response({"error": "Queue name is required"}, status=400)
+        
+        if router.router_type != 'mikrotik':
+            return Response({"error": "This action is only available for Mikrotik routers"}, status=400)
+        
+        if not router.api_username or not router.api_password:
+            return Response({"error": "API credentials not configured for this router"}, status=400)
+        
+        try:
+            api = mikrotik_api_module.MikrotikAPI(router)
+            success = api.enable_queue(queue_name)
+            
+            if success:
+                RouterEvent.objects.create(
+                    router=router,
+                    event_type='queue_enabled',
+                    message=f"Queue {queue_name} enabled"
+                )
+                return Response({"status": "success", "message": f"Queue {queue_name} enabled"})
+            else:
+                return Response({"error": f"Failed to enable queue {queue_name}"}, status=400)
+        except Exception as e:
+            logger.error(f"Failed to enable queue for router {router.name}: {str(e)}")
+            return Response({"error": str(e)}, status=400)
+
+    @action(detail=True, methods=['post'], permission_classes=[IsAuthenticated, HasCompanyAccess])
+    def disable_queue(self, request, pk=None):
+        """Disable queue"""
+        router = self.get_object()
+        queue_name = request.data.get('queue_name')
+        
+        if not queue_name:
+            return Response({"error": "Queue name is required"}, status=400)
+        
+        if router.router_type != 'mikrotik':
+            return Response({"error": "This action is only available for Mikrotik routers"}, status=400)
+        
+        if not router.api_username or not router.api_password:
+            return Response({"error": "API credentials not configured for this router"}, status=400)
+        
+        try:
+            api = mikrotik_api_module.MikrotikAPI(router)
+            success = api.disable_queue(queue_name)
+            
+            if success:
+                RouterEvent.objects.create(
+                    router=router,
+                    event_type='queue_disabled',
+                    message=f"Queue {queue_name} disabled"
+                )
+                return Response({"status": "success", "message": f"Queue {queue_name} disabled"})
+            else:
+                return Response({"error": f"Failed to disable queue {queue_name}"}, status=400)
+        except Exception as e:
+            logger.error(f"Failed to disable queue for router {router.name}: {str(e)}")
+            return Response({"error": str(e)}, status=400)
+
+    @action(detail=True, methods=['post'], permission_classes=[IsAuthenticated, HasCompanyAccess])
+    def add_firewall_rule(self, request, pk=None):
+        """Add firewall rule"""
+        router = self.get_object()
+        if router.router_type != 'mikrotik':
+            return Response({"error": "This action is only available for Mikrotik routers"}, status=400)
+        
+        if not router.api_username or not router.api_password:
+            return Response({"error": "API credentials not configured for this router"}, status=400)
+        
+        chain = request.data.get('chain')
+        action = request.data.get('action')
+        src_address = request.data.get('src_address', '')
+        dst_address = request.data.get('dst_address', '')
+        protocol = request.data.get('protocol', '')
+        dst_port = request.data.get('dst_port', '')
+        comment = request.data.get('comment', '')
+        
+        if not chain or not action:
+            return Response({"error": "Chain and action are required"}, status=400)
+        
+        try:
+            api = mikrotik_api_module.MikrotikAPI(router)
+            success = api.add_firewall_rule(chain, action, src_address, dst_address, protocol, dst_port, comment)
+            
+            if success:
+                RouterEvent.objects.create(
+                    router=router,
+                    event_type='firewall_rule_added',
+                    message=f"Firewall rule added to {chain} chain"
+                )
+                return Response({"status": "success", "message": "Firewall rule added"})
+            else:
+                return Response({"error": "Failed to add firewall rule"}, status=400)
+        except Exception as e:
+            logger.error(f"Failed to add firewall rule for router {router.name}: {str(e)}")
+            return Response({"error": str(e)}, status=400)
+
+    # ────────────────────────────────────────────────────────────────
+    # MIKROTIK API ENDPOINTS - INTERFACE MANAGEMENT
+    # ────────────────────────────────────────────────────────────────
+
+    @action(detail=True, methods=['get'], permission_classes=[IsAuthenticated, HasCompanyAccess])
+    def interfaces(self, request, pk=None):
+        """Get all interfaces"""
+        router = self.get_object()
+        if router.router_type != 'mikrotik':
+            return Response({"error": "This action is only available for Mikrotik routers"}, status=400)
+        
+        if not router.api_username or not router.api_password:
+            return Response({"error": "API credentials not configured for this router"}, status=400)
+        
+        try:
+            api = mikrotik_api_module.MikrotikAPI(router)
+            interfaces = api.get_interfaces()
+            return Response(interfaces)
+        except Exception as e:
+            logger.error(f"Failed to get interfaces for router {router.name}: {str(e)}")
+            return Response({"error": str(e)}, status=400)
+
+    @action(detail=True, methods=['post'], permission_classes=[IsAuthenticated, HasCompanyAccess])
+    def enable_interface(self, request, pk=None):
+        """Enable interface"""
+        router = self.get_object()
+        interface_name = request.data.get('interface_name')
+        
+        if not interface_name:
+            return Response({"error": "Interface name is required"}, status=400)
+        
+        if router.router_type != 'mikrotik':
+            return Response({"error": "This action is only available for Mikrotik routers"}, status=400)
+        
+        if not router.api_username or not router.api_password:
+            return Response({"error": "API credentials not configured for this router"}, status=400)
+        
+        try:
+            api = mikrotik_api_module.MikrotikAPI(router)
+            success = api.enable_interface(interface_name)
+            
+            if success:
+                RouterEvent.objects.create(
+                    router=router,
+                    event_type='interface_enabled',
+                    message=f"Interface {interface_name} enabled"
+                )
+                return Response({"status": "success", "message": f"Interface {interface_name} enabled"})
+            else:
+                return Response({"error": f"Failed to enable interface {interface_name}"}, status=400)
+        except Exception as e:
+            logger.error(f"Failed to enable interface for router {router.name}: {str(e)}")
+            return Response({"error": str(e)}, status=400)
+
+    @action(detail=True, methods=['post'], permission_classes=[IsAuthenticated, HasCompanyAccess])
+    def disable_interface(self, request, pk=None):
+        """Disable interface"""
+        router = self.get_object()
+        interface_name = request.data.get('interface_name')
+        
+        if not interface_name:
+            return Response({"error": "Interface name is required"}, status=400)
+        
+        if router.router_type != 'mikrotik':
+            return Response({"error": "This action is only available for Mikrotik routers"}, status=400)
+        
+        if not router.api_username or not router.api_password:
+            return Response({"error": "API credentials not configured for this router"}, status=400)
+        
+        try:
+            api = mikrotik_api_module.MikrotikAPI(router)
+            success = api.disable_interface(interface_name)
+            
+            if success:
+                RouterEvent.objects.create(
+                    router=router,
+                    event_type='interface_disabled',
+                    message=f"Interface {interface_name} disabled"
+                )
+                return Response({"status": "success", "message": f"Interface {interface_name} disabled"})
+            else:
+                return Response({"error": f"Failed to disable interface {interface_name}"}, status=400)
+        except Exception as e:
+            logger.error(f"Failed to disable interface for router {router.name}: {str(e)}")
+            return Response({"error": str(e)}, status=400)
+
+    @action(detail=True, methods=['get'], permission_classes=[IsAuthenticated, HasCompanyAccess])
+    def interface_traffic(self, request, pk=None):
+        """Get traffic statistics for specific interface"""
+        router = self.get_object()
+        interface_name = request.query_params.get('interface_name')
+        
+        if not interface_name:
+            return Response({"error": "Interface name parameter is required"}, status=400)
+        
+        if router.router_type != 'mikrotik':
+            return Response({"error": "This action is only available for Mikrotik routers"}, status=400)
+        
+        if not router.api_username or not router.api_password:
+            return Response({"error": "API credentials not configured for this router"}, status=400)
+        
+        try:
+            api = mikrotik_api_module.MikrotikAPI(router)
+            traffic = api.get_interface_traffic(interface_name)
+            return Response(traffic)
+        except Exception as e:
+            logger.error(f"Failed to get interface traffic for router {router.name}: {str(e)}")
+            return Response({"error": str(e)}, status=400)
+
+    # ────────────────────────────────────────────────────────────────
+    # MIKROTIK API ENDPOINTS - DHCP MANAGEMENT
+    # ────────────────────────────────────────────────────────────────
+
+    @action(detail=True, methods=['get'], permission_classes=[IsAuthenticated, HasCompanyAccess])
+    def dhcp_leases(self, request, pk=None):
+        """Get DHCP leases"""
+        router = self.get_object()
+        if router.router_type != 'mikrotik':
+            return Response({"error": "This action is only available for Mikrotik routers"}, status=400)
+        
+        if not router.api_username or not router.api_password:
+            return Response({"error": "API credentials not configured for this router"}, status=400)
+        
+        try:
+            api = mikrotik_api_module.MikrotikAPI(router)
+            leases = api.get_dhcp_leases()
+            return Response(leases)
+        except Exception as e:
+            logger.error(f"Failed to get DHCP leases for router {router.name}: {str(e)}")
+            return Response({"error": str(e)}, status=400)
+
+    # ────────────────────────────────────────────────────────────────
+    # MIKROTIK API ENDPOINTS - DIAGNOSTICS
+    # ────────────────────────────────────────────────────────────────
+
+    @action(detail=True, methods=['post'], permission_classes=[IsAuthenticated, HasCompanyAccess])
+    def ping(self, request, pk=None):
+        """Run ping from router"""
+        router = self.get_object()
+        target = request.data.get('target', '8.8.8.8')
+        count = request.data.get('count', 3)
+        
+        if router.router_type != 'mikrotik':
+            return Response({"error": "This action is only available for Mikrotik routers"}, status=400)
+        
+        if not router.api_username or not router.api_password:
+            return Response({"error": "API credentials not configured for this router"}, status=400)
+        
+        try:
+            api = mikrotik_api_module.MikrotikAPI(router)
+            result = api.ping(target, count)
+            return Response(result)
+        except Exception as e:
+            logger.error(f"Failed to ping from router {router.name}: {str(e)}")
+            return Response({"error": str(e)}, status=400)
+
+    @action(detail=True, methods=['post'], permission_classes=[IsAuthenticated, HasCompanyAccess])
+    def traceroute(self, request, pk=None):
+        """Run traceroute from router"""
+        router = self.get_object()
+        target = request.data.get('target', '8.8.8.8')
+        
+        if router.router_type != 'mikrotik':
+            return Response({"error": "This action is only available for Mikrotik routers"}, status=400)
+        
+        if not router.api_username or not router.api_password:
+            return Response({"error": "API credentials not configured for this router"}, status=400)
+        
+        try:
+            api = mikrotik_api_module.MikrotikAPI(router)
+            result = api.traceroute(target)
+            return Response(result)
+        except Exception as e:
+            logger.error(f"Failed to run traceroute from router {router.name}: {str(e)}")
+            return Response({"error": str(e)}, status=400)
+
+    @action(detail=True, methods=['get'], permission_classes=[IsAuthenticated, HasCompanyAccess])
+    def system_logs(self, request, pk=None):
+        """Get system logs"""
+        router = self.get_object()
+        lines = request.query_params.get('lines', 50)
+        
+        try:
+            lines = int(lines)
+        except ValueError:
+            lines = 50
+        
+        if router.router_type != 'mikrotik':
+            return Response({"error": "This action is only available for Mikrotik routers"}, status=400)
+        
+        if not router.api_username or not router.api_password:
+            return Response({"error": "API credentials not configured for this router"}, status=400)
+        
+        try:
+            api = mikrotik_api_module.MikrotikAPI(router)
+            logs = api.get_system_logs(lines)
+            return Response(logs)
+        except Exception as e:
+            logger.error(f"Failed to get system logs for router {router.name}: {str(e)}")
+            return Response({"error": str(e)}, status=400)
+
+    @action(detail=True, methods=['get'], permission_classes=[IsAuthenticated, HasCompanyAccess])
+    def wireless_interfaces(self, request, pk=None):
+        """Get wireless interface information"""
+        router = self.get_object()
+        if router.router_type != 'mikrotik':
+            return Response({"error": "This action is only available for Mikrotik routers"}, status=400)
+        
+        if not router.api_username or not router.api_password:
+            return Response({"error": "API credentials not configured for this router"}, status=400)
+        
+        try:
+            api = mikrotik_api_module.MikrotikAPI(router)
+            wireless = api.get_wireless_interfaces()
+            return Response(wireless)
+        except Exception as e:
+            logger.error(f"Failed to get wireless interfaces for router {router.name}: {str(e)}")
+            return Response({"error": str(e)}, status=400)
+
+    @action(detail=True, methods=['get'], permission_classes=[IsAuthenticated, HasCompanyAccess])
+    def wireless_registrations(self, request, pk=None):
+        """Get wireless client registrations"""
+        router = self.get_object()
+        if router.router_type != 'mikrotik':
+            return Response({"error": "This action is only available for Mikrotik routers"}, status=400)
+        
+        if not router.api_username or not router.api_password:
+            return Response({"error": "API credentials not configured for this router"}, status=400)
+        
+        try:
+            api = mikrotik_api_module.MikrotikAPI(router)
+            registrations = api.get_wireless_registrations()
+            return Response(registrations)
+        except Exception as e:
+            logger.error(f"Failed to get wireless registrations for router {router.name}: {str(e)}")
+            return Response({"error": str(e)}, status=400)
+
+    # ────────────────────────────────────────────────────────────────
+    # EXISTING ENDPOINTS (from your original code)
+    # ────────────────────────────────────────────────────────────────
+
     @action(detail=False, methods=['get'])
     def dashboard_stats(self, request):
         qs = self.get_queryset()
