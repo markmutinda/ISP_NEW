@@ -62,6 +62,26 @@ api_urlpatterns = [
 
     # Messaging app (Phase 12 - SMS/Email Messaging) 
     path('messaging/', include('apps.messaging.urls')),
+    
+    # ─────────────────────────────────────────────────────────────
+    # Subscriptions app (Netily Platform Subscriptions)
+    # ─────────────────────────────────────────────────────────────
+    path('subscriptions/', include('apps.subscriptions.urls')),
+    
+    # ISP Payout Configuration (under core/)
+    # These use urls from subscriptions.urls.payout_urlpatterns
+]
+
+# Hotspot URLs (PUBLIC - no auth required for captive portal)
+from apps.billing.urls import hotspot_urlpatterns, webhook_urlpatterns
+
+hotspot_api_urlpatterns = [
+    path('hotspot/', include((hotspot_urlpatterns, 'hotspot'))),
+]
+
+# PayHero Webhooks (PUBLIC - callbacks from PayHero)
+webhook_api_urlpatterns = [
+    path('webhooks/payhero/', include((webhook_urlpatterns, 'webhooks'))),
 ]
 
 # Main URL Patterns
@@ -71,6 +91,12 @@ urlpatterns = [
     
     # API URLs (versioned)
     path('api/v1/', include(api_urlpatterns)),
+    
+    # Hotspot API (PUBLIC - for captive portal)
+    path('api/v1/', include(hotspot_api_urlpatterns)),
+    
+    # PayHero Webhooks (PUBLIC - callbacks)
+    path('api/v1/', include(webhook_api_urlpatterns)),
     
     # API Documentation
     path('swagger/', schema_view.with_ui('swagger', cache_timeout=0), name='schema-swagger-ui'),

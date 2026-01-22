@@ -3,6 +3,17 @@ from rest_framework.routers import DefaultRouter
 from .views.InvoiceViews import PlanViewSet, BillingCycleViewSet, InvoiceViewSet, InvoiceItemViewSet
 from .views.PaymentViews import PaymentViewSet
 from .views.VoucherViews import VoucherBatchViewSet, VoucherViewSet  # Removed VoucherUsageViewSet
+from .views.hotspot_views import HotspotPlansView, HotspotPurchaseView, HotspotPurchaseStatusView
+from .views.customer_payment_views import (
+    InitiateCustomerPaymentView,
+    CustomerPaymentStatusView,
+    CustomerPaymentMethodsView,
+)
+from .views.webhook_views import (
+    PayHeroSubscriptionWebhookView,
+    PayHeroHotspotWebhookView,
+    PayHeroBillingWebhookView,
+)
 
 router = DefaultRouter()
 
@@ -38,6 +49,33 @@ urlpatterns = [
 
     # Utility endpoints
     path('vouchers/validate/', VoucherViewSet.as_view({'post': 'validate_code'}), name='voucher-validate'),
+    
+    # ─────────────────────────────────────────────────────────────
+    # Customer Payment Initiation (payments to Netily → ISP)
+    # ─────────────────────────────────────────────────────────────
+    path('payments/initiate/', InitiateCustomerPaymentView.as_view(), name='initiate-payment'),
+    path('payments/<int:payment_id>/status/', CustomerPaymentStatusView.as_view(), name='payment-status'),
+    path('payment-methods/', CustomerPaymentMethodsView.as_view(), name='payment-methods'),
+]
+
+# ─────────────────────────────────────────────────────────────
+# Hotspot URLs (PUBLIC - no auth)
+# These are accessed from captive portal
+# ─────────────────────────────────────────────────────────────
+hotspot_urlpatterns = [
+    path('routers/<int:router_id>/plans/', HotspotPlansView.as_view(), name='hotspot-plans'),
+    path('purchase/', HotspotPurchaseView.as_view(), name='hotspot-purchase'),
+    path('purchase/<str:session_id>/status/', HotspotPurchaseStatusView.as_view(), name='hotspot-status'),
+]
+
+# ─────────────────────────────────────────────────────────────
+# PayHero Webhook URLs (PUBLIC - no auth)
+# These receive callbacks from PayHero
+# ─────────────────────────────────────────────────────────────
+webhook_urlpatterns = [
+    path('subscription/', PayHeroSubscriptionWebhookView.as_view(), name='payhero-subscription-webhook'),
+    path('hotspot/', PayHeroHotspotWebhookView.as_view(), name='payhero-hotspot-webhook'),
+    path('billing/', PayHeroBillingWebhookView.as_view(), name='payhero-billing-webhook'),
 ]
 
 app_name = 'billing'

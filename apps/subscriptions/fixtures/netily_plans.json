@@ -1,0 +1,128 @@
+[
+  {
+    "model": "subscriptions.netilyplan",
+    "pk": 4,
+    "fields": {
+      "name": "Test Plan",
+      "code": "test",
+      "description": "Test plan for payment testing. Only costs 1 KES.",
+      "tagline": "For testing only",
+      "price_monthly": "1.00",
+      "price_yearly": "10.00",
+      "currency": "KES",
+      "max_subscribers": 10,
+      "max_routers": 1,
+      "max_staff": 1,
+      "features": [
+        "Test plan for payment validation",
+        "1 KES monthly",
+        "Limited features"
+      ],
+      "is_active": true,
+      "is_popular": false,
+      "sort_order": 0,
+      "created_at": "2025-01-01T00:00:00Z",
+      "updated_at": "2025-01-01T00:00:00Z"
+    }
+  },
+  {
+    "model": "subscriptions.netilyplan",
+    "pk": 1,
+    "fields": {
+      "name": "Starter",
+      "code": "starter",
+      "description": "Perfect for small ISPs just getting started. Manage your first customers with essential features.",
+      "tagline": "Get started with the basics",
+      "price_monthly": "2999.00",
+      "price_yearly": "29990.00",
+      "currency": "KES",
+      "max_subscribers": 100,
+      "max_routers": 5,
+      "max_staff": 3,
+      "features": [
+        "Up to 100 subscribers",
+        "5 routers",
+        "3 staff accounts",
+        "Basic reports",
+        "Email support",
+        "Customer portal",
+        "Invoice management",
+        "M-Pesa payments"
+      ],
+      "is_active": true,
+      "is_popular": false,
+      "sort_order": 1,
+      "created_at": "2025-01-01T00:00:00Z",
+      "updated_at": "2025-01-01T00:00:00Z"
+    }
+  },
+  {
+    "model": "subscriptions.netilyplan",
+    "pk": 2,
+    "fields": {
+      "name": "Professional",
+      "code": "professional",
+      "description": "For growing ISPs that need more power. Advanced features to scale your business.",
+      "tagline": "Most popular choice",
+      "price_monthly": "7999.00",
+      "price_yearly": "79990.00",
+      "currency": "KES",
+      "max_subscribers": 500,
+      "max_routers": 25,
+      "max_staff": 10,
+      "features": [
+        "Up to 500 subscribers",
+        "25 routers",
+        "10 staff accounts",
+        "Advanced reports & analytics",
+        "Priority email & phone support",
+        "White-label customer portal",
+        "Automated billing",
+        "M-Pesa & Bank payments",
+        "SMS notifications",
+        "Hotspot management",
+        "API access"
+      ],
+      "is_active": true,
+      "is_popular": true,
+      "sort_order": 2,
+      "created_at": "2025-01-01T00:00:00Z",
+      "updated_at": "2025-01-01T00:00:00Z"
+    }
+  },
+  {
+    "model": "subscriptions.netilyplan",
+    "pk": 3,
+    "fields": {
+      "name": "Enterprise",
+      "code": "enterprise",
+      "description": "For established ISPs with large subscriber bases. Unlimited everything with premium support.",
+      "tagline": "Unlimited power",
+      "price_monthly": "19999.00",
+      "price_yearly": "199990.00",
+      "currency": "KES",
+      "max_subscribers": 0,
+      "max_routers": 0,
+      "max_staff": 0,
+      "features": [
+        "Unlimited subscribers",
+        "Unlimited routers",
+        "Unlimited staff accounts",
+        "Custom reports & dashboards",
+        "Dedicated account manager",
+        "24/7 priority support",
+        "Full white-label solution",
+        "Custom integrations",
+        "On-premise deployment option",
+        "SLA guarantee",
+        "Training & onboarding",
+        "Multi-branch support"
+      ],
+      "is_active": true,
+      "is_popular": false,
+      "sort_order": 3,
+      "created_at": "2025-01-01T00:00:00Z",
+      "updated_at": "2025-01-01T00:00:00Z"
+    }
+  }
+]

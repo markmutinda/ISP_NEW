@@ -49,6 +49,7 @@ SHARED_APPS = (
     'django.contrib.messages',         # SHOULD be in both
     'django.contrib.admin',           # SHOULD be in both
     'apps.core',                       # Tenant & Domain models go here - MUST be in BOTH
+    'apps.subscriptions',              # Netily platform subscriptions (public schema only)
 )
 
 TENANT_APPS = (
@@ -342,11 +343,24 @@ TWILIO_AUTH_TOKEN = os.getenv('TWILIO_AUTH_TOKEN', '')
 TWILIO_PHONE_NUMBER = os.getenv('TWILIO_PHONE_NUMBER', '')
 
 # ────────────────────────────────────────────────────────────────
-#  PAYHERO CONFIG
+#  PAYHERO CONFIG (Netily Master Account)
+#  All customer payments flow through this account.
+#  ISPs receive settlements after 5% commission deduction.
 # ────────────────────────────────────────────────────────────────
-PAYHERO_API_USERNAME = os.getenv('PAYHERO_API_USERNAME')
-PAYHERO_API_PASSWORD = os.getenv('PAYHERO_API_PASSWORD')
-PAYHERO_CALLBACK_URL = os.getenv('PAYHERO_CALLBACK_URL', 'https://yourdomain.com/billing/payments/payhero/callback/')
+PAYHERO_API_USERNAME = os.getenv('PAYHERO_API_USERNAME', '')
+PAYHERO_API_PASSWORD = os.getenv('PAYHERO_API_PASSWORD', '')
+PAYHERO_ENVIRONMENT = os.getenv('PAYHERO_ENVIRONMENT', 'sandbox')  # 'sandbox' or 'production'
+PAYHERO_CHANNEL_ID = int(os.getenv('PAYHERO_CHANNEL_ID', '1180'))  # Default STK channel
+PAYHERO_WEBHOOK_SECRET = os.getenv('PAYHERO_WEBHOOK_SECRET', '')  # For verifying webhooks
+
+# Callback URLs for different payment types
+PAYHERO_CALLBACK_URL = os.getenv('PAYHERO_CALLBACK_URL', 'https://api.netily.io/api/v1/webhooks/payhero/')
+PAYHERO_SUBSCRIPTION_CALLBACK = os.getenv('PAYHERO_SUBSCRIPTION_CALLBACK', 'https://api.netily.io/api/v1/webhooks/payhero/subscription/')
+PAYHERO_HOTSPOT_CALLBACK = os.getenv('PAYHERO_HOTSPOT_CALLBACK', 'https://api.netily.io/api/v1/webhooks/payhero/hotspot/')
+PAYHERO_BILLING_CALLBACK = os.getenv('PAYHERO_BILLING_CALLBACK', 'https://api.netily.io/api/v1/webhooks/payhero/billing/')
+
+# Commission settings
+NETILY_COMMISSION_RATE = float(os.getenv('NETILY_COMMISSION_RATE', '0.05'))  # 5% default
 
 # ────────────────────────────────────────────────────────────────
 #  NGROK / PUBLIC DOMAIN
