@@ -86,11 +86,12 @@ if DEBUG:
     INSTALLED_APPS.append('debug_toolbar')
 
 # ────────────────────────────────────────────────────────────────
-#  MIDDLEWARE — TenantMainMiddleware must be very early
+#  MIDDLEWARE — CorsMiddleware MUST be before anything that might return a response
 # ────────────────────────────────────────────────────────────────
 MIDDLEWARE = [
-    'apps.core.middleware.TenantMainMiddleware',  # MUST be first
+    'apps.core.middleware.CorsPreflightMiddleware',  # Handle CORS preflight FIRST
     'corsheaders.middleware.CorsMiddleware',
+    'apps.core.middleware.TenantMainMiddleware',
     'django.middleware.security.SecurityMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
     'django.middleware.common.CommonMiddleware',
@@ -103,7 +104,7 @@ MIDDLEWARE = [
     # REMOVED: 'apps.core.middleware.TenantMiddleware',
 ]
 if DEBUG:
-    MIDDLEWARE.insert(1, 'debug_toolbar.middleware.DebugToolbarMiddleware')  # After TenantMainMiddleware
+    MIDDLEWARE.insert(3, 'debug_toolbar.middleware.DebugToolbarMiddleware')  # After CORS middlewares
     INTERNAL_IPS = ['127.0.0.1', 'localhost', 'camden-convocative-oversorrowfully.ngrok-free.dev']
     DEBUG_TOOLBAR_CONFIG = {'SHOW_TOOLBAR_CALLBACK': lambda request: DEBUG}
 

@@ -79,21 +79,36 @@ class CurrentSubscriptionView(APIView):
     
     permission_classes = [IsAuthenticated]
     
-    def get(self, request):
-        # Get the current tenant/company from request
+    def get_company(self, request):
+        """Get the company from tenant or user context"""
+        # First, try to get from tenant
         tenant = getattr(request, 'tenant', None)
+        if tenant:
+            company = getattr(tenant, 'company', None)
+            if company:
+                return company
         
-        if not tenant:
-            return Response(
-                {'error': 'No tenant context available'},
-                status=status.HTTP_400_BAD_REQUEST
-            )
+        # Fall back to user's company
+        user = request.user
+        if hasattr(user, 'company') and user.company:
+            return user.company
         
-        # Get the company associated with this tenant
-        company = getattr(tenant, 'company', None)
+        # For superusers without a company, return None (they can't have subscriptions)
+        return None
+    
+    def get(self, request):
+        company = self.get_company(request)
+        
         if not company:
+            # For superusers or users without company, return a meaningful response
+            if request.user.is_superuser:
+                return Response({
+                    'message': 'Superuser account - no subscription required',
+                    'is_superuser': True,
+                    'subscription': None
+                })
             return Response(
-                {'error': 'Tenant has no associated company'},
+                {'error': 'No company associated with your account'},
                 status=status.HTTP_400_BAD_REQUEST
             )
         
@@ -150,21 +165,35 @@ class SubscriptionUsageView(APIView):
     
     permission_classes = [IsAuthenticated]
     
-    def get(self, request):
-        # Get the current tenant/company from request
+    def get_company(self, request):
+        """Get the company from tenant or user context"""
+        # First, try to get from tenant
         tenant = getattr(request, 'tenant', None)
+        if tenant:
+            company = getattr(tenant, 'company', None)
+            if company:
+                return company
         
-        if not tenant:
-            return Response(
-                {'error': 'No tenant context available'},
-                status=status.HTTP_400_BAD_REQUEST
-            )
+        # Fall back to user's company
+        user = request.user
+        if hasattr(user, 'company') and user.company:
+            return user.company
         
-        # Get the company associated with this tenant
-        company = getattr(tenant, 'company', None)
+        return None
+    
+    def get(self, request):
+        company = self.get_company(request)
+        
         if not company:
+            # For superusers or users without company, return empty usage
+            if request.user.is_superuser:
+                return Response({
+                    'message': 'Superuser account - no usage limits',
+                    'is_superuser': True,
+                    'usage': None
+                })
             return Response(
-                {'error': 'Tenant has no associated company'},
+                {'error': 'No company associated with your account'},
                 status=status.HTTP_400_BAD_REQUEST
             )
         
