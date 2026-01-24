@@ -19,7 +19,16 @@ SECRET_KEY = os.environ.get('SECRET_KEY', 'django-insecure-development-key-chang
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = True
 
-ALLOWED_HOSTS = ['localhost', '127.0.0.1', '.localhost']
+# For ngrok testing
+NGROK_URL = "https://camden-convocative-oversorrowfully.ngrok-free.dev"
+BASE_URL = NGROK_URL  # Use ngrok as base URL
+
+ALLOWED_HOSTS = ['localhost', '127.0.0.1', '.localhost','camden-convocative-oversorrowfully.ngrok-free.dev','*.ngrok-free.dev', '*.ngrok.io',]
+
+# For ngrok, we need to handle HTTPS/SSL
+SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
+USE_X_FORWARDED_HOST = True
+USE_X_FORWARDED_PORT = True
 
 # ────────────────────────────────────────────────────────────────
 #  BASE + THIRD-PARTY + DJANGO CONTRIB APPS (these must always exist)
