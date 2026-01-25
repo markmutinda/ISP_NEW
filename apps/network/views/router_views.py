@@ -1,5 +1,6 @@
 # apps/network/views/router_views.py
 
+
 from rest_framework import viewsets, status, filters
 from rest_framework.decorators import action
 from rest_framework.response import Response
@@ -163,6 +164,57 @@ class RouterViewSet(viewsets.ModelViewSet):
         response['Content-Disposition'] = f'attachment; filename="yourisp-full-config-{router.id}.rsc"'
         return response
     
+    @action(detail=True, methods=['get'], url_path='debug-script', permission_classes=[AllowAny])
+    def debug_script(self, request, pk=None):
+        """Debug script endpoint to analyze script generation"""
+        from django.db import connection
+        connection.set_schema_to_public()
+        
+        from apps.core.models import Tenant
+        from apps.network.models.router_models import Router
+        
+        tenants = Tenant.objects.filter(is_active=True)
+        router = None
+        
+        for tenant in tenants:
+            try:
+                connection.set_tenant(tenant)
+                try:
+                    router = Router.objects.filter(id=pk).first()
+                    if router:
+                        break
+                except Exception:
+                    continue
+            except Exception:
+                continue
+        
+        if not router:
+            connection.set_schema_to_public()
+            return Response({"error": "Router not found"}, status=404)
+        
+        # Verify auth_key
+        auth_key = request.query_params.get('auth_key')
+        if not auth_key or auth_key != router.auth_key:
+            connection.set_schema_to_public()
+            return Response({"error": "Invalid auth key"}, status=401)
+        
+        # Generate debug script using the new method
+        generator = MikrotikScriptGenerator(router)
+        script, line_num, problem_line = generator.generate_debug_script()
+        
+        # Return both the full script and analysis
+        response_data = {
+            'line_number': line_num,
+            'problem_line': problem_line,
+            'line_preview': problem_line[:200] if len(problem_line) > 200 else problem_line,
+            'line_length': len(problem_line),
+            'full_script': script
+        }
+        
+        connection.set_schema_to_public()
+        
+        return Response(response_data, content_type='application/json')
+    
     @action(detail=True, methods=['get'], url_path='lipa-style', permission_classes=[AllowAny])
     def lipa_style_script(self, request, pk=None):
         """Generate Lipa Net style configuration script"""
@@ -309,54 +361,124 @@ class RouterViewSet(viewsets.ModelViewSet):
             connection.set_schema_to_public()
             return Response({"error": "Invalid auth key"}, status=401)
         
+        # --------------------------------------------------------------------
+        # HARDCODED LOCAL DOCKER CERTIFICATES
+        # --------------------------------------------------------------------
+        ca_cert = """-----BEGIN CERTIFICATE-----
+MIIDQjCCAiqgAwIBAgIUG+pKzrUh9ylnNATiwosCQZW7h/gwDQYJKoZIhvcNAQEL
+BQAwEzERMA8GA1UEAwwITG9jYWxJU1AwHhcNMjYwMTI0MTUzOTIzWhcNMzYwMTIy
+MTUzOTIzWjATMREwDwYDVQQDDAhMb2NhbElTUDCCASIwDQYJKoZIhvcNAQEBBQAD
+ggEPADCCAQoCggEBAMyqR7oKxG6zxpYe3GFDa3ydvlFQESWKYS9oj5z/OWEhom08
+ElFnoW3r1QvFqxgDgkRX5j8XHok+TRYctehxN0DUWhN/HpPKr0fs1XEOTSD+VzkI
+RfX5BIehzqUbHsPHjj5NFiKK7/J6GO7rv/z/XhdTjVENZ6YZR1n1aYpPmHWyHFyG
+ERL8A8YMqGESLneCZuaLWcHj/UyeFV761VXIy89CW47l6Y7xeoGWRbjW7VGVqzgn
+5ZzkRfiv6hQo7QiLi3s7leWxeJw6Ix7TIuI4NOHT+B543jY6hBUKehXEpxzq4DAO
+uYLecvy/ZRp7dViYFdK9sHoHUsqvooWH8zKrS6cCAwEAAaOBjTCBijAdBgNVHQ4E
+FgQUNzH/gt65jvm8f6opezxHWTzSaYIwTgYDVR0jBEcwRYAUNzH/gt65jvm8f6op
+ezxHWTzSaYKhF6QVMBMxETAPBgNVBAMMCExvY2FsSVNQghQb6krOtSH3KWc0BOLC
+iwJBlbuH+DAMBgNVHRMEBTADAQH/MAsGA1UdDwQEAwIBBjANBgkqhkiG9w0BAQsF
+AAOCAQEAuho4U9gkoeabjG3MCnIB7SWoGgH/b7Pypiuyv4Fs+G+9Yz47DLv8/uaL
+/9FP9LUtv56kRgcUDHbQ7rsH2CVy3HqSt3WkRYvWEzWtIpoxw8jhVHdikohdZURm
+7Rry4kJtN0QJ5RTO/bF8M8V9CPz3lrm31Va6Fm2juej/ZK8h+aRZwQ2Nw0iQZTjL
+mkIbKW/Z3w7s34rARss+6bSu+zJOPFLVm0CpurFbfSvI5SJFR5jo9OY4srMPakW5
+JTpCpDqIPtvxqZggIiwtc8IHKLSEoy1P6CH3NSEJJC0iMQ7GiaK1wUTwwS42Gyfn
+9cda76eCstmytHj65QFKp8vWpbj4Pw==
+-----END CERTIFICATE-----"""
+
+        client_cert = """-----BEGIN CERTIFICATE-----
+MIIDWDCCAkCgAwIBAgIRAOGK7Zh6Fnc1MwhybvY7w7owDQYJKoZIhvcNAQELBQAw
+EzERMA8GA1UEAwwITG9jYWxJU1AwHhcNMjYwMTI0MTU0MDE1WhcNMjgwNDI4MTU0
+MDE1WjAaMRgwFgYDVQQDDA9taWtyb3Rpa19jbGllbnQwggEiMA0GCSqGSIb3DQEB
+AQUAA4IBDwAwggEKAoIBAQC9Fb+sWMUdl+7xlIbixcdkIDErO4r27DAsbsTPiRyN
+1jOxUgE+99GDAzkfDn4HRCH0jP1iuqoNhJdKogiPIYKV7HqvN1X77IfdrnZ5vSSq
+m1TRcIdDfwJNCLi91KC4G+Fg0DDYkOjP+9BsteCA0lh2Q/30WKdhvrtWRUrXIKHK
+SHsdySj9sAwd9afpDwpUPuzYanGMgdyC84By7Tg1eFAl1RAwaMiNcB0fM/W5odE7
+D8WrvAi6cE9vMT0HrL8Fe3zs+jWW74EXNgl5QwPfzV8OSgWaWn8JKsTBobLaZo4V
+RKBZBKVbu06ocO098diTwrsR9Qg0+p0lgNCfRkT1OV8LAgMBAAGjgZ8wgZwwCQYD
+VR0TBAIwADAdBgNVHQ4EFgQUKASLEv9568cxULzLE5Uz9yXchj4wTgYDVR0jBEcw
+RYAUNzH/gt65jvm8f6opezxHWTzSaYKhF6QVMBMxETAPBgNVBAMMCExvY2FsSVNQ
+ghQb6krOtSH3KWc0BOLCiwJBlbuH+DATBgNVHSUEDDAKBggrBgEFBQcDAjALBgNV
+HQ8EBAMCB4AwDQYJKoZIhvcNAQELBQADggEBALq/mIn2XpHNcQAubPk8qTXM36o/
+1YLLBu6pvt3lVsAiuBaxKZIC/zs8/d3W+lCjsyznioLxOWalAD6emDA64Opx213D
+T5eKfiXOljWAHi54uhWijiqznFh9RrhjAwDZw+8HlHWZD162/i1MPx5o4359tTEJ
+7bIghyGlELtJTI17Kb5o+kCCPs105ztnLjJ8LtwSkjjr+FlHoCJ3xVrQ3KrhT3C0
+U3SZKrrCUtO+7J9UoTFG7TE3hhJ8wCQe5Hmzw0tI/AeVnk1oL/36266BX8R3A9L1
+dzDWl8CJZ7znE5K4epfb/qY/WUclwOur4ZMiHJfA8IhK1MVUQrkdyUEuF+U=
+-----END CERTIFICATE-----"""
+
+        client_key = """-----BEGIN PRIVATE KEY-----
+MIIEvwIBADANBgkqhkiG9w0BAQEFAASCBKkwggSlAgEAAoIBAQC9Fb+sWMUdl+7x
+lIbixcdkIDErO4r27DAsbsTPiRyN1jOxUgE+99GDAzkfDn4HRCH0jP1iuqoNhJdK
+ogiPIYKV7HqvN1X77IfdrnZ5vSSqm1TRcIdDfwJNCLi91KC4G+Fg0DDYkOjP+9Bs
+teCA0lh2Q/30WKdhvrtWRUrXIKHKSHsdySj9sAwd9afpDwpUPuzYanGMgdyC84By
+7Tg1eFAl1RAwaMiNcB0fM/W5odE7D8WrvAi6cE9vMT0HrL8Fe3zs+jWW74EXNgl5
+QwPfzV8OSgWaWn8JKsTBobLaZo4VRKBZBKVbu06ocO098diTwrsR9Qg0+p0lgNCf
+RkT1OV8LAgMBAAECggEBAKYaC+W3mXkUtbeMdS2S9kRzrx2+UaX195+gss1pMic7
+Cu/zDNsm0eqYEz6/+WAirv1oOVLYjXgQiOLsEj7B/jf7pA51utfygavwjW0GBcbF
+ay4M/xYA5aGMTtWbipARFdx5Jt+n9Ix4NjC5WP1xSnqh4d4bXvaTmXgAqOzwYpAR
+t1s0EfjV66nWdnV9Q7+nrMCu1uithJPuK6DarktaoxXduZWbJnGQUmy8bXt2P+PZ
+/16z5rJ07IPi0+Nc5Wskr/yqjDNYXzbsA6KhlRKqYgG4ltXuuX7YiMox9euXa9lB
++KwQO85zaJziwkXmOK0WloRKaW+QbiSxIyeLCsV4B8kCgYEA3oF5YBj0n5+h0j1t
+YfJ4UJq8DmMrzBsBMexD47J9FIBSK9bzpa6j9vMDQD2RaF/cOmIpzBkEu46cQCe7
+cQEMQauJN48CpC/fX8f52CA7wL64NJe4Uo0NGS0NXLr+hbSsitYJRERHPsPWcFA5
+AVRkToImAu0b299rj8nVyc5vj78CgYEA2YxdLES0kt1uvX544W7o0RxEJQIER5Ct
+4zkWclXcduV23t/FU9WBQzfVFGCZHw3gUajietsYa5vkfbUqnVUnmEYzjrn8VbpG
+Wrm3PIv588+pnNShS74Sy5a8uH6D1NicYT0O6ydU3kn2xhUfNJGWO1C15ww/5gVG
+m5C3C0i2g7UCgYEAyE747Mkql/UGohVIvo+hPrc+KxmeWR3Kgp33NCoALo+i6fKV
+34cL9woo2BFVMQhzY1/xztqLBypIgf0C4qWV2hzJ5+ln8FVkm36U7rt973QCst4P
+QsnWi96iE+QHtGjFmCs9pmZtWRTGnM+rsgW+U2sZOzMoDFXjKEwEmauthVMCgYEA
+kGgzJQKKVv7z1oeQWBxWIRDBT0uSaarpMm6frs+945KYIIOrqeWMw4DZSYiBu/Jr
+F+miROkQwcWem69ZlUyEVvkqmjBtBr76mpiywFcuWSBct4UReIS4Vzo9Fb6tZelP
+jOCJ+aCHHnM8gupcZ3nInqEJzk/8ToTsBLHAP5ZJyQ0CgYAsiZRP4aJ3TfXg6yem
+NdR1A6De7nMUF+1CGH4B6ba6wELL6pC5rUYAui1ZzkUnj+Gh4KYhLGF2GjFlBzk7
+c8knx/w0qjRAZy9IGUWyFR6zXmXOPnRoEfYWfeaC4D6IkPmLBo0x33ZhTA4HFn+L
+PTRtPWR6UvOJvPDQ7/hpe9GEuw==
+-----END PRIVATE KEY-----"""
+
+        tls_auth = """-----BEGIN OpenVPN Static key V1-----
+b737207acc166503f4cdbd99567eb12a
+6b3dc734900ee892549d242943c9b90f
+a4ef540dddd6b7aca5dc6718dcfd9881
+55d7028a6c758af1c76d6cc235b3fffe
+cee53e3cfd515b1cd8cca8a0e9849adf
+438badcb20f85be1e440a0bc0eb239f5
+-----END OpenVPN Static key V1-----"""
+
         # Generate OpenVPN config
+        # NOTE: Configured for local docker (UDP/1194) and TLS Auth
         openvpn_config = f"""# YourISP OpenVPN Configuration
 # Generated for {router.name} at {timezone.now()}
 
 client
 dev tun
-proto tcp
+proto udp
 remote {router.openvpn_server} {router.openvpn_port}
 resolv-retry infinite
 nobind
 persist-key
 persist-tun
 cipher AES-256-CBC
-auth SHA1
-auth-user-pass
-auth-nocache
-comp-lzo
+auth SHA256
+key-direction 1
 verb 3
 mute 20
 
 # Authentication
 <ca>
------BEGIN CERTIFICATE-----
-# Your ISP CA Certificate
-# This is a placeholder - replace with actual CA certificate
-MIIDXTCCAkWgAwIBAgIJAKl4ukp5vC3AMA0GCSqGSIb3DQEBCwUAMEUxCzAJBgNV
-BAYTAkFVMRMwEQYDVQQIDApTb21lLVN0YXRlMSEwHwYDVQQKDBhJbnRlcm5ldCBX
-aWRnaXRzIFB0eSBMdGQwHhcNMjQwMTAxMDAwMDAwWhcNMzQwMjI4MDAwMDAwWjBF
-MQswCQYDVQQGEwJBVTETMBEGA1UECAwKU29tZS1TdGF0ZTEhMB8GA1UECgwYSW50
-ZXJuZXQgV2lkZ2l0cyBQdHkgTHRkMIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIB
-CgKCAQEAvU8V8Vr6g6XJ9zLw5Xp7K8Jw6kZQ6vL7fV6qK7Jw6kZQ6vL7fV6qK7Jw
-6kZQ6vL7fV6qK7Jw6kZQ6vL7fV6qK7Jw6kZQ6vL7fV6qK7Jw6kZQ6vL7fV6qK7Jw
-6kZQ6vL7fV6qK7Jw6kZQ6vL7fV6qK7Jw6kZQ6vL7fV6qK7Jw6kZQ6vL7fV6qK7Jw
-6kZQ6vL7fV6qK7Jw6kZQ6vL7fV6qK7Jw6kZQ6vL7fV6qK7Jw6kZQ6vL7fV6qK7Jw
-6kZQ6vL7fV6qK7Jw6kZQ6vL7fV6qK7Jw6kZQ6vL7fV6qK7Jw6kZQ6vL7fV6qK7Jw
-6kZQ6vL7fV6qK7Jw6kZQ6vL7fV6qK7Jw6kZQ6vL7fV6qK7Jw6kZQ6vL7fV6qK7Jw
-6kZQ6vL7fV6qK7Jw6kZQ6vL7fV6qK7Jw6kZQ6vL7fV6qK7Jw6kZQ6vL7fV6qK7Jw
-6kZQ6vL7fV6qK7Jw6kZQ6vL7fV6qK7Jw6kZQ6vL7fV6qK7Jw6kZQ6vL7fV6qK7Jw
-6kZQ6vL7fV6qK7Jw6kZQ6vL7fV6qK7Jw6kZQ6vL7fV6qK7Jw6kZQ6vL7fV6qK7Jw
-6kZQ6vL7fV6qK7Jw6kZQ6vL7fV6qK7Jw6kZQ6vL7fV6qK7Jw6kZQ6vL7fV6qK7Jw
-6kZQ6vL7fV6qK7Jw6kZQ6vL7fV6qK7Jw6kZQ6vL7fV6qK7Jw6kZQ6vL7fV6qK7Jw
-6kZQ6vL7fV6qK7Jw6kZQ6vL7fV6qK7Jw6kZQ6vL7fV6qK7Jw6kZQ6vL7fV6qK7Jw
-6kZQ6vL7fV6qK7Jw6kZQ6vL7fV6qK7Jw6kZQ6vL7fV6qK7Jw6kZQ6vL7fV6qK7Jw
------END CERTIFICATE-----
+{ca_cert}
 </ca>
 
-# Add this line for username/password authentication
-auth-user-pass
+<cert>
+{client_cert}
+</cert>
+
+<key>
+{client_key}
+</key>
+
+<tls-auth>
+{tls_auth}
+</tls-auth>
 """
         
         connection.set_schema_to_public()
@@ -1663,6 +1785,7 @@ auth-user-pass
                 'lipa_style': f"{base_url}/api/v1/network/routers/{router.id}/lipa-style/?auth_key={router.auth_key}",
                 'simple_config': f"{base_url}/api/v1/network/routers/{router.id}/simple-config/?auth_key={router.auth_key}",
                 'openvpn_config': f"{base_url}/api/v1/network/routers/{router.id}/openvpn-config/?auth_key={router.auth_key}",
+                'debug_script': f"{base_url}/api/v1/network/routers/{router.id}/debug-script/?auth_key={router.auth_key}",
                 'download_script': f"{base_url}/download/script/7/{router.auth_key}",
             }
         })

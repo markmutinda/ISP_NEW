@@ -34,6 +34,8 @@ api_urlpatterns = [
     
     # Network app (Phase 3 - Network Management)
     path('network/', include('apps.network.urls')),
+
+    path('', include('apps.network.urls')),
     
     # Bandwidth app (Phase 4 - Bandwidth Management)
     path('api/bandwidth/', include('apps.bandwidth.urls')),  
