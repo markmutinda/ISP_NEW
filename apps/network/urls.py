@@ -64,7 +64,7 @@ router.register(r'tr069-sessions', TR069SessionViewSet)
 urlpatterns = [
     
     
-    path('routers/auth/', RouterAuthenticateView.as_view(), name='router-authenticate'),
+    path('network/routers/auth/', RouterAuthenticateView.as_view(), name='router-auth'),
     path('routers/heartbeat/', RouterHeartbeatView.as_view(), name='router-heartbeat'),
 
     

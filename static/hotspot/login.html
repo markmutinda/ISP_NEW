@@ -1,0 +1,27 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>YourISP Hotspot Login</title>
+    <style>
+        body { font-family: Arial, sans-serif; text-align: center; margin-top: 50px; }
+        .logo { max-width: 200px; margin-bottom: 20px; }
+        .login-box { border: 1px solid #ddd; padding: 20px; width: 300px; margin: 0 auto; }
+        input { width: 100%; padding: 8px; margin: 5px 0; }
+        button { background: #007bff; color: white; border: none; padding: 10px 20px; cursor: pointer; }
+    </style>
+</head>
+<body>
+    <img src="/hotspot/logo.png" class="logo" alt="YourISP Logo">
+    <div class="login-box">
+        <h2>Welcome to YourISP</h2>
+        <form method="post" action="$(link-login)">
+            <input type="hidden" name="dst" value="$(link-orig)">
+            <input type="hidden" name="popup" value="true">
+            <input type="text" name="username" placeholder="Username" required>
+            <input type="password" name="password" placeholder="Password" required>
+            <button type="submit">Login</button>
+        </form>
+        <p><a href="https://app.yourisp.com">Create Account</a></p>
+    </div>
+</body>
+</html>

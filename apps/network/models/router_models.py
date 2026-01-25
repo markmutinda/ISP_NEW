@@ -35,6 +35,15 @@ class Router(AuditMixin):
         ('warning', 'Warning'),
         ('error', 'Error'),
     ]
+    
+    # Configuration Types
+    CONFIG_TYPES = [
+        ('basic', 'Basic Router'),
+        ('hotspot', 'Hotspot Only'),
+        ('pppoe', 'PPPoE Only'),
+        ('isp', 'Full ISP (Hotspot + PPPoE)'),
+        ('full_isp', 'Full ISP with OpenVPN'),
+    ]
 
     # DENORMALIZED FIELDS (replace ForeignKey to Company)
     company_name = models.CharField(
@@ -71,6 +80,14 @@ class Router(AuditMixin):
     api_username = models.CharField(max_length=100, null=True, blank=True)
     api_password = models.CharField(max_length=255, null=True, blank=True)
     router_type = models.CharField(max_length=50, choices=ROUTER_TYPES, default='mikrotik')
+    
+    # Configuration Type
+    config_type = models.CharField(
+        max_length=20,
+        choices=CONFIG_TYPES,
+        default='basic'
+    )
+    
     model = models.CharField(max_length=100, null=True, blank=True)
     firmware_version = models.CharField(max_length=50, null=True, blank=True)
     location = models.CharField(max_length=255, null=True, blank=True)
@@ -104,6 +121,103 @@ class Router(AuditMixin):
         help_text="RADIUS shared secret — used when configuring this router as a RADIUS client"
     )
     
+    # Network configuration fields
+    lan_subnet = models.CharField(
+        max_length=20, 
+        default='192.168.88.0/24',
+        help_text="LAN network subnet (e.g., 192.168.88.0/24)"
+    )
+    hotspot_subnet = models.CharField(
+        max_length=20, 
+        default='172.19.0.0/16',
+        help_text="Hotspot network subnet (e.g., 172.19.0.0/16)"
+    )
+    pppoe_pool = models.CharField(
+        max_length=50, 
+        default='192.40.2.10-192.40.2.254',
+        help_text="PPPoE IP pool range"
+    )
+    
+    # Service enable/disable flags
+    enable_hotspot = models.BooleanField(
+        default=True,
+        help_text="Enable Hotspot service"
+    )
+    enable_pppoe = models.BooleanField(
+        default=True,
+        help_text="Enable PPPoE service"
+    )
+    enable_openvpn = models.BooleanField(
+        default=False,
+        help_text="Enable OpenVPN client (for backhaul)"
+    )
+    
+    # OpenVPN settings
+    openvpn_server = models.CharField(
+        max_length=100, 
+        default='vpn.yourisp.local',
+        help_text="OpenVPN server address"
+    )
+    openvpn_port = models.IntegerField(
+        default=1194,
+        help_text="OpenVPN server port"
+    )
+    openvpn_username = models.CharField(
+        max_length=100,
+        blank=True,
+        null=True,
+        help_text="OpenVPN username (auto-generated if empty)"
+    )
+    openvpn_password = models.CharField(
+        max_length=100,
+        blank=True,
+        null=True,
+        help_text="OpenVPN password (auto-generated if empty)"
+    )
+    
+    # Hotspot settings
+    hotspot_portal_url = models.URLField(
+        default='https://app.yourisp.local',
+        help_text="Hotspot captive portal URL"
+    )
+    hotspot_cookie_lifetime = models.CharField(
+        max_length=10, 
+        default='4w2d',
+        help_text="Hotspot cookie lifetime (e.g., 4w2d)"
+    )
+    hotspot_ssl_cert = models.CharField(
+        max_length=100,
+        blank=True,
+        null=True,
+        help_text="SSL certificate name for Hotspot HTTPS"
+    )
+    
+    # WAN Interface configuration
+    wan_interface = models.CharField(
+        max_length=50,
+        default='ether1',
+        help_text="WAN interface name (e.g., ether1, sfp-sfpplus1)"
+    )
+    
+    # LAN Interface configuration
+    lan_interfaces = models.CharField(
+        max_length=200,
+        default='ether2,ether3,ether4,ether5',
+        help_text="Comma-separated LAN interfaces"
+    )
+    
+    # RADIUS Settings
+    radius_server = models.GenericIPAddressField(
+        protocol='IPv4',
+        blank=True,
+        null=True,
+        help_text="RADIUS server IP address"
+    )
+    radius_port = models.IntegerField(
+        default=1812,
+        help_text="RADIUS authentication port"
+    )
+    
     # Tenant schema field - REMOVE OR MAKE NON-UNIQUE
     schema_name = models.SlugField(
         max_length=63,
@@ -117,16 +231,14 @@ class Router(AuditMixin):
         verbose_name = 'Router'
         verbose_name_plural = 'Routers'
         ordering = ['-created_at']
-        # REMOVE unique_together for name or make it unique per company
-        # unique_together = ['name']
         indexes = [
             models.Index(fields=['ip_address']),
             models.Index(fields=['status']),
             models.Index(fields=['last_seen']),
             models.Index(fields=['auth_key']),
-            # REMOVE the company index - Add these instead:
-            models.Index(fields=['company_name']),  # New index
-            models.Index(fields=['tenant_subdomain']),  # New index
+            models.Index(fields=['company_name']),
+            models.Index(fields=['tenant_subdomain']),
+            models.Index(fields=['config_type']),
         ]
 
     def __str__(self):
@@ -138,7 +250,43 @@ class Router(AuditMixin):
         # Auto-fill schema_name from tenant_subdomain if available
         if self.tenant_subdomain:
             self.schema_name = f"tenant_{self.tenant_subdomain}"
+        
+        # Generate OpenVPN credentials if enabled and not set
+        if self.enable_openvpn and not self.openvpn_username:
+            import uuid
+            self.openvpn_username = f"{self.name.lower().replace(' ', '_')}_{self.id}_vpn"
+            self.openvpn_password = secrets.token_hex(8)
+        
+        # Ensure shared secret exists
+        if not self.shared_secret or self.shared_secret == '':
+            self.shared_secret = generate_shared_secret()
+        
         super().save(*args, **kwargs)
+    
+    def get_lan_ip(self):
+        """Extract LAN gateway IP from subnet"""
+        if '/' in self.lan_subnet:
+            network, cidr = self.lan_subnet.split('/')
+            parts = network.split('.')
+            parts[-1] = '1'
+            return '.'.join(parts)
+        return '192.168.88.1'
+    
+    def get_hotspot_ip(self):
+        """Extract Hotspot gateway IP from subnet"""
+        if '/' in self.hotspot_subnet:
+            network, cidr = self.hotspot_subnet.split('/')
+            parts = network.split('.')
+            parts[-1] = '1'
+            return '.'.join(parts)
+        return '172.19.0.1'
+    
+    def get_pppoe_local_ip(self):
+        """Get PPPoE local address"""
+        if '-' in self.pppoe_pool:
+            return self.pppoe_pool.split('-')[0].rsplit('.', 1)[0] + '.1'
+        return '192.40.2.1'
+
 
 class RouterEvent(AuditMixin):
     EVENT_TYPES = [
@@ -152,11 +300,24 @@ class RouterEvent(AuditMixin):
         ('auth_success', 'Authenticated Successfully'),
         ('auth_key_regen', 'Auth Key Regenerated'),
         ('backup', 'Backup Created'),
+        ('user_created', 'User Created'),
+        ('user_deleted', 'User Deleted'),
+        ('user_enabled', 'User Enabled'),
+        ('user_disabled', 'User Disabled'),
+        ('queue_created', 'Queue Created'),
+        ('queue_removed', 'Queue Removed'),
+        ('interface_up', 'Interface Up'),
+        ('interface_down', 'Interface Down'),
+        ('config_sync', 'Configuration Synced'),
+        ('script_executed', 'Script Executed'),
     ]
 
     router = models.ForeignKey(Router, on_delete=models.CASCADE, related_name='events')
     event_type = models.CharField(max_length=50, choices=EVENT_TYPES)
     message = models.TextField()
+    
+    # Additional details for events
+    details = models.JSONField(default=dict, blank=True, null=True)
     
     # Make schema_name non-unique
     schema_name = models.SlugField(
@@ -170,6 +331,10 @@ class RouterEvent(AuditMixin):
 
     class Meta:
         ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['router', 'event_type']),
+            models.Index(fields=['created_at']),
+        ]
     
     def save(self, *args, **kwargs):
         # Auto-fill schema_name from router
@@ -247,6 +412,10 @@ class HotspotUser(AuditMixin):
     ], default='ACTIVE')
     profile = models.CharField(max_length=100, default='default')
     
+    # Connection tracking
+    connected_since = models.DateTimeField(null=True, blank=True)
+    last_seen = models.DateTimeField(null=True, blank=True)
+    
     # Make schema_name non-unique
     schema_name = models.SlugField(
         max_length=63,
@@ -258,6 +427,10 @@ class HotspotUser(AuditMixin):
     class Meta:
         unique_together = [['router', 'username']]
         ordering = ['username']
+        indexes = [
+            models.Index(fields=['router', 'status']),
+            models.Index(fields=['last_seen']),
+        ]
 
     def __str__(self):
         return f"{self.username}@{self.router.name}"
@@ -291,6 +464,10 @@ class PPPoEUser(AuditMixin):
     ], default='DISCONNECTED')
     profile = models.CharField(max_length=100, default='default-encryption')
     
+    # Connection tracking
+    connected_since = models.DateTimeField(null=True, blank=True)
+    last_seen = models.DateTimeField(null=True, blank=True)
+    
     # Make schema_name non-unique
     schema_name = models.SlugField(
         max_length=63,
@@ -302,6 +479,10 @@ class PPPoEUser(AuditMixin):
     class Meta:
         unique_together = [['router', 'username']]
         ordering = ['username']
+        indexes = [
+            models.Index(fields=['router', 'status']),
+            models.Index(fields=['last_seen']),
+        ]
 
     def __str__(self):
         return f"{self.username}@{self.router.name}"
@@ -340,6 +521,41 @@ class MikrotikQueue(AuditMixin):
 
     def __str__(self):
         return f"{self.queue_name} - {self.router.name}"
+    
+    def save(self, *args, **kwargs):
+        if self.router and self.router.schema_name:
+            self.schema_name = self.router.schema_name
+        super().save(*args, **kwargs)
+
+
+class RouterConfiguration(AuditMixin):
+    """Store router configuration templates and history"""
+    router = models.ForeignKey(Router, on_delete=models.CASCADE, related_name='configurations')
+    config_type = models.CharField(max_length=20, choices=Router.CONFIG_TYPES)
+    config_data = models.JSONField(default=dict, help_text="Configuration parameters")
+    config_script = models.TextField(help_text="Generated RouterOS script")
+    version = models.CharField(max_length=10, default='1.0')
+    is_active = models.BooleanField(default=True)
+    applied_at = models.DateTimeField(null=True, blank=True)
+    applied_by = models.CharField(max_length=100, blank=True, null=True)
+    
+    # Make schema_name non-unique
+    schema_name = models.SlugField(
+        max_length=63,
+        editable=False,
+        null=True,
+        blank=True
+    )
+    
+    class Meta:
+        ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['router', 'is_active']),
+            models.Index(fields=['applied_at']),
+        ]
+    
+    def __str__(self):
+        return f"{self.router.name} - {self.config_type} v{self.version}"
     
     def save(self, *args, **kwargs):
         if self.router and self.router.schema_name:

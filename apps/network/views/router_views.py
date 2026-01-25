@@ -1,5 +1,6 @@
 # apps/network/views/router_views.py
 
+
 from rest_framework import viewsets, status, filters
 from rest_framework.decorators import action
 from rest_framework.response import Response
@@ -9,6 +10,7 @@ from django.utils import timezone
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from django.db.models import Sum, Avg, F, Count
 from django.http import HttpResponse
+from apps.network.services.mikrotik_script_generator import MikrotikScriptGenerator
 from rest_framework import serializers
 import json
 import logging
@@ -26,7 +28,7 @@ class RouterViewSet(viewsets.ModelViewSet):
     serializer_class = RouterSerializer
     permission_classes = [IsAuthenticated, HasCompanyAccess]
     filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
-    filterset_fields = ['router_type', 'status', 'is_active']
+    filterset_fields = ['router_type', 'status', 'is_active', 'config_type']
     search_fields = ['name', 'ip_address', 'model', 'location', 'tags']
     ordering_fields = ['name', 'last_seen', 'created_at', 'status']
 
@@ -46,7 +48,6 @@ class RouterViewSet(viewsets.ModelViewSet):
 
     def perform_create(self, serializer):
         # The serializer will handle adding company_name and tenant_subdomain
-        # We just need to ensure the context has the request
         serializer.save()
         
     # Optional: Add this method to debug the request
@@ -59,6 +60,611 @@ class RouterViewSet(viewsets.ModelViewSet):
             logger.debug(f"Create router - Tenant: {request.tenant}")
         
         return super().create(request, *args, **kwargs)
+
+    # ────────────────────────────────────────────────────────────────
+    # CONFIGURATION ENDPOINTS (UPDATED TO USE SINGLE GENERATOR)
+    # ────────────────────────────────────────────────────────────────
+
+    @action(detail=True, methods=['get'], url_path='one-liner', permission_classes=[AllowAny])
+    def one_liner_script(self, request, pk=None):
+        """Generate one-liner script"""
+        from django.db import connection
+        connection.set_schema_to_public()
+        
+        from apps.core.models import Tenant
+        from apps.network.models.router_models import Router
+        
+        tenants = Tenant.objects.filter(is_active=True)
+        router = None
+        
+        for tenant in tenants:
+            try:
+                connection.set_tenant(tenant)
+                try:
+                    router = Router.objects.filter(id=pk).first()
+                    if router:
+                        break
+                except Exception:
+                    continue
+            except Exception:
+                continue
+        
+        if not router:
+            connection.set_schema_to_public()
+            return Response({"error": "Router not found"}, status=404)
+        
+        # Generate one-liner script using single generator
+        generator = MikrotikScriptGenerator(router)
+        one_liner = generator.generate_one_liner()
+        
+        connection.set_schema_to_public()
+        
+        response = HttpResponse(one_liner, content_type='text/plain')
+        response['Content-Disposition'] = f'attachment; filename="yourisp-one-liner-{router.id}.txt"'
+        return response
+    
+    @action(detail=True, methods=['get'], url_path='full-config', permission_classes=[AllowAny])
+    def full_config_script(self, request, pk=None):
+        """Full configuration script"""
+        from django.db import connection
+        connection.set_schema_to_public()
+        
+        from apps.core.models import Tenant
+        from apps.network.models.router_models import Router
+        
+        tenants = Tenant.objects.filter(is_active=True)
+        router = None
+        found_tenant = None
+        
+        for tenant in tenants:
+            try:
+                connection.set_tenant(tenant)
+                try:
+                    router = Router.objects.filter(id=pk).first()
+                    if router:
+                        found_tenant = tenant
+                        break
+                except Exception:
+                    continue
+            except Exception:
+                continue
+        
+        if not router:
+            connection.set_schema_to_public()
+            return Response({"error": "Router not found"}, status=404)
+        
+        # Verify auth_key
+        auth_key = request.query_params.get('auth_key')
+        if not auth_key or auth_key != router.auth_key:
+            connection.set_schema_to_public()
+            return Response({"error": "Invalid auth key"}, status=401)
+        
+        # Generate configuration using single generator
+        version = request.query_params.get('version', '7')
+        config_type = request.query_params.get('type', router.config_type)
+        
+        generator = MikrotikScriptGenerator(router)
+        script_content = generator.generate_full_script()
+        
+        # Log the configuration generation
+        RouterEvent.objects.create(
+            router=router,
+            event_type='script_executed',
+            message=f"Full configuration script generated for {config_type} setup",
+            details={
+                'version': version,
+                'config_type': config_type,
+            }
+        )
+        
+        # Switch back to public schema
+        connection.set_schema_to_public()
+        
+        response = HttpResponse(script_content, content_type='text/plain')
+        response['Content-Disposition'] = f'attachment; filename="yourisp-full-config-{router.id}.rsc"'
+        return response
+    
+    @action(detail=True, methods=['get'], url_path='debug-script', permission_classes=[AllowAny])
+    def debug_script(self, request, pk=None):
+        """Debug script endpoint to analyze script generation"""
+        from django.db import connection
+        connection.set_schema_to_public()
+        
+        from apps.core.models import Tenant
+        from apps.network.models.router_models import Router
+        
+        tenants = Tenant.objects.filter(is_active=True)
+        router = None
+        
+        for tenant in tenants:
+            try:
+                connection.set_tenant(tenant)
+                try:
+                    router = Router.objects.filter(id=pk).first()
+                    if router:
+                        break
+                except Exception:
+                    continue
+            except Exception:
+                continue
+        
+        if not router:
+            connection.set_schema_to_public()
+            return Response({"error": "Router not found"}, status=404)
+        
+        # Verify auth_key
+        auth_key = request.query_params.get('auth_key')
+        if not auth_key or auth_key != router.auth_key:
+            connection.set_schema_to_public()
+            return Response({"error": "Invalid auth key"}, status=401)
+        
+        # Generate debug script using the new method
+        generator = MikrotikScriptGenerator(router)
+        script, line_num, problem_line = generator.generate_debug_script()
+        
+        # Return both the full script and analysis
+        response_data = {
+            'line_number': line_num,
+            'problem_line': problem_line,
+            'line_preview': problem_line[:200] if len(problem_line) > 200 else problem_line,
+            'line_length': len(problem_line),
+            'full_script': script
+        }
+        
+        connection.set_schema_to_public()
+        
+        return Response(response_data, content_type='application/json')
+    
+    @action(detail=True, methods=['get'], url_path='lipa-style', permission_classes=[AllowAny])
+    def lipa_style_script(self, request, pk=None):
+        """Generate Lipa Net style configuration script"""
+        from django.db import connection
+        connection.set_schema_to_public()
+        
+        from apps.core.models import Tenant
+        from apps.network.models.router_models import Router
+        
+        # Search across all tenants
+        tenants = Tenant.objects.filter(is_active=True)
+        router = None
+        found_tenant = None
+        
+        for tenant in tenants:
+            try:
+                connection.set_tenant(tenant)
+                try:
+                    router = Router.objects.filter(id=pk).first()
+                    if router:
+                        found_tenant = tenant
+                        break
+                except Exception:
+                    continue
+            except Exception:
+                continue
+        
+        if not router:
+            connection.set_schema_to_public()
+            return Response({"error": "Router not found"}, status=404)
+        
+        # Verify auth_key
+        auth_key = request.query_params.get('auth_key')
+        if not auth_key or auth_key != router.auth_key:
+            connection.set_schema_to_public()
+            return Response({"error": "Invalid auth key"}, status=401)
+        
+        # Generate configuration using single generator
+        version = request.query_params.get('version', '7')
+        
+        generator = MikrotikScriptGenerator(router)
+        
+        if request.query_params.get('type') == 'one_liner':
+            script_content = generator.generate_one_liner()
+        else:
+            script_content = generator.generate_full_script()
+        
+        # Log the configuration generation
+        RouterEvent.objects.create(
+            router=router,
+            event_type='script_executed',
+            message=f"Lipa-style configuration script generated",
+            details={
+                'version': version,
+            }
+        )
+        
+        # Switch back to public schema
+        connection.set_schema_to_public()
+        
+        response = HttpResponse(script_content, content_type='text/plain')
+        response['Content-Disposition'] = f'attachment; filename="yourisp-config-{router.id}.rsc"'
+        return response
+    
+    @action(detail=False, methods=['get'], url_path='download/script/(?P<version>\d+)/(?P<router_name>[^/]+)', permission_classes=[AllowAny])
+    def download_script(self, request, version=None, router_name=None):
+        """Download script endpoint"""
+        from django.db import connection
+        connection.set_schema_to_public()
+        
+        from apps.core.models import Tenant
+        from apps.network.models.router_models import Router
+        
+        # Search across all tenants for router by name or auth_key
+        tenants = Tenant.objects.filter(is_active=True)
+        router = None
+        
+        for tenant in tenants:
+            try:
+                connection.set_tenant(tenant)
+                try:
+                    # Try to find by name or similar identifier
+                    router = Router.objects.filter(
+                        name__icontains=router_name
+                    ).first()
+                    if not router:
+                        # Try by auth_key if router_name is actually an auth_key
+                        router = Router.objects.filter(
+                            auth_key=router_name
+                        ).first()
+                    
+                    if router:
+                        break
+                except Exception:
+                    continue
+            except Exception:
+                continue
+        
+        if not router:
+            connection.set_schema_to_public()
+            return Response({"error": "Router not found"}, status=404)
+        
+        # Generate the one-liner script using single generator
+        generator = MikrotikScriptGenerator(router)
+        one_liner = generator.generate_one_liner()
+        
+        connection.set_schema_to_public()
+        
+        response = HttpResponse(one_liner, content_type='text/plain')
+        response['Content-Disposition'] = f'attachment; filename="yourisp-one-liner-{router.id}.txt"'
+        return response
+    
+    @action(detail=True, methods=['get'], url_path='openvpn-config', permission_classes=[AllowAny])
+    def openvpn_config(self, request, pk=None):
+        """Generate OpenVPN configuration file"""
+        from django.db import connection
+        connection.set_schema_to_public()
+        
+        from apps.core.models import Tenant
+        from apps.network.models.router_models import Router
+        
+        tenants = Tenant.objects.filter(is_active=True)
+        router = None
+        
+        for tenant in tenants:
+            try:
+                connection.set_tenant(tenant)
+                try:
+                    router = Router.objects.filter(id=pk).first()
+                    if router:
+                        break
+                except Exception:
+                    continue
+            except Exception:
+                continue
+        
+        if not router:
+            connection.set_schema_to_public()
+            return Response({"error": "Router not found"}, status=404)
+        
+        # Verify auth_key
+        auth_key = request.query_params.get('auth_key')
+        if not auth_key or auth_key != router.auth_key:
+            connection.set_schema_to_public()
+            return Response({"error": "Invalid auth key"}, status=401)
+        
+        # --------------------------------------------------------------------
+        # HARDCODED LOCAL DOCKER CERTIFICATES
+        # --------------------------------------------------------------------
+        ca_cert = """-----BEGIN CERTIFICATE-----
+MIIDQjCCAiqgAwIBAgIUG+pKzrUh9ylnNATiwosCQZW7h/gwDQYJKoZIhvcNAQEL
+BQAwEzERMA8GA1UEAwwITG9jYWxJU1AwHhcNMjYwMTI0MTUzOTIzWhcNMzYwMTIy
+MTUzOTIzWjATMREwDwYDVQQDDAhMb2NhbElTUDCCASIwDQYJKoZIhvcNAQEBBQAD
+ggEPADCCAQoCggEBAMyqR7oKxG6zxpYe3GFDa3ydvlFQESWKYS9oj5z/OWEhom08
+ElFnoW3r1QvFqxgDgkRX5j8XHok+TRYctehxN0DUWhN/HpPKr0fs1XEOTSD+VzkI
+RfX5BIehzqUbHsPHjj5NFiKK7/J6GO7rv/z/XhdTjVENZ6YZR1n1aYpPmHWyHFyG
+ERL8A8YMqGESLneCZuaLWcHj/UyeFV761VXIy89CW47l6Y7xeoGWRbjW7VGVqzgn
+5ZzkRfiv6hQo7QiLi3s7leWxeJw6Ix7TIuI4NOHT+B543jY6hBUKehXEpxzq4DAO
+uYLecvy/ZRp7dViYFdK9sHoHUsqvooWH8zKrS6cCAwEAAaOBjTCBijAdBgNVHQ4E
+FgQUNzH/gt65jvm8f6opezxHWTzSaYIwTgYDVR0jBEcwRYAUNzH/gt65jvm8f6op
+ezxHWTzSaYKhF6QVMBMxETAPBgNVBAMMCExvY2FsSVNQghQb6krOtSH3KWc0BOLC
+iwJBlbuH+DAMBgNVHRMEBTADAQH/MAsGA1UdDwQEAwIBBjANBgkqhkiG9w0BAQsF
+AAOCAQEAuho4U9gkoeabjG3MCnIB7SWoGgH/b7Pypiuyv4Fs+G+9Yz47DLv8/uaL
+/9FP9LUtv56kRgcUDHbQ7rsH2CVy3HqSt3WkRYvWEzWtIpoxw8jhVHdikohdZURm
+7Rry4kJtN0QJ5RTO/bF8M8V9CPz3lrm31Va6Fm2juej/ZK8h+aRZwQ2Nw0iQZTjL
+mkIbKW/Z3w7s34rARss+6bSu+zJOPFLVm0CpurFbfSvI5SJFR5jo9OY4srMPakW5
+JTpCpDqIPtvxqZggIiwtc8IHKLSEoy1P6CH3NSEJJC0iMQ7GiaK1wUTwwS42Gyfn
+9cda76eCstmytHj65QFKp8vWpbj4Pw==
+-----END CERTIFICATE-----"""
+
+        client_cert = """-----BEGIN CERTIFICATE-----
+MIIDWDCCAkCgAwIBAgIRAOGK7Zh6Fnc1MwhybvY7w7owDQYJKoZIhvcNAQELBQAw
+EzERMA8GA1UEAwwITG9jYWxJU1AwHhcNMjYwMTI0MTU0MDE1WhcNMjgwNDI4MTU0
+MDE1WjAaMRgwFgYDVQQDDA9taWtyb3Rpa19jbGllbnQwggEiMA0GCSqGSIb3DQEB
+AQUAA4IBDwAwggEKAoIBAQC9Fb+sWMUdl+7xlIbixcdkIDErO4r27DAsbsTPiRyN
+1jOxUgE+99GDAzkfDn4HRCH0jP1iuqoNhJdKogiPIYKV7HqvN1X77IfdrnZ5vSSq
+m1TRcIdDfwJNCLi91KC4G+Fg0DDYkOjP+9BsteCA0lh2Q/30WKdhvrtWRUrXIKHK
+SHsdySj9sAwd9afpDwpUPuzYanGMgdyC84By7Tg1eFAl1RAwaMiNcB0fM/W5odE7
+D8WrvAi6cE9vMT0HrL8Fe3zs+jWW74EXNgl5QwPfzV8OSgWaWn8JKsTBobLaZo4V
+RKBZBKVbu06ocO098diTwrsR9Qg0+p0lgNCfRkT1OV8LAgMBAAGjgZ8wgZwwCQYD
+VR0TBAIwADAdBgNVHQ4EFgQUKASLEv9568cxULzLE5Uz9yXchj4wTgYDVR0jBEcw
+RYAUNzH/gt65jvm8f6opezxHWTzSaYKhF6QVMBMxETAPBgNVBAMMCExvY2FsSVNQ
+ghQb6krOtSH3KWc0BOLCiwJBlbuH+DATBgNVHSUEDDAKBggrBgEFBQcDAjALBgNV
+HQ8EBAMCB4AwDQYJKoZIhvcNAQELBQADggEBALq/mIn2XpHNcQAubPk8qTXM36o/
+1YLLBu6pvt3lVsAiuBaxKZIC/zs8/d3W+lCjsyznioLxOWalAD6emDA64Opx213D
+T5eKfiXOljWAHi54uhWijiqznFh9RrhjAwDZw+8HlHWZD162/i1MPx5o4359tTEJ
+7bIghyGlELtJTI17Kb5o+kCCPs105ztnLjJ8LtwSkjjr+FlHoCJ3xVrQ3KrhT3C0
+U3SZKrrCUtO+7J9UoTFG7TE3hhJ8wCQe5Hmzw0tI/AeVnk1oL/36266BX8R3A9L1
+dzDWl8CJZ7znE5K4epfb/qY/WUclwOur4ZMiHJfA8IhK1MVUQrkdyUEuF+U=
+-----END CERTIFICATE-----"""
+
+        client_key = """-----BEGIN PRIVATE KEY-----
+MIIEvwIBADANBgkqhkiG9w0BAQEFAASCBKkwggSlAgEAAoIBAQC9Fb+sWMUdl+7x
+lIbixcdkIDErO4r27DAsbsTPiRyN1jOxUgE+99GDAzkfDn4HRCH0jP1iuqoNhJdK
+ogiPIYKV7HqvN1X77IfdrnZ5vSSqm1TRcIdDfwJNCLi91KC4G+Fg0DDYkOjP+9Bs
+teCA0lh2Q/30WKdhvrtWRUrXIKHKSHsdySj9sAwd9afpDwpUPuzYanGMgdyC84By
+7Tg1eFAl1RAwaMiNcB0fM/W5odE7D8WrvAi6cE9vMT0HrL8Fe3zs+jWW74EXNgl5
+QwPfzV8OSgWaWn8JKsTBobLaZo4VRKBZBKVbu06ocO098diTwrsR9Qg0+p0lgNCf
+RkT1OV8LAgMBAAECggEBAKYaC+W3mXkUtbeMdS2S9kRzrx2+UaX195+gss1pMic7
+Cu/zDNsm0eqYEz6/+WAirv1oOVLYjXgQiOLsEj7B/jf7pA51utfygavwjW0GBcbF
+ay4M/xYA5aGMTtWbipARFdx5Jt+n9Ix4NjC5WP1xSnqh4d4bXvaTmXgAqOzwYpAR
+t1s0EfjV66nWdnV9Q7+nrMCu1uithJPuK6DarktaoxXduZWbJnGQUmy8bXt2P+PZ
+/16z5rJ07IPi0+Nc5Wskr/yqjDNYXzbsA6KhlRKqYgG4ltXuuX7YiMox9euXa9lB
++KwQO85zaJziwkXmOK0WloRKaW+QbiSxIyeLCsV4B8kCgYEA3oF5YBj0n5+h0j1t
+YfJ4UJq8DmMrzBsBMexD47J9FIBSK9bzpa6j9vMDQD2RaF/cOmIpzBkEu46cQCe7
+cQEMQauJN48CpC/fX8f52CA7wL64NJe4Uo0NGS0NXLr+hbSsitYJRERHPsPWcFA5
+AVRkToImAu0b299rj8nVyc5vj78CgYEA2YxdLES0kt1uvX544W7o0RxEJQIER5Ct
+4zkWclXcduV23t/FU9WBQzfVFGCZHw3gUajietsYa5vkfbUqnVUnmEYzjrn8VbpG
+Wrm3PIv588+pnNShS74Sy5a8uH6D1NicYT0O6ydU3kn2xhUfNJGWO1C15ww/5gVG
+m5C3C0i2g7UCgYEAyE747Mkql/UGohVIvo+hPrc+KxmeWR3Kgp33NCoALo+i6fKV
+34cL9woo2BFVMQhzY1/xztqLBypIgf0C4qWV2hzJ5+ln8FVkm36U7rt973QCst4P
+QsnWi96iE+QHtGjFmCs9pmZtWRTGnM+rsgW+U2sZOzMoDFXjKEwEmauthVMCgYEA
+kGgzJQKKVv7z1oeQWBxWIRDBT0uSaarpMm6frs+945KYIIOrqeWMw4DZSYiBu/Jr
+F+miROkQwcWem69ZlUyEVvkqmjBtBr76mpiywFcuWSBct4UReIS4Vzo9Fb6tZelP
+jOCJ+aCHHnM8gupcZ3nInqEJzk/8ToTsBLHAP5ZJyQ0CgYAsiZRP4aJ3TfXg6yem
+NdR1A6De7nMUF+1CGH4B6ba6wELL6pC5rUYAui1ZzkUnj+Gh4KYhLGF2GjFlBzk7
+c8knx/w0qjRAZy9IGUWyFR6zXmXOPnRoEfYWfeaC4D6IkPmLBo0x33ZhTA4HFn+L
+PTRtPWR6UvOJvPDQ7/hpe9GEuw==
+-----END PRIVATE KEY-----"""
+
+        tls_auth = """-----BEGIN OpenVPN Static key V1-----
+b737207acc166503f4cdbd99567eb12a
+6b3dc734900ee892549d242943c9b90f
+a4ef540dddd6b7aca5dc6718dcfd9881
+55d7028a6c758af1c76d6cc235b3fffe
+cee53e3cfd515b1cd8cca8a0e9849adf
+438badcb20f85be1e440a0bc0eb239f5
+-----END OpenVPN Static key V1-----"""
+
+        # Generate OpenVPN config
+        # NOTE: Configured for local docker (UDP/1194) and TLS Auth
+        openvpn_config = f"""# YourISP OpenVPN Configuration
+# Generated for {router.name} at {timezone.now()}
+
+client
+dev tun
+proto udp
+remote {router.openvpn_server} {router.openvpn_port}
+resolv-retry infinite
+nobind
+persist-key
+persist-tun
+cipher AES-256-CBC
+auth SHA256
+key-direction 1
+verb 3
+mute 20
+
+# Authentication
+<ca>
+{ca_cert}
+</ca>
+
+<cert>
+{client_cert}
+</cert>
+
+<key>
+{client_key}
+</key>
+
+<tls-auth>
+{tls_auth}
+</tls-auth>
+"""
+        
+        connection.set_schema_to_public()
+        
+        response = HttpResponse(openvpn_config, content_type='application/x-openvpn-profile')
+        response['Content-Disposition'] = f'attachment; filename="yourisp-{router.id}.ovpn"'
+        return response
+    
+    @action(detail=True, methods=['get'], url_path='simple-config', permission_classes=[AllowAny])
+    def simple_config_script(self, request, pk=None):
+        """Simple configuration endpoint (backward compatible)"""
+        return self.full_config_script(request, pk)
+    
+    @action(detail=True, methods=['post'], permission_classes=[IsAuthenticated, HasCompanyAccess])
+    def generate_config(self, request, pk=None):
+        """Generate and preview configuration"""
+        router = self.get_object()
+        
+        config_type = request.data.get('config_type', router.config_type)
+        version = request.data.get('version', '7')
+        
+        # Use single generator
+        generator = MikrotikScriptGenerator(router)
+        config_script = generator.generate_full_script()
+        
+        return Response({
+            'status': 'success',
+            'router_id': router.id,
+            'router_name': router.name,
+            'config_type': config_type,
+            'version': version,
+            'preview': config_script[:500] + "..." if len(config_script) > 500 else config_script,
+            'one_liner': generator.generate_one_liner(),
+        })
+    
+    # ────────────────────────────────────────────────────────────────
+    # ISP CONFIGURATION MANAGEMENT
+    # ────────────────────────────────────────────────────────────────
+    
+    @action(detail=True, methods=['post'], permission_classes=[IsAuthenticated, HasCompanyAccess])
+    def update_config_settings(self, request, pk=None):
+        """Update router configuration settings"""
+        router = self.get_object()
+        
+        # Update basic settings
+        fields_to_update = [
+            'config_type', 'lan_subnet', 'hotspot_subnet', 'pppoe_pool',
+            'enable_hotspot', 'enable_pppoe', 'enable_openvpn',
+            'openvpn_server', 'openvpn_port', 'hotspot_portal_url',
+            'hotspot_cookie_lifetime', 'wan_interface', 'lan_interfaces',
+            'radius_server', 'radius_port'
+        ]
+        
+        updated_fields = []
+        for field in fields_to_update:
+            if field in request.data:
+                setattr(router, field, request.data[field])
+                updated_fields.append(field)
+        
+        if updated_fields:
+            router.save()
+            
+            RouterEvent.objects.create(
+                router=router,
+                event_type='config_change',
+                message=f"Router configuration updated: {', '.join(updated_fields)}",
+                details={'updated_fields': updated_fields}
+            )
+        
+        return Response({
+            'status': 'success',
+            'message': f'Updated {len(updated_fields)} fields',
+            'updated_fields': updated_fields,
+            'router': RouterSerializer(router).data
+        })
+    
+    @action(detail=True, methods=['post'], permission_classes=[IsAuthenticated, HasCompanyAccess])
+    def test_isp_config(self, request, pk=None):
+        """Test ISP configuration by applying it to router"""
+        router = self.get_object()
+        
+        if router.router_type != 'mikrotik':
+            return Response({"error": "This action is only available for Mikrotik routers"}, status=400)
+        
+        if not router.api_username or not router.api_password:
+            return Response({"error": "API credentials not configured for this router"}, status=400)
+        
+        try:
+            api = mikrotik_api_module.MikrotikAPI(router)
+            
+            # Test connection
+            if not api.connect():
+                return Response({"error": "Failed to connect to router"}, status=400)
+            
+            # Test basic commands
+            test_results = []
+            
+            # Test system identity
+            try:
+                identity = api._execute('/system/identity')[0]
+                test_results.append({
+                    'test': 'system_identity',
+                    'status': 'success',
+                    'result': identity
+                })
+            except Exception as e:
+                test_results.append({
+                    'test': 'system_identity',
+                    'status': 'failed',
+                    'error': str(e)
+                })
+            
+            # Test interface listing
+            try:
+                interfaces = api.get_interfaces()
+                test_results.append({
+                    'test': 'interfaces',
+                    'status': 'success',
+                    'result': f"Found {len(interfaces)} interfaces"
+                })
+            except Exception as e:
+                test_results.append({
+                    'test': 'interfaces',
+                    'status': 'failed',
+                    'error': str(e)
+                })
+            
+            api.disconnect()
+            
+            RouterEvent.objects.create(
+                router=router,
+                event_type='config_sync',
+                message="ISP configuration test completed",
+                details={'test_results': test_results}
+            )
+            
+            return Response({
+                'status': 'success',
+                'message': 'Configuration test completed',
+                'test_results': test_results
+            })
+            
+        except Exception as e:
+            logger.error(f"Failed to test ISP config for router {router.name}: {str(e)}")
+            return Response({"error": str(e)}, status=400)
+    
+    @action(detail=True, methods=['get'], permission_classes=[IsAuthenticated, HasCompanyAccess])
+    def config_summary(self, request, pk=None):
+        """Get configuration summary"""
+        router = self.get_object()
+        
+        summary = {
+            'router': {
+                'name': router.name,
+                'config_type': router.get_config_type_display(),
+                'ip_address': router.ip_address,
+                'status': router.status,
+            },
+            'network': {
+                'lan_subnet': router.lan_subnet,
+                'lan_gateway': router.get_lan_ip(),
+                'hotspot_subnet': router.hotspot_subnet,
+                'hotspot_gateway': router.get_hotspot_ip(),
+                'pppoe_pool': router.pppoe_pool,
+                'pppoe_local_ip': router.get_pppoe_local_ip(),
+            },
+            'services': {
+                'hotspot_enabled': router.enable_hotspot,
+                'hotspot_portal': router.hotspot_portal_url,
+                'pppoe_enabled': router.enable_pppoe,
+                'openvpn_enabled': router.enable_openvpn,
+                'openvpn_server': f"{router.openvpn_server}:{router.openvpn_port}",
+            },
+            'interfaces': {
+                'wan': router.wan_interface,
+                'lan': router.lan_interfaces.split(',') if router.lan_interfaces else [],
+            },
+            'authentication': {
+                'is_authenticated': router.is_authenticated,
+                'auth_key_exists': bool(router.auth_key),
+                'shared_secret_exists': bool(router.shared_secret),
+                'radius_server': f"{router.radius_server}:{router.radius_port}" if router.radius_server else 'Not configured',
+            }
+        }
+        
+        return Response(summary)
 
     # ────────────────────────────────────────────────────────────────
     # MIKROTIK API ENDPOINTS - LIVE STATUS & HEALTH
@@ -850,6 +1456,12 @@ class RouterViewSet(viewsets.ModelViewSet):
             "maintenance_routers": qs.filter(status='maintenance').count(),
             "total_connected_users": qs.aggregate(total=Sum('active_users'))['total'] or 0,
             "average_uptime": round(qs.aggregate(avg=Avg('uptime_percentage'))['avg'] or 0, 2),
+            # Configuration type stats
+            "basic_routers": qs.filter(config_type='basic').count(),
+            "hotspot_routers": qs.filter(config_type='hotspot').count(),
+            "pppoe_routers": qs.filter(config_type='pppoe').count(),
+            "isp_routers": qs.filter(config_type='isp').count(),
+            "full_isp_routers": qs.filter(config_type='full_isp').count(),
         }
         
         # Add SLA stats if field exists
@@ -1085,23 +1697,13 @@ class RouterViewSet(viewsets.ModelViewSet):
             connection.set_schema_to_public()
             return Response({"error": "Router not found"}, status=404)
         
-        # Generate simple script
-        version = request.query_params.get('version', '7')
-        script_content = f"""# YourISP Configuration Script for Router ID: {router.id}
-# This script will configure your router for YourISP service
-
-:put "Starting YourISP configuration...";
-
-# Download and run configuration
-/tool fetch url="https://camden-convocative-oversorrowfully.ngrok-free.dev/api/v1/network/routers/{router.id}/config/?auth_key={router.auth_key}&version={version}" dst-path=yourisp-config.rsc;
-:delay 2s;
-/import yourisp-config.rsc;
-
-:put "Configuration completed!";
-"""
+        # Generate simple script using single generator
+        generator = MikrotikScriptGenerator(router)
+        one_liner = generator.generate_one_liner()
+        
         connection.set_schema_to_public()
         
-        response = HttpResponse(script_content, content_type='text/plain')
+        response = HttpResponse(one_liner, content_type='text/plain')
         response['Content-Disposition'] = f'attachment; filename="yourisp-{router.id}.rsc"'
         return response
     
@@ -1148,93 +1750,10 @@ class RouterViewSet(viewsets.ModelViewSet):
             connection.set_schema_to_public()
             return Response({"error": "Invalid auth key"}, status=401)
         
-        # STEP 5: Generate config (same as before)
-        version = request.query_params.get('version', '7')
-        script_content = f"""# YourISP Configuration for {router.name}
-# Generated at {timezone.now()}
-
-:put "Starting YourISP configuration...";
-
-# Get router information
-:local macAddr "";
-:local ethernetList [/interface ethernet find];
-:if ([:len $ethernetList] > 0) do={{
-    :set macAddr [/interface ethernet get [:pick $ethernetList 0] mac-address];
-}} else={{
-    :set macAddr "00:00:00:00:00:00";
-}};
-
-:local routerModel [/system routerboard get model];
-:if ([:len $routerModel] = 0) do={{
-    :set routerModel "Unknown";
-}};
-
-:put ("Router Model: $routerModel");
-
-:local routerIdentity [/system identity get name];
-:local routerVersion [/system resource get version];
-
-:put ("MAC Address: $macAddr");
-:put ("Router Model: $routerModel");
-:put ("Router Identity: $routerIdentity");
-:put ("Router Version: $routerVersion");
-
-# Register router with YourISP
-:put "Registering router...";
-/tool fetch url="https://camden-convocative-oversorrowfully.ngrok-free.dev/api/v1/network/routers/auth/" \\
-  http-method=post \\
-  http-header-field="Content-Type: application/json" \\
-  http-data="{{\\"auth_key\\":\\"{router.auth_key}\\",\\"mac\\":\\"$macAddr\\",\\"model\\":\\"$routerModel\\",\\"identity\\":\\"$routerIdentity\\",\\"version\\":\\"$routerVersion\\"}}";
-
-:delay 2s;
-
-# Basic configuration
-:put "Configuring router...";
-
-# Create bridge if it doesn't exist
-:if ([:len [/interface bridge find name=bridge-local]] = 0) do={{
-    /interface bridge add name=bridge-local comment="YourISP Local Bridge";
-}};
-
-# Add IP address if it doesn't exist
-:if ([:len [/ip address find interface=bridge-local address=192.168.88.1/24]] = 0) do={{
-    /ip address add address=192.168.88.1/24 interface=bridge-local;
-}};
-
-# Create DHCP pool if it doesn't exist
-:if ([:len [/ip pool find name=dhcp-pool]] = 0) do={{
-    /ip pool add name=dhcp-pool ranges=192.168.88.10-192.168.88.254;
-}};
-
-# Create DHCP server if it doesn't exist
-:if ([:len [/ip dhcp-server find name=dhcp-server]] = 0) do={{
-    /ip dhcp-server add interface=bridge-local name=dhcp-server address-pool=dhcp-pool lease-time=1d disabled=no;
-}};
-
-# Create DHCP network if it doesn't exist
-:if ([:len [/ip dhcp-server network find address=192.168.88.0/24]] = 0) do={{
-    /ip dhcp-server network add address=192.168.88.0/24 gateway=192.168.88.1 dns-server=8.8.8.8;
-}};
-
-# Create NAT rule if it doesn't exist
-:if ([:len [/ip firewall nat find chain=srcnat action=masquerade out-interface-list=WAN]] = 0) do={{
-    /ip firewall nat add chain=srcnat action=masquerade out-interface-list=WAN;
-}};
-
-:put "Basic configuration completed!";
-
-# RADIUS Configuration (if shared secret exists)
-:if ([:len "{router.shared_secret}"] > 0) do={{
-    :put "Configuring RADIUS...";
-    :if ([:len [/radius find address=camden-convocative-oversorrowfully.ngrok-free.dev]] = 0) do={{
-        /radius add address=camden-convocative-oversorrowfully.ngrok-free.dev secret={router.shared_secret} service=hotspot timeout=3s;
-    }};
-    :put "RADIUS configured.";
-}};
-
-:put "YourISP configuration completed successfully!";
-:put "Router is now ready for service.";
-"""
+        # STEP 5: Generate config using single generator
+        generator = MikrotikScriptGenerator(router)
+        script_content = generator.generate_full_script()
+        
         # STEP 6: Switch back to public BEFORE response
         connection.set_schema_to_public()
 
@@ -1246,15 +1765,29 @@ class RouterViewSet(viewsets.ModelViewSet):
     def auth_key(self, request, pk=None):
         router = self.get_object()
         
-        # Simple one-liner
-        one_liner = f'/tool fetch url="https://camden-convocative-oversorrowfully.ngrok-free.dev/api/v1/network/routers/{router.id}/config/?auth_key={router.auth_key}" dst-path=yourisp.rsc; :delay 2s; /import yourisp.rsc;'
+        # Use single generator
+        generator = MikrotikScriptGenerator(router)
+        one_liner = generator.generate_one_liner()
+        
+        base_url = request.build_absolute_uri('/').rstrip('/')
         
         return Response({
             'auth_key': router.auth_key,
             'one_liner': one_liner,
+            'config_types': dict(Router.CONFIG_TYPES),
+            'current_config': router.config_type,
             'is_authenticated': router.is_authenticated,
             'authenticated_at': router.authenticated_at,
             'shared_secret': router.shared_secret,
+            'config_endpoints': {
+                'one_liner': f"{base_url}/api/v1/network/routers/{router.id}/one-liner/?auth_key={router.auth_key}",
+                'full_config': f"{base_url}/api/v1/network/routers/{router.id}/full-config/?auth_key={router.auth_key}",
+                'lipa_style': f"{base_url}/api/v1/network/routers/{router.id}/lipa-style/?auth_key={router.auth_key}",
+                'simple_config': f"{base_url}/api/v1/network/routers/{router.id}/simple-config/?auth_key={router.auth_key}",
+                'openvpn_config': f"{base_url}/api/v1/network/routers/{router.id}/openvpn-config/?auth_key={router.auth_key}",
+                'debug_script': f"{base_url}/api/v1/network/routers/{router.id}/debug-script/?auth_key={router.auth_key}",
+                'download_script': f"{base_url}/download/script/7/{router.auth_key}",
+            }
         })
 
 
@@ -1330,6 +1863,12 @@ class RouterAuthenticateView(APIView):
                 router=found_router,
                 event_type="auth_success",
                 message=f"Router authenticated from {ip}",
+                details={
+                    'ip': ip,
+                    'mac': data.get('mac'),
+                    'model': data.get('model'),
+                    'version': data.get('version'),
+                }
             )
             
             # Switch back to public schema for response
@@ -1341,6 +1880,11 @@ class RouterAuthenticateView(APIView):
                 "router_id": found_router.id,
                 "router_name": found_router.name,
                 "tenant": found_tenant.subdomain if found_tenant else None,
+                "config_endpoints": {
+                    "one_liner": f"/api/v1/network/routers/{found_router.id}/one-liner/?auth_key={auth_key}",
+                    "full_config": f"/api/v1/network/routers/{found_router.id}/full-config/?auth_key={auth_key}",
+                    "lipa_style": f"/api/v1/network/routers/{found_router.id}/lipa-style/?auth_key={auth_key}",
+                }
             })
             
         except Exception as e:
@@ -1352,6 +1896,7 @@ class RouterAuthenticateView(APIView):
             except:
                 pass
             return Response({"error": "Internal server error"}, status=500)
+
 
 class RouterHeartbeatView(APIView):
     """Public endpoint for router heartbeats"""
@@ -1365,24 +1910,19 @@ class RouterHeartbeatView(APIView):
             if not auth_key:
                 return Response({"error": "Missing auth_key"}, status=400)
             
-            # Switch to public schema
             from django.db import connection
             connection.set_schema_to_public()
             
-            # Get all tenants - IMPORT DIRECTLY FROM YOUR CORE MODELS
-            from apps.core.models import Tenant  # Import from your app
+            from apps.core.models import Tenant
             tenants = Tenant.objects.all()
             
             found_router = None
             current_tenant = None
             
-            # Search through each tenant's schema
             for tenant in tenants:
                 try:
-                    # Switch to tenant schema
                     connection.set_tenant(tenant)
                     
-                    # Try to find router in this tenant's schema
                     from apps.network.models.router_models import Router
                     router = Router.objects.filter(auth_key=auth_key).first()
                     
@@ -1395,7 +1935,6 @@ class RouterHeartbeatView(APIView):
                     continue
             
             if not found_router:
-                # Switch back to public schema
                 connection.set_schema_to_public()
                 return Response({"error": "Invalid key"}, status=404)
             
@@ -1403,23 +1942,34 @@ class RouterHeartbeatView(APIView):
             found_router.last_seen = timezone.now()
             found_router.status = 'online'
             
-            # Optional: Update IP if provided
+            # Optional: Update statistics if provided
+            if 'active_users' in data:
+                found_router.active_users = data['active_users']
+            
+            if 'total_users' in data:
+                found_router.total_users = data['total_users']
+            
+            if 'uptime' in data:
+                found_router.uptime = data['uptime']
+            
             if 'ip' in data:
                 found_router.ip_address = data['ip']
-                found_router.save(update_fields=['last_seen', 'status', 'ip_address'])
+                found_router.save(update_fields=['last_seen', 'status', 'ip_address', 'active_users', 'total_users', 'uptime'])
             else:
-                found_router.save(update_fields=['last_seen', 'status'])
+                found_router.save(update_fields=['last_seen', 'status', 'active_users', 'total_users', 'uptime'])
             
             logger.debug(f"Heartbeat from router {found_router.name} (ID: {found_router.id}) in tenant {current_tenant.schema_name}")
             
-            # Switch back to public schema
             connection.set_schema_to_public()
             
-            return Response({"status": "ok", "router_id": found_router.id})
+            return Response({
+                "status": "ok", 
+                "router_id": found_router.id,
+                "timestamp": timezone.now().isoformat()
+            })
             
         except Exception as e:
             logger.error(f"Heartbeat error: {e}")
-            # Ensure we're back in public schema
             try:
                 from django.db import connection
                 connection.set_schema_to_public()
