@@ -44,7 +44,7 @@ createdb -U postgres isp_management
 Create a `.env` file in the project root:
 
 ```env
-# Database
+# Database - REQUIRED!
 DB_NAME=isp_management
 DB_USER=postgres
 DB_PASSWORD=your_password
@@ -56,6 +56,25 @@ SECRET_KEY=your-secret-key-here
 DEBUG=True
 ALLOWED_HOSTS=localhost,127.0.0.1
 ```
+
+> ⚠️ **IMPORTANT:** The `.env` file MUST exist before running any scripts. Without it, you'll get:
+> ```
+> fe_sendauth: no password supplied
+> ```
+
+**Verify your `.env` file:**
+```bash
+# On Windows PowerShell
+Get-Content .env
+
+# On Linux/Mac
+cat .env
+```
+
+Make sure:
+1. The file is named exactly `.env` (not `.env.txt` or `env`)
+2. `DB_PASSWORD` matches your PostgreSQL password
+3. The database `isp_management` exists (created in Step 1)
 
 ---
 
@@ -83,9 +102,13 @@ Expected output:
 
 ## Step 4: Create the Public Tenant
 
-The public tenant is required for django-tenants to work. Run this script:
+The public tenant is required for django-tenants to work.
 
-```python
+**Copy and paste this entire command into your terminal:**
+
+**Windows PowerShell:**
+```powershell
+python -c "
 import os
 os.environ['DJANGO_SETTINGS_MODULE'] = 'config.settings.local'
 import django
@@ -133,11 +156,7 @@ Domain.objects.get_or_create(
     defaults={'tenant': public_tenant, 'is_primary': False}
 )
 print('Public tenant domains created')
-```
-
-Save as `setup_public_tenant.py` and run:
-```bash
-python setup_public_tenant.py
+"
 ```
 
 ---
@@ -160,7 +179,11 @@ This creates 4 plans:
 
 ## Step 6: Create Superuser Account
 
-```python
+**Copy and paste this entire command into your terminal:**
+
+**Windows PowerShell:**
+```powershell
+python -c "
 import os
 os.environ['DJANGO_SETTINGS_MODULE'] = 'config.settings.local'
 import django
@@ -190,6 +213,7 @@ user.save()
 print(f'Superuser created: {created}')
 print('Email: admin@netily.io')
 print('Password: Admin@2026')
+"
 ```
 
 ---
@@ -198,7 +222,11 @@ print('Password: Admin@2026')
 
 ### 7.1 Create the Company and Tenant
 
-```python
+**Copy and paste this entire command into your terminal:**
+
+**Windows PowerShell:**
+```powershell
+python -c "
 import os
 os.environ['DJANGO_SETTINGS_MODULE'] = 'config.settings.local'
 import django
@@ -241,11 +269,16 @@ Domain.objects.get_or_create(
     defaults={'tenant': sample_tenant, 'is_primary': True}
 )
 print('Domain created: yellow.localhost')
+"
 ```
 
 ### 7.2 Create Tenant Admin User
 
-```python
+**Copy and paste this entire command into your terminal:**
+
+**Windows PowerShell:**
+```powershell
+python -c "
 import os
 os.environ['DJANGO_SETTINGS_MODULE'] = 'config.settings.local'
 import django
@@ -271,8 +304,8 @@ user, created = User.objects.get_or_create(
         'is_active': True,
         'is_verified': True,
         'role': 'admin',
-        'company_name': 'Yellow ISP',      # Denormalized
-        'tenant_subdomain': 'yellow',       # Denormalized
+        'company_name': 'Yellow ISP',
+        'tenant_subdomain': 'yellow',
     }
 )
 user.set_password('Creative@2028')
@@ -281,6 +314,7 @@ print(f'Tenant admin created: {created}')
 print('Email: yellow@gmail.com')
 print('Password: Creative@2028')
 print('Access: http://yellow.localhost:3000')
+"
 ```
 
 > **Note:** Tenant users use `company_name` and `tenant_subdomain` fields (denormalized) instead of foreign keys, since the Company and Tenant models are in the public schema.
@@ -494,6 +528,40 @@ python setup_database.py
 ---
 
 ## Troubleshooting
+
+### Database Connection Error: "no password supplied"
+
+```
+fe_sendauth: no password supplied
+```
+
+**Cause:** The `.env` file is missing or not properly configured.
+
+**Solution:**
+
+1. Create a `.env` file in the project root (same folder as `manage.py`):
+
+```env
+DB_NAME=isp_management
+DB_USER=postgres
+DB_PASSWORD=your_actual_password
+DB_HOST=localhost
+DB_PORT=5432
+SECRET_KEY=any-random-string-here
+DEBUG=True
+```
+
+2. Make sure the file is named exactly `.env` (not `.env.txt`)
+
+3. Verify Django can read it:
+```bash
+python -c "from dotenv import load_dotenv; load_dotenv(); import os; print('DB_PASSWORD:', os.getenv('DB_PASSWORD', 'NOT SET!'))"
+```
+
+If it prints `NOT SET!`, the `.env` file isn't being loaded. Check:
+- File is in the correct directory
+- File has no BOM (byte order mark) - save as UTF-8 without BOM
+- python-dotenv is installed: `pip install python-dotenv`
 
 ### Missing Columns Error
 
