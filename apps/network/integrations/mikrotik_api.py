@@ -873,3 +873,445 @@ class MikrotikAPI:
         except Exception as e:
             status['health_error'] = str(e)
             return status
+
+    # ────────────────────────────────────────────────────────────────
+    # HOTSPOT SERVER CONFIGURATION
+    # ────────────────────────────────────────────────────────────────
+    
+    def get_ports_with_usage(self) -> List[Dict[str, Any]]:
+        """
+        Get all interfaces (ports) with their current usage context.
+        Returns ethernet, wireless, and bridge interfaces with usage info.
+        """
+        try:
+            if not self.connect():
+                return []
+            
+            # Get all interfaces
+            interfaces = self._execute('/interface')
+            
+            # Get IP addresses to determine which interfaces have IPs
+            ip_addresses = self._execute('/ip/address')
+            ip_interface_map = {}
+            for ip in ip_addresses:
+                iface = ip.get('interface', '')
+                if iface:
+                    ip_interface_map[iface] = ip.get('address', '')
+            
+            # Get hotspot servers to identify hotspot interfaces
+            hotspot_servers = []
+            try:
+                hotspot_servers = self._execute('/ip/hotspot')
+            except:
+                pass
+            hotspot_interfaces = {hs.get('interface', '') for hs in hotspot_servers}
+            
+            # Get PPPoE servers
+            pppoe_servers = []
+            try:
+                pppoe_servers = self._execute('/interface/pppoe-server/server')
+            except:
+                pass
+            pppoe_interfaces = {ps.get('interface', '') for ps in pppoe_servers}
+            
+            # Get DHCP servers
+            dhcp_servers = []
+            try:
+                dhcp_servers = self._execute('/ip/dhcp-server')
+            except:
+                pass
+            dhcp_interfaces = {ds.get('interface', '') for ds in dhcp_servers}
+            
+            # Get wireless interfaces for additional info
+            wireless_interfaces = {}
+            try:
+                wireless = self._execute('/interface/wireless')
+                for w in wireless:
+                    wireless_interfaces[w.get('name', '')] = {
+                        'ssid': w.get('ssid', ''),
+                        'mode': w.get('mode', ''),
+                        'band': w.get('band', ''),
+                        'frequency': w.get('frequency', ''),
+                    }
+            except:
+                pass
+            
+            ports = []
+            for iface in interfaces:
+                name = iface.get('name', '')
+                iface_type = iface.get('type', 'ether')
+                
+                # Skip certain interface types
+                if iface_type in ['pppoe-out', 'pppoe-in', 'pptp-out', 'l2tp-out', 'sstp-out', 'ovpn-out']:
+                    continue
+                
+                # Determine current usage
+                current_use = 'unused'
+                if name in hotspot_interfaces:
+                    current_use = 'hotspot'
+                elif name in pppoe_interfaces:
+                    current_use = 'pppoe'
+                elif name in dhcp_interfaces:
+                    current_use = 'dhcp'
+                elif name in ip_interface_map:
+                    # Has an IP but no specific server - likely WAN or LAN
+                    ip = ip_interface_map[name]
+                    # Check if it's likely the WAN (gateway route uses it)
+                    try:
+                        routes = self._execute('/ip/route')
+                        for route in routes:
+                            if route.get('gateway', '') and route.get('dst-address', '') == '0.0.0.0/0':
+                                # This is a default route
+                                gw_interface = route.get('interface', route.get('gateway', ''))
+                                if gw_interface == name or name in str(gw_interface):
+                                    current_use = 'wan'
+                                    break
+                    except:
+                        pass
+                    if current_use == 'unused':
+                        current_use = 'lan'
+                
+                # Determine interface category
+                if iface_type in ['ether', 'ethernet']:
+                    port_type = 'ethernet'
+                elif iface_type in ['wlan', 'wireless']:
+                    port_type = 'wireless'
+                elif iface_type == 'bridge':
+                    port_type = 'bridge'
+                elif iface_type in ['vlan']:
+                    port_type = 'vlan'
+                else:
+                    port_type = iface_type
+                
+                port_info = {
+                    'name': name,
+                    'type': port_type,
+                    'mac_address': iface.get('mac-address', ''),
+                    'running': iface.get('running', 'false') == 'true',
+                    'disabled': iface.get('disabled', 'false') == 'true',
+                    'speed': iface.get('speed', ''),
+                    'current_use': current_use,
+                    'ip_address': ip_interface_map.get(name, ''),
+                }
+                
+                # Add wireless info if applicable
+                if name in wireless_interfaces:
+                    port_info['wireless'] = wireless_interfaces[name]
+                
+                ports.append(port_info)
+            
+            return ports
+            
+        except Exception as e:
+            logger.error(f"Failed to get ports with usage: {str(e)}")
+            raise
+        finally:
+            self.disconnect()
+    
+    def get_hotspot_config(self) -> Dict[str, Any]:
+        """
+        Get current hotspot configuration from the router.
+        Returns hotspot servers, profiles, and related configuration.
+        """
+        try:
+            if not self.connect():
+                return {'configured': False, 'error': 'Connection failed'}
+            
+            # Get hotspot servers
+            servers = []
+            try:
+                hotspot_servers = self._execute('/ip/hotspot')
+                for hs in hotspot_servers:
+                    servers.append({
+                        'id': hs.get('.id', ''),
+                        'name': hs.get('name', ''),
+                        'interface': hs.get('interface', ''),
+                        'address_pool': hs.get('address-pool', ''),
+                        'profile': hs.get('profile', ''),
+                        'idle_timeout': hs.get('idle-timeout', ''),
+                        'keepalive_timeout': hs.get('keepalive-timeout', ''),
+                        'disabled': hs.get('disabled', 'false') == 'true',
+                    })
+            except Exception as e:
+                logger.warning(f"No hotspot servers found: {e}")
+            
+            if not servers:
+                return {'configured': False}
+            
+            # Get hotspot profiles
+            profiles = []
+            try:
+                hotspot_profiles = self._execute('/ip/hotspot/profile')
+                for hp in hotspot_profiles:
+                    profiles.append({
+                        'id': hp.get('.id', ''),
+                        'name': hp.get('name', ''),
+                        'hotspot_address': hp.get('hotspot-address', ''),
+                        'dns_name': hp.get('dns-name', ''),
+                        'html_directory': hp.get('html-directory', ''),
+                        'login_by': hp.get('login-by', ''),
+                        'mac_auth_mode': hp.get('mac-auth-mode', ''),
+                    })
+            except:
+                pass
+            
+            # Get IP pools
+            pools = []
+            try:
+                ip_pools = self._execute('/ip/pool')
+                for pool in ip_pools:
+                    pools.append({
+                        'id': pool.get('.id', ''),
+                        'name': pool.get('name', ''),
+                        'ranges': pool.get('ranges', ''),
+                    })
+            except:
+                pass
+            
+            # Get walled garden entries
+            walled_garden = []
+            try:
+                wg_entries = self._execute('/ip/hotspot/walled-garden')
+                for wg in wg_entries:
+                    walled_garden.append({
+                        'id': wg.get('.id', ''),
+                        'dst_host': wg.get('dst-host', ''),
+                        'action': wg.get('action', 'allow'),
+                        'comment': wg.get('comment', ''),
+                    })
+            except:
+                pass
+            
+            # Get active sessions count
+            active_users = 0
+            try:
+                active = self._execute('/ip/hotspot/active')
+                active_users = len(active)
+            except:
+                pass
+            
+            return {
+                'configured': True,
+                'servers': servers,
+                'profiles': profiles,
+                'pools': pools,
+                'walled_garden': walled_garden,
+                'active_users': active_users,
+            }
+            
+        except Exception as e:
+            logger.error(f"Failed to get hotspot config: {str(e)}")
+            return {'configured': False, 'error': str(e)}
+        finally:
+            self.disconnect()
+    
+    def configure_hotspot(self, config: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Configure hotspot on the router.
+        
+        Args:
+            config: {
+                'interface': 'ether3',
+                'network': {
+                    'network_address': '10.5.50.1',
+                    'network_mask': '24',
+                    'pool_name': 'hotspot-pool',
+                    'pool_range': '10.5.50.10-10.5.50.254',
+                    'dns_server': '8.8.8.8'
+                },
+                'server': {
+                    'name': 'hotspot-server',
+                    'idle_timeout': '5m',
+                    'keepalive_timeout': '2m',
+                    'login_by': ['mac', 'http-chap']
+                },
+                'branding': {
+                    'company_name': 'ISP Name',
+                    'logo_url': '',
+                    'primary_color': '#3B82F6',
+                    'welcome_message': 'Welcome',
+                    'terms_url': ''
+                }
+            }
+        """
+        try:
+            if not self.connect():
+                return {'success': False, 'error': 'Connection failed'}
+            
+            interface = config.get('interface')
+            network = config.get('network', {})
+            server = config.get('server', {})
+            branding = config.get('branding', {})
+            
+            results = {'steps': [], 'success': True}
+            
+            # Step 1: Add IP address to interface
+            try:
+                ip_address = f"{network.get('network_address')}/{network.get('network_mask', '24')}"
+                
+                # Check if IP already exists on this interface
+                existing_ips = self._execute('/ip/address')
+                ip_exists = False
+                for ip in existing_ips:
+                    if ip.get('interface') == interface and ip.get('address') == ip_address:
+                        ip_exists = True
+                        break
+                
+                if not ip_exists:
+                    self.api.path('/ip/address').add(
+                        address=ip_address,
+                        interface=interface
+                    )
+                    results['steps'].append({'step': 'add_ip', 'status': 'created'})
+                else:
+                    results['steps'].append({'step': 'add_ip', 'status': 'exists'})
+            except Exception as e:
+                results['steps'].append({'step': 'add_ip', 'status': 'error', 'error': str(e)})
+                # Continue anyway - IP might already exist
+            
+            # Step 2: Create IP pool
+            pool_name = network.get('pool_name', 'hotspot-pool')
+            pool_range = network.get('pool_range')
+            try:
+                # Check if pool exists
+                existing_pools = self._execute('/ip/pool')
+                pool_exists = any(p.get('name') == pool_name for p in existing_pools)
+                
+                if not pool_exists:
+                    self.api.path('/ip/pool').add(
+                        name=pool_name,
+                        ranges=pool_range
+                    )
+                    results['steps'].append({'step': 'create_pool', 'status': 'created'})
+                else:
+                    # Update existing pool
+                    for p in existing_pools:
+                        if p.get('name') == pool_name:
+                            self.api.path('/ip/pool').set(
+                                **{'.id': p.get('.id'), 'ranges': pool_range}
+                            )
+                            break
+                    results['steps'].append({'step': 'create_pool', 'status': 'updated'})
+            except Exception as e:
+                results['steps'].append({'step': 'create_pool', 'status': 'error', 'error': str(e)})
+                results['success'] = False
+                return results
+            
+            # Step 3: Create hotspot profile
+            profile_name = f"{server.get('name', 'hotspot')}-profile"
+            login_by = ','.join(server.get('login_by', ['mac', 'http-chap']))
+            try:
+                existing_profiles = self._execute('/ip/hotspot/profile')
+                profile_exists = any(p.get('name') == profile_name for p in existing_profiles)
+                
+                if not profile_exists:
+                    self.api.path('/ip/hotspot/profile').add(
+                        name=profile_name,
+                        **{'hotspot-address': network.get('network_address')},
+                        **{'dns-name': f"{server.get('name', 'hotspot')}.local"},
+                        **{'login-by': login_by}
+                    )
+                    results['steps'].append({'step': 'create_profile', 'status': 'created'})
+                else:
+                    results['steps'].append({'step': 'create_profile', 'status': 'exists'})
+            except Exception as e:
+                results['steps'].append({'step': 'create_profile', 'status': 'error', 'error': str(e)})
+            
+            # Step 4: Create hotspot server
+            server_name = server.get('name', 'hotspot-server')
+            try:
+                existing_servers = self._execute('/ip/hotspot')
+                server_exists = any(s.get('name') == server_name for s in existing_servers)
+                
+                if not server_exists:
+                    self.api.path('/ip/hotspot').add(
+                        name=server_name,
+                        interface=interface,
+                        **{'address-pool': pool_name},
+                        profile=profile_name,
+                        **{'idle-timeout': server.get('idle_timeout', '5m')},
+                        **{'keepalive-timeout': server.get('keepalive_timeout', '2m')},
+                        disabled='no'
+                    )
+                    results['steps'].append({'step': 'create_server', 'status': 'created'})
+                else:
+                    results['steps'].append({'step': 'create_server', 'status': 'exists'})
+            except Exception as e:
+                results['steps'].append({'step': 'create_server', 'status': 'error', 'error': str(e)})
+                results['success'] = False
+                return results
+            
+            # Step 5: Add walled garden entries for payment gateway (PayHero)
+            try:
+                walled_garden_entries = [
+                    'api.payhero.co.ke',
+                    'payhero.co.ke',
+                    '*.safaricom.co.ke',
+                ]
+                
+                existing_wg = self._execute('/ip/hotspot/walled-garden')
+                existing_hosts = {wg.get('dst-host', '') for wg in existing_wg}
+                
+                for host in walled_garden_entries:
+                    if host not in existing_hosts:
+                        try:
+                            self.api.path('/ip/hotspot/walled-garden').add(
+                                **{'dst-host': host},
+                                action='allow',
+                                comment='PayHero/M-Pesa payment gateway'
+                            )
+                        except:
+                            pass
+                
+                results['steps'].append({'step': 'walled_garden', 'status': 'configured'})
+            except Exception as e:
+                results['steps'].append({'step': 'walled_garden', 'status': 'error', 'error': str(e)})
+            
+            # Store branding info (this would typically be stored in the database, not router)
+            results['branding'] = branding
+            results['server_name'] = server_name
+            results['interface'] = interface
+            
+            return results
+            
+        except Exception as e:
+            logger.error(f"Failed to configure hotspot: {str(e)}")
+            return {'success': False, 'error': str(e)}
+        finally:
+            self.disconnect()
+    
+    def disable_hotspot(self, server_name: str = None) -> Dict[str, Any]:
+        """
+        Disable or remove hotspot server.
+        
+        Args:
+            server_name: Name of hotspot server to disable. If None, disables all.
+        """
+        try:
+            if not self.connect():
+                return {'success': False, 'error': 'Connection failed'}
+            
+            servers = self._execute('/ip/hotspot')
+            disabled_count = 0
+            
+            for server in servers:
+                if server_name is None or server.get('name') == server_name:
+                    try:
+                        self.api.path('/ip/hotspot').set(
+                            **{'.id': server.get('.id'), 'disabled': 'yes'}
+                        )
+                        disabled_count += 1
+                    except Exception as e:
+                        logger.error(f"Failed to disable hotspot {server.get('name')}: {e}")
+            
+            return {
+                'success': True,
+                'disabled_count': disabled_count,
+                'message': f'Disabled {disabled_count} hotspot server(s)'
+            }
+            
+        except Exception as e:
+            logger.error(f"Failed to disable hotspot: {str(e)}")
+            return {'success': False, 'error': str(e)}
+        finally:
+            self.disconnect()
