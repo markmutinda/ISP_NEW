@@ -1,3 +1,4 @@
+# apps/billing/models/hotspot_models.py
 """
 Hotspot Models for WiFi Access Payments
 

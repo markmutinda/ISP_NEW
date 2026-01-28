@@ -1,0 +1,52 @@
+version: '3.8'
+
+services:
+  # 1. The Database (PostgreSQL)
+  # This holds your users and their "Expiry Times"
+  db:
+    image: postgres:14-alpine
+    container_name: yourisp_db
+    environment:
+      - POSTGRES_DB=yourisp
+      - POSTGRES_USER=yourisp_user
+      - POSTGRES_PASSWORD=yourisp_pass
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"  # Exposed so Django on Windows can see it
+
+  # 2. The RADIUS Server (FreeRADIUS)
+  # This listens for the MikroTik's questions
+  radius:
+    image: freeradius/freeradius-server:latest
+    container_name: yourisp_radius
+    depends_on:
+      - db
+    ports:
+      - "1812:1812/udp"  # Authentication Port
+      - "1813:1813/udp"  # Accounting Port
+    environment:
+      - DB_HOST=db
+      - DB_PORT=5432
+      - DB_USER=yourisp_user
+      - DB_PASS=yourisp_pass
+      - DB_NAME=yourisp
+      - RADIUS_KEY=testing123  # This must match your MikroTik "Secret"
+    volumes:
+      # We will mount custom config files here later to teach it SQL
+      - ./radius_config:/etc/raddb/mods-config/sql/main/postgresql:ro
+
+  # 3. (Optional) Admin GUI for Database
+  pgadmin:
+    image: dpage/pgadmin4
+    container_name: yourisp_pgadmin
+    environment:
+      PGADMIN_DEFAULT_EMAIL: admin@yourisp.com
+      PGADMIN_DEFAULT_PASSWORD: admin
+    ports:
+      - "5050:80"
+    depends_on:
+      - db
+
+volumes:
+  postgres_data:
