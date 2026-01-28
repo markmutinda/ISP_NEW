@@ -1,6 +1,4 @@
 # apps/network/views/router_views.py
-
-
 from rest_framework import viewsets, status, filters
 from rest_framework.decorators import action
 from rest_framework.response import Response
@@ -15,14 +13,48 @@ from rest_framework import serializers
 import json
 import logging
 import socket
-
 from apps.network.models.router_models import Router, RouterEvent
 from apps.network.serializers.router_serializers import RouterSerializer, RouterEventSerializer
 from apps.core.permissions import HasCompanyAccess
 import apps.network.integrations.mikrotik_api as mikrotik_api_module
-
 logger = logging.getLogger(__name__)
 
+def find_router_across_tenants(router_id=None, auth_key=None, router_name=None):
+    """
+    Helper function to search for a router across all tenants.
+    Returns (router, tenant) or (None, None) if not found.
+    """
+    from django.db import connection
+    connection.set_schema_to_public()
+    
+    from apps.core.models import Tenant
+    tenants = Tenant.objects.filter(is_active=True)
+    
+    found_router = None
+    found_tenant = None
+    
+    for tenant in tenants:
+        try:
+            connection.set_tenant(tenant)
+            try:
+                if router_id:
+                    found_router = Router.objects.filter(id=router_id).first()
+                elif auth_key:
+                    found_router = Router.objects.filter(auth_key=auth_key).first()
+                elif router_name:
+                    found_router = Router.objects.filter(name__icontains=router_name).first()
+                    if not found_router:
+                        found_router = Router.objects.filter(auth_key=router_name).first()
+                
+                if found_router:
+                    found_tenant = tenant
+                    break
+            except Exception:
+                continue
+        except Exception:
+            continue
+    
+    return found_router, found_tenant
 
 class RouterViewSet(viewsets.ModelViewSet):
     serializer_class = RouterSerializer
@@ -31,25 +63,24 @@ class RouterViewSet(viewsets.ModelViewSet):
     filterset_fields = ['router_type', 'status', 'is_active', 'config_type']
     search_fields = ['name', 'ip_address', 'model', 'location', 'tags']
     ordering_fields = ['name', 'last_seen', 'created_at', 'status']
-
-    queryset = Router.objects.all() 
-    
+    queryset = Router.objects.all()
+   
     def get_queryset(self):
         user = self.request.user
-        
+       
         # All users in a tenant see only their tenant's routers
         qs = Router.objects.all()
-        
+       
         # Filter by tenant_subdomain if available
         if hasattr(self.request, 'tenant') and self.request.tenant:
             qs = qs.filter(tenant_subdomain=self.request.tenant.subdomain)
-        
+       
         return qs
-
+    
     def perform_create(self, serializer):
         # The serializer will handle adding company_name and tenant_subdomain
         serializer.save()
-        
+       
     # Optional: Add this method to debug the request
     def create(self, request, *args, **kwargs):
         logger.debug(f"Create router - Request has company: {hasattr(request, 'company')}")
@@ -58,86 +89,51 @@ class RouterViewSet(viewsets.ModelViewSet):
             logger.debug(f"Create router - Company: {request.company}")
         if hasattr(request, 'tenant'):
             logger.debug(f"Create router - Tenant: {request.tenant}")
-        
+       
         return super().create(request, *args, **kwargs)
-
+    
     # ────────────────────────────────────────────────────────────────
     # CONFIGURATION ENDPOINTS (UPDATED TO USE SINGLE GENERATOR)
     # ────────────────────────────────────────────────────────────────
-
     @action(detail=True, methods=['get'], url_path='one-liner', permission_classes=[AllowAny])
     def one_liner_script(self, request, pk=None):
         """Generate one-liner script"""
-        from django.db import connection
-        connection.set_schema_to_public()
-        
-        from apps.core.models import Tenant
-        from apps.network.models.router_models import Router
-        
-        tenants = Tenant.objects.filter(is_active=True)
-        router = None
-        
-        for tenant in tenants:
-            try:
-                connection.set_tenant(tenant)
-                try:
-                    router = Router.objects.filter(id=pk).first()
-                    if router:
-                        break
-                except Exception:
-                    continue
-            except Exception:
-                continue
+        router, tenant = find_router_across_tenants(router_id=pk)
         
         if not router:
-            connection.set_schema_to_public()
             return Response({"error": "Router not found"}, status=404)
+        
+        # Switch to tenant schema to generate script
+        from django.db import connection
+        connection.set_tenant(tenant)
         
         # Generate one-liner script using single generator
         generator = MikrotikScriptGenerator(router)
         one_liner = generator.generate_one_liner()
         
+        # Switch back to public
         connection.set_schema_to_public()
         
         response = HttpResponse(one_liner, content_type='text/plain')
-        response['Content-Disposition'] = f'attachment; filename="yourisp-one-liner-{router.id}.txt"'
+        response['Content-Disposition'] = f'attachment; filename="netily-one-liner-{router.id}.txt"'
         return response
-    
+   
     @action(detail=True, methods=['get'], url_path='full-config', permission_classes=[AllowAny])
     def full_config_script(self, request, pk=None):
         """Full configuration script"""
-        from django.db import connection
-        connection.set_schema_to_public()
-        
-        from apps.core.models import Tenant
-        from apps.network.models.router_models import Router
-        
-        tenants = Tenant.objects.filter(is_active=True)
-        router = None
-        found_tenant = None
-        
-        for tenant in tenants:
-            try:
-                connection.set_tenant(tenant)
-                try:
-                    router = Router.objects.filter(id=pk).first()
-                    if router:
-                        found_tenant = tenant
-                        break
-                except Exception:
-                    continue
-            except Exception:
-                continue
+        router, tenant = find_router_across_tenants(router_id=pk)
         
         if not router:
-            connection.set_schema_to_public()
             return Response({"error": "Router not found"}, status=404)
         
         # Verify auth_key
         auth_key = request.query_params.get('auth_key')
         if not auth_key or auth_key != router.auth_key:
-            connection.set_schema_to_public()
             return Response({"error": "Invalid auth key"}, status=401)
+        
+        # Switch to tenant schema
+        from django.db import connection
+        connection.set_tenant(tenant)
         
         # Generate configuration using single generator
         version = request.query_params.get('version', '7')
@@ -157,100 +153,63 @@ class RouterViewSet(viewsets.ModelViewSet):
             }
         )
         
-        # Switch back to public schema
+        # Switch back to public
         connection.set_schema_to_public()
         
         response = HttpResponse(script_content, content_type='text/plain')
-        response['Content-Disposition'] = f'attachment; filename="yourisp-full-config-{router.id}.rsc"'
+        response['Content-Disposition'] = f'attachment; filename="netily-full-config-{router.id}.rsc"'
         return response
-    
+   
     @action(detail=True, methods=['get'], url_path='debug-script', permission_classes=[AllowAny])
     def debug_script(self, request, pk=None):
         """Debug script endpoint to analyze script generation"""
-        from django.db import connection
-        connection.set_schema_to_public()
-        
-        from apps.core.models import Tenant
-        from apps.network.models.router_models import Router
-        
-        tenants = Tenant.objects.filter(is_active=True)
-        router = None
-        
-        for tenant in tenants:
-            try:
-                connection.set_tenant(tenant)
-                try:
-                    router = Router.objects.filter(id=pk).first()
-                    if router:
-                        break
-                except Exception:
-                    continue
-            except Exception:
-                continue
+        router, tenant = find_router_across_tenants(router_id=pk)
         
         if not router:
-            connection.set_schema_to_public()
             return Response({"error": "Router not found"}, status=404)
         
         # Verify auth_key
         auth_key = request.query_params.get('auth_key')
         if not auth_key or auth_key != router.auth_key:
-            connection.set_schema_to_public()
             return Response({"error": "Invalid auth key"}, status=401)
         
-        # Generate debug script using the new method
+        # Switch to tenant schema
+        from django.db import connection
+        connection.set_tenant(tenant)
+        
+        # Assuming generate_debug_script is implemented; if not, implement or remove
+        # For now, placeholder - adjust based on actual implementation
         generator = MikrotikScriptGenerator(router)
-        script, line_num, problem_line = generator.generate_debug_script()
+        try:
+            script = generator.generate_full_script()
+            response_data = {
+                'full_script': script,
+                # Add debug logic if needed, e.g., line analysis
+            }
+        except Exception as e:
+            response_data = {'error': str(e)}
         
-        # Return both the full script and analysis
-        response_data = {
-            'line_number': line_num,
-            'problem_line': problem_line,
-            'line_preview': problem_line[:200] if len(problem_line) > 200 else problem_line,
-            'line_length': len(problem_line),
-            'full_script': script
-        }
-        
+        # Switch back to public
         connection.set_schema_to_public()
         
-        return Response(response_data, content_type='application/json')
-    
+        return Response(response_data)
+   
     @action(detail=True, methods=['get'], url_path='lipa-style', permission_classes=[AllowAny])
     def lipa_style_script(self, request, pk=None):
         """Generate Lipa Net style configuration script"""
-        from django.db import connection
-        connection.set_schema_to_public()
-        
-        from apps.core.models import Tenant
-        from apps.network.models.router_models import Router
-        
-        # Search across all tenants
-        tenants = Tenant.objects.filter(is_active=True)
-        router = None
-        found_tenant = None
-        
-        for tenant in tenants:
-            try:
-                connection.set_tenant(tenant)
-                try:
-                    router = Router.objects.filter(id=pk).first()
-                    if router:
-                        found_tenant = tenant
-                        break
-                except Exception:
-                    continue
-            except Exception:
-                continue
+        router, tenant = find_router_across_tenants(router_id=pk)
         
         if not router:
-            connection.set_schema_to_public()
             return Response({"error": "Router not found"}, status=404)
         
         # Verify auth_key
         auth_key = request.query_params.get('auth_key')
         if not auth_key or auth_key != router.auth_key:
-            connection.set_schema_to_public()
             return Response({"error": "Invalid auth key"}, status=401)
+        
+        # Switch to tenant schema
+        from django.db import connection
+        connection.set_tenant(tenant)
         
         # Generate configuration using single generator
         version = request.query_params.get('version', '7')
@@ -272,97 +231,55 @@ class RouterViewSet(viewsets.ModelViewSet):
             }
         )
         
-        # Switch back to public schema
+        # Switch back to public
         connection.set_schema_to_public()
         
         response = HttpResponse(script_content, content_type='text/plain')
-        response['Content-Disposition'] = f'attachment; filename="yourisp-config-{router.id}.rsc"'
+        response['Content-Disposition'] = f'attachment; filename="netily-config-{router.id}.rsc"'
         return response
-    
+   
     @action(detail=False, methods=['get'], url_path='download/script/(?P<version>\d+)/(?P<router_name>[^/]+)', permission_classes=[AllowAny])
     def download_script(self, request, version=None, router_name=None):
         """Download script endpoint"""
-        from django.db import connection
-        connection.set_schema_to_public()
-        
-        from apps.core.models import Tenant
-        from apps.network.models.router_models import Router
-        
-        # Search across all tenants for router by name or auth_key
-        tenants = Tenant.objects.filter(is_active=True)
-        router = None
-        
-        for tenant in tenants:
-            try:
-                connection.set_tenant(tenant)
-                try:
-                    # Try to find by name or similar identifier
-                    router = Router.objects.filter(
-                        name__icontains=router_name
-                    ).first()
-                    if not router:
-                        # Try by auth_key if router_name is actually an auth_key
-                        router = Router.objects.filter(
-                            auth_key=router_name
-                        ).first()
-                    
-                    if router:
-                        break
-                except Exception:
-                    continue
-            except Exception:
-                continue
+        router, tenant = find_router_across_tenants(router_name=router_name)
         
         if not router:
-            connection.set_schema_to_public()
             return Response({"error": "Router not found"}, status=404)
+        
+        # Switch to tenant schema
+        from django.db import connection
+        connection.set_tenant(tenant)
         
         # Generate the one-liner script using single generator
         generator = MikrotikScriptGenerator(router)
         one_liner = generator.generate_one_liner()
         
+        # Switch back to public
         connection.set_schema_to_public()
         
         response = HttpResponse(one_liner, content_type='text/plain')
-        response['Content-Disposition'] = f'attachment; filename="yourisp-one-liner-{router.id}.txt"'
+        response['Content-Disposition'] = f'attachment; filename="netily-one-liner-{router.id}.txt"'
         return response
-    
+   
     @action(detail=True, methods=['get'], url_path='openvpn-config', permission_classes=[AllowAny])
     def openvpn_config(self, request, pk=None):
         """Generate OpenVPN configuration file"""
-        from django.db import connection
-        connection.set_schema_to_public()
-        
-        from apps.core.models import Tenant
-        from apps.network.models.router_models import Router
-        
-        tenants = Tenant.objects.filter(is_active=True)
-        router = None
-        
-        for tenant in tenants:
-            try:
-                connection.set_tenant(tenant)
-                try:
-                    router = Router.objects.filter(id=pk).first()
-                    if router:
-                        break
-                except Exception:
-                    continue
-            except Exception:
-                continue
+        router, tenant = find_router_across_tenants(router_id=pk)
         
         if not router:
-            connection.set_schema_to_public()
             return Response({"error": "Router not found"}, status=404)
         
         # Verify auth_key
         auth_key = request.query_params.get('auth_key')
         if not auth_key or auth_key != router.auth_key:
-            connection.set_schema_to_public()
             return Response({"error": "Invalid auth key"}, status=401)
         
+        # Switch to tenant schema
+        from django.db import connection
+        connection.set_tenant(tenant)
+        
         # --------------------------------------------------------------------
-        # HARDCODED LOCAL DOCKER CERTIFICATES
+        # HARDCODED LOCAL DOCKER CERTIFICATES - Replace with dynamic in production
         # --------------------------------------------------------------------
         ca_cert = """-----BEGIN CERTIFICATE-----
 MIIDQjCCAiqgAwIBAgIUG+pKzrUh9ylnNATiwosCQZW7h/gwDQYJKoZIhvcNAQEL
@@ -384,7 +301,6 @@ mkIbKW/Z3w7s34rARss+6bSu+zJOPFLVm0CpurFbfSvI5SJFR5jo9OY4srMPakW5
 JTpCpDqIPtvxqZggIiwtc8IHKLSEoy1P6CH3NSEJJC0iMQ7GiaK1wUTwwS42Gyfn
 9cda76eCstmytHj65QFKp8vWpbj4Pw==
 -----END CERTIFICATE-----"""
-
         client_cert = """-----BEGIN CERTIFICATE-----
 MIIDWDCCAkCgAwIBAgIRAOGK7Zh6Fnc1MwhybvY7w7owDQYJKoZIhvcNAQELBQAw
 EzERMA8GA1UEAwwITG9jYWxJU1AwHhcNMjYwMTI0MTU0MDE1WhcNMjgwNDI4MTU0
@@ -405,7 +321,6 @@ T5eKfiXOljWAHi54uhWijiqznFh9RrhjAwDZw+8HlHWZD162/i1MPx5o4359tTEJ
 U3SZKrrCUtO+7J9UoTFG7TE3hhJ8wCQe5Hmzw0tI/AeVnk1oL/36266BX8R3A9L1
 dzDWl8CJZ7znE5K4epfb/qY/WUclwOur4ZMiHJfA8IhK1MVUQrkdyUEuF+U=
 -----END CERTIFICATE-----"""
-
         client_key = """-----BEGIN PRIVATE KEY-----
 MIIEvwIBADANBgkqhkiG9w0BAQEFAASCBKkwggSlAgEAAoIBAQC9Fb+sWMUdl+7x
 lIbixcdkIDErO4r27DAsbsTPiRyN1jOxUgE+99GDAzkfDn4HRCH0jP1iuqoNhJdK
@@ -434,7 +349,6 @@ NdR1A6De7nMUF+1CGH4B6ba6wELL6pC5rUYAui1ZzkUnj+Gh4KYhLGF2GjFlBzk7
 c8knx/w0qjRAZy9IGUWyFR6zXmXOPnRoEfYWfeaC4D6IkPmLBo0x33ZhTA4HFn+L
 PTRtPWR6UvOJvPDQ7/hpe9GEuw==
 -----END PRIVATE KEY-----"""
-
         tls_auth = """-----BEGIN OpenVPN Static key V1-----
 b737207acc166503f4cdbd99567eb12a
 6b3dc734900ee892549d242943c9b90f
@@ -443,12 +357,10 @@ a4ef540dddd6b7aca5dc6718dcfd9881
 cee53e3cfd515b1cd8cca8a0e9849adf
 438badcb20f85be1e440a0bc0eb239f5
 -----END OpenVPN Static key V1-----"""
-
         # Generate OpenVPN config
         # NOTE: Configured for local docker (UDP/1194) and TLS Auth
-        openvpn_config = f"""# YourISP OpenVPN Configuration
+        openvpn_config = f"""# Netily OpenVPN Configuration
 # Generated for {router.name} at {timezone.now()}
-
 client
 dev tun
 proto udp
@@ -462,36 +374,33 @@ auth SHA256
 key-direction 1
 verb 3
 mute 20
-
 # Authentication
 <ca>
 {ca_cert}
 </ca>
-
 <cert>
 {client_cert}
 </cert>
-
 <key>
 {client_key}
 </key>
-
 <tls-auth>
 {tls_auth}
 </tls-auth>
 """
         
+        # Switch back to public
         connection.set_schema_to_public()
         
         response = HttpResponse(openvpn_config, content_type='application/x-openvpn-profile')
-        response['Content-Disposition'] = f'attachment; filename="yourisp-{router.id}.ovpn"'
+        response['Content-Disposition'] = f'attachment; filename="netily-{router.id}.ovpn"'
         return response
-    
+   
     @action(detail=True, methods=['get'], url_path='simple-config', permission_classes=[AllowAny])
     def simple_config_script(self, request, pk=None):
         """Simple configuration endpoint (backward compatible)"""
         return self.full_config_script(request, pk)
-    
+   
     @action(detail=True, methods=['post'], permission_classes=[IsAuthenticated, HasCompanyAccess])
     def generate_config(self, request, pk=None):
         """Generate and preview configuration"""
@@ -513,22 +422,21 @@ mute 20
             'preview': config_script[:500] + "..." if len(config_script) > 500 else config_script,
             'one_liner': generator.generate_one_liner(),
         })
-    
+   
     # ────────────────────────────────────────────────────────────────
     # ISP CONFIGURATION MANAGEMENT
     # ────────────────────────────────────────────────────────────────
-    
+   
     @action(detail=True, methods=['post'], permission_classes=[IsAuthenticated, HasCompanyAccess])
     def update_config_settings(self, request, pk=None):
         """Update router configuration settings"""
         router = self.get_object()
         
-        # Update basic settings
+        # Update basic settings - aligned with new model fields
         fields_to_update = [
-            'config_type', 'lan_subnet', 'hotspot_subnet', 'pppoe_pool',
-            'enable_hotspot', 'enable_pppoe', 'enable_openvpn',
-            'openvpn_server', 'openvpn_port', 'hotspot_portal_url',
-            'hotspot_cookie_lifetime', 'wan_interface', 'lan_interfaces',
+            'config_type', 'gateway_cidr', 'dns_name', 'hotspot_interfaces',
+            'wan_interface', 'enable_hotspot', 'enable_pppoe', 'pppoe_pool',
+            'enable_openvpn', 'openvpn_server', 'openvpn_port',
             'radius_server', 'radius_port'
         ]
         
@@ -554,7 +462,7 @@ mute 20
             'updated_fields': updated_fields,
             'router': RouterSerializer(router).data
         })
-    
+   
     @action(detail=True, methods=['post'], permission_classes=[IsAuthenticated, HasCompanyAccess])
     def test_isp_config(self, request, pk=None):
         """Test ISP configuration by applying it to router"""
@@ -624,7 +532,7 @@ mute 20
         except Exception as e:
             logger.error(f"Failed to test ISP config for router {router.name}: {str(e)}")
             return Response({"error": str(e)}, status=400)
-    
+   
     @action(detail=True, methods=['get'], permission_classes=[IsAuthenticated, HasCompanyAccess])
     def config_summary(self, request, pk=None):
         """Get configuration summary"""
@@ -638,23 +546,21 @@ mute 20
                 'status': router.status,
             },
             'network': {
-                'lan_subnet': router.lan_subnet,
-                'lan_gateway': router.get_lan_ip(),
-                'hotspot_subnet': router.hotspot_subnet,
-                'hotspot_gateway': router.get_hotspot_ip(),
+                'gateway_cidr': router.gateway_cidr,
+                'gateway_ip': router.gateway_ip,
+                'pool_range': router.pool_range,
+                'dns_name': router.dns_name,
                 'pppoe_pool': router.pppoe_pool,
-                'pppoe_local_ip': router.get_pppoe_local_ip(),
             },
             'services': {
                 'hotspot_enabled': router.enable_hotspot,
-                'hotspot_portal': router.hotspot_portal_url,
                 'pppoe_enabled': router.enable_pppoe,
                 'openvpn_enabled': router.enable_openvpn,
                 'openvpn_server': f"{router.openvpn_server}:{router.openvpn_port}",
             },
             'interfaces': {
                 'wan': router.wan_interface,
-                'lan': router.lan_interfaces.split(',') if router.lan_interfaces else [],
+                'hotspot_interfaces': router.hotspot_interfaces,
             },
             'authentication': {
                 'is_authenticated': router.is_authenticated,
@@ -665,11 +571,10 @@ mute 20
         }
         
         return Response(summary)
-
+    
     # ────────────────────────────────────────────────────────────────
     # MIKROTIK API ENDPOINTS - LIVE STATUS & HEALTH
     # ────────────────────────────────────────────────────────────────
-
     @action(detail=True, methods=['get'], permission_classes=[IsAuthenticated, HasCompanyAccess])
     def live_status(self, request, pk=None):
         """Get real-time router status"""
@@ -687,7 +592,7 @@ mute 20
         except Exception as e:
             logger.error(f"Failed to get live status for router {router.name}: {str(e)}")
             return Response({"error": str(e)}, status=400)
-
+    
     @action(detail=True, methods=['get'], permission_classes=[IsAuthenticated, HasCompanyAccess])
     def system_health(self, request, pk=None):
         """Get comprehensive system health information"""
@@ -705,7 +610,7 @@ mute 20
         except Exception as e:
             logger.error(f"Failed to get system health for router {router.name}: {str(e)}")
             return Response({"error": str(e)}, status=400)
-
+    
     @action(detail=True, methods=['get'], permission_classes=[IsAuthenticated, HasCompanyAccess])
     def sync_device_info(self, request, pk=None):
         """Sync device information from Mikrotik"""
@@ -729,11 +634,10 @@ mute 20
         except Exception as e:
             logger.error(f"Failed to sync device info for router {router.name}: {str(e)}")
             return Response({"error": str(e)}, status=400)
-
+    
     # ────────────────────────────────────────────────────────────────
     # MIKROTIK API ENDPOINTS - CONNECTED USERS
     # ────────────────────────────────────────────────────────────────
-
     @action(detail=True, methods=['get'], permission_classes=[IsAuthenticated, HasCompanyAccess])
     def active_hotspot_users(self, request, pk=None):
         """Get currently connected hotspot users"""
@@ -751,7 +655,7 @@ mute 20
         except Exception as e:
             logger.error(f"Failed to get active hotspot users for router {router.name}: {str(e)}")
             return Response({"error": str(e)}, status=400)
-
+    
     @action(detail=True, methods=['get'], permission_classes=[IsAuthenticated, HasCompanyAccess])
     def active_pppoe_sessions(self, request, pk=None):
         """Get active PPPoE sessions"""
@@ -769,7 +673,7 @@ mute 20
         except Exception as e:
             logger.error(f"Failed to get active PPPoE sessions for router {router.name}: {str(e)}")
             return Response({"error": str(e)}, status=400)
-
+    
     @action(detail=True, methods=['get'], permission_classes=[IsAuthenticated, HasCompanyAccess])
     def hotspot_users(self, request, pk=None):
         """Get all hotspot users"""
@@ -787,7 +691,7 @@ mute 20
         except Exception as e:
             logger.error(f"Failed to get hotspot users for router {router.name}: {str(e)}")
             return Response({"error": str(e)}, status=400)
-
+    
     @action(detail=True, methods=['get'], permission_classes=[IsAuthenticated, HasCompanyAccess])
     def hotspot_user_stats(self, request, pk=None):
         """Get hotspot user active session stats"""
@@ -810,7 +714,7 @@ mute 20
         except Exception as e:
             logger.error(f"Failed to get hotspot user stats for router {router.name}: {str(e)}")
             return Response({"error": str(e)}, status=400)
-
+    
     @action(detail=True, methods=['get'], permission_classes=[IsAuthenticated, HasCompanyAccess])
     def pppoe_users(self, request, pk=None):
         """Get all PPPoE users"""
@@ -828,7 +732,7 @@ mute 20
         except Exception as e:
             logger.error(f"Failed to get PPPoE users for router {router.name}: {str(e)}")
             return Response({"error": str(e)}, status=400)
-
+    
     @action(detail=True, methods=['get'], permission_classes=[IsAuthenticated, HasCompanyAccess])
     def pppoe_user_stats(self, request, pk=None):
         """Get PPPoE user active session stats"""
@@ -851,11 +755,10 @@ mute 20
         except Exception as e:
             logger.error(f"Failed to get PPPoE user stats for router {router.name}: {str(e)}")
             return Response({"error": str(e)}, status=400)
-
+    
     # ────────────────────────────────────────────────────────────────
     # MIKROTIK API ENDPOINTS - USER MANAGEMENT
     # ────────────────────────────────────────────────────────────────
-
     @action(detail=True, methods=['post'], permission_classes=[IsAuthenticated, HasCompanyAccess])
     def create_hotspot_user(self, request, pk=None):
         """Create hotspot user"""
@@ -891,7 +794,7 @@ mute 20
         except Exception as e:
             logger.error(f"Failed to create hotspot user for router {router.name}: {str(e)}")
             return Response({"error": str(e)}, status=400)
-
+    
     @action(detail=True, methods=['post'], permission_classes=[IsAuthenticated, HasCompanyAccess])
     def create_pppoe_user(self, request, pk=None):
         """Create PPPoE user"""
@@ -927,7 +830,7 @@ mute 20
         except Exception as e:
             logger.error(f"Failed to create PPPoE user for router {router.name}: {str(e)}")
             return Response({"error": str(e)}, status=400)
-
+    
     @action(detail=True, methods=['post'], permission_classes=[IsAuthenticated, HasCompanyAccess])
     def enable_hotspot_user(self, request, pk=None):
         """Enable hotspot user"""
@@ -959,7 +862,7 @@ mute 20
         except Exception as e:
             logger.error(f"Failed to enable hotspot user for router {router.name}: {str(e)}")
             return Response({"error": str(e)}, status=400)
-
+    
     @action(detail=True, methods=['post'], permission_classes=[IsAuthenticated, HasCompanyAccess])
     def disable_hotspot_user(self, request, pk=None):
         """Disable hotspot user"""
@@ -991,11 +894,10 @@ mute 20
         except Exception as e:
             logger.error(f"Failed to disable hotspot user for router {router.name}: {str(e)}")
             return Response({"error": str(e)}, status=400)
-
+    
     # ────────────────────────────────────────────────────────────────
     # MIKROTIK API ENDPOINTS - FIREWALL & QUEUES
     # ────────────────────────────────────────────────────────────────
-
     @action(detail=True, methods=['get'], permission_classes=[IsAuthenticated, HasCompanyAccess])
     def firewall_filter_rules(self, request, pk=None):
         """Get all firewall filter rules"""
@@ -1013,7 +915,7 @@ mute 20
         except Exception as e:
             logger.error(f"Failed to get firewall rules for router {router.name}: {str(e)}")
             return Response({"error": str(e)}, status=400)
-
+    
     @action(detail=True, methods=['get'], permission_classes=[IsAuthenticated, HasCompanyAccess])
     def queues(self, request, pk=None):
         """Get all queues"""
@@ -1031,7 +933,7 @@ mute 20
         except Exception as e:
             logger.error(f"Failed to get queues for router {router.name}: {str(e)}")
             return Response({"error": str(e)}, status=400)
-
+    
     @action(detail=True, methods=['post'], permission_classes=[IsAuthenticated, HasCompanyAccess])
     def add_simple_queue(self, request, pk=None):
         """Add a simple queue for rate limiting"""
@@ -1065,7 +967,7 @@ mute 20
         except Exception as e:
             logger.error(f"Failed to add queue for router {router.name}: {str(e)}")
             return Response({"error": str(e)}, status=400)
-
+    
     @action(detail=True, methods=['post'], permission_classes=[IsAuthenticated, HasCompanyAccess])
     def create_queue(self, request, pk=None):
         """Create queue"""
@@ -1101,7 +1003,7 @@ mute 20
         except Exception as e:
             logger.error(f"Failed to create queue for router {router.name}: {str(e)}")
             return Response({"error": str(e)}, status=400)
-
+    
     @action(detail=True, methods=['post'], permission_classes=[IsAuthenticated, HasCompanyAccess])
     def enable_queue(self, request, pk=None):
         """Enable queue"""
@@ -1133,7 +1035,7 @@ mute 20
         except Exception as e:
             logger.error(f"Failed to enable queue for router {router.name}: {str(e)}")
             return Response({"error": str(e)}, status=400)
-
+    
     @action(detail=True, methods=['post'], permission_classes=[IsAuthenticated, HasCompanyAccess])
     def disable_queue(self, request, pk=None):
         """Disable queue"""
@@ -1165,7 +1067,7 @@ mute 20
         except Exception as e:
             logger.error(f"Failed to disable queue for router {router.name}: {str(e)}")
             return Response({"error": str(e)}, status=400)
-
+    
     @action(detail=True, methods=['post'], permission_classes=[IsAuthenticated, HasCompanyAccess])
     def add_firewall_rule(self, request, pk=None):
         """Add firewall rule"""
@@ -1203,11 +1105,10 @@ mute 20
         except Exception as e:
             logger.error(f"Failed to add firewall rule for router {router.name}: {str(e)}")
             return Response({"error": str(e)}, status=400)
-
+    
     # ────────────────────────────────────────────────────────────────
     # MIKROTIK API ENDPOINTS - INTERFACE MANAGEMENT
     # ────────────────────────────────────────────────────────────────
-
     @action(detail=True, methods=['get'], permission_classes=[IsAuthenticated, HasCompanyAccess])
     def interfaces(self, request, pk=None):
         """Get all interfaces"""
@@ -1225,7 +1126,7 @@ mute 20
         except Exception as e:
             logger.error(f"Failed to get interfaces for router {router.name}: {str(e)}")
             return Response({"error": str(e)}, status=400)
-
+    
     @action(detail=True, methods=['post'], permission_classes=[IsAuthenticated, HasCompanyAccess])
     def enable_interface(self, request, pk=None):
         """Enable interface"""
@@ -1257,7 +1158,7 @@ mute 20
         except Exception as e:
             logger.error(f"Failed to enable interface for router {router.name}: {str(e)}")
             return Response({"error": str(e)}, status=400)
-
+    
     @action(detail=True, methods=['post'], permission_classes=[IsAuthenticated, HasCompanyAccess])
     def disable_interface(self, request, pk=None):
         """Disable interface"""
@@ -1289,7 +1190,7 @@ mute 20
         except Exception as e:
             logger.error(f"Failed to disable interface for router {router.name}: {str(e)}")
             return Response({"error": str(e)}, status=400)
-
+    
     @action(detail=True, methods=['get'], permission_classes=[IsAuthenticated, HasCompanyAccess])
     def interface_traffic(self, request, pk=None):
         """Get traffic statistics for specific interface"""
@@ -1312,11 +1213,10 @@ mute 20
         except Exception as e:
             logger.error(f"Failed to get interface traffic for router {router.name}: {str(e)}")
             return Response({"error": str(e)}, status=400)
-
+    
     # ────────────────────────────────────────────────────────────────
     # MIKROTIK API ENDPOINTS - DHCP MANAGEMENT
     # ────────────────────────────────────────────────────────────────
-
     @action(detail=True, methods=['get'], permission_classes=[IsAuthenticated, HasCompanyAccess])
     def dhcp_leases(self, request, pk=None):
         """Get DHCP leases"""
@@ -1334,11 +1234,10 @@ mute 20
         except Exception as e:
             logger.error(f"Failed to get DHCP leases for router {router.name}: {str(e)}")
             return Response({"error": str(e)}, status=400)
-
+    
     # ────────────────────────────────────────────────────────────────
     # MIKROTIK API ENDPOINTS - DIAGNOSTICS
     # ────────────────────────────────────────────────────────────────
-
     @action(detail=True, methods=['post'], permission_classes=[IsAuthenticated, HasCompanyAccess])
     def ping(self, request, pk=None):
         """Run ping from router"""
@@ -1359,7 +1258,7 @@ mute 20
         except Exception as e:
             logger.error(f"Failed to ping from router {router.name}: {str(e)}")
             return Response({"error": str(e)}, status=400)
-
+    
     @action(detail=True, methods=['post'], permission_classes=[IsAuthenticated, HasCompanyAccess])
     def traceroute(self, request, pk=None):
         """Run traceroute from router"""
@@ -1379,7 +1278,7 @@ mute 20
         except Exception as e:
             logger.error(f"Failed to run traceroute from router {router.name}: {str(e)}")
             return Response({"error": str(e)}, status=400)
-
+    
     @action(detail=True, methods=['get'], permission_classes=[IsAuthenticated, HasCompanyAccess])
     def system_logs(self, request, pk=None):
         """Get system logs"""
@@ -1404,7 +1303,7 @@ mute 20
         except Exception as e:
             logger.error(f"Failed to get system logs for router {router.name}: {str(e)}")
             return Response({"error": str(e)}, status=400)
-
+    
     @action(detail=True, methods=['get'], permission_classes=[IsAuthenticated, HasCompanyAccess])
     def wireless_interfaces(self, request, pk=None):
         """Get wireless interface information"""
@@ -1422,7 +1321,7 @@ mute 20
         except Exception as e:
             logger.error(f"Failed to get wireless interfaces for router {router.name}: {str(e)}")
             return Response({"error": str(e)}, status=400)
-
+    
     @action(detail=True, methods=['get'], permission_classes=[IsAuthenticated, HasCompanyAccess])
     def wireless_registrations(self, request, pk=None):
         """Get wireless client registrations"""
@@ -1440,11 +1339,10 @@ mute 20
         except Exception as e:
             logger.error(f"Failed to get wireless registrations for router {router.name}: {str(e)}")
             return Response({"error": str(e)}, status=400)
-
+    
     # ────────────────────────────────────────────────────────────────
     # EXISTING ENDPOINTS (from your original code)
     # ────────────────────────────────────────────────────────────────
-
     @action(detail=False, methods=['get'])
     def dashboard_stats(self, request):
         qs = self.get_queryset()
@@ -1479,14 +1377,14 @@ mute 20
         })
         
         return Response(stats)
-
+    
     @action(detail=True, methods=['get'])
     def events(self, request, pk=None):
         router = self.get_object()
         events = router.events.all().order_by('-created_at')[:50]  # Limit to 50 events
         serializer = RouterEventSerializer(events, many=True)
         return Response(serializer.data)
-
+    
     @action(detail=True, methods=['get'])
     def users(self, request, pk=None):
         router = self.get_object()
@@ -1506,7 +1404,7 @@ mute 20
                 "total": 0,
                 "error": "Could not retrieve user counts"
             })
-
+    
     @action(detail=True, methods=['post'])
     def test_connection(self, request, pk=None):
         router = self.get_object()
@@ -1531,21 +1429,18 @@ mute 20
             return Response({"error": "Router hostname cannot be resolved"}, status=400)
         except Exception as e:
             return Response({"error": f"Connection failed: {str(e)}"}, status=400)
-
+    
     @action(detail=True, methods=['post'])
     def reboot(self, request, pk=None):
         router = self.get_object()
         if router.router_type != 'mikrotik':
             return Response({"error": "Reboot only supported for Mikrotik routers"}, status=400)
         
-        # Check if API credentials are set
         if not router.api_username or not router.api_password:
             return Response({"error": "API credentials not configured for this router"}, status=400)
         
         try:
-            # Import MikrotikAPI locally to avoid circular imports
-            from apps.network.integrations.mikrotik_api import MikrotikAPI
-            api = MikrotikAPI(router)
+            api = mikrotik_api_module.MikrotikAPI(router)
             if not api.connect():
                 raise Exception("Failed to connect to router")
             
@@ -1553,8 +1448,8 @@ mute 20
             api.disconnect()
             
             RouterEvent.objects.create(
-                router=router, 
-                event_type='reboot', 
+                router=router,
+                event_type='reboot',
                 message="Reboot command sent via API"
             )
             
@@ -1562,7 +1457,7 @@ mute 20
         except Exception as e:
             logger.error(f"Router {router.name} reboot failed: {str(e)}")
             return Response({"error": str(e)}, status=400)
-
+    
     @action(detail=True, methods=['post'])
     def maintenance(self, request, pk=None):
         router = self.get_object()
@@ -1572,26 +1467,24 @@ mute 20
         router.save(update_fields=['status'])
         
         RouterEvent.objects.create(
-            router=router, 
-            event_type='maintenance', 
+            router=router,
+            event_type='maintenance',
             message=f"Status changed from {old_status} to {new_status}"
         )
         
         return Response({"status": "success", "new_status": new_status})
-
+    
     @action(detail=True, methods=['post'])
     def sync_users(self, request, pk=None):
         router = self.get_object()
         if router.router_type != 'mikrotik':
             return Response({"error": "User sync only supported for Mikrotik"}, status=400)
         
-        # Check if API credentials are set
         if not router.api_username or not router.api_password:
             return Response({"error": "API credentials not configured for this router"}, status=400)
         
         try:
-            from apps.network.integrations.mikrotik_api import MikrotikAPI
-            api = MikrotikAPI(router)
+            api = mikrotik_api_module.MikrotikAPI(router)
             if not api.connect():
                 raise Exception("Failed to connect to router")
             
@@ -1619,20 +1512,18 @@ mute 20
         except Exception as e:
             logger.error(f"User sync failed for {router.name}: {str(e)}")
             return Response({"error": str(e)}, status=400)
-
+    
     @action(detail=True, methods=['post'])
     def backup(self, request, pk=None):
         router = self.get_object()
         if router.router_type != 'mikrotik':
             return Response({"error": "Backup only supported for Mikrotik"}, status=400)
         
-        # Check if API credentials are set
         if not router.api_username or not router.api_password:
             return Response({"error": "API credentials not configured for this router"}, status=400)
         
         try:
-            from apps.network.integrations.mikrotik_api import MikrotikAPI
-            api = MikrotikAPI(router)
+            api = mikrotik_api_module.MikrotikAPI(router)
             if not api.connect():
                 raise Exception("Failed to connect")
             
@@ -1640,8 +1531,8 @@ mute 20
             api.disconnect()
             
             RouterEvent.objects.create(
-                router=router, 
-                event_type='config_change', 
+                router=router,
+                event_type='config_change',
                 message="Configuration backup created"
             )
             
@@ -1649,7 +1540,7 @@ mute 20
         except Exception as e:
             logger.error(f"Backup failed for {router.name}: {str(e)}")
             return Response({"error": str(e)}, status=400)
-
+    
     @action(detail=True, methods=['post'])
     def regenerate_auth_key(self, request, pk=None):
         router = self.get_object()
@@ -1660,107 +1551,63 @@ mute 20
         router.save(update_fields=['auth_key', 'is_authenticated', 'authenticated_at'])
         
         RouterEvent.objects.create(
-            router=router, 
-            event_type='auth_key_regen', 
+            router=router,
+            event_type='auth_key_regen',
             message="Authentication key regenerated"
         )
         
         return Response({"status": "success", "new_auth_key": router.auth_key})
-    
+   
     @action(detail=True, methods=['get'], url_path='script', permission_classes=[AllowAny])
     def script(self, request, pk=None):
         """Public endpoint for router to download script"""
-        
-        # IDENTICAL SCHEMA LOGIC AS ABOVE
-        from django.db import connection
-        connection.set_schema_to_public()
-        
-        from apps.core.models import Tenant
-        from apps.network.models.router_models import Router
-        
-        tenants = Tenant.objects.filter(is_active=True)
-        router = None
-        
-        for tenant in tenants:
-            try:
-                connection.set_tenant(tenant)
-                try:
-                    router = Router.objects.filter(id=pk).first()
-                    if router:
-                        break
-                except Exception:
-                    continue
-            except Exception:
-                continue
+        router, tenant = find_router_across_tenants(router_id=pk)
         
         if not router:
-            connection.set_schema_to_public()
             return Response({"error": "Router not found"}, status=404)
+        
+        # Switch to tenant schema
+        from django.db import connection
+        connection.set_tenant(tenant)
         
         # Generate simple script using single generator
         generator = MikrotikScriptGenerator(router)
         one_liner = generator.generate_one_liner()
         
+        # Switch back to public
         connection.set_schema_to_public()
         
         response = HttpResponse(one_liner, content_type='text/plain')
-        response['Content-Disposition'] = f'attachment; filename="yourisp-{router.id}.rsc"'
+        response['Content-Disposition'] = f'attachment; filename="netily-{router.id}.rsc"'
         return response
-    
+   
     @action(detail=True, methods=['get'], url_path='config', permission_classes=[AllowAny])
     def config_script(self, request, pk=None):
         """Public endpoint for router to download configuration script"""
+        router, tenant = find_router_across_tenants(router_id=pk)
         
-        # STEP 1: Start in PUBLIC schema to find tenant
-        from django.db import connection
-        connection.set_schema_to_public()
-        
-        from apps.core.models import Tenant, Domain
-        from apps.network.models.router_models import Router
-        
-        # STEP 2: Find tenant by router ID (search across ALL tenants)
-        tenants = Tenant.objects.filter(is_active=True)
-        router = None
-        
-        for tenant in tenants:
-            try:
-                # Switch to THIS tenant's schema
-                connection.set_tenant(tenant)
-                
-                # Try to find router in this tenant
-                try:
-                    router = Router.objects.filter(id=pk).first()
-                    if router:
-                        break  # Found it!
-                except Exception:
-                    continue  # Router table missing in this tenant, try next
-                    
-            except Exception as e:
-                print(f"DEBUG: Error checking tenant {tenant.subdomain}: {e}")
-                continue
-        
-        # STEP 3: If no router found, 404
         if not router:
-            connection.set_schema_to_public()
             return Response({"error": "Router not found or access denied"}, status=404)
         
-        # STEP 4: Verify auth_key
+        # Verify auth_key
         auth_key = request.query_params.get('auth_key')
         if not auth_key or auth_key != router.auth_key:
-            connection.set_schema_to_public()
             return Response({"error": "Invalid auth key"}, status=401)
         
-        # STEP 5: Generate config using single generator
+        # Switch to tenant schema
+        from django.db import connection
+        connection.set_tenant(tenant)
+        
+        # Generate config using single generator
         generator = MikrotikScriptGenerator(router)
         script_content = generator.generate_full_script()
         
-        # STEP 6: Switch back to public BEFORE response
+        # Switch back to public
         connection.set_schema_to_public()
-
         response = HttpResponse(script_content, content_type='text/plain')
-        response['Content-Disposition'] = f'attachment; filename="yourisp-config-{router.id}.rsc"'
+        response['Content-Disposition'] = f'attachment; filename="netily-config-{router.id}.rsc"'
         return response
-    
+   
     @action(detail=True, methods=['get'], url_path='auth-key')
     def auth_key(self, request, pk=None):
         router = self.get_object()
@@ -1790,229 +1637,40 @@ mute 20
             }
         })
 
-
-class RouterAuthenticateView(APIView):
-    """Public endpoint for routers to authenticate"""
-    permission_classes = [AllowAny]
-    
-    def post(self, request):
-        try:
-            data = request.data
-            
-            # Get auth_key
-            auth_key = data.get('auth_key')
-            if not auth_key:
-                return Response({"error": "Missing auth_key"}, status=400)
-            
-            # IMPORTANT: We need to search across ALL tenant schemas
-            # First, switch to public schema
-            from django.db import connection
-            connection.set_schema_to_public()
-            
-            # Get all tenants - IMPORT DIRECTLY FROM YOUR CORE MODELS
-            from apps.core.models import Tenant  # Import from your app
-            tenants = Tenant.objects.all()
-            
-            found_router = None
-            found_tenant = None
-            
-            # Search through each tenant's schema
-            for tenant in tenants:
-                try:
-                    # Switch to tenant schema
-                    connection.set_tenant(tenant)
-                    
-                    # Try to find router in this tenant's schema
-                    from apps.network.models.router_models import Router
-                    router = Router.objects.filter(auth_key=auth_key).first()
-                    
-                    if router:
-                        found_router = router
-                        found_tenant = tenant
-                        break
-                except Exception as e:
-                    logger.warning(f"Error searching in tenant {tenant.schema_name}: {str(e)}")
-                    continue
-            
-            if not found_router:
-                # Switch back to public schema
-                connection.set_schema_to_public()
-                return Response({"error": "Invalid authentication key"}, status=404)
-            
-            # Get IP address
-            x_forwarded_for = request.META.get('HTTP_X_FORWARDED_FOR', '')
-            if x_forwarded_for:
-                ip = x_forwarded_for.split(',')[0].strip()
-            else:
-                ip = request.META.get('REMOTE_ADDR', 'Unknown')
-            
-            # Update router (we're already in the correct tenant schema)
-            found_router.ip_address = ip
-            found_router.mac_address = data.get('mac', 'Unknown')
-            found_router.firmware_version = data.get('version', 'Unknown')
-            found_router.model = data.get('model', 'Unknown')
-            found_router.is_authenticated = True
-            found_router.authenticated_at = timezone.now()
-            found_router.status = "online"
-            found_router.last_seen = timezone.now()
-            found_router.save()
-            
-            # Create event
-            from apps.network.models.router_models import RouterEvent
-            RouterEvent.objects.create(
-                router=found_router,
-                event_type="auth_success",
-                message=f"Router authenticated from {ip}",
-                details={
-                    'ip': ip,
-                    'mac': data.get('mac'),
-                    'model': data.get('model'),
-                    'version': data.get('version'),
-                }
-            )
-            
-            # Switch back to public schema for response
-            connection.set_schema_to_public()
-            
-            return Response({
-                "status": "success",
-                "message": "Router authenticated successfully",
-                "router_id": found_router.id,
-                "router_name": found_router.name,
-                "tenant": found_tenant.subdomain if found_tenant else None,
-                "config_endpoints": {
-                    "one_liner": f"/api/v1/network/routers/{found_router.id}/one-liner/?auth_key={auth_key}",
-                    "full_config": f"/api/v1/network/routers/{found_router.id}/full-config/?auth_key={auth_key}",
-                    "lipa_style": f"/api/v1/network/routers/{found_router.id}/lipa-style/?auth_key={auth_key}",
-                }
-            })
-            
-        except Exception as e:
-            logger.error(f"Router authentication error: {str(e)}")
-            # Ensure we're back in public schema on error
-            try:
-                from django.db import connection
-                connection.set_schema_to_public()
-            except:
-                pass
-            return Response({"error": "Internal server error"}, status=500)
-
-
-class RouterHeartbeatView(APIView):
-    """Public endpoint for router heartbeats"""
-    permission_classes = [AllowAny]
-    
-    def post(self, request):
-        try:
-            data = request.data
-            auth_key = data.get('auth_key') or data.get('key')
-            
-            if not auth_key:
-                return Response({"error": "Missing auth_key"}, status=400)
-            
-            from django.db import connection
-            connection.set_schema_to_public()
-            
-            from apps.core.models import Tenant
-            tenants = Tenant.objects.all()
-            
-            found_router = None
-            current_tenant = None
-            
-            for tenant in tenants:
-                try:
-                    connection.set_tenant(tenant)
-                    
-                    from apps.network.models.router_models import Router
-                    router = Router.objects.filter(auth_key=auth_key).first()
-                    
-                    if router:
-                        found_router = router
-                        current_tenant = tenant
-                        break
-                except Exception as e:
-                    logger.warning(f"Error searching in tenant {tenant.schema_name}: {str(e)}")
-                    continue
-            
-            if not found_router:
-                connection.set_schema_to_public()
-                return Response({"error": "Invalid key"}, status=404)
-            
-            # Update heartbeat
-            found_router.last_seen = timezone.now()
-            found_router.status = 'online'
-            
-            # Optional: Update statistics if provided
-            if 'active_users' in data:
-                found_router.active_users = data['active_users']
-            
-            if 'total_users' in data:
-                found_router.total_users = data['total_users']
-            
-            if 'uptime' in data:
-                found_router.uptime = data['uptime']
-            
-            if 'ip' in data:
-                found_router.ip_address = data['ip']
-                found_router.save(update_fields=['last_seen', 'status', 'ip_address', 'active_users', 'total_users', 'uptime'])
-            else:
-                found_router.save(update_fields=['last_seen', 'status', 'active_users', 'total_users', 'uptime'])
-            
-            logger.debug(f"Heartbeat from router {found_router.name} (ID: {found_router.id}) in tenant {current_tenant.schema_name}")
-            
-            connection.set_schema_to_public()
-            
-            return Response({
-                "status": "ok", 
-                "router_id": found_router.id,
-                "timestamp": timezone.now().isoformat()
-            })
-            
-        except Exception as e:
-            logger.error(f"Heartbeat error: {e}")
-            try:
-                from django.db import connection
-                connection.set_schema_to_public()
-            except:
-                pass
-            return Response({"error": str(e)}, status=400)
-
-
 # ────────────────────────────────────────────────────────────────
 # ROUTER PORTS & HOTSPOT CONFIGURATION VIEWS
 # ────────────────────────────────────────────────────────────────
-
 class RouterPortsView(APIView):
     """
     GET /api/v1/network/routers/{id}/ports/
-    
+   
     List all ethernet/wireless/bridge interfaces on the router with their current usage.
     """
     permission_classes = [IsAuthenticated, HasCompanyAccess]
-    
+   
     def get(self, request, pk):
         try:
             router = Router.objects.get(pk=pk)
         except Router.DoesNotExist:
             return Response({'error': 'Router not found'}, status=status.HTTP_404_NOT_FOUND)
-        
+       
         # Check if router is reachable
         if router.status != 'online':
             return Response({
                 'error': 'Router is offline',
                 'message': 'Cannot retrieve ports from an offline router'
             }, status=status.HTTP_503_SERVICE_UNAVAILABLE)
-        
+       
         try:
             mikrotik = mikrotik_api_module.MikrotikAPI(router)
             ports = mikrotik.get_ports_with_usage()
-            
+           
             return Response({
                 'router_id': router.id,
                 'router_name': router.name,
                 'ports': ports,
             })
-        
+       
         except Exception as e:
             logger.error(f"Failed to get ports for router {pk}: {e}")
             return Response({
@@ -2020,38 +1678,37 @@ class RouterPortsView(APIView):
                 'message': str(e)
             }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
-
 class RouterHotspotConfigView(APIView):
     """
     GET /api/v1/network/routers/{id}/hotspot/config/
-    
+   
     Get current hotspot configuration from the router.
     """
     permission_classes = [IsAuthenticated, HasCompanyAccess]
-    
+   
     def get(self, request, pk):
         try:
             router = Router.objects.get(pk=pk)
         except Router.DoesNotExist:
             return Response({'error': 'Router not found'}, status=status.HTTP_404_NOT_FOUND)
-        
+       
         # Check if router is reachable
         if router.status != 'online':
             return Response({
                 'error': 'Router is offline',
                 'message': 'Cannot retrieve hotspot config from an offline router'
             }, status=status.HTTP_503_SERVICE_UNAVAILABLE)
-        
+       
         try:
             mikrotik = mikrotik_api_module.MikrotikAPI(router)
             config = mikrotik.get_hotspot_config()
-            
+           
             # Add router info
             config['router_id'] = router.id
             config['router_name'] = router.name
-            
+           
             return Response(config)
-        
+       
         except Exception as e:
             logger.error(f"Failed to get hotspot config for router {pk}: {e}")
             return Response({
@@ -2059,50 +1716,49 @@ class RouterHotspotConfigView(APIView):
                 'message': str(e)
             }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
-
 class RouterHotspotConfigureView(APIView):
     """
     POST /api/v1/network/routers/{id}/hotspot/configure/
-    
+   
     Configure hotspot on the router.
     """
     permission_classes = [IsAuthenticated, HasCompanyAccess]
-    
+   
     def post(self, request, pk):
         try:
             router = Router.objects.get(pk=pk)
         except Router.DoesNotExist:
             return Response({'error': 'Router not found'}, status=status.HTTP_404_NOT_FOUND)
-        
+       
         # Check if router is reachable
         if router.status != 'online':
             return Response({
                 'error': 'Router is offline',
                 'message': 'Cannot configure hotspot on an offline router'
             }, status=status.HTTP_503_SERVICE_UNAVAILABLE)
-        
+       
         # Validate required fields
         config = request.data
-        
+       
         if not config.get('interface'):
             return Response({
                 'error': 'Interface is required'
             }, status=status.HTTP_400_BAD_REQUEST)
-        
+       
         if not config.get('network', {}).get('network_address'):
             return Response({
                 'error': 'Network address is required'
             }, status=status.HTTP_400_BAD_REQUEST)
-        
+       
         if not config.get('network', {}).get('pool_range'):
             return Response({
                 'error': 'Pool range is required'
             }, status=status.HTTP_400_BAD_REQUEST)
-        
+       
         try:
             mikrotik = mikrotik_api_module.MikrotikAPI(router)
             result = mikrotik.configure_hotspot(config)
-            
+           
             if result.get('success'):
                 # Log the configuration event
                 RouterEvent.objects.create(
@@ -2116,12 +1772,12 @@ class RouterHotspotConfigureView(APIView):
                         'configured_by': request.user.email,
                     }
                 )
-                
+               
                 # Update router config_type if needed
                 if router.config_type != 'hotspot':
                     router.config_type = 'hotspot'
                     router.save(update_fields=['config_type'])
-                
+               
                 return Response({
                     'success': True,
                     'message': 'Hotspot configured successfully',
@@ -2133,7 +1789,7 @@ class RouterHotspotConfigureView(APIView):
                     'message': 'Hotspot configuration failed',
                     'result': result,
                 }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-        
+       
         except Exception as e:
             logger.error(f"Failed to configure hotspot for router {pk}: {e}")
             return Response({
@@ -2141,34 +1797,33 @@ class RouterHotspotConfigureView(APIView):
                 'message': str(e)
             }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
-
 class RouterHotspotDisableView(APIView):
     """
     POST /api/v1/network/routers/{id}/hotspot/disable/
-    
+   
     Disable hotspot server on the router.
     """
     permission_classes = [IsAuthenticated, HasCompanyAccess]
-    
+   
     def post(self, request, pk):
         try:
             router = Router.objects.get(pk=pk)
         except Router.DoesNotExist:
             return Response({'error': 'Router not found'}, status=status.HTTP_404_NOT_FOUND)
-        
+       
         # Check if router is reachable
         if router.status != 'online':
             return Response({
                 'error': 'Router is offline',
                 'message': 'Cannot disable hotspot on an offline router'
             }, status=status.HTTP_503_SERVICE_UNAVAILABLE)
-        
+       
         server_name = request.data.get('server_name')  # Optional
-        
+       
         try:
             mikrotik = mikrotik_api_module.MikrotikAPI(router)
             result = mikrotik.disable_hotspot(server_name)
-            
+           
             if result.get('success'):
                 # Log the event
                 RouterEvent.objects.create(
@@ -2180,7 +1835,7 @@ class RouterHotspotDisableView(APIView):
                         'disabled_by': request.user.email,
                     }
                 )
-                
+               
                 return Response({
                     'success': True,
                     'message': result.get('message', 'Hotspot disabled'),
@@ -2191,10 +1846,152 @@ class RouterHotspotDisableView(APIView):
                     'message': 'Failed to disable hotspot',
                     'error': result.get('error'),
                 }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-        
+       
         except Exception as e:
             logger.error(f"Failed to disable hotspot for router {pk}: {e}")
             return Response({
                 'error': 'Failed to disable hotspot',
                 'message': str(e)
             }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+class RouterAuthenticateView(APIView):
+    """Public endpoint for routers to authenticate"""
+    permission_classes = [AllowAny]
+   
+    def post(self, request):
+        try:
+            data = request.data
+            
+            # Get auth_key
+            auth_key = data.get('auth_key')
+            if not auth_key:
+                return Response({"error": "Missing auth_key"}, status=400)
+            
+            # Use helper to find router
+            router, tenant = find_router_across_tenants(auth_key=auth_key)
+            
+            if not router:
+                return Response({"error": "Invalid authentication key"}, status=404)
+            
+            # Switch to tenant schema
+            from django.db import connection
+            connection.set_tenant(tenant)
+            
+            # Get IP address
+            x_forwarded_for = request.META.get('HTTP_X_FORWARDED_FOR', '')
+            if x_forwarded_for:
+                ip = x_forwarded_for.split(',')[0].strip()
+            else:
+                ip = request.META.get('REMOTE_ADDR', 'Unknown')
+            
+            # Update router
+            router.ip_address = ip
+            router.mac_address = data.get('mac', 'Unknown')
+            router.firmware_version = data.get('version', 'Unknown')
+            router.model = data.get('model', 'Unknown')
+            router.is_authenticated = True
+            router.authenticated_at = timezone.now()
+            router.status = "online"
+            router.last_seen = timezone.now()
+            router.save()
+            
+            # Create event
+            RouterEvent.objects.create(
+                router=router,
+                event_type="auth_success",
+                message=f"Router authenticated from {ip}",
+                details={
+                    'ip': ip,
+                    'mac': data.get('mac'),
+                    'model': data.get('model'),
+                    'version': data.get('version'),
+                }
+            )
+            
+            # Switch back to public schema
+            connection.set_schema_to_public()
+            
+            return Response({
+                "status": "success",
+                "message": "Router authenticated successfully",
+                "router_id": router.id,
+                "router_name": router.name,
+                "tenant": tenant.subdomain if tenant else None,
+                "config_endpoints": {
+                    "one_liner": f"/api/v1/network/routers/{router.id}/one-liner/?auth_key={auth_key}",
+                    "full_config": f"/api/v1/network/routers/{router.id}/full-config/?auth_key={auth_key}",
+                    "lipa_style": f"/api/v1/network/routers/{router.id}/lipa-style/?auth_key={auth_key}",
+                }
+            })
+            
+        except Exception as e:
+            logger.error(f"Router authentication error: {str(e)}")
+            # Ensure we're back in public schema on error
+            try:
+                from django.db import connection
+                connection.set_schema_to_public()
+            except:
+                pass
+            return Response({"error": "Internal server error"}, status=500)
+
+class RouterHeartbeatView(APIView):
+    """Public endpoint for router heartbeats"""
+    permission_classes = [AllowAny]
+   
+    def post(self, request):
+        try:
+            data = request.data
+            auth_key = data.get('auth_key') or data.get('key')
+            
+            if not auth_key:
+                return Response({"error": "Missing auth_key"}, status=400)
+            
+            # Use helper to find router
+            router, tenant = find_router_across_tenants(auth_key=auth_key)
+            
+            if not router:
+                return Response({"error": "Invalid key"}, status=404)
+            
+            # Switch to tenant schema
+            from django.db import connection
+            connection.set_tenant(tenant)
+            
+            # Update heartbeat
+            router.last_seen = timezone.now()
+            router.status = 'online'
+            
+            # Optional: Update statistics if provided
+            if 'active_users' in data:
+                router.active_users = data['active_users']
+            
+            if 'total_users' in data:
+                router.total_users = data['total_users']
+            
+            if 'uptime' in data:
+                router.uptime = data['uptime']
+            
+            if 'ip' in data:
+                router.ip_address = data['ip']
+                router.save(update_fields=['last_seen', 'status', 'ip_address', 'active_users', 'total_users', 'uptime'])
+            else:
+                router.save(update_fields=['last_seen', 'status', 'active_users', 'total_users', 'uptime'])
+            
+            logger.debug(f"Heartbeat from router {router.name} (ID: {router.id}) in tenant {tenant.schema_name}")
+            
+            # Switch back to public
+            connection.set_schema_to_public()
+            
+            return Response({
+                "status": "ok",
+                "router_id": router.id,
+                "timestamp": timezone.now().isoformat()
+            })
+            
+        except Exception as e:
+            logger.error(f"Heartbeat error: {e}")
+            try:
+                from django.db import connection
+                connection.set_schema_to_public()
+            except:
+                pass
+            return Response({"error": str(e)}, status=400)
