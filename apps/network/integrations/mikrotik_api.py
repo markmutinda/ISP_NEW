@@ -1,5 +1,3 @@
-#apps/network/integrations/mikrotik_api.py
-
 from librouteros import connect
 from librouteros.query import Key
 from librouteros.exceptions import TrapError

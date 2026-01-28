@@ -1976,3 +1976,225 @@ class RouterHeartbeatView(APIView):
             except:
                 pass
             return Response({"error": str(e)}, status=400)
+
+
+# ────────────────────────────────────────────────────────────────
+# ROUTER PORTS & HOTSPOT CONFIGURATION VIEWS
+# ────────────────────────────────────────────────────────────────
+
+class RouterPortsView(APIView):
+    """
+    GET /api/v1/network/routers/{id}/ports/
+    
+    List all ethernet/wireless/bridge interfaces on the router with their current usage.
+    """
+    permission_classes = [IsAuthenticated, HasCompanyAccess]
+    
+    def get(self, request, pk):
+        try:
+            router = Router.objects.get(pk=pk)
+        except Router.DoesNotExist:
+            return Response({'error': 'Router not found'}, status=status.HTTP_404_NOT_FOUND)
+        
+        # Check if router is reachable
+        if router.status != 'online':
+            return Response({
+                'error': 'Router is offline',
+                'message': 'Cannot retrieve ports from an offline router'
+            }, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+        
+        try:
+            mikrotik = mikrotik_api_module.MikrotikAPI(router)
+            ports = mikrotik.get_ports_with_usage()
+            
+            return Response({
+                'router_id': router.id,
+                'router_name': router.name,
+                'ports': ports,
+            })
+        
+        except Exception as e:
+            logger.error(f"Failed to get ports for router {pk}: {e}")
+            return Response({
+                'error': 'Failed to retrieve ports',
+                'message': str(e)
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+class RouterHotspotConfigView(APIView):
+    """
+    GET /api/v1/network/routers/{id}/hotspot/config/
+    
+    Get current hotspot configuration from the router.
+    """
+    permission_classes = [IsAuthenticated, HasCompanyAccess]
+    
+    def get(self, request, pk):
+        try:
+            router = Router.objects.get(pk=pk)
+        except Router.DoesNotExist:
+            return Response({'error': 'Router not found'}, status=status.HTTP_404_NOT_FOUND)
+        
+        # Check if router is reachable
+        if router.status != 'online':
+            return Response({
+                'error': 'Router is offline',
+                'message': 'Cannot retrieve hotspot config from an offline router'
+            }, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+        
+        try:
+            mikrotik = mikrotik_api_module.MikrotikAPI(router)
+            config = mikrotik.get_hotspot_config()
+            
+            # Add router info
+            config['router_id'] = router.id
+            config['router_name'] = router.name
+            
+            return Response(config)
+        
+        except Exception as e:
+            logger.error(f"Failed to get hotspot config for router {pk}: {e}")
+            return Response({
+                'error': 'Failed to retrieve hotspot configuration',
+                'message': str(e)
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+class RouterHotspotConfigureView(APIView):
+    """
+    POST /api/v1/network/routers/{id}/hotspot/configure/
+    
+    Configure hotspot on the router.
+    """
+    permission_classes = [IsAuthenticated, HasCompanyAccess]
+    
+    def post(self, request, pk):
+        try:
+            router = Router.objects.get(pk=pk)
+        except Router.DoesNotExist:
+            return Response({'error': 'Router not found'}, status=status.HTTP_404_NOT_FOUND)
+        
+        # Check if router is reachable
+        if router.status != 'online':
+            return Response({
+                'error': 'Router is offline',
+                'message': 'Cannot configure hotspot on an offline router'
+            }, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+        
+        # Validate required fields
+        config = request.data
+        
+        if not config.get('interface'):
+            return Response({
+                'error': 'Interface is required'
+            }, status=status.HTTP_400_BAD_REQUEST)
+        
+        if not config.get('network', {}).get('network_address'):
+            return Response({
+                'error': 'Network address is required'
+            }, status=status.HTTP_400_BAD_REQUEST)
+        
+        if not config.get('network', {}).get('pool_range'):
+            return Response({
+                'error': 'Pool range is required'
+            }, status=status.HTTP_400_BAD_REQUEST)
+        
+        try:
+            mikrotik = mikrotik_api_module.MikrotikAPI(router)
+            result = mikrotik.configure_hotspot(config)
+            
+            if result.get('success'):
+                # Log the configuration event
+                RouterEvent.objects.create(
+                    router=router,
+                    event_type='config_change',
+                    message=f"Hotspot configured on interface {config.get('interface')}",
+                    details={
+                        'interface': config.get('interface'),
+                        'server_name': result.get('server_name'),
+                        'network': config.get('network'),
+                        'configured_by': request.user.email,
+                    }
+                )
+                
+                # Update router config_type if needed
+                if router.config_type != 'hotspot':
+                    router.config_type = 'hotspot'
+                    router.save(update_fields=['config_type'])
+                
+                return Response({
+                    'success': True,
+                    'message': 'Hotspot configured successfully',
+                    'result': result,
+                })
+            else:
+                return Response({
+                    'success': False,
+                    'message': 'Hotspot configuration failed',
+                    'result': result,
+                }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        
+        except Exception as e:
+            logger.error(f"Failed to configure hotspot for router {pk}: {e}")
+            return Response({
+                'error': 'Failed to configure hotspot',
+                'message': str(e)
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+class RouterHotspotDisableView(APIView):
+    """
+    POST /api/v1/network/routers/{id}/hotspot/disable/
+    
+    Disable hotspot server on the router.
+    """
+    permission_classes = [IsAuthenticated, HasCompanyAccess]
+    
+    def post(self, request, pk):
+        try:
+            router = Router.objects.get(pk=pk)
+        except Router.DoesNotExist:
+            return Response({'error': 'Router not found'}, status=status.HTTP_404_NOT_FOUND)
+        
+        # Check if router is reachable
+        if router.status != 'online':
+            return Response({
+                'error': 'Router is offline',
+                'message': 'Cannot disable hotspot on an offline router'
+            }, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+        
+        server_name = request.data.get('server_name')  # Optional
+        
+        try:
+            mikrotik = mikrotik_api_module.MikrotikAPI(router)
+            result = mikrotik.disable_hotspot(server_name)
+            
+            if result.get('success'):
+                # Log the event
+                RouterEvent.objects.create(
+                    router=router,
+                    event_type='config_change',
+                    message=f"Hotspot disabled{' (' + server_name + ')' if server_name else ''}",
+                    details={
+                        'server_name': server_name,
+                        'disabled_by': request.user.email,
+                    }
+                )
+                
+                return Response({
+                    'success': True,
+                    'message': result.get('message', 'Hotspot disabled'),
+                })
+            else:
+                return Response({
+                    'success': False,
+                    'message': 'Failed to disable hotspot',
+                    'error': result.get('error'),
+                }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        
+        except Exception as e:
+            logger.error(f"Failed to disable hotspot for router {pk}: {e}")
+            return Response({
+                'error': 'Failed to disable hotspot',
+                'message': str(e)
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)

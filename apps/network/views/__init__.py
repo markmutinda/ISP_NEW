@@ -34,5 +34,11 @@ __all__ = [
     'IPPoolViewSet',
     'IPAddressViewSet',
     'DHCPRangeViewSet',
+    
+    # Router Hotspot Configuration
+    'RouterPortsView',
+    'RouterHotspotConfigView',
+    'RouterHotspotConfigureView',
+    'RouterHotspotDisableView',
 ]
 
