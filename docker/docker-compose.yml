@@ -1,4 +1,4 @@
-version: '3.8'
+
 
 services:
   # ────────────────────────────────────────────────────────────────
@@ -9,13 +9,13 @@ services:
     volumes:
       - postgres_data:/var/lib/postgresql/data
     environment:
-      - POSTGRES_DB=netily_isp
-      - POSTGRES_USER=netily
-      - POSTGRES_PASSWORD=${DB_PASSWORD:-netily_secure_password}
+      - POSTGRES_DB=${DB_NAME}
+      - POSTGRES_USER=${DB_USER}
+      - POSTGRES_PASSWORD=${DB_PASSWORD}
     ports:
       - "5432:5432"
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U netily -d netily_isp"]
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER} -d ${DB_NAME}"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -139,9 +139,9 @@ services:
       # Database connection (same as Django)
       - DB_HOST=db
       - DB_PORT=5432
-      - DB_NAME=${POSTGRES_DB:-netily}
-      - DB_USER=${POSTGRES_USER:-postgres}
-      - DB_PASSWORD=${POSTGRES_PASSWORD:-postgres}
+      - DB_NAME=${DB_NAME}
+      - DB_USER=${DB_USER}
+      - DB_PASSWORD=${DB_PASSWORD}
       - RADIUS_CLIENTS=0.0.0.0/0
     entrypoint: ["/bin/bash", "/docker-entrypoint.sh"]
     depends_on:
@@ -190,3 +190,5 @@ volumes:
   media_volume:
   openvpn_data:
   openvpn_logs:
+  freeradius_data:
+  freeradius_logs:
