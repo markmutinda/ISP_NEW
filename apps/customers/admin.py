@@ -75,16 +75,16 @@ class CustomerAdmin(admin.ModelAdmin):
     )
     
     def get_queryset(self, request):
-        qs = super().get_queryset(request).select_related('user', 'company')
-        if request.user.is_superuser:
-            return qs
-        if hasattr(request.user, 'company') and request.user.company:
-            return qs.filter(company=request.user.company)
-        return qs.none()
+        # With django-tenants, the queryset is automatically scoped to the current tenant's schema
+        qs = super().get_queryset(request).select_related('user', 'created_by', 'updated_by', 'next_of_kin')
+        return qs
     
     def save_model(self, request, obj, form, change):
-        if not change:
-            obj.company = request.user.company
+        # With django-tenants, new records are automatically created in the current tenant's schema
+        if not change and request.user.is_authenticated:
+            obj.created_by = request.user
+        if request.user.is_authenticated:
+            obj.updated_by = request.user
         super().save_model(request, obj, form, change)
 
     def full_name_display(self, obj):

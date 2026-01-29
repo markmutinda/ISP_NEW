@@ -26,7 +26,7 @@ from utils.pagination import StandardResultsSetPagination
 class CustomerViewSet(viewsets.ModelViewSet):
     """ViewSet for managing customers"""
     queryset = Customer.objects.select_related(
-        'user', 'company'
+        'user', 'created_by', 'updated_by', 'next_of_kin'
     ).prefetch_related(
         'addresses', 'documents', 'services'
     ).all()
@@ -63,19 +63,13 @@ class CustomerViewSet(viewsets.ModelViewSet):
         return [permission() for permission in permission_classes]
     
     def get_queryset(self):
+        # With django-tenants, the queryset is automatically scoped to the current tenant's schema
         queryset = super().get_queryset()
         user = self.request.user
         
-        # SUPERUSERS: can see everything (with optional company filter)
-        if user.is_superuser:
-            company_id = self.request.query_params.get('company_id')
-            if company_id:
-                return queryset.filter(company_id=company_id)
+        # SUPERUSERS/STAFF: can see all customers in current tenant
+        if user.is_superuser or user.is_staff:
             return queryset
-        
-        # COMPANY USERS: can only see customers from their company
-        if hasattr(user, 'company') and user.company:
-            return queryset.filter(company=user.company)
         
         # CUSTOMERS: can only see themselves
         if hasattr(user, 'customer_profile'):
@@ -85,15 +79,12 @@ class CustomerViewSet(viewsets.ModelViewSet):
         return queryset.none()
     
     def perform_create(self, serializer):
-        """Auto-assign company when creating customers"""
+        """Create customer - tenant scoping handled by django-tenants"""
         user = self.request.user
         
-        # If company not specified, use user's company
-        if 'company' not in serializer.validated_data:
-            if hasattr(user, 'company') and user.company:
-                serializer.save(company=user.company)
-            else:
-                serializer.save()
+        # Set created_by if user is authenticated
+        if user.is_authenticated:
+            serializer.save(created_by=user)
         else:
             serializer.save()
     
