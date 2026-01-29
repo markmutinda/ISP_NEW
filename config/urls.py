@@ -68,6 +68,9 @@ api_urlpatterns = [
     # VPN app (Phase 13 - VPN & OpenVPN Management)
     path('vpn/', include('apps.vpn.urls')),
     
+    # RADIUS app (Phase 14 - RADIUS/FreeRADIUS Integration)
+    path('radius/', include('apps.radius.urls')),
+    
     # ─────────────────────────────────────────────────────────────
     # Subscriptions app (Netily Platform Subscriptions)
     # ─────────────────────────────────────────────────────────────

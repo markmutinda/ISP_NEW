@@ -118,6 +118,29 @@ services:
       - default
 
   # ────────────────────────────────────────────────────────────────
+  # FREERADIUS SERVER
+  # ────────────────────────────────────────────────────────────────
+  freeradius:
+    image: freeradius/freeradius-server:latest
+    container_name: netily-freeradius
+    ports:
+      - "1812:1812/udp"   # Authentication
+      - "1813:1813/udp"   # Accounting
+      - "18120:18120/tcp" # Status (optional)
+    volumes:
+      - freeradius_data:/etc/raddb
+      - freeradius_logs:/var/log/freeradius
+    environment:
+      - RADIUS_CLIENTS=0.0.0.0/0
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - vpn_network
+      - default
+
+  # ────────────────────────────────────────────────────────────────
   # NGINX REVERSE PROXY
   # ────────────────────────────────────────────────────────────────
   nginx:
