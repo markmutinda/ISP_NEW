@@ -1,0 +1,28 @@
+# ────────────────────────────────────────────────────────────────
+# FreeRADIUS Authorize Configuration for Netily
+# SQL-based authentication with MikroTik support
+# ────────────────────────────────────────────────────────────────
+
+# Preprocess - normalize username
+preprocess {
+    # Convert username to lowercase
+    tolower
+    
+    # Strip realm from username if present (user@domain -> user)
+    # suffix
+}
+
+# Check against SQL database (radcheck table)
+sql
+
+# Check expiration if set
+expiration
+
+# Check login time restrictions if set
+logintime
+
+# Check simultaneous use limits
+sql.simul_verify
+
+# PAP authentication
+pap

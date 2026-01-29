@@ -7,5 +7,8 @@ class RadiusConfig(AppConfig):
     verbose_name = 'RADIUS Management'
 
     def ready(self):
-        # Import signals when app is ready
-        pass
+        """Import signals when app is ready for auto-sync with RADIUS"""
+        try:
+            from . import signals  # noqa: F401
+        except ImportError:
+            pass

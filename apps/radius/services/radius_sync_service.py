@@ -563,3 +563,53 @@ class RadiusSyncService:
         
         logger.info(f"Customer sync complete: {stats}")
         return stats
+
+    def bulk_update_plan_users(self, service_plan) -> Dict[str, Any]:
+        """
+        Update all RADIUS users on a service plan when the plan changes.
+        
+        Called when bandwidth or other plan attributes are modified.
+        
+        Args:
+            service_plan: ServicePlan model instance
+            
+        Returns:
+            Dict with update statistics
+        """
+        from apps.customers.models import ServiceConnection
+        
+        # Find all active service connections on this plan
+        connections = ServiceConnection.objects.filter(
+            service_plan=service_plan,
+            status='active',
+            pppoe_username__isnull=False
+        ).exclude(pppoe_username='')
+        
+        stats = {
+            'total': connections.count(),
+            'updated': 0,
+            'errors': 0
+        }
+        
+        # Get bandwidth from plan
+        download_speed = getattr(service_plan, 'download_speed', 10)
+        upload_speed = getattr(service_plan, 'upload_speed', 5)
+        burst_download = getattr(service_plan, 'burst_download', None)
+        burst_upload = getattr(service_plan, 'burst_upload', None)
+        
+        for conn in connections:
+            try:
+                self.set_user_bandwidth(
+                    username=conn.pppoe_username,
+                    download_kbps=download_speed * 1000,  # Convert to kbps
+                    upload_kbps=upload_speed * 1000,
+                    burst_download=burst_download * 1000 if burst_download else None,
+                    burst_upload=burst_upload * 1000 if burst_upload else None
+                )
+                stats['updated'] += 1
+            except Exception as e:
+                logger.error(f"Error updating RADIUS user {conn.pppoe_username}: {e}")
+                stats['errors'] += 1
+        
+        logger.info(f"Plan update sync complete for {service_plan.name}: {stats}")
+        return stats

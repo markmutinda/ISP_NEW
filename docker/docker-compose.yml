@@ -119,6 +119,7 @@ services:
 
   # ────────────────────────────────────────────────────────────────
   # FREERADIUS SERVER
+  # Connects to PostgreSQL to share data with Django
   # ────────────────────────────────────────────────────────────────
   freeradius:
     image: freeradius/freeradius-server:latest
@@ -130,8 +131,19 @@ services:
     volumes:
       - freeradius_data:/etc/raddb
       - freeradius_logs:/var/log/freeradius
+      # Mount custom configuration
+      - ./freeradius/sql.conf:/etc/raddb-custom/sql.conf:ro
+      - ./freeradius/clients.conf:/etc/raddb-custom/clients.conf:ro
+      - ./freeradius/docker-entrypoint.sh:/docker-entrypoint.sh:ro
     environment:
+      # Database connection (same as Django)
+      - DB_HOST=db
+      - DB_PORT=5432
+      - DB_NAME=${POSTGRES_DB:-netily}
+      - DB_USER=${POSTGRES_USER:-postgres}
+      - DB_PASSWORD=${POSTGRES_PASSWORD:-postgres}
       - RADIUS_CLIENTS=0.0.0.0/0
+    entrypoint: ["/bin/bash", "/docker-entrypoint.sh"]
     depends_on:
       db:
         condition: service_healthy
