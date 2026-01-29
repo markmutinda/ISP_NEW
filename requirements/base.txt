@@ -32,3 +32,6 @@ paramiko==3.4.0           # SSH for OLT/Huawei
 librouteros==3.3.0        # Mikrotik API
 netaddr==1.2.0            # IP address manipulation
 requests==2.31.0          # HTTP requests for TR-069
+
+# VPN/Certificate Management
+cryptography==42.0.0      # Certificate generation for OpenVPN

@@ -65,6 +65,9 @@ api_urlpatterns = [
     # Messaging app (Phase 12 - SMS/Email Messaging) 
     path('messaging/', include('apps.messaging.urls')),
     
+    # VPN app (Phase 13 - VPN & OpenVPN Management)
+    path('vpn/', include('apps.vpn.urls')),
+    
     # ─────────────────────────────────────────────────────────────
     # Subscriptions app (Netily Platform Subscriptions)
     # ─────────────────────────────────────────────────────────────

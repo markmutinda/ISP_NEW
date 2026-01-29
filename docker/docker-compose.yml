@@ -1,33 +1,157 @@
 version: '3.8'
 
 services:
-  # ... other services
-  
-  celery-worker:
-    build: .
-    command: celery -A config worker -l info
+  # ────────────────────────────────────────────────────────────────
+  # DATABASE
+  # ────────────────────────────────────────────────────────────────
+  db:
+    image: postgres:15-alpine
     volumes:
-      - .:/app
+      - postgres_data:/var/lib/postgresql/data
     environment:
-      - DJANGO_SETTINGS_MODULE=config.settings.production
-      - REDIS_URL=redis://redis:6379/0
-    depends_on:
-      - redis
-      - db
-  
-  celery-beat:
-    build: .
-    command: celery -A config beat -l info
-    volumes:
-      - .:/app
-    environment:
-      - DJANGO_SETTINGS_MODULE=config.settings.production
-      - REDIS_URL=redis://redis:6379/0
-    depends_on:
-      - redis
-      - db
-  
+      - POSTGRES_DB=netily_isp
+      - POSTGRES_USER=netily
+      - POSTGRES_PASSWORD=${DB_PASSWORD:-netily_secure_password}
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U netily -d netily_isp"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ────────────────────────────────────────────────────────────────
+  # REDIS
+  # ────────────────────────────────────────────────────────────────
   redis:
     image: redis:7-alpine
     ports:
       - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ────────────────────────────────────────────────────────────────
+  # DJANGO WEB APPLICATION
+  # ────────────────────────────────────────────────────────────────
+  web:
+    build: .
+    command: gunicorn config.wsgi:application --bind 0.0.0.0:8000 --workers 4
+    volumes:
+      - .:/app
+      - static_volume:/app/static
+      - media_volume:/app/media
+    environment:
+      - DJANGO_SETTINGS_MODULE=config.settings.production
+      - REDIS_URL=redis://redis:6379/0
+      - DATABASE_URL=postgres://netily:${DB_PASSWORD:-netily_secure_password}@db:5432/netily_isp
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    ports:
+      - "8000:8000"
+
+  # ────────────────────────────────────────────────────────────────
+  # CELERY WORKER
+  # ────────────────────────────────────────────────────────────────
+  celery-worker:
+    build: .
+    command: celery -A config worker -l info --concurrency=4
+    volumes:
+      - .:/app
+    environment:
+      - DJANGO_SETTINGS_MODULE=config.settings.production
+      - REDIS_URL=redis://redis:6379/0
+      - DATABASE_URL=postgres://netily:${DB_PASSWORD:-netily_secure_password}@db:5432/netily_isp
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  # ────────────────────────────────────────────────────────────────
+  # CELERY BEAT SCHEDULER
+  # ────────────────────────────────────────────────────────────────
+  celery-beat:
+    build: .
+    command: celery -A config beat -l info --scheduler django_celery_beat.schedulers:DatabaseScheduler
+    volumes:
+      - .:/app
+    environment:
+      - DJANGO_SETTINGS_MODULE=config.settings.production
+      - REDIS_URL=redis://redis:6379/0
+      - DATABASE_URL=postgres://netily:${DB_PASSWORD:-netily_secure_password}@db:5432/netily_isp
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  # ────────────────────────────────────────────────────────────────
+  # OPENVPN SERVER
+  # ────────────────────────────────────────────────────────────────
+  openvpn:
+    image: kylemanna/openvpn:latest
+    container_name: netily-openvpn
+    cap_add:
+      - NET_ADMIN
+    ports:
+      - "1194:1194/udp"
+      - "1194:1194/tcp"
+      - "7505:7505"  # Management interface
+    volumes:
+      - openvpn_data:/etc/openvpn
+      - openvpn_logs:/var/log/openvpn
+    environment:
+      - OPENVPN_OPTS=--management localhost 7505
+    restart: unless-stopped
+    sysctls:
+      - net.ipv4.ip_forward=1
+    networks:
+      - vpn_network
+      - default
+
+  # ────────────────────────────────────────────────────────────────
+  # NGINX REVERSE PROXY
+  # ────────────────────────────────────────────────────────────────
+  nginx:
+    image: nginx:alpine
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - static_volume:/app/static:ro
+      - media_volume:/app/media:ro
+      - ./nginx/certs:/etc/nginx/certs:ro
+    depends_on:
+      - web
+
+# ────────────────────────────────────────────────────────────────
+# NETWORKS
+# ────────────────────────────────────────────────────────────────
+networks:
+  default:
+    driver: bridge
+  vpn_network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 10.8.0.0/24
+
+# ────────────────────────────────────────────────────────────────
+# VOLUMES
+# ────────────────────────────────────────────────────────────────
+volumes:
+  postgres_data:
+  redis_data:
+  static_volume:
+  media_volume:
+  openvpn_data:
+  openvpn_logs:

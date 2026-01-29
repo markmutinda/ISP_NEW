@@ -79,6 +79,7 @@ TENANT_APPS = (
     'apps.inventory',
     'apps.notifications',
     'apps.bandwidth',
+    'apps.vpn',                        # VPN/OpenVPN Management
 )
 
 # ────────────────────────────────────────────────────────────────

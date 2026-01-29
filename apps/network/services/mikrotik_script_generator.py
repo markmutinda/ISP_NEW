@@ -130,12 +130,12 @@ class MikrotikScriptGenerator:
 # =========================================================
 :put "Installing Cloud Redirector..."
 
-:global redirectHtml "<html><head><meta http-equiv=\\"refresh\\" content=\\"0;url={self.portal_url}/login?router_id={self.router.id}&mac=\$(mac)&ip=\$(ip)&u=\$(username)\\" /></head><body><p>Loading Portal...</p></body></html>"
+:global redirectHtml "<html><head><meta http-equiv=\\"refresh\\" content=\\"0;url={self.portal_url}/login?router_id={self.router.id}&mac=\\$(mac)&ip=\\$(ip)&u=\\$(username)\\" /></head><body><p>Loading Portal...</p></body></html>"
 
 # Ensure directory exists (fallback)
 :do {{ /file print file="hotspot/login.html" }} on-error={{}}
 :delay 1s
-/file set [find name="hotspot/login.html"] contents=$redirectHtml
+/file set [find name="hotspot/login.html"] contents=\\$redirectHtml
 
 :log info "Netily Configuration Complete for {self.router.name}"
 :put ">>> SUCCESS: ROUTER PROVISIONED <<<"

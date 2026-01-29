@@ -238,7 +238,7 @@ class RouterViewSet(viewsets.ModelViewSet):
         response['Content-Disposition'] = f'attachment; filename="netily-config-{router.id}.rsc"'
         return response
    
-    @action(detail=False, methods=['get'], url_path='download/script/(?P<version>\d+)/(?P<router_name>[^/]+)', permission_classes=[AllowAny])
+    @action(detail=False, methods=['get'], url_path=r'download/script/(?P<version>\d+)/(?P<router_name>[^/]+)', permission_classes=[AllowAny])
     def download_script(self, request, version=None, router_name=None):
         """Download script endpoint"""
         router, tenant = find_router_across_tenants(router_name=router_name)
