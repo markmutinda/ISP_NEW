@@ -564,52 +564,66 @@ class RadiusSyncService:
         logger.info(f"Customer sync complete: {stats}")
         return stats
 
-    def bulk_update_plan_users(self, service_plan) -> Dict[str, Any]:
+    def bulk_update_plan_users(self, plan, profile=None) -> Dict[str, Any]:
         """
-        Update all RADIUS users on a service plan when the plan changes.
+        Update all RADIUS users on a plan when the plan changes.
         
         Called when bandwidth or other plan attributes are modified.
         
         Args:
-            service_plan: ServicePlan model instance
+            plan: billing.Plan model instance
+            profile: Optional RadiusBandwidthProfile to use
             
         Returns:
             Dict with update statistics
         """
-        from apps.customers.models import ServiceConnection
+        from apps.radius.models import RadCheck
         
         # Find all active service connections on this plan
-        connections = ServiceConnection.objects.filter(
-            service_plan=service_plan,
-            status='active',
-            pppoe_username__isnull=False
-        ).exclude(pppoe_username='')
+        # ServiceConnection uses 'plan' FK to billing.Plan with related_name='service_connections'
+        connections = plan.service_connections.filter(
+            status='ACTIVE'
+        )
+        
+        # Get all customer IDs from these connections
+        customer_ids = connections.values_list('customer_id', flat=True).distinct()
+        
+        # Get all RADIUS usernames for these customers
+        usernames = RadCheck.objects.filter(
+            customer_id__in=customer_ids,
+            attribute='Cleartext-Password'
+        ).values_list('username', flat=True).distinct()
         
         stats = {
-            'total': connections.count(),
+            'total': len(usernames),
             'updated': 0,
             'errors': 0
         }
         
-        # Get bandwidth from plan
-        download_speed = getattr(service_plan, 'download_speed', 10)
-        upload_speed = getattr(service_plan, 'upload_speed', 5)
-        burst_download = getattr(service_plan, 'burst_download', None)
-        burst_upload = getattr(service_plan, 'burst_upload', None)
+        if not usernames:
+            logger.info(f"No RADIUS users found for plan {plan.name}")
+            return stats
         
-        for conn in connections:
+        # Get bandwidth from plan (in Mbps) and convert to kbps
+        download_kbps = (plan.download_speed or 10) * 1000
+        upload_kbps = (plan.upload_speed or 5) * 1000
+        
+        # Use profile if provided, otherwise use plan values
+        if profile:
+            download_kbps = profile.download_speed
+            upload_kbps = profile.upload_speed
+        
+        for username in usernames:
             try:
                 self.set_user_bandwidth(
-                    username=conn.pppoe_username,
-                    download_kbps=download_speed * 1000,  # Convert to kbps
-                    upload_kbps=upload_speed * 1000,
-                    burst_download=burst_download * 1000 if burst_download else None,
-                    burst_upload=burst_upload * 1000 if burst_upload else None
+                    username=username,
+                    download_kbps=download_kbps,
+                    upload_kbps=upload_kbps,
                 )
                 stats['updated'] += 1
             except Exception as e:
-                logger.error(f"Error updating RADIUS user {conn.pppoe_username}: {e}")
+                logger.error(f"Error updating RADIUS user {username}: {e}")
                 stats['errors'] += 1
         
-        logger.info(f"Plan update sync complete for {service_plan.name}: {stats}")
+        logger.info(f"Plan update sync complete for {plan.name}: {stats}")
         return stats

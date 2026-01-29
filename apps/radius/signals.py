@@ -3,14 +3,18 @@ RADIUS Signals - Auto-sync Django models to RADIUS tables
 
 This module provides automatic synchronization between Django's
 customer/router models and FreeRADIUS database tables when:
-- Customer is created/updated
 - Service connection changes
 - Router is created/updated
-- Billing status changes (suspend/resume)
+- Customer status changes (suspend/resume)
+- Plan is updated (bandwidth changes)
+
+Note: The ServiceConnection model doesn't have pppoe_username/password fields.
+RADIUS users are created through the RadiusSyncService directly when 
+setting up PPPoE/RADIUS authentication for customers.
 """
 
 import logging
-from django.db.models.signals import post_save, post_delete, pre_save
+from django.db.models.signals import post_save, post_delete
 from django.dispatch import receiver
 
 logger = logging.getLogger(__name__)
@@ -20,74 +24,6 @@ def get_radius_sync_service():
     """Lazy import to avoid circular imports"""
     from .services.radius_sync_service import RadiusSyncService
     return RadiusSyncService()
-
-
-# ────────────────────────────────────────────────────────────────
-# SERVICE CONNECTION SIGNALS
-# ────────────────────────────────────────────────────────────────
-
-@receiver(post_save, sender='customers.ServiceConnection')
-def sync_service_connection_to_radius(sender, instance, created, **kwargs):
-    """
-    Sync service connection to RADIUS when created or updated.
-    
-    Triggers when:
-    - New PPPoE service is activated
-    - Service plan changes (bandwidth update)
-    - Service status changes (active/suspended)
-    """
-    try:
-        # Only sync if connection has PPPoE credentials
-        if not instance.pppoe_username:
-            return
-        
-        service = get_radius_sync_service()
-        
-        if instance.status == 'active':
-            # Get bandwidth profile from service plan
-            profile = None
-            if instance.service_plan:
-                from .models import RadiusBandwidthProfile
-                profile = RadiusBandwidthProfile.objects.filter(
-                    service_plan=instance.service_plan
-                ).first()
-            
-            # Create or update RADIUS user
-            result = service.create_radius_user(
-                username=instance.pppoe_username,
-                password=instance.pppoe_password,
-                customer=instance.customer,
-                profile=profile
-            )
-            logger.info(f"Synced service connection to RADIUS: {result}")
-            
-        elif instance.status == 'suspended':
-            # Disable user in RADIUS
-            service.disable_radius_user(instance.pppoe_username)
-            logger.info(f"Disabled RADIUS user: {instance.pppoe_username}")
-            
-        elif instance.status == 'terminated':
-            # Remove user from RADIUS
-            service.delete_radius_user(instance.pppoe_username)
-            logger.info(f"Removed RADIUS user: {instance.pppoe_username}")
-            
-    except Exception as e:
-        logger.error(f"Failed to sync service connection to RADIUS: {e}")
-
-
-@receiver(post_delete, sender='customers.ServiceConnection')
-def remove_service_from_radius(sender, instance, **kwargs):
-    """Remove RADIUS user when service connection is deleted"""
-    try:
-        if not instance.pppoe_username:
-            return
-        
-        service = get_radius_sync_service()
-        service.delete_radius_user(instance.pppoe_username)
-        logger.info(f"Removed RADIUS user on delete: {instance.pppoe_username}")
-        
-    except Exception as e:
-        logger.error(f"Failed to remove RADIUS user: {e}")
 
 
 # ────────────────────────────────────────────────────────────────
@@ -103,8 +39,9 @@ def sync_router_to_nas(sender, instance, created, **kwargs):
     with its shared secret.
     """
     try:
-        # Only sync if router has RADIUS enabled
-        if not getattr(instance, 'radius_enabled', True):
+        # Only sync if router has RADIUS secret configured
+        if not getattr(instance, 'radius_secret', None):
+            logger.debug(f"Router {instance.name} has no RADIUS secret, skipping NAS sync")
             return
         
         service = get_radius_sync_service()
@@ -120,21 +57,84 @@ def remove_router_from_nas(sender, instance, **kwargs):
     """Remove NAS entry when router is deleted"""
     try:
         from .models import Nas
-        Nas.objects.filter(router=instance).delete()
-        logger.info(f"Removed NAS entry for router: {instance.name}")
+        deleted, _ = Nas.objects.filter(router=instance).delete()
+        if deleted:
+            logger.info(f"Removed NAS entry for router: {instance.name}")
         
     except Exception as e:
         logger.error(f"Failed to remove NAS entry: {e}")
 
 
 # ────────────────────────────────────────────────────────────────
-# SERVICE PLAN SIGNALS
+# SERVICE CONNECTION SIGNALS
 # ────────────────────────────────────────────────────────────────
 
-@receiver(post_save, sender='billing.ServicePlan')
-def sync_service_plan_to_radius_profile(sender, instance, created, **kwargs):
+@receiver(post_save, sender='customers.ServiceConnection')
+def sync_service_connection_status(sender, instance, created, **kwargs):
     """
-    Create/update RADIUS bandwidth profile when service plan changes.
+    Sync service connection status changes to RADIUS.
+    
+    When a service is suspended/terminated, disable the corresponding
+    RADIUS user. When activated, ensure RADIUS is enabled.
+    
+    Note: RADIUS user must already exist (created via RadiusSyncService
+    when setting up the customer's PPPoE/RADIUS credentials).
+    """
+    try:
+        from .models import RadCheck
+        
+        # Find RADIUS user linked to this service connection's customer
+        customer = instance.customer
+        radius_users = RadCheck.objects.filter(
+            customer=customer,
+            attribute='Cleartext-Password'
+        ).values_list('username', flat=True).distinct()
+        
+        if not radius_users:
+            return
+        
+        service = get_radius_sync_service()
+        
+        # Status is uppercase in the model (ACTIVE, SUSPENDED, etc.)
+        status = instance.status.upper() if instance.status else ''
+        
+        if status == 'ACTIVE':
+            for username in radius_users:
+                service.enable_radius_user(username)
+            logger.info(f"Enabled RADIUS for active service: {instance.id}")
+            
+        elif status in ['SUSPENDED', 'TERMINATED']:
+            for username in radius_users:
+                service.disable_radius_user(username)
+            logger.info(f"Disabled RADIUS for {status.lower()} service: {instance.id}")
+            
+    except Exception as e:
+        logger.error(f"Failed to sync service connection to RADIUS: {e}")
+
+
+@receiver(post_delete, sender='customers.ServiceConnection')
+def handle_service_connection_delete(sender, instance, **kwargs):
+    """
+    Handle RADIUS cleanup when service connection is deleted.
+    
+    Note: This doesn't delete the RADIUS user automatically as 
+    the customer may have other services or the RADIUS user may
+    be managed independently.
+    """
+    try:
+        logger.info(f"Service connection {instance.id} deleted - RADIUS user cleanup may be needed")
+    except Exception as e:
+        logger.error(f"Error handling service connection delete: {e}")
+
+
+# ────────────────────────────────────────────────────────────────
+# PLAN SIGNALS
+# ────────────────────────────────────────────────────────────────
+
+@receiver(post_save, sender='billing.Plan')
+def sync_plan_to_radius_profile(sender, instance, created, **kwargs):
+    """
+    Create/update RADIUS bandwidth profile when plan changes.
     
     This ensures bandwidth limits are updated in RADIUS when an
     ISP modifies their service plans.
@@ -142,28 +142,35 @@ def sync_service_plan_to_radius_profile(sender, instance, created, **kwargs):
     try:
         from .models import RadiusBandwidthProfile
         
+        # Only sync PPPoE/RADIUS-related plans
+        if instance.plan_type not in ['PPPOE', 'INTERNET', 'STATIC']:
+            return
+        
+        # Convert Mbps to kbps for RADIUS
+        download_kbps = (instance.download_speed or 10) * 1000
+        upload_kbps = (instance.upload_speed or 5) * 1000
+        
         # Create or update bandwidth profile
         profile, profile_created = RadiusBandwidthProfile.objects.update_or_create(
-            service_plan=instance,
+            name=f"plan_{instance.id}_{instance.code or 'default'}",
             defaults={
-                'name': f"plan_{instance.id}",
-                'download_speed': getattr(instance, 'download_speed', 10),
-                'upload_speed': getattr(instance, 'upload_speed', 5),
-                'burst_download': getattr(instance, 'burst_download', None),
-                'burst_upload': getattr(instance, 'burst_upload', None),
+                'description': f"Auto-synced from plan: {instance.name}",
+                'download_speed': download_kbps,
+                'upload_speed': upload_kbps,
+                'is_active': instance.is_active,
             }
         )
         
         action = "Created" if profile_created else "Updated"
         logger.info(f"{action} RADIUS profile for plan: {instance.name}")
         
-        # If plan was updated, sync all affected users
+        # If plan was updated (not created), sync all affected users
         if not created and not profile_created:
             service = get_radius_sync_service()
-            service.bulk_update_plan_users(instance)
+            service.bulk_update_plan_users(instance, profile)
             
     except Exception as e:
-        logger.error(f"Failed to sync service plan to RADIUS: {e}")
+        logger.error(f"Failed to sync plan to RADIUS: {e}")
 
 
 # ────────────────────────────────────────────────────────────────
@@ -179,30 +186,34 @@ def sync_customer_status_to_radius(sender, instance, **kwargs):
     their RADIUS users.
     """
     try:
-        # Check if status field exists and changed
+        from .models import RadCheck
+        
+        # Check if status field exists
         if not hasattr(instance, 'status'):
             return
         
-        # Get all service connections for this customer
-        connections = instance.service_connections.filter(
-            pppoe_username__isnull=False
-        ).exclude(pppoe_username='')
+        # Get all RADIUS usernames for this customer
+        usernames = RadCheck.objects.filter(
+            customer=instance,
+            attribute='Cleartext-Password'
+        ).values_list('username', flat=True).distinct()
         
-        if not connections.exists():
+        if not usernames:
             return
         
         service = get_radius_sync_service()
+        status = instance.status.upper() if instance.status else ''
         
-        if instance.status in ['suspended', 'inactive']:
+        if status in ['SUSPENDED', 'INACTIVE']:
             # Disable all RADIUS users
-            for conn in connections:
-                service.disable_radius_user(conn.pppoe_username)
+            for username in usernames:
+                service.disable_radius_user(username)
             logger.info(f"Disabled RADIUS for suspended customer: {instance.id}")
             
-        elif instance.status == 'active':
-            # Re-enable RADIUS users for active connections
-            for conn in connections.filter(status='active'):
-                service.enable_radius_user(conn.pppoe_username)
+        elif status == 'ACTIVE':
+            # Re-enable RADIUS users
+            for username in usernames:
+                service.enable_radius_user(username)
             logger.info(f"Enabled RADIUS for active customer: {instance.id}")
             
     except Exception as e:
@@ -222,33 +233,42 @@ def handle_invoice_status_change(sender, instance, **kwargs):
     - Paid invoice: Restore RADIUS access
     """
     try:
+        from .models import RadCheck
+        
         customer = instance.customer
         service = get_radius_sync_service()
         
-        if instance.status == 'overdue' and getattr(instance, 'auto_suspend', True):
+        # Get RADIUS usernames for this customer
+        usernames = RadCheck.objects.filter(
+            customer=customer,
+            attribute='Cleartext-Password'
+        ).values_list('username', flat=True).distinct()
+        
+        if not usernames:
+            return
+        
+        status = instance.status.upper() if instance.status else ''
+        
+        if status == 'OVERDUE' and getattr(instance, 'auto_suspend', True):
             # Suspend all customer's RADIUS users
-            connections = customer.service_connections.filter(
-                pppoe_username__isnull=False
-            )
-            for conn in connections:
-                service.disable_radius_user(conn.pppoe_username)
+            for username in usernames:
+                service.disable_radius_user(username)
             logger.info(f"Suspended RADIUS for overdue invoice: {instance.id}")
             
-        elif instance.status == 'paid':
+        elif status == 'PAID':
             # Check if all invoices are paid
             pending = customer.invoices.filter(
-                status__in=['pending', 'overdue']
+                status__in=['PENDING', 'OVERDUE', 'pending', 'overdue']
             ).exclude(id=instance.id).exists()
             
             if not pending:
                 # Restore RADIUS access
-                connections = customer.service_connections.filter(
-                    status='active',
-                    pppoe_username__isnull=False
-                )
-                for conn in connections:
-                    service.enable_radius_user(conn.pppoe_username)
+                for username in usernames:
+                    service.enable_radius_user(username)
                 logger.info(f"Restored RADIUS after payment: {instance.id}")
+                
+    except Exception as e:
+        logger.error(f"Failed to handle invoice status change: {e}")
                 
     except Exception as e:
         logger.error(f"Failed to handle invoice status change: {e}")
