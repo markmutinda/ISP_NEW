@@ -1,0 +1,55 @@
+# -*- text -*-
+##
+## sql - FreeRADIUS SQL Module Configuration
+##
+## This module connects FreeRADIUS to PostgreSQL to authenticate users
+## managed by Django.
+##
+
+sql {
+    # PostgreSQL driver
+    driver = "rlm_sql_postgresql"
+    dialect = "postgresql"
+
+    # Connection info - these will be overridden by environment variables
+    # at container startup via envsubst
+    server = "DB_HOST_PLACEHOLDER"
+    port = DB_PORT_PLACEHOLDER
+    login = "DB_USER_PLACEHOLDER"
+    password = "DB_PASS_PLACEHOLDER"
+    
+    # Database name
+    radius_db = "DB_NAME_PLACEHOLDER"
+
+    # Schema for multi-tenant setup (Django uses tenant schemas)
+    # This sets the PostgreSQL search_path to the tenant schema
+    postconnect = "SET search_path TO DB_SCHEMA_PLACEHOLDER, public"
+    
+    # Connection pooling
+    pool {
+        start = 5
+        min = 4
+        max = 32
+        spare = 3
+        uses = 0
+        lifetime = 0
+        idle_timeout = 60
+    }
+
+    # Read clients from database (optional)
+    read_clients = no
+
+    # Table names (matching Django RADIUS models)
+    authcheck_table = "radcheck"
+    authreply_table = "radreply"
+    groupcheck_table = "radgroupcheck"
+    groupreply_table = "radgroupreply"
+    usergroup_table = "radusergroup"
+    acct_table1 = "radacct"
+    acct_table2 = "radacct"
+    postauth_table = "radpostauth"
+    client_table = "nas"
+
+    # SQL queries - use our custom queries
+    $INCLUDE ${modconfdir}/${.:name}/main/${dialect}/queries.conf
+}

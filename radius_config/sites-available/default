@@ -1,0 +1,126 @@
+# -*- text -*-
+##
+## FreeRADIUS Default Site - Configured for SQL Authentication
+##
+## This site handles authentication and accounting for RADIUS clients
+## (MikroTik routers, etc.)
+##
+
+server default {
+    listen {
+        type = auth
+        ipaddr = *
+        port = 0
+    }
+
+    listen {
+        type = acct
+        ipaddr = *
+        port = 0
+    }
+
+    # Authorization - check if user exists and get password
+    authorize {
+        # Filter incoming username
+        filter_username
+
+        # Preprocess the request
+        preprocess
+
+        # Check suffix/prefix (optional)
+        suffix
+
+        # Handle EAP requests
+        eap {
+            ok = return
+        }
+
+        # ============================================
+        # SQL Authorization - Check radcheck table
+        # ============================================
+        sql
+
+        # If not found in SQL, try local files as fallback
+        files
+
+        # Set default auth type if not already set
+        pap
+        
+        # Expiration check
+        expiration
+        logintime
+    }
+
+    # Authentication - verify password
+    authenticate {
+        # PAP - Cleartext passwords
+        Auth-Type PAP {
+            pap
+        }
+
+        # CHAP - Challenge-Handshake
+        Auth-Type CHAP {
+            chap
+        }
+
+        # MS-CHAP - Microsoft CHAP (PPPoE, VPN)
+        Auth-Type MS-CHAP {
+            mschap
+        }
+
+        # EAP
+        eap
+    }
+
+    # Pre-accounting
+    preacct {
+        preprocess
+        acct_unique
+        suffix
+    }
+
+    # Accounting - log sessions to radacct table
+    accounting {
+        # ============================================
+        # SQL Accounting - Write to radacct table
+        # ============================================
+        sql
+
+        # Execute accounting scripts
+        exec
+
+        # Update session details
+        attr_filter.accounting_response
+    }
+
+    # Session - check simultaneous sessions
+    session {
+        sql
+    }
+
+    # Post-authentication - log auth attempts to radpostauth
+    post-auth {
+        # ============================================
+        # SQL Post-Auth - Log to radpostauth table
+        # ============================================
+        sql
+
+        # Execute post-auth scripts
+        exec
+
+        # Update reply attributes
+        Post-Auth-Type REJECT {
+            sql
+            attr_filter.access_reject
+        }
+    }
+
+    # Pre-proxy (for proxied requests)
+    pre-proxy {
+    }
+
+    # Post-proxy
+    post-proxy {
+        eap
+    }
+}

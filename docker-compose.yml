@@ -1,52 +1,55 @@
 version: '3.8'
 
+# ============================================================================
+# NETILY ISP - RADIUS & VPN DOCKER SERVICES
+# ============================================================================
+# This docker-compose runs FreeRADIUS which connects to your LOCAL PostgreSQL
+# database (same database that Django uses).
+#
+# Architecture:
+#   - Django (Windows) ──► Local PostgreSQL ◄── FreeRADIUS (Docker)
+#   - Both share the same database, so Django can manage RADIUS users
+# ============================================================================
+
 services:
-  # 1. The Database (PostgreSQL)
-  # This holds your users and their "Expiry Times"
-  db:
-    image: postgres:14-alpine
-    container_name: yourisp_db
-    environment:
-      - POSTGRES_DB=yourisp
-      - POSTGRES_USER=yourisp_user
-      - POSTGRES_PASSWORD=yourisp_pass
-    volumes:
-      - postgres_data:/var/lib/postgresql/data
-    ports:
-      - "5432:5432"  # Exposed so Django on Windows can see it
-
-  # 2. The RADIUS Server (FreeRADIUS)
-  # This listens for the MikroTik's questions
+  # ──────────────────────────────────────────────────────────────────────────
+  # FREERADIUS SERVER
+  # Connects to your LOCAL PostgreSQL to authenticate PPPoE/Hotspot users
+  # ──────────────────────────────────────────────────────────────────────────
   radius:
-    image: freeradius/freeradius-server:latest
-    container_name: yourisp_radius
-    depends_on:
-      - db
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.radius
+    container_name: netily_radius
     ports:
-      - "1812:1812/udp"  # Authentication Port
-      - "1813:1813/udp"  # Accounting Port
+      - "1812:1812/udp"   # Authentication Port (MikroTik sends auth requests here)
+      - "1813:1813/udp"   # Accounting Port (Session start/stop/update)
     environment:
-      - DB_HOST=db
+      # Connect to LOCAL PostgreSQL on host machine
+      # host.docker.internal resolves to the Windows host from inside Docker
+      - DB_HOST=host.docker.internal
       - DB_PORT=5432
-      - DB_USER=yourisp_user
-      - DB_PASS=yourisp_pass
-      - DB_NAME=yourisp
-      - RADIUS_KEY=testing123  # This must match your MikroTik "Secret"
-    volumes:
-      # We will mount custom config files here later to teach it SQL
-      - ./radius_config:/etc/raddb/mods-config/sql/main/postgresql:ro
+      - DB_USER=postgres
+      - DB_PASS=1234
+      - DB_NAME=isp_management
+      - DB_SCHEMA=tenant_yellow1
+      - RADIUS_KEY=testing123  # Shared secret - must match MikroTik config
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
 
-  # 3. (Optional) Admin GUI for Database
+  # ──────────────────────────────────────────────────────────────────────────
+  # PGADMIN (Optional - Database GUI)
+  # Access at http://localhost:5050
+  # ──────────────────────────────────────────────────────────────────────────
   pgadmin:
     image: dpage/pgadmin4
-    container_name: yourisp_pgadmin
+    container_name: netily_pgadmin
     environment:
-      PGADMIN_DEFAULT_EMAIL: admin@yourisp.com
+      PGADMIN_DEFAULT_EMAIL: admin@netily.com
       PGADMIN_DEFAULT_PASSWORD: admin
     ports:
       - "5050:80"
-    depends_on:
-      - db
+    restart: unless-stopped
 
-volumes:
-  postgres_data:
+# Note: No postgres volume needed - we use your local PostgreSQL

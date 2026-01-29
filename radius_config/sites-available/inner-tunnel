@@ -1,0 +1,53 @@
+# -*- text -*-
+##
+## FreeRADIUS Inner-Tunnel Site - For EAP/TTLS/PEAP inner authentication
+##
+
+server inner-tunnel {
+    listen {
+        ipaddr = 127.0.0.1
+        port = 18120
+        type = auth
+    }
+
+    authorize {
+        filter_username
+        suffix
+        
+        # SQL for inner tunnel authentication
+        sql
+        
+        # Fallback to files
+        files
+        
+        pap
+        chap
+        mschap
+    }
+
+    authenticate {
+        Auth-Type PAP {
+            pap
+        }
+        Auth-Type CHAP {
+            chap
+        }
+        Auth-Type MS-CHAP {
+            mschap
+        }
+        eap
+    }
+
+    session {
+        sql
+    }
+
+    post-auth {
+        sql
+        
+        Post-Auth-Type REJECT {
+            sql
+            attr_filter.access_reject
+        }
+    }
+}

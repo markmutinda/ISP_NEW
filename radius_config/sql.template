@@ -1,0 +1,38 @@
+sql {
+    driver = "rlm_sql_postgresql"
+    dialect = "postgresql"
+    
+    server = "${DB_HOST}"
+    port = ${DB_PORT}
+    login = "${DB_USER}"
+    password = "${DB_PASS}"
+    radius_db = "${DB_NAME}"
+    
+    # Set SQL-User-Name from User-Name attribute
+    sql_user_name = "%{User-Name}"
+    
+    pool {
+        start = 5
+        min = 4
+        max = 32
+        spare = 3
+        uses = 0
+        lifetime = 0
+        idle_timeout = 60
+    }
+    
+    read_clients = no
+    
+    authcheck_table = "radcheck"
+    authreply_table = "radreply"
+    groupcheck_table = "radgroupcheck"
+    groupreply_table = "radgroupreply"
+    usergroup_table = "radusergroup"
+    acct_table1 = "radacct"
+    acct_table2 = "radacct"
+    postauth_table = "radpostauth"
+    client_table = "nas"
+    
+    # Include queries from the standard location
+    $$INCLUDE $${modconfdir}/$${.:name}/main/$${dialect}/queries.conf
+}

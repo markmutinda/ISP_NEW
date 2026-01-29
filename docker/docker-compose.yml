@@ -119,34 +119,27 @@ services:
 
   # ────────────────────────────────────────────────────────────────
   # FREERADIUS SERVER
-  # Connects to PostgreSQL to share data with Django
+  # Connects to LOCAL PostgreSQL to share data with Django
   # ────────────────────────────────────────────────────────────────
-  freeradius:
-    image: freeradius/freeradius-server:latest
-    container_name: netily-freeradius
+  radius:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.radius
+    container_name: netily_radius
     ports:
       - "1812:1812/udp"   # Authentication
       - "1813:1813/udp"   # Accounting
       - "18120:18120/tcp" # Status (optional)
-    volumes:
-      - freeradius_data:/etc/raddb
-      - freeradius_logs:/var/log/freeradius
-      # Mount custom configuration
-      - ./freeradius/sql.conf:/etc/raddb-custom/sql.conf:ro
-      - ./freeradius/clients.conf:/etc/raddb-custom/clients.conf:ro
-      - ./freeradius/docker-entrypoint.sh:/docker-entrypoint.sh:ro
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     environment:
-      # Database connection (same as Django)
-      - DB_HOST=db
+      # Connect to LOCAL PostgreSQL (not Docker db service)
+      - DB_HOST=host.docker.internal
       - DB_PORT=5432
-      - DB_NAME=${POSTGRES_DB:-netily}
-      - DB_USER=${POSTGRES_USER:-postgres}
-      - DB_PASSWORD=${POSTGRES_PASSWORD:-postgres}
-      - RADIUS_CLIENTS=0.0.0.0/0
-    entrypoint: ["/bin/bash", "/docker-entrypoint.sh"]
-    depends_on:
-      db:
-        condition: service_healthy
+      - DB_NAME=isp_management
+      - DB_USER=postgres
+      - DB_PASS=1234
+      - DB_SCHEMA=tenant_yellow1
     restart: unless-stopped
     networks:
       - vpn_network

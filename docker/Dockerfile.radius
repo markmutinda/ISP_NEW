@@ -1,0 +1,59 @@
+# ============================================================================
+# NETILY ISP - FreeRADIUS with PostgreSQL Support
+# ============================================================================
+# This Dockerfile builds FreeRADIUS with:
+# - PostgreSQL SQL module support
+# - Custom configuration for Django integration
+# - Multi-tenant schema support
+# ============================================================================
+
+FROM freeradius/freeradius-server:latest
+
+# Install PostgreSQL client library for rlm_sql_postgresql
+USER root
+
+RUN apt-get update && apt-get install -y \
+    libpq5 \
+    postgresql-client \
+    gettext-base \
+    gosu \
+    && rm -rf /var/lib/apt/lists/*
+
+# Create directory for our custom configs
+RUN mkdir -p /etc/raddb/mods-config/sql/main/postgresql
+
+# Copy SQL module template (will be processed at runtime)
+COPY radius_config/sql.template /etc/raddb/sql.template
+
+# Copy queries config
+COPY radius_config/mods-config/sql/main/postgresql/queries.conf /etc/raddb/mods-config/sql/main/postgresql/queries.conf
+
+# Enable SQL module (will be created from template)
+RUN rm -f /etc/raddb/mods-enabled/sql
+
+# Copy site configurations
+COPY radius_config/sites-available/default /etc/raddb/sites-available/default
+COPY radius_config/sites-available/inner-tunnel /etc/raddb/sites-available/inner-tunnel
+
+# Create clients.conf with environment variable support
+RUN echo '# RADIUS Clients Configuration\n\
+# This allows any NAS (MikroTik router) to connect\n\
+\n\
+client any {\n\
+    ipaddr = 0.0.0.0/0\n\
+    secret = testing123\n\
+    shortname = any-nas\n\
+    nastype = other\n\
+}\n' > /etc/raddb/clients.conf
+
+# Create a startup script that handles schema configuration
+COPY docker/radius-entrypoint.sh /usr/local/bin/radius-entrypoint.sh
+RUN chmod +x /usr/local/bin/radius-entrypoint.sh
+
+# Keep root user for entrypoint (it will drop to freerad after config)
+# Expose RADIUS ports
+EXPOSE 1812/udp 1813/udp
+
+# Use our custom entrypoint (runs as root, drops to freerad)
+ENTRYPOINT ["/usr/local/bin/radius-entrypoint.sh"]
+CMD ["freeradius", "-X"]
