@@ -24,6 +24,9 @@ from .payment_status_view import (
     CustomerPaymentsListView,
 )
 
+# Invoice Views
+from .invoices_view import CustomerInvoicesView
+
 # Alert Views
 from .alerts_view import (
     CustomerAlertsView,
@@ -39,6 +42,8 @@ __all__ = [
     'PaymentStatusView',
     'PaymentRefreshStatusView',
     'CustomerPaymentsListView',
+    # Invoices
+    'CustomerInvoicesView',
     # Service Requests
     'ServiceRequestListCreateView',
     'ServiceRequestDetailView',

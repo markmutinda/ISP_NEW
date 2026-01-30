@@ -13,6 +13,7 @@ from .views import (
     PaymentStatusView,
     PaymentRefreshStatusView,
     CustomerPaymentsListView,
+    CustomerInvoicesView,
     
     # Service Requests
     ServiceRequestListCreateView,
@@ -45,6 +46,9 @@ urlpatterns = [
     
     # Dashboard
     path('dashboard/', CustomerDashboardView.as_view(), name='customer-dashboard'),
+    
+    # Invoices
+    path('invoices/', CustomerInvoicesView.as_view(), name='customer-invoices'),
     
     # Payments
     path('payments/', CustomerPaymentsListView.as_view(), name='customer-payments-list'),

@@ -1,4 +1,5 @@
 from datetime import datetime, timedelta
+from decimal import Decimal
 from django.utils import timezone
 from rest_framework import generics, status
 from rest_framework.views import APIView
@@ -15,198 +16,187 @@ from apps.bandwidth.models import DataUsage
 from apps.support.models import SupportTicket
 
 
-class CustomerDashboardView(generics.RetrieveAPIView):
+class CustomerDashboardView(APIView):
     """
-    Customer portal dashboard
+    Customer portal dashboard - Returns data in format expected by frontend.
+    
+    GET /api/v1/self-service/dashboard/
+    
+    Response format matches CustomerDashboardData TypeScript interface.
     """
     permission_classes = [IsAuthenticated, CustomerOnlyPermission]
-    serializer_class = CustomerDashboardSerializer
-    
-    def get_object(self):
-        return self.request.user.customer_profile
     
     def get(self, request, *args, **kwargs):
-        customer = self.get_object()
+        user = request.user
         
-        # Get current usage
-        current_usage = self._get_current_usage(customer)
+        # Get customer profile
+        try:
+            customer = user.customer_profile
+        except Customer.DoesNotExist:
+            return Response({
+                'error': 'Customer profile not found'
+            }, status=status.HTTP_404_NOT_FOUND)
         
-        # Get billing summary
-        billing_summary = self._get_billing_summary(customer)
+        # Build customer data - use full_name property or fallback to user name
+        full_name = getattr(customer, 'full_name', None)
+        if not full_name or full_name == ' ':
+            full_name = f"{user.first_name} {user.last_name}".strip() or user.email
         
-        # Get recent activity
-        recent_activity = self._get_recent_activity(customer)
-        
-        # Get alerts
-        alerts = UsageAlert.objects.filter(
-            customer=customer,
-            is_read=False
-        ).order_by('-triggered_at')[:5]
-        
-        data = {
-            'customer': {
-                'name': customer.name,
-                'customer_code': customer.customer_code,
-                'plan': customer.plan.name if customer.plan else None,
-                'status': customer.status,
-                'join_date': customer.created_at,
-            },
-            'usage': current_usage,
-            'billing': billing_summary,
-            'recent_activity': recent_activity,
-            'alerts': UsageAlertSerializer(alerts, many=True).data,
-            'quick_actions': self._get_quick_actions(customer),
+        customer_data = {
+            'id': customer.id,
+            'customer_code': customer.customer_code,
+            'full_name': full_name,
+            'email': user.email,
+            'phone_number': getattr(customer, 'phone_number', '') or getattr(user, 'phone_number', '') or '',
+            'status': customer.status,
+            'balance': str(getattr(customer, 'outstanding_balance', Decimal('0.00')) or Decimal('0.00')),
+            'created_at': customer.created_at.isoformat() if customer.created_at else None,
         }
         
-        return Response(data)
+        # Get current plan from active service
+        current_plan = None
+        try:
+            # Try to get active service with plan
+            service = getattr(customer, 'services', Customer.objects.none())
+            if hasattr(service, 'filter'):
+                active_service = service.filter(status='ACTIVE').select_related('plan').first()
+            else:
+                active_service = None
+            
+            if active_service and active_service.plan:
+                plan = active_service.plan
+                expiry_date = getattr(active_service, 'expiry_date', None) or getattr(active_service, 'expires_at', None)
+                days_remaining = None
+                
+                if expiry_date:
+                    if isinstance(expiry_date, str):
+                        expiry_date = datetime.fromisoformat(expiry_date.replace('Z', '+00:00'))
+                    days_remaining = max(0, (expiry_date.date() - timezone.now().date()).days)
+                
+                current_plan = {
+                    'id': plan.id,
+                    'name': plan.name,
+                    'price': str(plan.price),
+                    'speed_down': str(getattr(plan, 'download_speed', '') or getattr(plan, 'speed_down', '') or ''),
+                    'speed_up': str(getattr(plan, 'upload_speed', '') or getattr(plan, 'speed_up', '') or ''),
+                    'expiry_date': expiry_date.isoformat() if expiry_date else None,
+                    'days_remaining': days_remaining,
+                }
+            elif customer.plan:
+                # Fallback to customer.plan if no active service
+                plan = customer.plan
+                current_plan = {
+                    'id': plan.id,
+                    'name': plan.name,
+                    'price': str(plan.price),
+                    'speed_down': str(getattr(plan, 'download_speed', '') or getattr(plan, 'speed_down', '') or ''),
+                    'speed_up': str(getattr(plan, 'upload_speed', '') or getattr(plan, 'speed_up', '') or ''),
+                    'expiry_date': None,
+                    'days_remaining': None,
+                }
+        except Exception:
+            pass
+        
+        # Get usage data
+        usage = self._get_usage(customer)
+        
+        # Get recent payments
+        recent_payments = self._get_recent_payments(customer)
+        
+        # Get pending invoices
+        pending_invoices = self._get_pending_invoices(customer)
+        
+        return Response({
+            'customer': customer_data,
+            'current_plan': current_plan,
+            'usage': usage,
+            'recent_payments': recent_payments,
+            'pending_invoices': pending_invoices,
+        })
     
-    def _get_current_usage(self, customer):
-        """Get current bandwidth usage"""
+    def _get_usage(self, customer):
+        """Get data usage in frontend-expected format"""
         today = timezone.now().date()
         month_start = today.replace(day=1)
         
-        # Monthly usage
-        monthly_usage = DataUsage.objects.filter(
-            customer=customer,
-            timestamp__gte=month_start
-        ).aggregate(
-            total_upload=Sum('upload_bytes'),
-            total_download=Sum('download_bytes')
-        )
-        
-        # Today's usage
-        today_usage = DataUsage.objects.filter(
-            customer=customer,
-            timestamp__date=today
-        ).aggregate(
-            total_upload=Sum('upload_bytes'),
-            total_download=Sum('download_bytes')
-        )
-        
-        # Convert bytes to GB
-        upload_gb = (monthly_usage['total_upload'] or 0) / (1024**3)
-        download_gb = (monthly_usage['total_download'] or 0) / (1024**3)
-        
-        # Check data cap
-        plan_data_cap = customer.plan.data_cap_gb if customer.plan and customer.plan.data_cap_gb else None
-        usage_percentage = (upload_gb + download_gb) / plan_data_cap * 100 if plan_data_cap else None
-        
-        return {
-            'monthly_upload_gb': round(upload_gb, 2),
-            'monthly_download_gb': round(download_gb, 2),
-            'total_usage_gb': round(upload_gb + download_gb, 2),
-            'data_cap_gb': plan_data_cap,
-            'usage_percentage': round(usage_percentage, 1) if usage_percentage else None,
-            'today_upload_gb': round((today_usage['total_upload'] or 0) / (1024**3), 2),
-            'today_download_gb': round((today_usage['total_download'] or 0) / (1024**3), 2),
-        }
+        try:
+            monthly_usage = DataUsage.objects.filter(
+                customer=customer,
+                timestamp__gte=month_start
+            ).aggregate(
+                total_upload=Sum('upload_bytes'),
+                total_download=Sum('download_bytes')
+            )
+            
+            upload_bytes = monthly_usage['total_upload'] or 0
+            download_bytes = monthly_usage['total_download'] or 0
+            total_bytes = upload_bytes + download_bytes
+            
+            # Convert to human-readable format
+            if total_bytes >= 1024**3:
+                data_used = f"{total_bytes / (1024**3):.1f} GB"
+            elif total_bytes >= 1024**2:
+                data_used = f"{total_bytes / (1024**2):.1f} MB"
+            else:
+                data_used = f"{total_bytes / 1024:.1f} KB"
+            
+            # Get data limit from plan
+            data_limit = None
+            percentage = 0
+            if customer.plan and hasattr(customer.plan, 'data_cap_gb') and customer.plan.data_cap_gb:
+                data_limit = f"{customer.plan.data_cap_gb} GB"
+                limit_bytes = customer.plan.data_cap_gb * (1024**3)
+                percentage = min(100, (total_bytes / limit_bytes) * 100) if limit_bytes > 0 else 0
+            
+            return {
+                'data_used': data_used,
+                'data_limit': data_limit,
+                'percentage': round(percentage, 1),
+            }
+        except Exception:
+            return {
+                'data_used': '0 GB',
+                'data_limit': None,
+                'percentage': 0,
+            }
     
-    def _get_billing_summary(self, customer):
-        """Get billing and payment summary"""
-        # Current invoice
-        current_invoice = Invoice.objects.filter(
-            customer=customer,
-            status__in=['pending', 'overdue']
-        ).order_by('-invoice_date').first()
-        
-        # Recent payments
-        recent_payments = Payment.objects.filter(
-            invoice__customer=customer
-        ).order_by('-payment_date')[:5]
-        
-        # Payment summary
-        payment_summary = Payment.objects.filter(
-            invoice__customer=customer,
-            payment_date__month=timezone.now().month
-        ).aggregate(total_paid=Sum('amount'))
-        
-        return {
-            'current_balance': float(customer.current_balance),
-            'current_invoice': {
-                'amount': float(current_invoice.total_amount) if current_invoice else 0,
-                'due_date': current_invoice.due_date if current_invoice else None,
-                'status': current_invoice.status if current_invoice else None,
-            },
-            'monthly_payment_total': float(payment_summary['total_paid'] or 0),
-            'recent_payments': [
+    def _get_recent_payments(self, customer):
+        """Get recent payments in frontend-expected format"""
+        try:
+            payments = Payment.objects.filter(
+                customer=customer
+            ).order_by('-created_at')[:5]
+            
+            return [
                 {
-                    'date': payment.payment_date,
-                    'amount': float(payment.amount),
-                    'method': payment.payment_method,
+                    'id': p.id,
+                    'amount': str(p.amount),
+                    'method': str(p.payment_method) if p.payment_method else 'Unknown',
+                    'status': p.status.lower() if p.status else 'pending',
+                    'created_at': p.created_at.isoformat() if p.created_at else None,
                 }
-                for payment in recent_payments
-            ],
-        }
+                for p in payments
+            ]
+        except Exception:
+            return []
     
-    def _get_recent_activity(self, customer):
-        """Get recent customer activity"""
-        # Recent service requests
-        recent_requests = ServiceRequest.objects.filter(
-            customer=customer
-        ).order_by('-created_at')[:5]
-        
-        # Recent support tickets
-        recent_tickets = SupportTicket.objects.filter(
-            customer=customer
-        ).order_by('-created_at')[:5]
-        
-        # Recent payments
-        recent_payments = Payment.objects.filter(
-            invoice__customer=customer
-        ).order_by('-payment_date')[:5]
-        
-        return {
-            'service_requests': ServiceRequestSerializer(recent_requests, many=True).data,
-            'support_tickets': [
+    def _get_pending_invoices(self, customer):
+        """Get pending invoices in frontend-expected format"""
+        try:
+            invoices = Invoice.objects.filter(
+                customer=customer,
+                status__in=['PENDING', 'OVERDUE', 'pending', 'overdue']
+            ).order_by('-created_at')[:10]
+            
+            return [
                 {
-                    'id': ticket.id,
-                    'subject': ticket.subject,
-                    'status': ticket.status,
-                    'created_at': ticket.created_at,
+                    'id': inv.id,
+                    'invoice_number': inv.invoice_number,
+                    'amount': str(inv.amount),
+                    'due_date': inv.due_date.isoformat() if inv.due_date else None,
+                    'status': inv.status.lower() if inv.status else 'pending',
                 }
-                for ticket in recent_tickets
-            ],
-            'payments': [
-                {
-                    'date': payment.payment_date,
-                    'amount': float(payment.amount),
-                    'invoice': payment.invoice.invoice_number,
-                }
-                for payment in recent_payments
-            ],
-        }
-    
-    def _get_quick_actions(self, customer):
-        """Get available quick actions for customer"""
-        return [
-            {
-                'id': 'pay_invoice',
-                'label': 'Pay Invoice',
-                'icon': 'credit-card',
-                'available': customer.current_balance > 0,
-            },
-            {
-                'id': 'view_usage',
-                'label': 'View Usage',
-                'icon': 'bar-chart',
-                'available': True,
-            },
-            {
-                'id': 'request_support',
-                'label': 'Request Support',
-                'icon': 'help-circle',
-                'available': True,
-            },
-            {
-                'id': 'update_profile',
-                'label': 'Update Profile',
-                'icon': 'user',
-                'available': True,
-            },
-            {
-                'id': 'change_plan',
-                'label': 'Change Plan',
-                'icon': 'refresh-cw',
-                'available': customer.status == 'active',
-            },
-        ]
+                for inv in invoices
+            ]
+        except Exception:
+            return []

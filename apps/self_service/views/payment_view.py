@@ -1,91 +1,213 @@
 from datetime import datetime
+from decimal import Decimal
 from django.utils import timezone
+from django.conf import settings
 from rest_framework import generics, status
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
 from django.shortcuts import get_object_or_404
 import json
+import time
+import logging
 
 from ..permissions import CustomerOnlyPermission
 from apps.billing.models import Invoice, Payment
+from apps.billing.models.payment_models import InvoiceItemPayment
 from apps.billing.serializers import InvoiceSerializer, PaymentSerializer
-from utils.mpesa_utils import MpesaService
+
+logger = logging.getLogger(__name__)
 
 
 class PaymentView(APIView):
     """
-    Customer payment operations
+    Customer payment operations - delegates to PayHero for M-Pesa.
+    
+    POST /api/v1/self-service/payments/initiate/
+    {
+        "amount": 1000,
+        "phone_number": "254712345678",
+        "invoice_id": 123  // Optional
+    }
     """
     permission_classes = [IsAuthenticated, CustomerOnlyPermission]
+    
+    def _get_or_create_mpesa_payment_method(self):
+        """Get or create M-Pesa STK payment method"""
+        method, created = InvoiceItemPayment.objects.get_or_create(
+            code='MPESA_STK',
+            defaults={
+                'name': 'M-Pesa STK Push',
+                'method_type': 'MPESA_STK',
+                'is_payhero_enabled': True,
+                'is_active': True,
+                'channel_id': getattr(settings, 'PAYHERO_CHANNEL_ID', 1180),
+            }
+        )
+        return method
     
     def get(self, request):
         """Get customer invoices and payments"""
         customer = request.user.customer_profile
         
         # Get invoices
-        invoices = Invoice.objects.filter(customer=customer).order_by('-invoice_date')
+        invoices = Invoice.objects.filter(customer=customer).order_by('-created_at')[:10]
         
         # Get payments
-        payments = Payment.objects.filter(invoice__customer=customer).order_by('-payment_date')
+        payments = Payment.objects.filter(customer=customer).order_by('-created_at')[:10]
         
         # Get payment methods
         payment_methods = self._get_payment_methods()
         
         return Response({
-            'invoices': InvoiceSerializer(invoices, many=True).data,
-            'payments': PaymentSerializer(payments, many=True).data,
+            'invoices': [
+                {
+                    'id': inv.id,
+                    'invoice_number': inv.invoice_number,
+                    'amount': float(inv.amount),
+                    'status': inv.status,
+                    'due_date': inv.due_date,
+                }
+                for inv in invoices
+            ],
+            'payments': [
+                {
+                    'id': p.id,
+                    'amount': float(p.amount),
+                    'status': p.status,
+                    'created_at': p.created_at,
+                }
+                for p in payments
+            ],
             'payment_methods': payment_methods,
-            'current_balance': float(customer.current_balance),
+            'current_balance': float(getattr(customer, 'outstanding_balance', 0) or 0),
         })
     
     def post(self, request):
-        """Make a payment"""
-        customer = request.user.customer_profile
+        """Initiate M-Pesa STK Push payment via PayHero"""
+        user = request.user
+        customer = user.customer_profile
         
         amount = request.data.get('amount')
-        payment_method = request.data.get('payment_method')
+        phone_number = request.data.get('phone_number')
         invoice_id = request.data.get('invoice_id')
-        phone_number = request.data.get('phone_number')  # For M-Pesa
         
-        if not amount or not payment_method:
+        # Validate amount
+        if not amount:
             return Response(
-                {'error': 'Amount and payment method are required'},
+                {'error': 'Amount is required'},
                 status=status.HTTP_400_BAD_REQUEST
             )
         
         try:
-            amount = float(amount)
-        except ValueError:
+            amount = Decimal(str(amount))
+        except (ValueError, TypeError):
             return Response(
                 {'error': 'Invalid amount'},
                 status=status.HTTP_400_BAD_REQUEST
             )
         
-        # Validate amount
         if amount <= 0:
             return Response(
                 {'error': 'Amount must be greater than 0'},
                 status=status.HTTP_400_BAD_REQUEST
             )
         
+        # Validate phone number
+        if not phone_number:
+            phone_number = getattr(customer, 'phone_number', None) or getattr(user, 'phone_number', None)
+        
+        if not phone_number:
+            return Response(
+                {'error': 'Phone number is required'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
         # Get invoice if specified
         invoice = None
         if invoice_id:
-            invoice = get_object_or_404(Invoice, id=invoice_id, customer=customer)
+            try:
+                invoice = Invoice.objects.get(id=invoice_id, customer=customer)
+            except Invoice.DoesNotExist:
+                return Response(
+                    {'error': 'Invoice not found'},
+                    status=status.HTTP_404_NOT_FOUND
+                )
         
-        # Process payment based on method
-        if payment_method == 'mpesa':
-            return self._process_mpesa_payment(customer, amount, phone_number, invoice)
-        elif payment_method == 'card':
-            return self._process_card_payment(customer, amount, invoice)
-        elif payment_method == 'bank':
-            return self._process_bank_payment(customer, amount, invoice)
-        else:
-            return Response(
-                {'error': 'Unsupported payment method'},
-                status=status.HTTP_400_BAD_REQUEST
+        # Get or create M-Pesa payment method
+        payment_method = self._get_or_create_mpesa_payment_method()
+        
+        # Generate reference
+        reference = f"PAY-{customer.customer_code}-{int(time.time())}"
+        
+        # Create payment record
+        payment = Payment.objects.create(
+            customer=customer,
+            invoice=invoice,
+            amount=amount,
+            payment_method=payment_method,
+            payer_phone=phone_number,
+            mpesa_phone=phone_number,
+            payment_reference=reference,
+            status='PENDING',
+            notes=f"Customer initiated payment via dashboard",
+        )
+        
+        # Initiate PayHero STK Push
+        try:
+            from apps.billing.services.payhero import PayHeroClient, PayHeroError
+            
+            client = PayHeroClient()
+            
+            full_name = getattr(customer, 'full_name', None) or f"{user.first_name} {user.last_name}".strip()
+            description = f"Account Recharge - {full_name}"
+            if invoice:
+                description = f"Invoice #{invoice.invoice_number}"
+            
+            response = client.stk_push(
+                phone_number=phone_number,
+                amount=int(amount),
+                reference=reference,
+                description=description,
+                callback_url=settings.PAYHERO_BILLING_CALLBACK,
+                channel_id=payment_method.channel_id,
             )
+            
+            if response.success:
+                payment.transaction_id = response.checkout_request_id or ''
+                payment.payhero_external_reference = reference
+                payment.status = 'PROCESSING'
+                payment.save()
+                
+                return Response({
+                    'status': 'pending',
+                    'payment_id': payment.id,
+                    'payhero_response': {
+                        'status': 'pending',
+                        'checkout_request_id': response.checkout_request_id,
+                        'message': 'STK Push sent to your phone',
+                    }
+                })
+            else:
+                payment.status = 'FAILED'
+                payment.failure_reason = response.message
+                payment.save()
+                
+                return Response({
+                    'status': 'error',
+                    'message': response.message or 'Failed to initiate payment',
+                }, status=status.HTTP_400_BAD_REQUEST)
+        
+        except Exception as e:
+            logger.error(f"Payment initiation error: {e}")
+            payment.status = 'FAILED'
+            payment.failure_reason = str(e)
+            payment.save()
+            
+            return Response({
+                'status': 'error',
+                'message': 'Payment service unavailable. Please try again.',
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
     
     def _get_payment_methods(self):
         """Get available payment methods"""
@@ -94,106 +216,21 @@ class PaymentView(APIView):
                 'id': 'mpesa',
                 'name': 'M-Pesa',
                 'icon': 'phone',
-                'description': 'Pay via M-Pesa mobile money',
+                'description': 'Pay via M-Pesa STK Push',
                 'enabled': True,
             },
             {
                 'id': 'card',
                 'name': 'Credit/Debit Card',
                 'icon': 'credit-card',
-                'description': 'Pay using Visa/Mastercard',
-                'enabled': True,
+                'description': 'Coming soon',
+                'enabled': False,
             },
             {
                 'id': 'bank',
                 'name': 'Bank Transfer',
                 'icon': 'bank',
-                'description': 'Pay via bank transfer',
-                'enabled': True,
-            },
-            {
-                'id': 'voucher',
-                'name': 'Payment Voucher',
-                'icon': 'ticket',
-                'description': 'Redeem payment voucher',
-                'enabled': True,
+                'description': 'Coming soon',
+                'enabled': False,
             },
         ]
-    
-    def _process_mpesa_payment(self, customer, amount, phone_number, invoice):
-        """Process M-Pesa payment"""
-        if not phone_number:
-            return Response(
-                {'error': 'Phone number is required for M-Pesa payment'},
-                status=status.HTTP_400_BAD_REQUEST
-            )
-        
-        # Validate phone number
-        from utils.validators import validate_phone_number
-        if not validate_phone_number(phone_number):
-            return Response(
-                {'error': 'Invalid phone number'},
-                status=status.HTTP_400_BAD_REQUEST
-            )
-        
-        # Initialize M-Pesa service
-        mpesa_service = MpesaService()
-        
-        # Generate STK push
-        try:
-            result = mpesa_service.generate_stk_push(
-                phone_number=phone_number,
-                amount=amount,
-                account_reference=customer.customer_code,
-                transaction_desc=f"Payment for {customer.name}"
-            )
-            
-            if result.get('ResponseCode') == '0':
-                # Payment initiated successfully
-                return Response({
-                    'message': 'Payment initiated. Please enter your M-Pesa PIN on your phone.',
-                    'transaction_id': result.get('CheckoutRequestID'),
-                    'status': 'pending',
-                })
-            else:
-                return Response(
-                    {'error': result.get('ResponseDescription', 'Payment failed')},
-                    status=status.HTTP_400_BAD_REQUEST
-                )
-        except Exception as e:
-            return Response(
-                {'error': str(e)},
-                status=status.HTTP_500_INTERNAL_SERVER_ERROR
-            )
-    
-    def _process_card_payment(self, customer, amount, invoice):
-        """Process card payment (placeholder - integrate with payment gateway)"""
-        # This would integrate with a payment gateway like Stripe
-        return Response({
-            'message': 'Card payment integration coming soon',
-            'status': 'pending',
-        }, status=status.HTTP_501_NOT_IMPLEMENTED)
-    
-    def _process_bank_payment(self, customer, amount, invoice):
-        """Generate bank payment details"""
-        # Generate unique payment reference
-        import uuid
-        payment_reference = f"ISP{customer.customer_code}{uuid.uuid4().hex[:8].upper()}"
-        
-        bank_details = {
-            'bank_name': 'Cooperative Bank of Kenya',
-            'account_name': 'Your ISP Name',
-            'account_number': '0112345678900',
-            'branch': 'Nairobi CBD',
-            'swift_code': 'COOPKENXXX',
-            'payment_reference': payment_reference,
-            'amount': amount,
-            'customer_name': customer.name,
-        }
-        
-        return Response({
-            'message': 'Please use the following bank details for payment',
-            'bank_details': bank_details,
-            'payment_reference': payment_reference,
-            'status': 'pending',
-        })

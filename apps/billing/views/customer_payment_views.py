@@ -18,7 +18,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from apps.billing.services.payhero import PayHeroClient, PayHeroError, PaymentStatus
-from apps.billing.models.payment_models import Payment
+from apps.billing.models.payment_models import Payment, InvoiceItemPayment
 from apps.billing.models.billing_models import Invoice
 
 logger = logging.getLogger(__name__)
@@ -38,6 +38,20 @@ class InitiateCustomerPaymentView(APIView):
     """
     
     permission_classes = [IsAuthenticated]
+    
+    def _get_or_create_mpesa_payment_method(self):
+        """Get or create M-Pesa STK payment method"""
+        method, created = InvoiceItemPayment.objects.get_or_create(
+            code='MPESA_STK',
+            defaults={
+                'name': 'M-Pesa STK Push',
+                'method_type': 'MPESA_STK',
+                'is_payhero_enabled': True,
+                'is_active': True,
+                'channel_id': getattr(settings, 'PAYHERO_CHANNEL_ID', 1180),
+            }
+        )
+        return method
     
     @transaction.atomic
     def post(self, request):
@@ -88,19 +102,25 @@ class InitiateCustomerPaymentView(APIView):
                     status=status.HTTP_404_NOT_FOUND
                 )
         
-        # Create payment record
+        # Get or create M-Pesa payment method
+        payment_method = self._get_or_create_mpesa_payment_method()
+        
+        # Generate reference
+        import time
+        reference = f"PAY-{customer.customer_code}-{int(time.time())}"
+        
+        # Create payment record with proper model fields
         payment = Payment.objects.create(
             customer=customer,
             invoice=invoice,
             amount=Decimal(str(amount)),
-            phone_number=phone_number,
-            payment_method='MPESA_STK',
+            payment_method=payment_method,
+            payer_phone=phone_number,
+            mpesa_phone=phone_number,
+            payment_reference=reference,
             status='PENDING',
             notes=f"Customer initiated payment via dashboard",
         )
-        
-        # Generate reference
-        reference = f"PAY-{customer.customer_id or customer.id}-{payment.id}"
         
         # Initiate PayHero STK Push
         try:
@@ -116,12 +136,13 @@ class InitiateCustomerPaymentView(APIView):
                 reference=reference,
                 description=description,
                 callback_url=settings.PAYHERO_BILLING_CALLBACK,
-                channel_id=channel_id,
+                channel_id=channel_id or payment_method.channel_id,
             )
             
             if response.success:
-                payment.payhero_checkout_id = response.checkout_request_id
-                payment.reference = reference
+                # Store checkout ID for status polling
+                payment.transaction_id = response.checkout_request_id or ''
+                payment.payhero_external_reference = reference
                 payment.status = 'PROCESSING'
                 payment.save()
                 
@@ -185,39 +206,39 @@ class CustomerPaymentStatusView(APIView):
                 'payment_id': payment.id,
                 'status': payment.status.lower(),
                 'message': self._get_status_message(payment),
-                'mpesa_receipt': payment.mpesa_receipt_number,
+                'mpesa_receipt': payment.mpesa_receipt,
                 'amount': float(payment.amount),
-                'completed_at': payment.paid_at,
+                'completed_at': payment.processed_at,
             })
         
         # Check with PayHero if pending
-        if payment.payhero_checkout_id:
+        if payment.transaction_id:
             try:
                 client = PayHeroClient()
-                status_response = client.get_payment_status(payment.payhero_checkout_id)
+                status_response = client.get_payment_status(payment.transaction_id)
                 
                 if status_response.status == PaymentStatus.SUCCESS:
                     payment.status = 'COMPLETED'
-                    payment.mpesa_receipt_number = status_response.mpesa_receipt
-                    payment.paid_at = timezone.now()
+                    payment.mpesa_receipt = status_response.mpesa_receipt
+                    payment.processed_at = timezone.now()
                     payment.save()
                     
-                    # Apply to customer
+                    # Apply to customer balance
                     customer = payment.customer
                     if payment.invoice:
                         payment.invoice.apply_payment(payment)
                     else:
-                        customer.balance = (customer.balance or 0) + payment.amount
-                        customer.save(update_fields=['balance'])
+                        # Reduce outstanding balance (negative balance = credit)
+                        customer.update_balance(-payment.amount)
                     
                     return Response({
                         'payment_id': payment.id,
                         'status': 'completed',
                         'message': 'Payment successful!',
-                        'mpesa_receipt': payment.mpesa_receipt_number,
+                        'mpesa_receipt': payment.mpesa_receipt,
                         'amount': float(payment.amount),
-                        'completed_at': payment.paid_at,
-                        'new_balance': float(customer.balance or 0),
+                        'completed_at': payment.processed_at,
+                        'outstanding_balance': float(customer.outstanding_balance or 0),
                     })
                 
                 elif status_response.status == PaymentStatus.FAILED:

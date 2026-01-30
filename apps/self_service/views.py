@@ -298,8 +298,8 @@ class CustomerDashboardView(APIView):
                 'error': 'Customer profile not found'
             }, status=status.HTTP_404_NOT_FOUND)
         
-        # Get account balance
-        account_balance = getattr(customer, 'account_balance', Decimal('0.00'))
+        # Get outstanding balance (negative means credit)
+        outstanding_balance = getattr(customer, 'outstanding_balance', Decimal('0.00')) or Decimal('0.00')
         
         # Get current service/plan
         current_plan = None
@@ -337,7 +337,7 @@ class CustomerDashboardView(APIView):
         
         return Response({
             'customer': CustomerProfileSerializer(customer).data,
-            'account_balance': float(account_balance),
+            'outstanding_balance': float(outstanding_balance),
             'current_plan': current_plan,
             'plan_expires_at': plan_expires_at,
             'usage': {
@@ -770,3 +770,64 @@ class MarkAlertReadView(APIView):
             return Response({
                 'error': 'Alert not found'
             }, status=status.HTTP_404_NOT_FOUND)
+
+
+# =============================================================================
+# CUSTOMER INVOICES
+# =============================================================================
+
+class CustomerInvoicesView(APIView):
+    """
+    Get customer's invoices.
+    
+    GET /api/v1/self-service/invoices/
+    """
+    
+    permission_classes = [IsAuthenticated]
+    
+    def get(self, request):
+        user = request.user
+        
+        try:
+            customer = Customer.objects.get(user=user)
+        except Customer.DoesNotExist:
+            return Response({
+                'error': 'Customer profile not found'
+            }, status=status.HTTP_404_NOT_FOUND)
+        
+        # Get filter params
+        status_filter = request.query_params.get('status')
+        
+        invoices = Invoice.objects.filter(customer=customer).order_by('-created_at')
+        
+        if status_filter:
+            invoices = invoices.filter(status=status_filter)
+        
+        # Simple pagination
+        page = int(request.query_params.get('page', 1))
+        page_size = int(request.query_params.get('page_size', 20))
+        start = (page - 1) * page_size
+        end = start + page_size
+        
+        total_count = invoices.count()
+        invoices_page = invoices[start:end]
+        
+        return Response({
+            'count': total_count,
+            'results': [
+                {
+                    'id': inv.id,
+                    'invoice_number': inv.invoice_number,
+                    'invoice_date': inv.billing_date,
+                    'due_date': inv.due_date,
+                    'amount': float(inv.total_amount),
+                    'amount_paid': float(inv.amount_paid),
+                    'amount_due': float(inv.amount_due),
+                    'status': inv.status,
+                    'paid': inv.status == 'PAID',
+                    'is_overdue': inv.is_overdue,
+                    'created_at': inv.created_at,
+                }
+                for inv in invoices_page
+            ]
+        })
