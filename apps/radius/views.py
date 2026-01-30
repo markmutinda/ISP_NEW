@@ -242,26 +242,85 @@ class RadiusUserView(APIView):
     def get(self, request, username=None):
         """Get RADIUS user details"""
         if not username:
-            # List all users
+            # List all users with proper paginated response format
             users = RadCheck.objects.filter(
                 attribute='Cleartext-Password'
             ).values('username').distinct()
             
+            # Apply search filter if provided
+            search = request.query_params.get('search')
+            if search:
+                users = users.filter(username__icontains=search)
+            
+            # Get pagination params
+            page = int(request.query_params.get('page', 1))
+            page_size = int(request.query_params.get('page_size', 50))
+            
+            total_count = users.count()
+            start = (page - 1) * page_size
+            end = start + page_size
+            
             user_list = []
-            for u in users[:100]:
+            for u in users[start:end]:
                 uname = u['username']
                 checks = RadCheck.objects.filter(username=uname)
                 replies = RadReply.objects.filter(username=uname)
                 groups = RadUserGroup.objects.filter(username=uname)
                 
+                # Check if user is disabled
+                is_disabled = checks.filter(
+                    attribute='Auth-Type',
+                    value='Reject'
+                ).exists()
+                
+                # Get speed settings from replies
+                download_speed = 0
+                upload_speed = 0
+                rate_limit = replies.filter(attribute='Mikrotik-Rate-Limit').first()
+                if rate_limit:
+                    try:
+                        parts = rate_limit.value.replace('k', '').replace('M', '000').split('/')
+                        if len(parts) == 2:
+                            upload_speed = int(parts[0])
+                            download_speed = int(parts[1])
+                    except:
+                        pass
+                
+                # Try to get linked customer info
+                customer_name = None
+                customer_id = None
+                try:
+                    creds = CustomerRadiusCredentials.objects.filter(
+                        radius_username=uname
+                    ).select_related('customer').first()
+                    if creds and creds.customer:
+                        customer_name = creds.customer.full_name
+                        customer_id = creds.customer.id
+                except:
+                    pass
+                
                 user_list.append({
+                    'id': checks.first().id if checks.exists() else 0,
                     'username': uname,
+                    'customer': customer_id,
+                    'customer_name': customer_name,
+                    'status': 'disabled' if is_disabled else 'enabled',
+                    'download_speed': download_speed,
+                    'upload_speed': upload_speed,
                     'check_count': checks.count(),
                     'reply_count': replies.count(),
-                    'groups': list(groups.values_list('groupname', flat=True))
+                    'groups': list(groups.values_list('groupname', flat=True)),
+                    'created_at': checks.first().created_at.isoformat() if checks.exists() and hasattr(checks.first(), 'created_at') else None,
+                    'updated_at': checks.first().updated_at.isoformat() if checks.exists() and hasattr(checks.first(), 'updated_at') else None,
                 })
             
-            return Response({'users': user_list})
+            # Return DRF-style paginated response
+            return Response({
+                'count': total_count,
+                'next': None if end >= total_count else f"?page={page + 1}&page_size={page_size}",
+                'previous': None if page <= 1 else f"?page={page - 1}&page_size={page_size}",
+                'results': user_list
+            })
         
         # Get specific user
         checks = RadCheck.objects.filter(username=username)

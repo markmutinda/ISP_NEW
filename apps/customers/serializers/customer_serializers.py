@@ -6,7 +6,6 @@ from django.contrib.auth import get_user_model
 from django.utils import timezone
 
 from apps.customers.models import Customer
-from apps.core.models import Company
 from utils.helpers import validate_phone_number
 
 User = get_user_model()
@@ -19,6 +18,7 @@ class CustomerCreateSerializer(serializers.ModelSerializer):
     last_name = serializers.CharField(max_length=100, required=True)
     phone_number = serializers.CharField(required=True)
     password = serializers.CharField(write_only=True, required=True)
+    id_number = serializers.CharField(required=False, allow_blank=True, allow_null=True)
     
     class Meta:
         model = Customer
@@ -37,17 +37,25 @@ class CustomerCreateSerializer(serializers.ModelSerializer):
                 {"email": "A user with this email already exists."}
             )
         
-        # Check if ID number exists
-        if Customer.objects.filter(id_number=data['id_number']).exists():
+        # Validate and format phone number first
+        try:
+            formatted_phone = validate_phone_number(data['phone_number'])
+            data['phone_number'] = formatted_phone
+        except Exception as e:
+            raise serializers.ValidationError({"phone_number": str(e)})
+        
+        # Check if phone number already exists (User.phone_number is unique)
+        if User.objects.filter(phone_number=data['phone_number']).exists():
+            raise serializers.ValidationError(
+                {"phone_number": "A user with this phone number already exists."}
+            )
+        
+        # Check if ID number exists (only if provided)
+        id_number = data.get('id_number')
+        if id_number and Customer.objects.filter(id_number=id_number).exists():
             raise serializers.ValidationError(
                 {"id_number": "A customer with this ID number already exists."}
             )
-        
-        # Validate phone number
-        try:
-            data['phone_number'] = validate_phone_number(data['phone_number'])
-        except Exception as e:
-            raise serializers.ValidationError({"phone_number": str(e)})
         
         return data
     
@@ -71,32 +79,37 @@ class CustomerCreateSerializer(serializers.ModelSerializer):
             role='customer'
         )
         
-        # Get company from context (usually from request)
-        request = self.context.get('request')
-        company = request.user.company if request and request.user.company else None
-        
-        if not company:
-            # Use default company or create one
-            company = Company.objects.first()
-            if not company:
-                company = Company.objects.create(
-                    name="Default ISP",
-                    slug="default-isp"
-                )
+        # Note: With django-tenants, tenant scoping is automatic
+        # No need to pass company - it's handled by the schema context
         
         # Generate customer code
         from utils.helpers import generate_customer_code_legacy
         customer_code = generate_customer_code_legacy()
         
-        # Create customer
+        # Create customer (tenant-scoped automatically)
         customer = Customer.objects.create(
             user=user,
-            company=company,
             customer_code=customer_code,
             **validated_data
         )
         
         return customer
+    
+    def to_representation(self, instance):
+        """Custom representation to include user fields in response"""
+        return {
+            'id': instance.id,
+            'customer_code': instance.customer_code,
+            'first_name': instance.user.first_name,
+            'last_name': instance.user.last_name,
+            'full_name': instance.user.get_full_name(),
+            'email': instance.user.email,
+            'phone_number': instance.user.phone_number,
+            'status': getattr(instance, 'status', 'ACTIVE'),
+            'date_of_birth': instance.date_of_birth,
+            'gender': instance.gender,
+            'created_at': instance.created_at.isoformat() if hasattr(instance, 'created_at') and instance.created_at else None,
+        }
 
 
 class CustomerUpdateSerializer(serializers.ModelSerializer):

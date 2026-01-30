@@ -14,7 +14,7 @@ class ServiceConnectionSerializer(serializers.ModelSerializer):
         model = ServiceConnection
         fields = [
             'id', 'customer', 'customer_name', 'customer_code',
-            'service_type', 'service_plan', 'connection_type', 'status',
+            'service_type', 'plan', 'connection_type', 'auth_connection_type', 'status',
             'ip_address', 'mac_address', 'vlan_id',
             'router_model', 'router_serial', 'ont_model', 'ont_serial',
             'download_speed', 'upload_speed', 'data_cap', 'qos_profile',
@@ -33,16 +33,23 @@ class ServiceConnectionSerializer(serializers.ModelSerializer):
 class ServiceCreateSerializer(serializers.ModelSerializer):
     """Serializer for creating service connections"""
     
+    # Provide defaults for required fields that may not be sent
+    download_speed = serializers.IntegerField(default=10, required=False)
+    upload_speed = serializers.IntegerField(default=5, required=False)
+    monthly_price = serializers.DecimalField(
+        max_digits=10, decimal_places=2, default=0, required=False
+    )
+    
     class Meta:
         model = ServiceConnection
         fields = [
-            'service_type', 'service_plan', 'connection_type',
+            'service_type', 'plan', 'connection_type', 'auth_connection_type',
             'ip_address', 'mac_address', 'vlan_id',
             'router_model', 'router_serial', 'ont_model', 'ont_serial',
             'download_speed', 'upload_speed', 'data_cap', 'qos_profile',
             'installation_address', 'installation_notes',
             'monthly_price', 'setup_fee', 'prorated_billing',
-            'auto_renew', 'contract_period'
+            'auto_renew', 'contract_period', 'status'
         ]
     
     def validate_mac_address(self, value):

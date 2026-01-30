@@ -71,16 +71,14 @@ class ServiceConnectionViewSet(viewsets.ModelViewSet):
     
     def perform_create(self, serializer):
         """
-        Auto-assign company when creating service
-        (via customer, since service belongs to customer)
+        Auto-assign customer when creating service
+        With django-tenants, tenant scoping is automatic
         """
         # If customer_pk in URL (nested router), use that customer
         customer_pk = self.kwargs.get('customer_pk')
         if customer_pk:
             customer = get_object_or_404(Customer, pk=customer_pk)
-            # Ensure customer belongs to user's company (security)
-            if not self.request.user.is_superuser and customer.company != self.request.user.company:
-                self.permission_denied(self.request)
+            # With django-tenants, tenant scoping is automatic - no need to check company
             serializer.save(customer=customer)
         else:
             # Fallback - should not happen if using nested router

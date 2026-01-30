@@ -159,7 +159,9 @@ class Customer(models.Model):
     id_number = models.CharField(
         max_length=50, 
         unique=True, 
-        db_index=True
+        db_index=True,
+        null=True,
+        blank=True
     )
     
     # Contact Information
