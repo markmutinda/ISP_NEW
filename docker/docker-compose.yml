@@ -136,21 +136,11 @@ services:
       # Connect to LOCAL PostgreSQL (not Docker db service)
       - DB_HOST=host.docker.internal
       - DB_PORT=5432
-<<<<<<< HEAD
       - DB_NAME=isp_management
       - DB_USER=postgres
       - DB_PASS=1234
       - DB_SCHEMA=tenant_yellow1
-=======
-      - DB_NAME=${DB_NAME}
-      - DB_USER=${DB_USER}
-      - DB_PASSWORD=${DB_PASSWORD}
       - RADIUS_CLIENTS=0.0.0.0/0
-    entrypoint: ["/bin/bash", "/docker-entrypoint.sh"]
-    depends_on:
-      db:
-        condition: service_healthy
->>>>>>> 9b32103e15fca1ba552c1f59730f133307c675fc
     restart: unless-stopped
     networks:
       - vpn_network

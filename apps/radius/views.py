@@ -21,7 +21,9 @@ from .models import (
     RadAcct,
     Nas,
     RadPostAuth,
-    RadiusBandwidthProfile
+    RadiusBandwidthProfile,
+    RadiusTenantConfig,
+    CustomerRadiusCredentials,
 )
 from .serializers import (
     RadCheckSerializer,
@@ -36,7 +38,11 @@ from .serializers import (
     RadPostAuthSerializer,
     RadiusBandwidthProfileSerializer,
     RadiusUserCreateSerializer,
-    RadiusDashboardSerializer
+    RadiusDashboardSerializer,
+    RadiusTenantConfigSerializer,
+    RadiusTenantConfigDetailSerializer,
+    CustomerRadiusCredentialsSerializer,
+    CustomerRadiusCredentialsDetailSerializer,
 )
 from .services import RadiusSyncService
 
@@ -588,3 +594,190 @@ class RadiusSyncView(APIView):
             {'error': f'Unknown sync type: {sync_type}'},
             status=status.HTTP_400_BAD_REQUEST
         )
+
+
+# ────────────────────────────────────────────────────────────────
+# TENANT RADIUS CONFIGURATION (Multi-Tenant Support)
+# ────────────────────────────────────────────────────────────────
+
+class RadiusTenantConfigViewSet(viewsets.ModelViewSet):
+    """
+    API ViewSet for managing RADIUS tenant configurations.
+    
+    Endpoints:
+        GET    /api/v1/radius/tenant-config/          - List all configs
+        POST   /api/v1/radius/tenant-config/          - Create new config
+        GET    /api/v1/radius/tenant-config/{id}/     - Get config details
+        PUT    /api/v1/radius/tenant-config/{id}/     - Update config
+        DELETE /api/v1/radius/tenant-config/{id}/     - Delete config
+        POST   /api/v1/radius/tenant-config/{id}/configure/  - Generate RADIUS config
+        POST   /api/v1/radius/tenant-config/{id}/regenerate/ - Regenerate config files
+    """
+    
+    queryset = RadiusTenantConfig.objects.all()
+    permission_classes = [IsAuthenticated, HasCompanyAccess]
+    
+    def get_serializer_class(self):
+        if self.action == 'retrieve':
+            return RadiusTenantConfigDetailSerializer
+        return RadiusTenantConfigSerializer
+    
+    @action(detail=True, methods=['post'])
+    def configure(self, request, pk=None):
+        """
+        Generate RADIUS configuration files for this tenant.
+        
+        POST /api/v1/radius/tenant-config/{id}/configure/
+        """
+        from .services.tenant_radius_service import tenant_radius_service
+        
+        config = self.get_object()
+        
+        try:
+            result = tenant_radius_service.configure_tenant_radius(
+                schema_name=config.schema_name,
+                tenant_name=config.tenant_name
+            )
+            
+            config.config_generated = True
+            config.last_config_update = timezone.now()
+            config.save(update_fields=['config_generated', 'last_config_update'])
+            
+            return Response({
+                'status': 'success',
+                'message': f'RADIUS configuration generated for {config.tenant_name}',
+                'result': result
+            })
+            
+        except Exception as e:
+            logger.error(f"Failed to configure RADIUS for tenant {config.schema_name}: {e}")
+            return Response(
+                {'status': 'error', 'message': str(e)},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+    
+    @action(detail=True, methods=['post'])
+    def regenerate(self, request, pk=None):
+        """
+        Regenerate RADIUS configuration files.
+        
+        POST /api/v1/radius/tenant-config/{id}/regenerate/
+        """
+        from .services.tenant_radius_service import tenant_radius_service
+        
+        config = self.get_object()
+        
+        try:
+            # Get custom settings from request
+            radius_secret = request.data.get('radius_secret') or config.radius_secret
+            
+            result = tenant_radius_service.configure_tenant_radius(
+                schema_name=config.schema_name,
+                tenant_name=config.tenant_name,
+                radius_secret=radius_secret
+            )
+            
+            config.last_config_update = timezone.now()
+            config.save(update_fields=['last_config_update'])
+            
+            return Response({
+                'status': 'success',
+                'message': f'RADIUS configuration regenerated for {config.tenant_name}',
+                'result': result
+            })
+            
+        except Exception as e:
+            logger.error(f"Failed to regenerate RADIUS config for {config.schema_name}: {e}")
+            return Response(
+                {'status': 'error', 'message': str(e)},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
+
+class CustomerRadiusCredentialsViewSet(viewsets.ModelViewSet):
+    """
+    API ViewSet for managing customer RADIUS credentials.
+    
+    Endpoints:
+        GET    /api/v1/radius/credentials/          - List all credentials
+        POST   /api/v1/radius/credentials/          - Create new credentials
+        GET    /api/v1/radius/credentials/{id}/     - Get credential details
+        PUT    /api/v1/radius/credentials/{id}/     - Update credentials
+        DELETE /api/v1/radius/credentials/{id}/     - Delete credentials
+        POST   /api/v1/radius/credentials/{id}/sync/    - Force sync to RADIUS
+        POST   /api/v1/radius/credentials/{id}/enable/  - Enable account
+        POST   /api/v1/radius/credentials/{id}/disable/ - Disable account
+    """
+    
+    permission_classes = [IsAuthenticated, HasCompanyAccess]
+    
+    def get_queryset(self):
+        return CustomerRadiusCredentials.objects.select_related(
+            'customer', 'bandwidth_profile'
+        ).all()
+    
+    def get_serializer_class(self):
+        if self.action == 'retrieve':
+            return CustomerRadiusCredentialsDetailSerializer
+        return CustomerRadiusCredentialsSerializer
+    
+    @action(detail=True, methods=['post'])
+    def sync(self, request, pk=None):
+        """
+        Force sync credentials to RADIUS tables.
+        
+        POST /api/v1/radius/credentials/{id}/sync/
+        """
+        credentials = self.get_object()
+        
+        try:
+            credentials.sync_to_radius()
+            return Response({
+                'status': 'success',
+                'message': f'Synced {credentials.username} to RADIUS',
+                'synced_at': credentials.last_sync
+            })
+        except Exception as e:
+            logger.error(f"Failed to sync credentials {credentials.username}: {e}")
+            return Response(
+                {'status': 'error', 'message': str(e)},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+    
+    @action(detail=True, methods=['post'])
+    def enable(self, request, pk=None):
+        """
+        Enable RADIUS account.
+        
+        POST /api/v1/radius/credentials/{id}/enable/
+        """
+        credentials = self.get_object()
+        
+        credentials.is_enabled = True
+        credentials.disabled_reason = ''
+        credentials.save()
+        
+        return Response({
+            'status': 'success',
+            'message': f'Enabled RADIUS account: {credentials.username}'
+        })
+    
+    @action(detail=True, methods=['post'])
+    def disable(self, request, pk=None):
+        """
+        Disable RADIUS account.
+        
+        POST /api/v1/radius/credentials/{id}/disable/
+        """
+        credentials = self.get_object()
+        
+        reason = request.data.get('reason', 'Manually disabled')
+        
+        credentials.is_enabled = False
+        credentials.disabled_reason = reason
+        credentials.save()
+        
+        return Response({
+            'status': 'success',
+            'message': f'Disabled RADIUS account: {credentials.username}'
+        })

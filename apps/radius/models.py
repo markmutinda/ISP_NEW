@@ -471,3 +471,272 @@ class RadiusBandwidthProfile(models.Model):
             attrs['Simultaneous-Use'] = str(self.simultaneous_use)
         
         return attrs
+
+
+# ────────────────────────────────────────────────────────────────
+# MULTI-TENANT RADIUS CONFIGURATION
+# ────────────────────────────────────────────────────────────────
+
+class RadiusTenantConfig(models.Model):
+    """
+    Stores RADIUS configuration for each tenant.
+    
+    This model is stored in the PUBLIC schema and maps tenant schemas
+    to their RADIUS configuration, including:
+    - RADIUS server ports (if isolated mode)
+    - RADIUS secret
+    - Configuration status
+    """
+    schema_name = models.CharField(
+        max_length=100,
+        unique=True,
+        db_index=True,
+        help_text="Tenant schema name (e.g., 'tenant_myisp')"
+    )
+    tenant_name = models.CharField(
+        max_length=255,
+        help_text="Human-readable tenant name"
+    )
+    
+    # RADIUS Configuration
+    radius_secret = models.CharField(
+        max_length=128,
+        blank=True,
+        help_text="RADIUS shared secret for this tenant"
+    )
+    radius_port_auth = models.IntegerField(
+        default=1812,
+        help_text="Authentication port (for isolated mode)"
+    )
+    radius_port_acct = models.IntegerField(
+        default=1813,
+        help_text="Accounting port (for isolated mode)"
+    )
+    
+    # Deployment Mode
+    DEPLOYMENT_MODES = [
+        ('SHARED', 'Shared RADIUS (single instance)'),
+        ('ISOLATED', 'Isolated RADIUS (per-tenant container)'),
+    ]
+    deployment_mode = models.CharField(
+        max_length=20,
+        choices=DEPLOYMENT_MODES,
+        default='SHARED',
+        help_text="RADIUS deployment mode for this tenant"
+    )
+    
+    # Container Info (for isolated mode)
+    container_name = models.CharField(
+        max_length=100,
+        blank=True,
+        help_text="Docker container name (isolated mode)"
+    )
+    container_status = models.CharField(
+        max_length=50,
+        blank=True,
+        default='not_started',
+        help_text="Container status"
+    )
+    
+    # Status
+    is_active = models.BooleanField(default=True)
+    config_generated = models.BooleanField(
+        default=False,
+        help_text="Whether RADIUS config files have been generated"
+    )
+    last_config_update = models.DateTimeField(null=True, blank=True)
+    
+    # Timestamps
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    
+    class Meta:
+        verbose_name = 'RADIUS Tenant Configuration'
+        verbose_name_plural = 'RADIUS Tenant Configurations'
+        # This model should be in public schema
+        # managed = True
+    
+    def __str__(self):
+        return f"RADIUS Config: {self.tenant_name} ({self.schema_name})"
+    
+    def generate_secret(self):
+        """Generate a secure RADIUS secret."""
+        import secrets
+        self.radius_secret = secrets.token_urlsafe(32)
+        return self.radius_secret
+    
+    def save(self, *args, **kwargs):
+        # Auto-generate secret if not set
+        if not self.radius_secret:
+            self.generate_secret()
+        
+        # Auto-set container name for isolated mode
+        if self.deployment_mode == 'ISOLATED' and not self.container_name:
+            self.container_name = f"netily_radius_{self.schema_name.replace('tenant_', '')}"
+        
+        super().save(*args, **kwargs)
+
+
+class CustomerRadiusCredentials(models.Model):
+    """
+    Stores RADIUS credentials for customers.
+    
+    This links a customer to their RADIUS username/password,
+    allowing automatic synchronization between Django and FreeRADIUS.
+    """
+    customer = models.OneToOneField(
+        'customers.Customer',
+        on_delete=models.CASCADE,
+        related_name='radius_credentials',
+        help_text="Customer this RADIUS account belongs to"
+    )
+    
+    # RADIUS Credentials
+    username = models.CharField(
+        max_length=64,
+        unique=True,
+        db_index=True,
+        help_text="RADIUS username (used for PPPoE/Hotspot login)"
+    )
+    password = models.CharField(
+        max_length=253,
+        help_text="RADIUS password (stored plaintext for FreeRADIUS)"
+    )
+    
+    # Profile/Plan Link
+    bandwidth_profile = models.ForeignKey(
+        RadiusBandwidthProfile,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='customer_credentials',
+        help_text="Bandwidth profile for this customer"
+    )
+    
+    # Connection Type
+    CONNECTION_TYPES = [
+        ('PPPOE', 'PPPoE'),
+        ('HOTSPOT', 'Hotspot'),
+        ('BOTH', 'PPPoE + Hotspot'),
+    ]
+    connection_type = models.CharField(
+        max_length=20,
+        choices=CONNECTION_TYPES,
+        default='PPPOE',
+        help_text="Type of RADIUS authentication"
+    )
+    
+    # Status
+    is_enabled = models.BooleanField(
+        default=True,
+        help_text="Whether this RADIUS account is active"
+    )
+    disabled_reason = models.CharField(
+        max_length=255,
+        blank=True,
+        help_text="Reason for disabling (if disabled)"
+    )
+    
+    # Optional Settings
+    static_ip = models.GenericIPAddressField(
+        null=True,
+        blank=True,
+        help_text="Static IP to assign (optional)"
+    )
+    ip_pool = models.CharField(
+        max_length=64,
+        blank=True,
+        help_text="IP pool name for dynamic assignment"
+    )
+    simultaneous_use = models.IntegerField(
+        default=1,
+        help_text="Max concurrent sessions allowed"
+    )
+    
+    # Expiration
+    expiration_date = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text="Account expiration date"
+    )
+    
+    # Sync Status
+    synced_to_radius = models.BooleanField(
+        default=False,
+        help_text="Whether synced to RADIUS tables"
+    )
+    last_sync = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text="Last sync timestamp"
+    )
+    
+    # Timestamps
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    
+    class Meta:
+        verbose_name = 'Customer RADIUS Credentials'
+        verbose_name_plural = 'Customer RADIUS Credentials'
+    
+    def __str__(self):
+        return f"RADIUS: {self.username} ({self.customer})"
+    
+    def sync_to_radius(self):
+        """
+        Sync this customer's credentials to RADIUS tables.
+        Called automatically via signals.
+        """
+        from .services.radius_sync_service import RadiusSyncService
+        
+        service = RadiusSyncService()
+        
+        # Build attributes
+        check_attrs = {}
+        reply_attrs = {}
+        
+        if self.simultaneous_use > 1:
+            check_attrs['Simultaneous-Use'] = str(self.simultaneous_use)
+        
+        if self.expiration_date:
+            check_attrs['Expiration'] = self.expiration_date.strftime('%b %d %Y %H:%M:%S')
+        
+        if self.static_ip:
+            reply_attrs['Framed-IP-Address'] = str(self.static_ip)
+        
+        if self.ip_pool:
+            reply_attrs['Framed-Pool'] = self.ip_pool
+        
+        # Create or update RADIUS user
+        if self.is_enabled:
+            service.create_radius_user(
+                username=self.username,
+                password=self.password,
+                customer=self.customer,
+                profile=self.bandwidth_profile,
+                attributes=check_attrs,
+                reply_attributes=reply_attrs,
+            )
+        else:
+            service.disable_radius_user(
+                username=self.username,
+                reason=self.disabled_reason or "Account disabled"
+            )
+        
+        # Update sync status
+        self.synced_to_radius = True
+        self.last_sync = timezone.now()
+        self.save(update_fields=['synced_to_radius', 'last_sync'])
+        
+        return True
+    
+    def delete_from_radius(self):
+        """Delete this user from RADIUS tables."""
+        from .services.radius_sync_service import RadiusSyncService
+        
+        service = RadiusSyncService()
+        service.delete_radius_user(self.username)
+        
+        self.synced_to_radius = False
+        self.save(update_fields=['synced_to_radius'])
+

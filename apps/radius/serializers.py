@@ -11,7 +11,9 @@ from .models import (
     RadAcct,
     Nas,
     RadPostAuth,
-    RadiusBandwidthProfile
+    RadiusBandwidthProfile,
+    RadiusTenantConfig,
+    CustomerRadiusCredentials,
 )
 
 
@@ -173,3 +175,62 @@ class RadiusDashboardSerializer(serializers.Serializer):
     
     # Top users by traffic
     top_users = serializers.ListField(child=serializers.DictField())
+
+
+# ────────────────────────────────────────────────────────────────
+# TENANT CONFIGURATION SERIALIZERS
+# ────────────────────────────────────────────────────────────────
+
+class RadiusTenantConfigSerializer(serializers.ModelSerializer):
+    """Serializer for RADIUS tenant configuration."""
+    
+    class Meta:
+        model = RadiusTenantConfig
+        fields = [
+            'id', 'schema_name', 'tenant_name',
+            'radius_secret', 'radius_port_auth', 'radius_port_acct',
+            'deployment_mode', 'container_name', 'container_status',
+            'is_active', 'config_generated', 'last_config_update',
+            'created_at', 'updated_at'
+        ]
+        read_only_fields = ['id', 'created_at', 'updated_at', 'last_config_update']
+        extra_kwargs = {
+            'radius_secret': {'write_only': True}  # Don't expose secret in GET
+        }
+
+
+class RadiusTenantConfigDetailSerializer(RadiusTenantConfigSerializer):
+    """Detailed serializer that includes the secret (for admin)."""
+    
+    class Meta(RadiusTenantConfigSerializer.Meta):
+        extra_kwargs = {}
+
+
+class CustomerRadiusCredentialsSerializer(serializers.ModelSerializer):
+    """Serializer for customer RADIUS credentials."""
+    
+    customer_name = serializers.CharField(source='customer.full_name', read_only=True)
+    customer_code = serializers.CharField(source='customer.customer_code', read_only=True)
+    profile_name = serializers.CharField(source='bandwidth_profile.name', read_only=True, allow_null=True)
+    
+    class Meta:
+        model = CustomerRadiusCredentials
+        fields = [
+            'id', 'customer', 'customer_name', 'customer_code',
+            'username', 'password', 'bandwidth_profile', 'profile_name',
+            'connection_type', 'is_enabled', 'disabled_reason',
+            'static_ip', 'ip_pool', 'simultaneous_use',
+            'expiration_date', 'synced_to_radius', 'last_sync',
+            'created_at', 'updated_at'
+        ]
+        read_only_fields = ['id', 'synced_to_radius', 'last_sync', 'created_at', 'updated_at']
+        extra_kwargs = {
+            'password': {'write_only': True}  # Don't expose password in GET by default
+        }
+
+
+class CustomerRadiusCredentialsDetailSerializer(CustomerRadiusCredentialsSerializer):
+    """Detailed serializer that shows password (for admin)."""
+    
+    class Meta(CustomerRadiusCredentialsSerializer.Meta):
+        extra_kwargs = {}

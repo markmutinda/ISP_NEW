@@ -13,6 +13,8 @@ from .views import (
     RadiusBandwidthProfileViewSet,
     RadPostAuthViewSet,
     RadiusSyncView,
+    RadiusTenantConfigViewSet,
+    CustomerRadiusCredentialsViewSet,
 )
 
 router = DefaultRouter()
@@ -20,6 +22,8 @@ router.register(r'accounting', RadAcctViewSet, basename='radius-accounting')
 router.register(r'nas', NasViewSet, basename='radius-nas')
 router.register(r'profiles', RadiusBandwidthProfileViewSet, basename='radius-profile')
 router.register(r'auth-logs', RadPostAuthViewSet, basename='radius-auth-log')
+router.register(r'tenant-config', RadiusTenantConfigViewSet, basename='radius-tenant-config')
+router.register(r'credentials', CustomerRadiusCredentialsViewSet, basename='radius-credentials')
 
 urlpatterns = [
     # Dashboard
