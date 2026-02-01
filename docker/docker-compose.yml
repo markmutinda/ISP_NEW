@@ -1,5 +1,3 @@
-
-
 services:
   # ────────────────────────────────────────────────────────────────
   # DATABASE
@@ -48,7 +46,7 @@ services:
     environment:
       - DJANGO_SETTINGS_MODULE=config.settings.production
       - REDIS_URL=redis://redis:6379/0
-      - DATABASE_URL=postgres://netily:${DB_PASSWORD:-netily_secure_password}@db:5432/netily_isp
+      - DATABASE_URL=postgres://${DB_USER}:${DB_PASSWORD}@db:5432/${DB_NAME}
     depends_on:
       db:
         condition: service_healthy
@@ -68,7 +66,7 @@ services:
     environment:
       - DJANGO_SETTINGS_MODULE=config.settings.production
       - REDIS_URL=redis://redis:6379/0
-      - DATABASE_URL=postgres://netily:${DB_PASSWORD:-netily_secure_password}@db:5432/netily_isp
+      - DATABASE_URL=postgres://${DB_USER}:${DB_PASSWORD}@db:5432/${DB_NAME}
     depends_on:
       db:
         condition: service_healthy
@@ -86,7 +84,7 @@ services:
     environment:
       - DJANGO_SETTINGS_MODULE=config.settings.production
       - REDIS_URL=redis://redis:6379/0
-      - DATABASE_URL=postgres://netily:${DB_PASSWORD:-netily_secure_password}@db:5432/netily_isp
+      - DATABASE_URL=postgres://${DB_USER}:${DB_PASSWORD}@db:5432/${DB_NAME}
     depends_on:
       db:
         condition: service_healthy
@@ -131,9 +129,8 @@ services:
       - "1812:1812/udp"   # Authentication
       - "1813:1813/udp"   # Accounting
       - "18120:18120/tcp" # Status (optional)
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
     environment:
+<<<<<<< HEAD
       # Database connection (uses .env file)
       - DB_HOST=${DB_HOST:-host.docker.internal}
       - DB_PORT=${DB_PORT:-5432}
@@ -143,11 +140,22 @@ services:
       # CRITICAL: Use 'public' for multi-tenant RADIUS
       # All tenants sync their users to public.radcheck
       - DB_SCHEMA=public
+=======
+      # Connect to LOCAL PostgreSQL (not Docker db service)
+      - DB_HOST=db
+      - DB_PORT=5432
+      - DB_NAME=isp_management
+      - DB_USER=isp_user
+      - DB_PASS=2202
+      - DB_SCHEMA=tenant_yellow1
+>>>>>>> 5423d016d688e1f5e73fc81e7655cc8f45bfbcc8
       - RADIUS_CLIENTS=0.0.0.0/0
       - RADIUS_SECRET=${RADIUS_SECRET:-testing123}
     restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
     networks:
-      - vpn_network
       - default
 
   # ────────────────────────────────────────────────────────────────

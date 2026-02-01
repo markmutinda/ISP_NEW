@@ -54,3 +54,5 @@ fi
 echo ""
 echo "Starting FreeRADIUS as freerad user..."
 exec gosu freerad "$@"
+FreeRADIUS as freerad user..."
+exec gosu freerad "$@"
