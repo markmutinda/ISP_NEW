@@ -8,10 +8,23 @@ media/
 staticfiles/
 *.sqlite3
 
-# Environment
+# Environment (NEVER commit these!)
 .env
 .env.local
 .env.*.local
+.env.production
+.env.staging
+
+# Docker override files with credentials
+docker-compose.override.yml
+docker-compose.local.yml
+docker-compose.prod.yml
+docker/.env
+docker/*.env
+
+# Local settings with credentials
+config/settings/local.py
+**/local_settings.py
 
 # Virtual Environment
 .venv/
