@@ -8,6 +8,10 @@ sql {
     password = "${DB_PASS}"
     radius_db = "${DB_NAME}"
     
+    # Set the search_path to public schema for multi-tenant support
+    # This allows all tenants' users to be authenticated from public schema
+    connect_query = "SET search_path TO public"
+    
     # Set SQL-User-Name from User-Name attribute
     sql_user_name = "%{User-Name}"
     

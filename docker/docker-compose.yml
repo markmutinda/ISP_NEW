@@ -119,7 +119,8 @@ services:
 
   # ────────────────────────────────────────────────────────────────
   # FREERADIUS SERVER
-  # Connects to LOCAL PostgreSQL to share data with Django
+  # Connects to PostgreSQL public schema for multi-tenant auth
+  # All tenants sync to public.radcheck for unified authentication
   # ────────────────────────────────────────────────────────────────
   radius:
     build:
@@ -133,14 +134,17 @@ services:
     extra_hosts:
       - "host.docker.internal:host-gateway"
     environment:
-      # Connect to LOCAL PostgreSQL (not Docker db service)
-      - DB_HOST=host.docker.internal
-      - DB_PORT=5432
-      - DB_NAME=isp_management
-      - DB_USER=postgres
-      - DB_PASS=1234
-      - DB_SCHEMA=tenant_yellow1
+      # Database connection (uses .env file)
+      - DB_HOST=${DB_HOST:-host.docker.internal}
+      - DB_PORT=${DB_PORT:-5432}
+      - DB_NAME=${DB_NAME:-isp_management}
+      - DB_USER=${DB_USER:-postgres}
+      - DB_PASS=${DB_PASSWORD}
+      # CRITICAL: Use 'public' for multi-tenant RADIUS
+      # All tenants sync their users to public.radcheck
+      - DB_SCHEMA=public
       - RADIUS_CLIENTS=0.0.0.0/0
+      - RADIUS_SECRET=${RADIUS_SECRET:-testing123}
     restart: unless-stopped
     networks:
       - vpn_network

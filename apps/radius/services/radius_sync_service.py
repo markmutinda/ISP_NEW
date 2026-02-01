@@ -7,12 +7,14 @@ This service handles:
 3. Disabling/enabling users based on payment status
 4. Syncing bandwidth profiles to RADIUS groups
 5. Registering routers as NAS entries
+6. DUAL-WRITE: Syncing to public schema for multi-tenant RADIUS auth
 """
 
+import re
 import logging
 from typing import Optional, Dict, List, Any
 from django.utils import timezone
-from django.db import transaction
+from django.db import transaction, connection
 
 from ..models import (
     RadCheck,
@@ -30,6 +32,11 @@ logger = logging.getLogger(__name__)
 class RadiusSyncService:
     """
     Service for synchronizing customers and routers with RADIUS database.
+    
+    MULTI-TENANT ARCHITECTURE:
+    - ORM writes go to tenant schema (for Admin UI visibility)
+    - Raw SQL writes go to public schema (for FreeRADIUS authentication)
+    - This "dual-write" enables single RADIUS server for all tenants
     """
     
     # Common RADIUS attributes
@@ -44,6 +51,217 @@ class RadiusSyncService:
     ATTR_IDLE_TIMEOUT = 'Idle-Timeout'
     ATTR_FRAMED_IP = 'Framed-IP-Address'
     ATTR_FRAMED_POOL = 'Framed-Pool'
+    
+    # ────────────────────────────────────────────────────────────────
+    # PUBLIC SCHEMA SYNC (MULTI-TENANT RADIUS SUPPORT)
+    # ────────────────────────────────────────────────────────────────
+    
+    def _get_tenant_schema(self) -> str:
+        """Get current tenant schema name from Django connection."""
+        try:
+            return connection.schema_name
+        except AttributeError:
+            return 'public'
+    
+    def _generate_unique_username(self, base_username: str, tenant_schema: str = None) -> str:
+        """
+        Generate globally unique RADIUS username for multi-tenant environment.
+        
+        Format: {tenant_prefix}_{username}
+        Example: yellow_254712345678, blue_254798765432
+        
+        This prevents username collisions across tenants when all users
+        are stored in public.radcheck for FreeRADIUS.
+        """
+        schema = tenant_schema or self._get_tenant_schema()
+        prefix = schema.replace('tenant_', '').lower()
+        
+        # Sanitize username (alphanumeric, underscore, hyphen, @ only)
+        clean_username = re.sub(r'[^a-zA-Z0-9_@.-]', '', str(base_username))
+        
+        # Max 64 chars for RADIUS username
+        max_base_len = 64 - len(prefix) - 1
+        clean_username = clean_username[:max_base_len]
+        
+        return f"{prefix}_{clean_username}"
+    
+    def _sync_to_public_schema(
+        self,
+        username: str,
+        password: str,
+        check_attributes: Dict[str, str] = None,
+        reply_attributes: Dict[str, str] = None
+    ) -> bool:
+        """
+        Write RADIUS user to PUBLIC schema for FreeRADIUS authentication.
+        
+        This is the CRITICAL method for multi-tenant RADIUS support.
+        FreeRADIUS only queries public schema, so all users must be synced here.
+        
+        Args:
+            username: Globally unique username (e.g., 'yellow_254712345678')
+            password: Cleartext password
+            check_attributes: Additional check attributes (Expiration, etc.)
+            reply_attributes: Reply attributes (Rate-Limit, Framed-IP, etc.)
+            
+        Returns:
+            True if sync succeeded
+        """
+        tenant_schema = self._get_tenant_schema()
+        check_attributes = check_attributes or {}
+        reply_attributes = reply_attributes or {}
+        
+        try:
+            with connection.cursor() as cursor:
+                # 1. Delete existing entries for this user in public schema
+                cursor.execute(
+                    "DELETE FROM public.radcheck WHERE username = %s",
+                    [username]
+                )
+                cursor.execute(
+                    "DELETE FROM public.radreply WHERE username = %s",
+                    [username]
+                )
+                
+                # 2. Insert Password (Cleartext-Password)
+                cursor.execute(
+                    """
+                    INSERT INTO public.radcheck 
+                        (username, attribute, op, value, tenant_schema, created_at, updated_at)
+                    VALUES (%s, %s, %s, %s, %s, NOW(), NOW())
+                    """,
+                    [username, self.ATTR_PASSWORD, ':=', password, tenant_schema]
+                )
+                
+                # 3. Insert additional check attributes
+                for attr, value in check_attributes.items():
+                    cursor.execute(
+                        """
+                        INSERT INTO public.radcheck 
+                            (username, attribute, op, value, tenant_schema, created_at, updated_at)
+                        VALUES (%s, %s, %s, %s, %s, NOW(), NOW())
+                        """,
+                        [username, attr, ':=', str(value), tenant_schema]
+                    )
+                
+                # 4. Insert reply attributes (bandwidth, IP, etc.)
+                for attr, value in reply_attributes.items():
+                    cursor.execute(
+                        """
+                        INSERT INTO public.radreply 
+                            (username, attribute, op, value, tenant_schema, created_at, updated_at)
+                        VALUES (%s, %s, %s, %s, %s, NOW(), NOW())
+                        """,
+                        [username, attr, '=', str(value), tenant_schema]
+                    )
+            
+            logger.info(f"[PUBLIC SYNC] User {username} synced to public schema (tenant: {tenant_schema})")
+            return True
+            
+        except Exception as e:
+            logger.error(f"[PUBLIC SYNC] Failed to sync {username} to public schema: {e}")
+            return False
+    
+    def _delete_from_public_schema(self, username: str) -> bool:
+        """
+        Remove a RADIUS user from public schema.
+        
+        Called when deleting a user from tenant or during cleanup.
+        """
+        try:
+            with connection.cursor() as cursor:
+                cursor.execute("DELETE FROM public.radcheck WHERE username = %s", [username])
+                cursor.execute("DELETE FROM public.radreply WHERE username = %s", [username])
+                cursor.execute("DELETE FROM public.radusergroup WHERE username = %s", [username])
+            
+            logger.info(f"[PUBLIC SYNC] Deleted user {username} from public schema")
+            return True
+            
+        except Exception as e:
+            logger.error(f"[PUBLIC SYNC] Failed to delete {username} from public schema: {e}")
+            return False
+    
+    def _update_public_schema_status(self, username: str, enabled: bool) -> bool:
+        """
+        Enable or disable a user in public schema.
+        
+        Disabled users get Auth-Type := Reject which blocks authentication.
+        """
+        tenant_schema = self._get_tenant_schema()
+        
+        try:
+            with connection.cursor() as cursor:
+                if enabled:
+                    # Remove Auth-Type := Reject to enable
+                    cursor.execute(
+                        """
+                        DELETE FROM public.radcheck 
+                        WHERE username = %s AND attribute = 'Auth-Type' AND value = 'Reject'
+                        """,
+                        [username]
+                    )
+                    logger.info(f"[PUBLIC SYNC] Enabled user {username} in public schema")
+                else:
+                    # Check if already disabled
+                    cursor.execute(
+                        """
+                        SELECT id FROM public.radcheck 
+                        WHERE username = %s AND attribute = 'Auth-Type' AND value = 'Reject'
+                        """,
+                        [username]
+                    )
+                    if not cursor.fetchone():
+                        # Add Auth-Type := Reject to disable
+                        cursor.execute(
+                            """
+                            INSERT INTO public.radcheck 
+                                (username, attribute, op, value, tenant_schema, created_at, updated_at)
+                            VALUES (%s, 'Auth-Type', ':=', 'Reject', %s, NOW(), NOW())
+                            """,
+                            [username, tenant_schema]
+                        )
+                    logger.info(f"[PUBLIC SYNC] Disabled user {username} in public schema")
+            
+            return True
+            
+        except Exception as e:
+            logger.error(f"[PUBLIC SYNC] Failed to update status for {username}: {e}")
+            return False
+    
+    def _sync_nas_to_public_schema(self, nasname: str, shortname: str, secret: str, 
+                                    nas_type: str = 'mikrotik', description: str = None) -> bool:
+        """
+        Register a NAS (router) in public schema for FreeRADIUS.
+        
+        NAS entries must be in public.nas for FreeRADIUS to accept RADIUS
+        requests from routers.
+        """
+        tenant_schema = self._get_tenant_schema()
+        
+        try:
+            with connection.cursor() as cursor:
+                # Upsert NAS entry
+                cursor.execute(
+                    """
+                    INSERT INTO public.nas 
+                        (nasname, shortname, type, secret, description, tenant_schema)
+                    VALUES (%s, %s, %s, %s, %s, %s)
+                    ON CONFLICT (nasname) DO UPDATE SET
+                        shortname = EXCLUDED.shortname,
+                        type = EXCLUDED.type,
+                        secret = EXCLUDED.secret,
+                        description = EXCLUDED.description,
+                        tenant_schema = EXCLUDED.tenant_schema
+                    """,
+                    [nasname, shortname[:32], nas_type, secret, description or '', tenant_schema]
+                )
+            
+            logger.info(f"[PUBLIC SYNC] NAS {nasname} synced to public schema")
+            return True
+            
+        except Exception as e:
+            logger.error(f"[PUBLIC SYNC] Failed to sync NAS {nasname}: {e}")
+            return False
     
     # ────────────────────────────────────────────────────────────────
     # USER MANAGEMENT
@@ -125,7 +343,17 @@ class RadiusSyncService:
                     priority=1
                 )
             
-            logger.info(f"Created RADIUS user: {username}")
+            logger.info(f"Created RADIUS user in tenant schema: {username}")
+            
+            # ════════════════════════════════════════════════════════════
+            # DUAL-WRITE: Sync to public schema for FreeRADIUS
+            # ════════════════════════════════════════════════════════════
+            self._sync_to_public_schema(
+                username=username,
+                password=password,
+                check_attributes=attributes,
+                reply_attributes=reply_attributes
+            )
             
             return {
                 'username': username,
@@ -133,7 +361,8 @@ class RadiusSyncService:
                 'profile': profile.name if profile else None,
                 'groupname': groupname,
                 'check_attributes': len(attributes) + 1,  # +1 for password
-                'reply_attributes': len(reply_attributes)
+                'reply_attributes': len(reply_attributes),
+                'public_sync': True  # Indicates dual-write was performed
             }
     
     def update_radius_user(
@@ -186,7 +415,28 @@ class RadiusSyncService:
                         defaults={'op': ':=', 'value': str(value)}
                     )
             
-            logger.info(f"Updated RADIUS user: {username}")
+            logger.info(f"Updated RADIUS user in tenant schema: {username}")
+            
+            # ════════════════════════════════════════════════════════════
+            # DUAL-WRITE: Sync changes to public schema
+            # ════════════════════════════════════════════════════════════
+            if password or reply_attributes:
+                # Get current password if not provided
+                current_password = password
+                if not current_password:
+                    pwd_entry = RadCheck.objects.filter(
+                        username=username,
+                        attribute=self.ATTR_PASSWORD
+                    ).first()
+                    current_password = pwd_entry.value if pwd_entry else ''
+                
+                self._sync_to_public_schema(
+                    username=username,
+                    password=current_password,
+                    check_attributes=attributes or {},
+                    reply_attributes=reply_attributes or {}
+                )
+            
             return True
     
     def disable_radius_user(self, username: str, reason: str = "Disabled") -> bool:
@@ -203,12 +453,17 @@ class RadiusSyncService:
         if not RadCheck.objects.filter(username=username).exists():
             return False
         
-        # Add Auth-Type := Reject
+        # Add Auth-Type := Reject in tenant schema
         RadCheck.objects.update_or_create(
             username=username,
             attribute=self.ATTR_AUTH_TYPE,
             defaults={'op': ':=', 'value': 'Reject'}
         )
+        
+        # ════════════════════════════════════════════════════════════
+        # DUAL-WRITE: Disable in public schema
+        # ════════════════════════════════════════════════════════════
+        self._update_public_schema_status(username, enabled=False)
         
         logger.info(f"Disabled RADIUS user: {username} - {reason}")
         return True
@@ -230,6 +485,11 @@ class RadiusSyncService:
             value='Reject'
         ).delete()
         
+        # ════════════════════════════════════════════════════════════
+        # DUAL-WRITE: Enable in public schema
+        # ════════════════════════════════════════════════════════════
+        self._update_public_schema_status(username, enabled=True)
+        
         if deleted > 0:
             logger.info(f"Enabled RADIUS user: {username}")
             return True
@@ -249,6 +509,11 @@ class RadiusSyncService:
             RadCheck.objects.filter(username=username).delete()
             RadReply.objects.filter(username=username).delete()
             RadUserGroup.objects.filter(username=username).delete()
+        
+        # ════════════════════════════════════════════════════════════
+        # DUAL-WRITE: Delete from public schema
+        # ════════════════════════════════════════════════════════════
+        self._delete_from_public_schema(username)
         
         logger.info(f"Deleted RADIUS user: {username}")
         return True
