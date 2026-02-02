@@ -51,41 +51,29 @@ class PlanViewSet(viewsets.ModelViewSet):
             return [IsAuthenticated(), IsCompanyStaff()]
     
     def get_queryset(self):
-        """Strong company isolation"""
+        """
+        Return plans for the current tenant.
+        With django-tenants, the schema is set automatically via middleware,
+        so we just return all plans (they're already tenant-scoped).
+        """
         user = self.request.user
         
-        # Public endpoint: only active public plans (no company filter)
+        # Public endpoint: only active public plans
         if self.action == 'public':
             return Plan.objects.filter(is_active=True, is_public=True)
         
+        # For authenticated users, return all plans in current tenant
+        # django-tenants handles the schema isolation automatically
         if user.is_superuser:
-            # Superuser can optionally filter by company
-            company_id = self.request.query_params.get('company_id')
-            if company_id:
-                return Plan.objects.filter(company_id=company_id)
             return Plan.objects.all()
         
-        # Company users see only their own plans
-        if hasattr(user, 'company') and user.company:
-            return Plan.objects.filter(company=user.company)
-        
-        return Plan.objects.none()
+        # Regular users see all plans in their tenant
+        return Plan.objects.all()
 
     def perform_create(self, serializer):
-        """Force company for non-superusers"""
+        """Save plan with creator info"""
         user = self.request.user
-        if user.is_superuser:
-            # Superuser can set any company (via request data)
-            serializer.save(created_by=user)
-        else:
-            # Force current user's company
-            if hasattr(user, 'company') and user.company:
-                serializer.save(
-                    created_by=user,
-                    company=user.company
-                )
-            else:
-                raise serializers.ValidationError("No company assigned to user")
+        serializer.save(created_by=user)
 
     def perform_update(self, serializer):
         serializer.save(updated_by=self.request.user)

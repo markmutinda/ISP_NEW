@@ -2,12 +2,12 @@ sql {
     driver = "rlm_sql_postgresql"
     dialect = "postgresql"
     
-    # Database connection settings
-    server = "172.19.0.2"
-    port = 5432
-    login = "isp_user"
-    password = "2202"
-    radius_db = "isp_management"
+    # Database connection settings (use environment variables)
+    server = "${DB_HOST:-db}"
+    port = ${DB_PORT:-5432}
+    login = "${DB_USER:-postgres}"
+    password = "${DB_PASSWORD:-1234}"
+    radius_db = "${DB_NAME:-isp_management}"
     
     # Set the search_path to public schema for multi-tenant support
     # This allows all tenants' users to be authenticated from public schema

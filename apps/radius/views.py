@@ -176,6 +176,15 @@ class RadiusUserView(APIView):
         
         data = serializer.validated_data
         
+        # Handle password: use provided or auto-generate
+        from utils.helpers import generate_random_password
+        
+        password = data.get('password')
+        auto_generate = data.get('auto_generate_password', False)
+        
+        if auto_generate or not password:
+            password = generate_random_password(length=12)
+        
         # Get customer if specified
         customer = None
         if data.get('customer_id'):
@@ -222,13 +231,16 @@ class RadiusUserView(APIView):
             service = RadiusSyncService()
             result = service.create_radius_user(
                 username=data['username'],
-                password=data['password'],
+                password=password,
                 customer=customer,
                 profile=profile,
                 attributes=check_attrs,
                 reply_attributes=reply_attrs,
                 groupname=data.get('groupname')
             )
+            
+            # Include password in response so admin can see it
+            result['password'] = password
             
             return Response(result, status=status.HTTP_201_CREATED)
             
@@ -273,6 +285,12 @@ class RadiusUserView(APIView):
                     value='Reject'
                 ).exists()
                 
+                # Get password from Cleartext-Password attribute
+                password = None
+                password_entry = checks.filter(attribute='Cleartext-Password').first()
+                if password_entry:
+                    password = password_entry.value
+                
                 # Get speed settings from replies
                 download_speed = 0
                 upload_speed = 0
@@ -302,6 +320,7 @@ class RadiusUserView(APIView):
                 user_list.append({
                     'id': checks.first().id if checks.exists() else 0,
                     'username': uname,
+                    'password': password,
                     'customer': customer_id,
                     'customer_name': customer_name,
                     'status': 'disabled' if is_disabled else 'enabled',
@@ -333,6 +352,12 @@ class RadiusUserView(APIView):
         replies = RadReply.objects.filter(username=username)
         groups = RadUserGroup.objects.filter(username=username)
         
+        # Get password
+        password = None
+        password_entry = checks.filter(attribute='Cleartext-Password').first()
+        if password_entry:
+            password = password_entry.value
+        
         # Check if disabled
         is_disabled = checks.filter(
             attribute='Auth-Type',
@@ -341,6 +366,7 @@ class RadiusUserView(APIView):
         
         return Response({
             'username': username,
+            'password': password,
             'is_disabled': is_disabled,
             'check_attributes': RadCheckSerializer(checks, many=True).data,
             'reply_attributes': RadReplySerializer(replies, many=True).data,

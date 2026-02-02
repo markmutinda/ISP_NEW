@@ -13,7 +13,6 @@ class PlanSerializer(serializers.ModelSerializer):
     validity_days = serializers.IntegerField(source='duration_days', read_only=True)
     subscriber_count = serializers.IntegerField(read_only=True)
     subscribers_count = serializers.IntegerField(source='subscriber_count', read_only=True)
-    company_name = serializers.CharField(source='company.name', read_only=True)
     created_by_name = serializers.CharField(source='created_by.get_full_name', read_only=True)
     
     class Meta:
@@ -26,7 +25,7 @@ class PlanSerializer(serializers.ModelSerializer):
             'fup_limit', 'fup_speed',
             'is_active', 'is_public', 'is_popular',
             'features', 'subscriber_count', 'subscribers_count',
-            'company', 'company_name', 'created_by', 'created_by_name',
+            'created_by', 'created_by_name',
             'created_at', 'updated_at'
         ]
         read_only_fields = ['id', 'code', 'subscriber_count', 'created_by', 'created_at', 'updated_at']

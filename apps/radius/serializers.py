@@ -136,7 +136,8 @@ class RadiusBandwidthProfileSerializer(serializers.ModelSerializer):
 class RadiusUserCreateSerializer(serializers.Serializer):
     """Serializer for creating a RADIUS user with all attributes"""
     username = serializers.CharField(max_length=64)
-    password = serializers.CharField(max_length=253, write_only=True)
+    password = serializers.CharField(max_length=253, write_only=True, required=False, allow_blank=True)
+    auto_generate_password = serializers.BooleanField(default=False, required=False)
     
     # Optional: Link to customer
     customer_id = serializers.UUIDField(required=False, allow_null=True)
