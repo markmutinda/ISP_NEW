@@ -81,79 +81,91 @@ class CurrentSubscriptionView(APIView):
     
     def get_company(self, request):
         """Get the company from tenant or user context"""
-        # First, try to get from tenant
-        tenant = getattr(request, 'tenant', None)
-        if tenant:
-            company = getattr(tenant, 'company', None)
-            if company:
-                return company
-        
-        # Fall back to user's company
-        user = request.user
-        if hasattr(user, 'company') and user.company:
-            return user.company
-        
-        # For superusers without a company, return None (they can't have subscriptions)
-        return None
+        try:
+            # First, try to get from tenant
+            tenant = getattr(request, 'tenant', None)
+            if tenant:
+                company = getattr(tenant, 'company', None)
+                if company:
+                    return company
+            
+            # Fall back to user's company
+            user = request.user
+            if hasattr(user, 'company') and user.company:
+                return user.company
+            
+            # For superusers without a company, return None (they can't have subscriptions)
+            return None
+        except Exception as e:
+            logger.error(f"Error getting company: {e}")
+            return None
     
     def get(self, request):
-        company = self.get_company(request)
-        
-        if not company:
-            # For superusers or users without company, return a meaningful response
-            if request.user.is_superuser:
-                return Response({
-                    'message': 'Superuser account - no subscription required',
-                    'is_superuser': True,
-                    'subscription': None
-                })
-            return Response(
-                {'error': 'No company associated with your account'},
-                status=status.HTTP_400_BAD_REQUEST
-            )
-        
         try:
-            subscription = CompanySubscription.objects.select_related('plan').get(
-                company=company
-            )
-        except CompanySubscription.DoesNotExist:
-            # Auto-create trial subscription for new companies
-            starter_plan = NetilyPlan.objects.filter(code='starter', is_active=True).first()
-            if not starter_plan:
+            company = self.get_company(request)
+            
+            if not company:
+                # For superusers or users without company, return a meaningful response
+                if request.user.is_superuser:
+                    return Response({
+                        'message': 'Superuser account - no subscription required',
+                        'is_superuser': True,
+                        'subscription': None
+                    })
                 return Response(
-                    {'error': 'No subscription plans available. Please contact support.'},
-                    status=status.HTTP_500_INTERNAL_SERVER_ERROR
+                    {'error': 'No company associated with your account'},
+                    status=status.HTTP_400_BAD_REQUEST
                 )
             
-            # Create trial subscription using the class method
             try:
-                subscription = CompanySubscription.create_trial_subscription(
-                    company=company,
-                    plan=starter_plan
+                subscription = CompanySubscription.objects.select_related('plan').get(
+                    company=company
                 )
-                logger.info(f"Auto-created trial subscription for company: {company.name}")
-            except Exception as e:
-                logger.error(f"Failed to create trial subscription: {e}")
-                return Response(
-                    {'error': 'Failed to initialize subscription. Please contact support.'},
-                    status=status.HTTP_500_INTERNAL_SERVER_ERROR
-                )
-        
-        # Build response with trial warnings
-        data = CompanySubscriptionSerializer(subscription).data
-        
-        # Add trial-specific messaging
-        if subscription.is_on_trial:
-            days = subscription.trial_days_remaining
-            data['trial_message'] = f"You have {days} day{'s' if days != 1 else ''} left in your free trial."
-            if days <= 3:
-                data['trial_warning'] = "Your trial is ending soon! Subscribe now to keep access."
-        elif subscription.trial_expired:
-            data['trial_message'] = "Your free trial has expired."
-            data['trial_warning'] = "Please subscribe to continue using Netily."
-            data['access_restricted'] = True
-        
-        return Response(data)
+            except CompanySubscription.DoesNotExist:
+                # Auto-create trial subscription for new companies
+                starter_plan = NetilyPlan.objects.filter(code='starter', is_active=True).first()
+                if not starter_plan:
+                    return Response(
+                        {'error': 'No subscription plans available. Please contact support.'},
+                        status=status.HTTP_500_INTERNAL_SERVER_ERROR
+                    )
+                
+                # Create trial subscription using the class method
+                try:
+                    subscription = CompanySubscription.create_trial_subscription(
+                        company=company,
+                        plan=starter_plan
+                    )
+                    logger.info(f"Auto-created trial subscription for company: {company.name}")
+                except Exception as e:
+                    logger.error(f"Failed to create trial subscription: {e}")
+                    return Response(
+                        {'error': 'Failed to initialize subscription. Please contact support.'},
+                        status=status.HTTP_500_INTERNAL_SERVER_ERROR
+                    )
+            
+            # Build response with trial warnings
+            data = CompanySubscriptionSerializer(subscription).data
+            
+            # Add trial-specific messaging
+            if subscription.is_on_trial:
+                days = subscription.trial_days_remaining
+                data['trial_message'] = f"You have {days} day{'s' if days != 1 else ''} left in your free trial."
+                if days <= 3:
+                    data['trial_warning'] = "Your trial is ending soon! Subscribe now to keep access."
+            elif subscription.trial_expired:
+                data['trial_message'] = "Your free trial has expired."
+                data['trial_warning'] = "Please subscribe to continue using Netily."
+                data['access_restricted'] = True
+            
+            return Response(data)
+            
+        except Exception as e:
+            logger.error(f"Error in CurrentSubscriptionView.get: {e}", exc_info=True)
+            return Response(
+                {'error': 'An error occurred retrieving subscription details'},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
 
 
 class SubscriptionUsageView(APIView):
