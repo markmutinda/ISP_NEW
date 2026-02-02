@@ -1,28 +1,34 @@
+version: '3.8'
+
 services:
   # ────────────────────────────────────────────────────────────────
   # DATABASE
   # ────────────────────────────────────────────────────────────────
   db:
     image: postgres:15-alpine
+    container_name: netily_db  # <--- Explicit name for easy finding
     volumes:
       - postgres_data:/var/lib/postgresql/data
     environment:
-      - POSTGRES_DB=${DB_NAME}
-      - POSTGRES_USER=${DB_USER}
-      - POSTGRES_PASSWORD=${DB_PASSWORD}
+      - POSTGRES_DB=isp_management
+      - POSTGRES_USER=isp_user
+      - POSTGRES_PASSWORD=2202
     ports:
-      - "5432:5432"
+      - "5433:5432"  # External 5433 (for Windows), Internal 5432 (for Docker)
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${DB_USER} -d ${DB_NAME}"]
+      test: ["CMD-SHELL", "pg_isready -U isp_user -d isp_management"]
       interval: 10s
       timeout: 5s
       retries: 5
+    networks:
+      - isp_network  # <--- NEW NETWORK
 
   # ────────────────────────────────────────────────────────────────
   # REDIS
   # ────────────────────────────────────────────────────────────────
   redis:
     image: redis:7-alpine
+    container_name: netily_redis
     ports:
       - "6379:6379"
     volumes:
@@ -32,21 +38,28 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
+    networks:
+      - isp_network
 
   # ────────────────────────────────────────────────────────────────
   # DJANGO WEB APPLICATION
   # ────────────────────────────────────────────────────────────────
   web:
-    build: .
-    command: gunicorn config.wsgi:application --bind 0.0.0.0:8000 --workers 4
+    build: 
+      context: ..
+      dockerfile: docker/Dockerfile
+    container_name: netily_backend
+    command: gunicorn config.wsgi:application --bind 0.0.0.0:8000 --workers 4 --reload
+    working_dir: /app
     volumes:
-      - .:/app
+      - ../:/app  # <--- CRITICAL FIX: Points to parent folder
       - static_volume:/app/static
       - media_volume:/app/media
     environment:
+      - PYTHONPATH=/app
       - DJANGO_SETTINGS_MODULE=config.settings.production
-      - REDIS_URL=redis://redis:6379/0
-      - DATABASE_URL=postgres://${DB_USER}:${DB_PASSWORD}@db:5432/${DB_NAME}
+      - REDIS_URL=redis://netily_redis:6379/0
+      - DATABASE_URL=postgres://isp_user:2202@netily_db:5432/isp_management
     depends_on:
       db:
         condition: service_healthy
@@ -54,42 +67,105 @@ services:
         condition: service_healthy
     ports:
       - "8000:8000"
+    networks:
+      - isp_network
 
   # ────────────────────────────────────────────────────────────────
   # CELERY WORKER
   # ────────────────────────────────────────────────────────────────
   celery-worker:
-    build: .
+    build: 
+      context: ..
+      dockerfile: docker/Dockerfile
+    container_name: netily_worker
+    working_dir: /app
     command: celery -A config worker -l info --concurrency=4
     volumes:
-      - .:/app
+      - ../:/app
     environment:
+      - PYTHONPATH=/app
       - DJANGO_SETTINGS_MODULE=config.settings.production
-      - REDIS_URL=redis://redis:6379/0
-      - DATABASE_URL=postgres://${DB_USER}:${DB_PASSWORD}@db:5432/${DB_NAME}
+      - REDIS_URL=redis://netily_redis:6379/0
+      - DATABASE_URL=postgres://isp_user:2202@netily_db:5432/isp_management
     depends_on:
       db:
         condition: service_healthy
       redis:
         condition: service_healthy
+    networks:
+      - isp_network
 
   # ────────────────────────────────────────────────────────────────
   # CELERY BEAT SCHEDULER
   # ────────────────────────────────────────────────────────────────
   celery-beat:
-    build: .
+    build: 
+      context: ..
+      dockerfile: docker/Dockerfile
+    container_name: netily_beat
+    working_dir: /app
     command: celery -A config beat -l info --scheduler django_celery_beat.schedulers:DatabaseScheduler
     volumes:
-      - .:/app
+      - ../:/app
     environment:
+      - PYTHONPATH=/app
       - DJANGO_SETTINGS_MODULE=config.settings.production
-      - REDIS_URL=redis://redis:6379/0
-      - DATABASE_URL=postgres://${DB_USER}:${DB_PASSWORD}@db:5432/${DB_NAME}
+      - REDIS_URL=redis://netily_redis:6379/0
+      - DATABASE_URL=postgres://isp_user:2202@netily_db:5432/isp_management
     depends_on:
       db:
         condition: service_healthy
       redis:
         condition: service_healthy
+    networks:
+      - isp_network
+
+  # ────────────────────────────────────────────────────────────────
+  # FREERADIUS SERVER
+  # ────────────────────────────────────────────────────────────────
+  radius:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.radius
+    container_name: netily_radius
+    ports:
+      - "1812:1812/udp"
+      - "1813:1813/udp"
+      - "18120:18120/tcp"
+    environment:
+      - DB_HOST=netily_db   # <--- Matches the container_name of the DB
+      - DB_PORT=5432
+      - DB_NAME=isp_management
+      - DB_USER=isp_user
+      - DB_PASS=2202
+      - DB_SCHEMA=public
+      - RADIUS_CLIENTS=0.0.0.0/0
+      - RADIUS_SECRET=${RADIUS_SECRET:-testing123}
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    networks:
+      - isp_network
+
+  # ────────────────────────────────────────────────────────────────
+  # NGINX REVERSE PROXY
+  # ────────────────────────────────────────────────────────────────
+  nginx:
+    image: nginx:alpine
+    container_name: netily_nginx
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - static_volume:/app/static:ro
+      - media_volume:/app/media:ro
+      - ./nginx/certs:/etc/nginx/certs:ro
+    depends_on:
+      - web
+    networks:
+      - isp_network
 
   # ────────────────────────────────────────────────────────────────
   # OPENVPN SERVER
@@ -102,7 +178,7 @@ services:
     ports:
       - "1194:1194/udp"
       - "1194:1194/tcp"
-      - "7505:7505"  # Management interface
+      - "7505:7505"
     volumes:
       - openvpn_data:/etc/openvpn
       - openvpn_logs:/var/log/openvpn
@@ -113,61 +189,13 @@ services:
       - net.ipv4.ip_forward=1
     networks:
       - vpn_network
-      - default
-
-  # ────────────────────────────────────────────────────────────────
-  # FREERADIUS SERVER
-  # Connects to PostgreSQL public schema for multi-tenant auth
-  # All tenants sync to public.radcheck for unified authentication
-  # ────────────────────────────────────────────────────────────────
-  radius:
-      build:
-        context: ..
-        dockerfile: docker/Dockerfile.radius
-      container_name: netily_radius
-      ports:
-        - "1812:1812/udp"   # Authentication
-        - "1813:1813/udp"   # Accounting
-        - "18120:18120/tcp" # Status check
-      environment:
-        # Connect to the internal Docker service named 'db'
-        - DB_HOST=db
-        - DB_PORT=5432
-        # Use credentials from .env (matches the db service)
-        - DB_NAME=${DB_NAME:-isp_management}
-        - DB_USER=${DB_USER:-isp_user}
-        - DB_PASS=${DB_PASSWORD}
-        # CRITICAL: Use 'public' for multi-tenant RADIUS
-        - DB_SCHEMA=public
-        - RADIUS_CLIENTS=0.0.0.0/0
-        - RADIUS_SECRET=${RADIUS_SECRET:-testing123}
-      restart: unless-stopped
-      depends_on:
-        db:
-          condition: service_healthy
-      networks:
-        - default
-  # ────────────────────────────────────────────────────────────────
-  # NGINX REVERSE PROXY
-  # ────────────────────────────────────────────────────────────────
-  nginx:
-    image: nginx:alpine
-    ports:
-      - "80:80"
-      - "443:443"
-    volumes:
-      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
-      - static_volume:/app/static:ro
-      - media_volume:/app/media:ro
-      - ./nginx/certs:/etc/nginx/certs:ro
-    depends_on:
-      - web
+      - isp_network
 
 # ────────────────────────────────────────────────────────────────
 # NETWORKS
 # ────────────────────────────────────────────────────────────────
 networks:
-  default:
+  isp_network:
     driver: bridge
   vpn_network:
     driver: bridge

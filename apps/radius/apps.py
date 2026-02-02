@@ -19,7 +19,7 @@ class RadiusConfig(AppConfig):
         - Tenant creation → RADIUS configuration
         """
         try:
-            from . import signals  # noqa: F401 - Original signals
+            
             from . import signals_auto_sync  # noqa: F401 - New auto-sync signals
         except ImportError as e:
             import logging
