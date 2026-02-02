@@ -29,8 +29,11 @@ export DB_SCHEMA="${DB_SCHEMA:-public}"
 
 echo "Configuring SQL module..."
 
-# Use envsubst to process only DB_* variables, then fix the escaped $$
+# Use envsubst to process DB_* variables, then fix the escaped $$
 envsubst '$DB_HOST $DB_PORT $DB_USER $DB_PASS $DB_NAME $DB_SCHEMA' < /etc/raddb/sql.template | sed 's/\$\$/$/g' > /etc/raddb/mods-available/sql
+
+echo "Generated SQL module config:"
+grep -E "server|port|login|password|radius_db|connect_query" /etc/raddb/mods-available/sql | head -10
 
 # Create symlink to enable SQL module
 ln -sf /etc/raddb/mods-available/sql /etc/raddb/mods-enabled/sql
@@ -53,6 +56,4 @@ fi
 # Start FreeRADIUS as freerad user
 echo ""
 echo "Starting FreeRADIUS as freerad user..."
-exec gosu freerad "$@"
-FreeRADIUS as freerad user..."
 exec gosu freerad "$@"

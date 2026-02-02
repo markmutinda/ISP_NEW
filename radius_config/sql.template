@@ -2,16 +2,17 @@ sql {
     driver = "rlm_sql_postgresql"
     dialect = "postgresql"
     
-    # Database connection settings (use environment variables)
-    server = "${DB_HOST:-db}"
-    port = ${DB_PORT:-5432}
-    login = "${DB_USER:-postgres}"
-    password = "${DB_PASSWORD:-1234}"
-    radius_db = "${DB_NAME:-isp_management}"
+    # Database connection settings
+    # These are substituted by envsubst in radius-entrypoint.sh
+    server = "${DB_HOST}"
+    port = ${DB_PORT}
+    login = "${DB_USER}"
+    password = "${DB_PASS}"
+    radius_db = "${DB_NAME}"
     
     # Set the search_path to public schema for multi-tenant support
     # This allows all tenants' users to be authenticated from public schema
-    connect_query = "SET search_path TO public"
+    connect_query = "SET search_path TO ${DB_SCHEMA}"
     
     # Set SQL-User-Name from User-Name attribute
     sql_user_name = "%{User-Name}"
