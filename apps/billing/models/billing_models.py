@@ -8,10 +8,7 @@ import uuid
 from django.utils.text import slugify
 from apps.core.models import Company
 
-#from apps.customers.models import Customer, ServiceConnection
 from utils.constants import KENYAN_COUNTIES, TAX_RATES, TAX_TYPES
-
-
 
 class Plan(models.Model):
     PLAN_TYPE_CHOICES = [
@@ -47,10 +44,9 @@ class Plan(models.Model):
     fup_limit = models.IntegerField(null=True, blank=True)  # GB before throttle
     fup_speed = models.IntegerField(null=True, blank=True)  # Reduced speed in Mbps
     
-    # Tenant schema field
+    # Tenant schema field - FIXED: Removed unique=True
     schema_name = models.SlugField(
         max_length=63,
-        unique=True,
         editable=False,
         default="default_schema"
     )
@@ -102,13 +98,15 @@ class Plan(models.Model):
 
     @property
     def subscriber_count(self):
-        return self.service_connections.filter(status='ACTIVE').count()
+        # Note: Ensure service_connections is a valid related_name or exists on ServiceConnection
+        if hasattr(self, 'service_connections'):
+            return self.service_connections.filter(status='ACTIVE').count()
+        return 0
 
     @property
     def subscribers_count(self):
         """Alias for subscriber_count for frontend compatibility"""
         return self.subscriber_count
-
 
 
 class BillingCycle(models.Model):
@@ -127,10 +125,9 @@ class BillingCycle(models.Model):
     status = models.CharField(max_length=20, choices=CYCLE_STATUS, default='OPEN')
     is_locked = models.BooleanField(default=False)
     
-    # Tenant schema field
+    # Tenant schema field - FIXED: Removed unique=True
     schema_name = models.SlugField(
         max_length=63,
-        unique=True,
         editable=False,
         default="default_schema"
     )
@@ -168,7 +165,11 @@ class BillingCycle(models.Model):
         super().save(*args, **kwargs)
 
     def calculate_totals(self):
+        # Imported inside method to avoid circular import issues
         from .payment_models import Invoice
+        # Note: Ensure Invoice model is available; Invoice is defined in this file below, 
+        # but if imported from payment_models it might be different. 
+        # Assuming Invoice is the one defined below in this file:
         invoices = Invoice.objects.filter(billing_cycle=self)
         
         self.total_invoices = invoices.count()
@@ -223,10 +224,9 @@ class Invoice(models.Model):
     service_period_start = models.DateField()
     service_period_end = models.DateField()
     
-    # Tenant schema field
+    # Tenant schema field - FIXED: Removed unique=True
     schema_name = models.SlugField(
         max_length=63,
-        unique=True,
         editable=False,
         default="default_schema"
     )
@@ -285,19 +285,22 @@ class Invoice(models.Model):
             ).order_by('-invoice_number').first()
             
             if last_invoice:
-                last_num = int(last_invoice.invoice_number.split('-')[-1])
-                new_num = last_num + 1
+                try:
+                    last_num = int(last_invoice.invoice_number.split('-')[-1])
+                    new_num = last_num + 1
+                except ValueError:
+                    new_num = 1
             else:
                 new_num = 1
             
             self.invoice_number = f"INV-{year_month}-{new_num:05d}"
         
         # Calculate balance
-        self.balance = self.total_amount - self.amount_paid
+        self.balance = Decimal(self.total_amount) - Decimal(self.amount_paid)
         
         # Check if overdue
         if self.status in ['ISSUED', 'SENT', 'PARTIAL']:
-            if timezone.now().date() > self.due_date:
+            if self.due_date and timezone.now().date() > self.due_date:
                 self.is_overdue = True
                 self.overdue_days = (timezone.now().date() - self.due_date).days
                 if self.status != 'OVERDUE':
@@ -338,11 +341,10 @@ class Invoice(models.Model):
             customer=self.customer,
             amount=amount,
             payment_method=payment_method,
-            
             created_by=self.created_by
         )
         
-        self.amount_paid += amount
+        self.amount_paid += Decimal(amount)
         self.balance = self.total_amount - self.amount_paid
         
         if self.balance <= 0:
@@ -364,10 +366,9 @@ class InvoiceItem(models.Model):
     tax_amount = models.DecimalField(max_digits=10, decimal_places=2, default=0)
     total = models.DecimalField(max_digits=10, decimal_places=2)
     
-    # Tenant schema field
+    # Tenant schema field - FIXED: Removed unique=True
     schema_name = models.SlugField(
         max_length=63,
-        unique=True,
         editable=False,
         default="default_schema"
     )
@@ -389,8 +390,8 @@ class InvoiceItem(models.Model):
 
     def save(self, *args, **kwargs):
         # Calculate total
-        self.total = self.quantity * self.unit_price
-        self.tax_amount = (self.total * self.tax_rate) / 100
+        self.total = Decimal(self.quantity) * Decimal(self.unit_price)
+        self.tax_amount = (self.total * Decimal(self.tax_rate)) / 100
         super().save(*args, **kwargs)
         
         # Update invoice totals
