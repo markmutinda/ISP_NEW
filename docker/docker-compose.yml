@@ -121,43 +121,32 @@ services:
   # All tenants sync to public.radcheck for unified authentication
   # ────────────────────────────────────────────────────────────────
   radius:
-    build:
-      context: ..
-      dockerfile: docker/Dockerfile.radius
-    container_name: netily_radius
-    ports:
-      - "1812:1812/udp"   # Authentication
-      - "1813:1813/udp"   # Accounting
-      - "18120:18120/tcp" # Status (optional)
-    environment:
-<<<<<<< HEAD
-      # Database connection (uses .env file)
-      - DB_HOST=${DB_HOST:-host.docker.internal}
-      - DB_PORT=${DB_PORT:-5432}
-      - DB_NAME=${DB_NAME:-isp_management}
-      - DB_USER=${DB_USER:-postgres}
-      - DB_PASS=${DB_PASSWORD}
-      # CRITICAL: Use 'public' for multi-tenant RADIUS
-      # All tenants sync their users to public.radcheck
-      - DB_SCHEMA=public
-=======
-      # Connect to LOCAL PostgreSQL (not Docker db service)
-      - DB_HOST=db
-      - DB_PORT=5432
-      - DB_NAME=isp_management
-      - DB_USER=isp_user
-      - DB_PASS=2202
-      - DB_SCHEMA=tenant_yellow1
->>>>>>> 5423d016d688e1f5e73fc81e7655cc8f45bfbcc8
-      - RADIUS_CLIENTS=0.0.0.0/0
-      - RADIUS_SECRET=${RADIUS_SECRET:-testing123}
-    restart: unless-stopped
-    depends_on:
-      db:
-        condition: service_healthy
-    networks:
-      - default
-
+      build:
+        context: ..
+        dockerfile: docker/Dockerfile.radius
+      container_name: netily_radius
+      ports:
+        - "1812:1812/udp"   # Authentication
+        - "1813:1813/udp"   # Accounting
+        - "18120:18120/tcp" # Status check
+      environment:
+        # Connect to the internal Docker service named 'db'
+        - DB_HOST=db
+        - DB_PORT=5432
+        # Use credentials from .env (matches the db service)
+        - DB_NAME=${DB_NAME:-isp_management}
+        - DB_USER=${DB_USER:-isp_user}
+        - DB_PASS=${DB_PASSWORD}
+        # CRITICAL: Use 'public' for multi-tenant RADIUS
+        - DB_SCHEMA=public
+        - RADIUS_CLIENTS=0.0.0.0/0
+        - RADIUS_SECRET=${RADIUS_SECRET:-testing123}
+      restart: unless-stopped
+      depends_on:
+        db:
+          condition: service_healthy
+      networks:
+        - default
   # ────────────────────────────────────────────────────────────────
   # NGINX REVERSE PROXY
   # ────────────────────────────────────────────────────────────────
