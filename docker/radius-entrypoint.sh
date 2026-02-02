@@ -12,48 +12,43 @@ set -e
 echo "=========================================="
 echo "NETILY RADIUS Server Starting..."
 echo "=========================================="
-echo "Database Host: ${DB_HOST:-localhost}"
-echo "Database Port: ${DB_PORT:-5432}"
-echo "Database Name: ${DB_NAME:-isp_management}"
-echo "Database User: ${DB_USER:-postgres}"
-echo "Schema: ${DB_SCHEMA:-public}"
-echo "=========================================="
 
-# Set default values for environment variables
-export DB_HOST="${DB_HOST:-localhost}"
+# Ensure defaults
+export DB_HOST="${DB_HOST:-netily_db}"
 export DB_PORT="${DB_PORT:-5432}"
-export DB_USER="${DB_USER:-postgres}"
-export DB_PASS="${DB_PASS:-}"
+export DB_USER="${DB_USER:-isp_user}"
+export DB_PASS="${DB_PASS:-2202}"
+export DB_PASSWORD="${DB_PASSWORD:-2202}" # Safety net
 export DB_NAME="${DB_NAME:-isp_management}"
-export DB_SCHEMA="${DB_SCHEMA:-public}"
+export RADIUS_SECRET="${RADIUS_SECRET:-testing123}"
+export RADIUS_LOCAL_SECRET="${RADIUS_LOCAL_SECRET:-testing123}"
+export RADIUS_DOCKER_SECRET="${RADIUS_DOCKER_SECRET:-docker_testing}"
 
 echo "Configuring SQL module..."
+# Process sql.template and output to mods-available/sql
+# We instruct envsubst to ONLY replace specific variables to avoid breaking other config syntax
+envsubst '$DB_HOST $DB_PORT $DB_USER $DB_PASSWORD $DB_NAME' < /etc/raddb/sql.template > /etc/raddb/mods-available/sql
 
-# Use envsubst to process DB_* variables, then fix the escaped $$
-envsubst '$DB_HOST $DB_PORT $DB_USER $DB_PASS $DB_NAME $DB_SCHEMA' < /etc/raddb/sql.template | sed 's/\$\$/$/g' > /etc/raddb/mods-available/sql
+echo "Configuring Clients..."
+# Process clients.conf
+envsubst '$RADIUS_SECRET $RADIUS_LOCAL_SECRET $RADIUS_DOCKER_SECRET' < /etc/raddb/clients.conf > /etc/raddb/clients.conf.tmp
+mv /etc/raddb/clients.conf.tmp /etc/raddb/clients.conf
 
-echo "Generated SQL module config:"
-grep -E "server|port|login|password|radius_db|connect_query" /etc/raddb/mods-available/sql | head -10
-
-# Create symlink to enable SQL module
+# Enable SQL module
 ln -sf /etc/raddb/mods-available/sql /etc/raddb/mods-enabled/sql
 
-# Fix ownership for freerad user
+# Fix permissions
 chown -R freerad:freerad /etc/raddb
 
-echo "SQL module configured successfully"
+echo "Configuration complete."
 
 # Test database connection
 echo "Testing database connection..."
-if PGPASSWORD="${DB_PASS}" psql -h "${DB_HOST}" -p "${DB_PORT}" -U "${DB_USER}" -d "${DB_NAME}" -c "SET search_path TO ${DB_SCHEMA}; SELECT COUNT(*) FROM radcheck;" 2>/dev/null; then
+if PGPASSWORD="${DB_PASSWORD}" psql -h "${DB_HOST}" -p "${DB_PORT}" -U "${DB_USER}" -d "${DB_NAME}" -c "SELECT 1;" 2>/dev/null; then
     echo "✓ Database connection successful"
 else
-    echo "✗ WARNING: Could not connect to database or read radcheck table."
-    echo "  RADIUS will start but SQL auth may not work."
-    echo "  Make sure PostgreSQL allows connections from Docker."
+    echo "✗ WARNING: Could not connect to database."
 fi
 
-# Start FreeRADIUS as freerad user
-echo ""
-echo "Starting FreeRADIUS as freerad user..."
+echo "Starting FreeRADIUS..."
 exec gosu freerad "$@"

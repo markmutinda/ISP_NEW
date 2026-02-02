@@ -1,59 +1,43 @@
 # ============================================================================
 # NETILY ISP - FreeRADIUS with PostgreSQL Support
 # ============================================================================
-# This Dockerfile builds FreeRADIUS with:
-# - PostgreSQL SQL module support
-# - Custom configuration for Django integration
-# - Multi-tenant schema support
-# ============================================================================
-
 FROM freeradius/freeradius-server:latest
 
-# Install PostgreSQL client library for rlm_sql_postgresql
 USER root
 
+# 1. Install dependencies AND dos2unix (Critical for Windows users)
 RUN apt-get update && apt-get install -y \
     libpq5 \
     postgresql-client \
     gettext-base \
     gosu \
+    dos2unix \
     && rm -rf /var/lib/apt/lists/*
 
-# Create directory for our custom configs
+# 2. Create directory for custom configs
 RUN mkdir -p /etc/raddb/mods-config/sql/main/postgresql
 
-# Copy SQL module template (will be processed at runtime)
-COPY radius_config/sql.template /etc/raddb/sql.template
-
-# Copy queries config
-COPY radius_config/mods-config/sql/main/postgresql/queries.conf /etc/raddb/mods-config/sql/main/postgresql/queries.conf
-
-# Enable SQL module (will be created from template)
-RUN rm -f /etc/raddb/mods-enabled/sql
-
-# Copy site configurations
-COPY radius_config/sites-available/default /etc/raddb/sites-available/default
-COPY radius_config/sites-available/inner-tunnel /etc/raddb/sites-available/inner-tunnel
-
-# Create clients.conf with environment variable support
-RUN echo '# RADIUS Clients Configuration\n\
-# This allows any NAS (MikroTik router) to connect\n\
-\n\
-client any {\n\
-    ipaddr = 0.0.0.0/0\n\
-    secret = testing123\n\
-    shortname = any-nas\n\
-    nastype = other\n\
-}\n' > /etc/raddb/clients.conf
-
-# Create a startup script that handles schema configuration
+# 3. Copy the Entrypoint Script & FIX Line Endings
 COPY docker/radius-entrypoint.sh /usr/local/bin/radius-entrypoint.sh
-RUN chmod +x /usr/local/bin/radius-entrypoint.sh
+RUN dos2unix /usr/local/bin/radius-entrypoint.sh && \
+    chmod +x /usr/local/bin/radius-entrypoint.sh
 
-# Keep root user for entrypoint (it will drop to freerad after config)
-# Expose RADIUS ports
+# 4. Copy the SQL Config (Treating it as a template for env substitution)
+# Note: We assume the file is in docker/freeradius/sql.conf based on your setup
+COPY docker/freeradius/sql.conf /etc/raddb/sql.template
+RUN dos2unix /etc/raddb/sql.template
+
+# 5. Copy the Clients Config
+COPY docker/freeradius/clients.conf /etc/raddb/clients.conf
+RUN dos2unix /etc/raddb/clients.conf
+
+# 6. Setup Sites (Optional: Use default if you don't have custom ones)
+# COPY radius_config/sites-available/default /etc/raddb/sites-available/default
+# COPY radius_config/sites-available/inner-tunnel /etc/raddb/sites-available/inner-tunnel
+
+# Expose ports
 EXPOSE 1812/udp 1813/udp
 
-# Use our custom entrypoint (runs as root, drops to freerad)
+# Start using the fixed entrypoint
 ENTRYPOINT ["/usr/local/bin/radius-entrypoint.sh"]
 CMD ["freeradius", "-X"]

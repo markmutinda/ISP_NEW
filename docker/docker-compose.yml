@@ -138,6 +138,7 @@ services:
       - DB_NAME=isp_management
       - DB_USER=isp_user
       - DB_PASS=2202
+      - DB_PASSWORD=2202
       - DB_SCHEMA=public
       - RADIUS_CLIENTS=0.0.0.0/0
       - RADIUS_SECRET=${RADIUS_SECRET:-testing123}
