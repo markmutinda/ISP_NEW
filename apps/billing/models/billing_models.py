@@ -21,6 +21,20 @@ class Plan(models.Model):
         ('STATIC', 'Static IP'),
     ]
     
+    # Validity Type Choices
+    VALIDITY_TYPE_CHOICES = [
+        ('DAYS', 'Days'),
+        ('HOURS', 'Hours'),
+        ('MINUTES', 'Minutes'),
+        ('UNLIMITED', 'Unlimited'),
+    ]
+    
+    # Speed Unit Choices
+    SPEED_UNIT_CHOICES = [
+        ('MBPS', 'Mbps'),
+        ('KBPS', 'Kbps'),
+    ]
+    
     # Basic Information
     name = models.CharField(max_length=255)
     code = models.CharField(max_length=50, unique=True, blank=True)
@@ -32,13 +46,26 @@ class Plan(models.Model):
     setup_fee = models.DecimalField(max_digits=10, decimal_places=2, default=0)
     
     # Speed & Data
-    download_speed = models.IntegerField(null=True, blank=True)  # Mbps
-    upload_speed = models.IntegerField(null=True, blank=True)    # Mbps
+    download_speed = models.IntegerField(null=True, blank=True)  # Speed value
+    upload_speed = models.IntegerField(null=True, blank=True)    # Speed value
+    speed_unit = models.CharField(max_length=10, choices=SPEED_UNIT_CHOICES, default='MBPS')
     data_limit = models.IntegerField(null=True, blank=True)       # GB, null = unlimited
     
-    # Validity
-    duration_days = models.IntegerField(default=30)  # Plan validity
+    # Validity - Flexible time-based options
+    validity_type = models.CharField(max_length=20, choices=VALIDITY_TYPE_CHOICES, default='DAYS')
+    duration_days = models.IntegerField(default=30)  # Plan validity in days
     validity_hours = models.IntegerField(null=True, blank=True)  # For hourly plans
+    validity_minutes = models.IntegerField(null=True, blank=True)  # For minute-based plans (hotspot)
+    
+    # Session/Connection limits (for hotspot)
+    max_sessions = models.IntegerField(default=1)  # Concurrent devices allowed
+    session_timeout = models.IntegerField(null=True, blank=True)  # Idle timeout in minutes
+    
+    # Burst Speed (for MikroTik)
+    burst_download = models.IntegerField(null=True, blank=True)  # Burst download speed
+    burst_upload = models.IntegerField(null=True, blank=True)  # Burst upload speed
+    burst_threshold = models.IntegerField(null=True, blank=True)  # Burst threshold in KB
+    burst_time = models.IntegerField(null=True, blank=True)  # Burst time in seconds
     
     # Fair Usage Policy
     fup_limit = models.IntegerField(null=True, blank=True)  # GB before throttle
@@ -107,6 +134,55 @@ class Plan(models.Model):
     def subscribers_count(self):
         """Alias for subscriber_count for frontend compatibility"""
         return self.subscriber_count
+    
+    @property
+    def validity_display(self):
+        """Human-readable validity string"""
+        if self.validity_type == 'UNLIMITED':
+            return 'Unlimited'
+        elif self.validity_type == 'MINUTES' and self.validity_minutes:
+            if self.validity_minutes < 60:
+                return f'{self.validity_minutes} min'
+            hours = self.validity_minutes // 60
+            mins = self.validity_minutes % 60
+            if mins > 0:
+                return f'{hours}h {mins}m'
+            return f'{hours} hour{"s" if hours > 1 else ""}'
+        elif self.validity_type == 'HOURS' and self.validity_hours:
+            if self.validity_hours < 24:
+                return f'{self.validity_hours} hour{"s" if self.validity_hours > 1 else ""}'
+            days = self.validity_hours // 24
+            hours = self.validity_hours % 24
+            if hours > 0:
+                return f'{days}d {hours}h'
+            return f'{days} day{"s" if days > 1 else ""}'
+        else:
+            return f'{self.duration_days} day{"s" if self.duration_days > 1 else ""}'
+    
+    @property
+    def speed_display(self):
+        """Human-readable speed string"""
+        unit = self.speed_unit or 'MBPS'
+        unit_str = 'Mbps' if unit == 'MBPS' else 'Kbps'
+        if self.download_speed and self.upload_speed:
+            if self.download_speed == self.upload_speed:
+                return f'{self.download_speed} {unit_str}'
+            return f'{self.download_speed}/{self.upload_speed} {unit_str}'
+        elif self.download_speed:
+            return f'{self.download_speed} {unit_str}'
+        return 'Unlimited'
+    
+    @property
+    def total_validity_minutes(self):
+        """Get total validity in minutes for RADIUS timeout"""
+        if self.validity_type == 'UNLIMITED':
+            return None
+        elif self.validity_type == 'MINUTES':
+            return self.validity_minutes
+        elif self.validity_type == 'HOURS':
+            return (self.validity_hours or 0) * 60
+        else:  # DAYS
+            return (self.duration_days or 30) * 24 * 60
 
 
 class BillingCycle(models.Model):
