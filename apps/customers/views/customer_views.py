@@ -28,7 +28,7 @@ class CustomerViewSet(viewsets.ModelViewSet):
     queryset = Customer.objects.select_related(
         'user', 'created_by', 'updated_by', 'next_of_kin'
     ).prefetch_related(
-        'addresses', 'documents', 'services'
+        'addresses', 'documents', 'services', 'services__plan'
     ).all()
     
     permission_classes = [IsAuthenticated, CanManageCustomers]

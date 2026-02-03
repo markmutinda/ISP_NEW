@@ -81,10 +81,15 @@ api_urlpatterns = [
 ]
 
 # Hotspot URLs (PUBLIC - no auth required for captive portal)
-from apps.billing.urls import hotspot_urlpatterns, webhook_urlpatterns
+from apps.billing.urls import hotspot_urlpatterns, hotspot_admin_urlpatterns, webhook_urlpatterns
 
 hotspot_api_urlpatterns = [
     path('hotspot/', include((hotspot_urlpatterns, 'hotspot'))),
+]
+
+# Hotspot Admin URLs (AUTHENTICATED - for admin management)
+hotspot_admin_api_urlpatterns = [
+    path('hotspot/', include((hotspot_admin_urlpatterns, 'hotspot-admin'))),
 ]
 
 # PayHero Webhooks (PUBLIC - callbacks from PayHero)
@@ -99,6 +104,9 @@ urlpatterns = [
     
     # API URLs (versioned)
     path('api/v1/', include(api_urlpatterns)),
+    
+    # Hotspot Admin API (AUTHENTICATED - for admin management page)
+    path('api/v1/', include(hotspot_admin_api_urlpatterns)),
     
     # Hotspot API (PUBLIC - for captive portal)
     path('api/v1/', include(hotspot_api_urlpatterns)),

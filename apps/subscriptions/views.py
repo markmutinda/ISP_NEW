@@ -10,10 +10,11 @@ from datetime import timedelta
 from decimal import Decimal
 
 from django.conf import settings
-from django.db import transaction
+from django.db import transaction, connection
 from django.db.models import Sum, Count
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
+from django_tenants.utils import schema_context
 
 from rest_framework import status, viewsets
 from rest_framework.decorators import action
@@ -117,46 +118,48 @@ class CurrentSubscriptionView(APIView):
                     status=status.HTTP_400_BAD_REQUEST
                 )
             
-            try:
-                subscription = CompanySubscription.objects.select_related('plan').get(
-                    company=company
-                )
-            except CompanySubscription.DoesNotExist:
-                # Auto-create trial subscription for new companies
-                starter_plan = NetilyPlan.objects.filter(code='starter', is_active=True).first()
-                if not starter_plan:
-                    return Response(
-                        {'error': 'No subscription plans available. Please contact support.'},
-                        status=status.HTTP_500_INTERNAL_SERVER_ERROR
-                    )
-                
-                # Create trial subscription using the class method
+            # Use public schema for subscriptions (they're in SHARED_APPS)
+            with schema_context('public'):
                 try:
-                    subscription = CompanySubscription.create_trial_subscription(
-                        company=company,
-                        plan=starter_plan
+                    subscription = CompanySubscription.objects.select_related('plan').get(
+                        company=company
                     )
-                    logger.info(f"Auto-created trial subscription for company: {company.name}")
-                except Exception as e:
-                    logger.error(f"Failed to create trial subscription: {e}")
-                    return Response(
-                        {'error': 'Failed to initialize subscription. Please contact support.'},
-                        status=status.HTTP_500_INTERNAL_SERVER_ERROR
-                    )
-            
-            # Build response with trial warnings
-            data = CompanySubscriptionSerializer(subscription).data
-            
-            # Add trial-specific messaging
-            if subscription.is_on_trial:
-                days = subscription.trial_days_remaining
-                data['trial_message'] = f"You have {days} day{'s' if days != 1 else ''} left in your free trial."
-                if days <= 3:
-                    data['trial_warning'] = "Your trial is ending soon! Subscribe now to keep access."
-            elif subscription.trial_expired:
-                data['trial_message'] = "Your free trial has expired."
-                data['trial_warning'] = "Please subscribe to continue using Netily."
-                data['access_restricted'] = True
+                except CompanySubscription.DoesNotExist:
+                    # Auto-create trial subscription for new companies
+                    starter_plan = NetilyPlan.objects.filter(code='starter', is_active=True).first()
+                    if not starter_plan:
+                        return Response(
+                            {'error': 'No subscription plans available. Please contact support.'},
+                            status=status.HTTP_500_INTERNAL_SERVER_ERROR
+                        )
+                    
+                    # Create trial subscription using the class method
+                    try:
+                        subscription = CompanySubscription.create_trial_subscription(
+                            company=company,
+                            plan=starter_plan
+                        )
+                        logger.info(f"Auto-created trial subscription for company: {company.name}")
+                    except Exception as e:
+                        logger.error(f"Failed to create trial subscription: {e}")
+                        return Response(
+                            {'error': 'Failed to initialize subscription. Please contact support.'},
+                            status=status.HTTP_500_INTERNAL_SERVER_ERROR
+                        )
+                
+                # Build response with trial warnings
+                data = CompanySubscriptionSerializer(subscription).data
+                
+                # Add trial-specific messaging
+                if subscription.is_on_trial:
+                    days = subscription.trial_days_remaining
+                    data['trial_message'] = f"You have {days} day{'s' if days != 1 else ''} left in your free trial."
+                    if days <= 3:
+                        data['trial_warning'] = "Your trial is ending soon! Subscribe now to keep access."
+                elif subscription.trial_expired:
+                    data['trial_message'] = "Your free trial has expired."
+                    data['trial_warning'] = "Please subscribe to continue using Netily."
+                    data['access_restricted'] = True
             
             return Response(data)
             
@@ -209,16 +212,18 @@ class SubscriptionUsageView(APIView):
                 status=status.HTTP_400_BAD_REQUEST
             )
         
-        try:
-            subscription = CompanySubscription.objects.select_related('plan').get(
-                company=company
-            )
-            plan = subscription.plan
-        except CompanySubscription.DoesNotExist:
-            return Response(
-                {'error': 'No active subscription'},
-                status=status.HTTP_404_NOT_FOUND
-            )
+        # Use public schema for subscriptions (they're in SHARED_APPS)
+        with schema_context('public'):
+            try:
+                subscription = CompanySubscription.objects.select_related('plan').get(
+                    company=company
+                )
+                plan = subscription.plan
+            except CompanySubscription.DoesNotExist:
+                return Response(
+                    {'error': 'No active subscription'},
+                    status=status.HTTP_404_NOT_FOUND
+                )
         
         # Get current counts using tenant context
         # These queries run in the tenant schema

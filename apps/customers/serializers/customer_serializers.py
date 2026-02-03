@@ -159,14 +159,27 @@ class CustomerListSerializer(serializers.ModelSerializer):
     full_name = serializers.CharField(source='user.get_full_name')
     email = serializers.EmailField(source='user.email')
     phone_number = serializers.CharField(source='user.phone_number')
+    first_name = serializers.CharField(source='user.first_name', read_only=True)
+    last_name = serializers.CharField(source='user.last_name', read_only=True)
+    phone = serializers.CharField(source='user.phone_number', read_only=True)
+    customer_number = serializers.CharField(source='customer_code', read_only=True)
+    balance = serializers.CharField(source='outstanding_balance', read_only=True)
+    services = serializers.SerializerMethodField()
     
     class Meta:
         model = Customer
         fields = [
-            'id', 'customer_code', 'full_name', 'email', 'phone_number',
+            'id', 'customer_code', 'customer_number', 'first_name', 'last_name',
+            'full_name', 'email', 'phone', 'phone_number',
             'customer_type', 'status', 'category', 'activation_date',
-            'outstanding_balance'
+            'outstanding_balance', 'balance', 'services', 'created_at', 'updated_at'
         ]
+    
+    def get_services(self, obj):
+        """Get customer services with nested plan data"""
+        from apps.customers.serializers.service_serializers import ServiceConnectionSerializer
+        services = obj.services.select_related('plan').all()[:5]  # Limit to 5 for list view
+        return ServiceConnectionSerializer(services, many=True).data
 
 
 class CustomerDetailSerializer(serializers.ModelSerializer):

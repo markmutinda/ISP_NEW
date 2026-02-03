@@ -3,18 +3,43 @@ Serializers for ServiceConnection model
 """
 from rest_framework import serializers
 from apps.customers.models import ServiceConnection
+from apps.billing.models import Plan
+
+
+class ServicePlanNestedSerializer(serializers.ModelSerializer):
+    """Minimal plan serializer for nesting in service responses"""
+    price = serializers.DecimalField(source='base_price', max_digits=10, decimal_places=2)
+    speed_down = serializers.IntegerField(source='download_speed')
+    speed_up = serializers.IntegerField(source='upload_speed')
+    validity_days = serializers.IntegerField(source='duration_days')
+    
+    class Meta:
+        model = Plan
+        fields = [
+            'id', 'name', 'description', 'price', 'code', 'plan_type',
+            'speed_down', 'speed_up', 'data_limit', 'validity_days',
+            'is_active', 'is_popular'
+        ]
 
 
 class ServiceConnectionSerializer(serializers.ModelSerializer):
     """Serializer for service connections"""
     customer_name = serializers.CharField(source='customer.user.get_full_name', read_only=True)
     customer_code = serializers.CharField(source='customer.customer_code', read_only=True)
+    plan = ServicePlanNestedSerializer(read_only=True)
+    plan_id = serializers.PrimaryKeyRelatedField(
+        queryset=Plan.objects.all(),
+        source='plan',
+        write_only=True,
+        required=False,
+        allow_null=True
+    )
     
     class Meta:
         model = ServiceConnection
         fields = [
             'id', 'customer', 'customer_name', 'customer_code',
-            'service_type', 'plan', 'connection_type', 'auth_connection_type', 'status',
+            'service_type', 'plan', 'plan_id', 'connection_type', 'auth_connection_type', 'status',
             'ip_address', 'mac_address', 'vlan_id',
             'router_model', 'router_serial', 'ont_model', 'ont_serial',
             'download_speed', 'upload_speed', 'data_cap', 'qos_profile',
@@ -40,6 +65,13 @@ class ServiceCreateSerializer(serializers.ModelSerializer):
         max_digits=10, decimal_places=2, default=0, required=False
     )
     
+    # Accept both 'plan' and 'plan_id' for flexibility
+    plan = serializers.PrimaryKeyRelatedField(
+        queryset=Plan.objects.all(),
+        required=False,
+        allow_null=True
+    )
+    
     class Meta:
         model = ServiceConnection
         fields = [
@@ -59,6 +91,10 @@ class ServiceCreateSerializer(serializers.ModelSerializer):
             if not mac_pattern.match(value):
                 raise serializers.ValidationError('Invalid MAC address format')
         return value
+    
+    def to_representation(self, instance):
+        """Return the full service with nested plan after creation"""
+        return ServiceConnectionSerializer(instance).data
 
 
 class ServiceActivationSerializer(serializers.ModelSerializer):

@@ -4,6 +4,12 @@ from .views.InvoiceViews import PlanViewSet, BillingCycleViewSet, InvoiceViewSet
 from .views.PaymentViews import PaymentViewSet
 from .views.VoucherViews import VoucherBatchViewSet, VoucherViewSet  # Removed VoucherUsageViewSet
 from .views.hotspot_views import HotspotPlansView, HotspotPurchaseView, HotspotPurchaseStatusView
+from .views.hotspot_admin_views import (
+    HotspotPlanViewSet,
+    HotspotSessionViewSet,
+    HotspotBrandingView,
+    HotspotDashboardView,
+)
 from .views.customer_payment_views import (
     InitiateCustomerPaymentView,
     CustomerPaymentStatusView,
@@ -66,6 +72,48 @@ hotspot_urlpatterns = [
     path('routers/<int:router_id>/plans/', HotspotPlansView.as_view(), name='hotspot-plans'),
     path('purchase/', HotspotPurchaseView.as_view(), name='hotspot-purchase'),
     path('purchase/<str:session_id>/status/', HotspotPurchaseStatusView.as_view(), name='hotspot-status'),
+]
+
+# ─────────────────────────────────────────────────────────────
+# Hotspot Admin URLs (AUTHENTICATED - admin/staff only)
+# These are used by the hotspot management admin page
+# ─────────────────────────────────────────────────────────────
+hotspot_admin_urlpatterns = [
+    # Dashboard
+    path('dashboard/', HotspotDashboardView.as_view(), name='hotspot-dashboard'),
+    
+    # Plans CRUD (per-router)
+    path('routers/<int:router_id>/plans/', 
+         HotspotPlanViewSet.as_view({'get': 'list', 'post': 'create'}), 
+         name='hotspot-admin-plans'),
+    path('routers/<int:router_id>/plans/<uuid:pk>/', 
+         HotspotPlanViewSet.as_view({'get': 'retrieve', 'patch': 'partial_update', 'delete': 'destroy'}), 
+         name='hotspot-admin-plan-detail'),
+    path('routers/<int:router_id>/plans/reorder/', 
+         HotspotPlanViewSet.as_view({'post': 'reorder'}), 
+         name='hotspot-admin-plans-reorder'),
+    path('routers/<int:router_id>/plans/<uuid:pk>/toggle-active/', 
+         HotspotPlanViewSet.as_view({'post': 'toggle_active'}), 
+         name='hotspot-admin-plan-toggle'),
+    
+    # Sessions (per-router, read-only with disconnect)
+    path('routers/<int:router_id>/sessions/', 
+         HotspotSessionViewSet.as_view({'get': 'list'}), 
+         name='hotspot-admin-sessions'),
+    path('routers/<int:router_id>/sessions/stats/', 
+         HotspotSessionViewSet.as_view({'get': 'stats'}), 
+         name='hotspot-admin-sessions-stats'),
+    path('routers/<int:router_id>/sessions/<uuid:pk>/', 
+         HotspotSessionViewSet.as_view({'get': 'retrieve'}), 
+         name='hotspot-admin-session-detail'),
+    path('routers/<int:router_id>/sessions/<uuid:pk>/disconnect/', 
+         HotspotSessionViewSet.as_view({'post': 'disconnect'}), 
+         name='hotspot-admin-session-disconnect'),
+    
+    # Branding (per-router)
+    path('routers/<int:router_id>/branding/', 
+         HotspotBrandingView.as_view(), 
+         name='hotspot-admin-branding'),
 ]
 
 # ─────────────────────────────────────────────────────────────
