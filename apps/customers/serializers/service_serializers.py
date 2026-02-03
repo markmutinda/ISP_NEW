@@ -72,6 +72,15 @@ class ServiceCreateSerializer(serializers.ModelSerializer):
         allow_null=True
     )
     
+    # RADIUS password - if provided, use this as RADIUS password
+    # Otherwise auto-generate one
+    radius_password = serializers.CharField(
+        write_only=True,
+        required=False,
+        allow_blank=True,
+        help_text="Password for RADIUS authentication (PPPoE/Hotspot login)"
+    )
+    
     class Meta:
         model = ServiceConnection
         fields = [
@@ -81,7 +90,7 @@ class ServiceCreateSerializer(serializers.ModelSerializer):
             'download_speed', 'upload_speed', 'data_cap', 'qos_profile',
             'installation_address', 'installation_notes',
             'monthly_price', 'setup_fee', 'prorated_billing',
-            'auto_renew', 'contract_period', 'status'
+            'auto_renew', 'contract_period', 'status', 'radius_password'
         ]
     
     def validate_mac_address(self, value):
@@ -91,6 +100,19 @@ class ServiceCreateSerializer(serializers.ModelSerializer):
             if not mac_pattern.match(value):
                 raise serializers.ValidationError('Invalid MAC address format')
         return value
+    
+    def create(self, validated_data):
+        """Create service and pass RADIUS password to signal."""
+        radius_password = validated_data.pop('radius_password', None)
+        instance = super().create(validated_data)
+        
+        # Attach the password so the signal can use it
+        if radius_password:
+            instance._radius_password = radius_password
+            # Trigger save again to let signal pick it up
+            instance.save()
+        
+        return instance
     
     def to_representation(self, instance):
         """Return the full service with nested plan after creation"""

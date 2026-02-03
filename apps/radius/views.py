@@ -866,3 +866,40 @@ class CustomerRadiusCredentialsViewSet(viewsets.ModelViewSet):
             'status': 'success',
             'message': f'Disabled RADIUS account: {credentials.username}'
         })
+    
+    @action(detail=True, methods=['post'])
+    def regenerate_username(self, request, pk=None):
+        """
+        Regenerate username based on phone number (simplified format).
+        
+        POST /api/v1/radius/credentials/{id}/regenerate_username/
+        """
+        credentials = self.get_object()
+        customer = credentials.customer
+        
+        # Generate new username from phone number
+        phone = customer.user.phone_number or ''
+        digits = ''.join(c for c in phone if c.isdigit())
+        
+        if len(digits) >= 9:
+            new_username = digits[-9:]  # Last 9 digits (Kenya phone without +254)
+        else:
+            # Fallback to customer code
+            new_username = customer.customer_code.lower().replace(' ', '_')[:20]
+        
+        old_username = credentials.username
+        credentials.username = new_username
+        credentials.save()
+        
+        # Force sync to update RADIUS tables
+        try:
+            credentials.sync_to_radius()
+        except Exception as e:
+            logger.warning(f"Failed to sync after username regeneration: {e}")
+        
+        return Response({
+            'status': 'success',
+            'old_username': old_username,
+            'new_username': new_username,
+            'message': f'Username regenerated from {old_username} to {new_username}'
+        })

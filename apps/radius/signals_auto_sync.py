@@ -20,13 +20,24 @@ from django.db import transaction
 logger = logging.getLogger(__name__)
 
 def generate_pppoe_username(customer) -> str:
-    """Generate a PPPoE username from customer code."""
-    base = customer.customer_code.lower().replace(' ', '_')
-    return f"ppp_{base}"
+    """
+    Generate a simple PPPoE username from customer phone number.
+    
+    Uses phone number (last 9 digits) for simplicity in testing.
+    Format: 712345678 (without country code prefix)
+    """
+    phone = customer.user.phone_number or ''
+    # Remove any non-digit characters
+    digits = ''.join(c for c in phone if c.isdigit())
+    # Take last 9 digits (Kenya phone without country code)
+    if len(digits) >= 9:
+        return digits[-9:]
+    # Fallback to customer code if no phone
+    return customer.customer_code.lower().replace(' ', '_')[:20]
 
-def generate_password(length=12) -> str:
-    """Generate a secure random password."""
-    alphabet = string.ascii_letters + string.digits
+def generate_password(length=8) -> str:
+    """Generate a simple alphanumeric password (easier to type)."""
+    alphabet = string.ascii_lowercase + string.digits
     return ''.join(secrets.choice(alphabet) for _ in range(length))
 
 def get_radius_sync_service():
@@ -135,8 +146,16 @@ def auto_create_radius_for_service(sender, instance, created, **kwargs):
             return
         
         # Generate credentials
+        # Username: simplified to phone number (last 9 digits)
         username = generate_pppoe_username(customer)
-        password = generate_password()
+        
+        # Password: Try to use the radius_password passed via instance, 
+        # or fallback to generating one
+        # Note: The frontend should pass radius_password during service creation
+        password = getattr(instance, '_radius_password', None)
+        if not password:
+            password = generate_password(8)  # 8 char for easier testing
+        
         conn_type = 'PPPOE' if auth_type == 'PPPOE' else 'HOTSPOT'
         profile = _get_or_create_bandwidth_profile(instance) if instance.plan else None
         
@@ -151,7 +170,7 @@ def auto_create_radius_for_service(sender, instance, created, **kwargs):
             simultaneous_use=1,
         )
         
-        logger.info(f"Auto-created RADIUS credentials: {username}")
+        logger.info(f"Auto-created RADIUS credentials: username={username}")
         
     except Exception as e:
         logger.error(f"Failed to auto-create RADIUS for service {instance.id}: {e}")

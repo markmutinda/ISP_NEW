@@ -678,6 +678,7 @@ class CustomerRadiusCredentials(models.Model):
     class Meta:
         verbose_name = 'Customer RADIUS Credentials'
         verbose_name_plural = 'Customer RADIUS Credentials'
+        ordering = ['-created_at']
     
     def __str__(self):
         return f"RADIUS: {self.username} ({self.customer})"

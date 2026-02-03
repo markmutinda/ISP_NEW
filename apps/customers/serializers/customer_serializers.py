@@ -165,6 +165,7 @@ class CustomerListSerializer(serializers.ModelSerializer):
     customer_number = serializers.CharField(source='customer_code', read_only=True)
     balance = serializers.CharField(source='outstanding_balance', read_only=True)
     services = serializers.SerializerMethodField()
+    radius_credentials = serializers.SerializerMethodField()
     
     class Meta:
         model = Customer
@@ -172,7 +173,8 @@ class CustomerListSerializer(serializers.ModelSerializer):
             'id', 'customer_code', 'customer_number', 'first_name', 'last_name',
             'full_name', 'email', 'phone', 'phone_number',
             'customer_type', 'status', 'category', 'activation_date',
-            'outstanding_balance', 'balance', 'services', 'created_at', 'updated_at'
+            'outstanding_balance', 'balance', 'services', 'radius_credentials',
+            'created_at', 'updated_at'
         ]
     
     def get_services(self, obj):
@@ -180,6 +182,18 @@ class CustomerListSerializer(serializers.ModelSerializer):
         from apps.customers.serializers.service_serializers import ServiceConnectionSerializer
         services = obj.services.select_related('plan').all()[:5]  # Limit to 5 for list view
         return ServiceConnectionSerializer(services, many=True).data
+    
+    def get_radius_credentials(self, obj):
+        """Get customer RADIUS credentials for PPPoE/Hotspot login"""
+        if hasattr(obj, 'radius_credentials'):
+            creds = obj.radius_credentials
+            return {
+                'username': creds.username,
+                'password': creds.password,
+                'is_enabled': creds.is_enabled,
+                'connection_type': creds.connection_type,
+            }
+        return None
 
 
 class CustomerDetailSerializer(serializers.ModelSerializer):
