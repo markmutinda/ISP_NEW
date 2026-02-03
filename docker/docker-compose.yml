@@ -6,7 +6,7 @@ services:
   # ────────────────────────────────────────────────────────────────
   db:
     image: postgres:15-alpine
-    container_name: netily_db  # <--- Explicit name for easy finding
+    container_name: netily_db
     volumes:
       - postgres_data:/var/lib/postgresql/data
     environment:
@@ -14,14 +14,14 @@ services:
       - POSTGRES_USER=isp_user
       - POSTGRES_PASSWORD=2202
     ports:
-      - "5433:5432"  # External 5433 (for Windows), Internal 5432 (for Docker)
+      - "5433:5432"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U isp_user -d isp_management"]
       interval: 10s
       timeout: 5s
       retries: 5
     networks:
-      - isp_network  # <--- NEW NETWORK
+      - isp_network
 
   # ────────────────────────────────────────────────────────────────
   # REDIS
@@ -52,7 +52,7 @@ services:
     command: gunicorn config.wsgi:application --bind 0.0.0.0:8000 --workers 4 --reload
     working_dir: /app
     volumes:
-      - ../:/app  # <--- CRITICAL FIX: Points to parent folder
+      - ../:/app
       - static_volume:/app/static
       - media_volume:/app/media
     environment:
@@ -133,7 +133,7 @@ services:
       - "1813:1813/udp"
       - "18120:18120/tcp"
     environment:
-      - DB_HOST=netily_db   # <--- Matches the container_name of the DB
+      - DB_HOST=netily_db
       - DB_PORT=5432
       - DB_NAME=isp_management
       - DB_USER=isp_user
@@ -142,6 +142,7 @@ services:
       - DB_SCHEMA=public
       - RADIUS_CLIENTS=0.0.0.0/0
       - RADIUS_SECRET=${RADIUS_SECRET:-testing123}
+    # REMOVED VOLUMES TO PREVENT PERMISSION ERRORS
     restart: unless-stopped
     depends_on:
       db:
