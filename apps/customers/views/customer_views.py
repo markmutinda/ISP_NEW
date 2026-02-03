@@ -26,7 +26,7 @@ from utils.pagination import StandardResultsSetPagination
 class CustomerViewSet(viewsets.ModelViewSet):
     """ViewSet for managing customers"""
     queryset = Customer.objects.select_related(
-        'user', 'created_by', 'updated_by', 'next_of_kin'
+        'user', 'created_by', 'updated_by', 'next_of_kin', 'radius_credentials'
     ).prefetch_related(
         'addresses', 'documents', 'services', 'services__plan'
     ).all()

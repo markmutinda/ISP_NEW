@@ -90,3 +90,12 @@ apps/notifications/migrations/0001_initial.py
 apps/self_service/migrations/0001_initial.py
 apps/staff/migrations/0001_initial.py
 apps/support/migrations/0001_initial.py
+
+
+#Documentation
+docs/_build/
+docs
+docs/
+*.md 
+docs/VPN_RADIUS_TESTING_GUIDE.md
+
