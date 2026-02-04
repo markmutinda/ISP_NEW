@@ -34,13 +34,43 @@ class HotspotPlan(models.Model):
         ('100', '100 Mbps'),
     )
     
+    VALIDITY_TYPE_CHOICES = (
+        ('MINUTES', 'Minutes'),
+        ('HOURS', 'Hours'),
+        ('DAYS', 'Days'),
+        ('UNLIMITED', 'Unlimited'),
+    )
+    
+    SPEED_UNIT_CHOICES = (
+        ('MBPS', 'Mbps'),
+        ('KBPS', 'Kbps'),
+    )
+    
+    LIMITATION_TYPE_CHOICES = (
+        ('UNLIMITED', 'Unlimited'),
+        ('DATA', 'Data Plan'),
+    )
+    
+    DATA_UNIT_CHOICES = (
+        ('MB', 'MB'),
+        ('GB', 'GB'),
+    )
+    
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     
-    # Relationship to router
+    # Relationship to router (primary router, can also be linked to multiple via routers M2M)
     router = models.ForeignKey(
         'network.Router',
         on_delete=models.CASCADE,
         related_name='hotspot_plans'
+    )
+    
+    # Multiple routers support
+    routers = models.ManyToManyField(
+        'network.Router',
+        related_name='available_hotspot_plans',
+        blank=True,
+        help_text="Additional routers where this plan is available"
     )
     
     # Plan Details
@@ -51,23 +81,98 @@ class HotspotPlan(models.Model):
     price = models.DecimalField(max_digits=10, decimal_places=2)
     currency = models.CharField(max_length=3, default='KES')
     
-    # Duration
-    duration_minutes = models.PositiveIntegerField(
-        help_text="Access duration in minutes (e.g., 60 for 1 hour)"
+    # ════════════════════════════════════════════════════════════════
+    # VALIDITY - Flexible time-based (Minutes/Hours/Days)
+    # ════════════════════════════════════════════════════════════════
+    validity_type = models.CharField(
+        max_length=20,
+        choices=VALIDITY_TYPE_CHOICES,
+        default='HOURS',
+        help_text="Validity period type"
+    )
+    validity_value = models.PositiveIntegerField(
+        default=1,
+        help_text="Number of minutes/hours/days based on validity_type"
     )
     
-    # Data & Speed Limits
+    # Legacy field - keep for backward compatibility
+    duration_minutes = models.PositiveIntegerField(
+        help_text="Access duration in minutes (e.g., 60 for 1 hour)",
+        default=60
+    )
+    
+    # ════════════════════════════════════════════════════════════════
+    # DATA LIMITS
+    # ════════════════════════════════════════════════════════════════
+    limitation_type = models.CharField(
+        max_length=20,
+        choices=LIMITATION_TYPE_CHOICES,
+        default='UNLIMITED',
+        help_text="Whether plan has data limits"
+    )
+    data_limit_value = models.PositiveIntegerField(
+        null=True,
+        blank=True,
+        help_text="Data limit value"
+    )
+    data_limit_unit = models.CharField(
+        max_length=5,
+        choices=DATA_UNIT_CHOICES,
+        default='MB',
+        help_text="Data limit unit (MB or GB)"
+    )
+    
+    # Legacy field - keep for backward compatibility
     data_limit_mb = models.PositiveIntegerField(
         null=True,
         blank=True,
         help_text="Data limit in MB. Null = unlimited"
     )
+    
+    # ════════════════════════════════════════════════════════════════
+    # SPEED SETTINGS - Separate Download/Upload
+    # ════════════════════════════════════════════════════════════════
+    download_speed = models.PositiveIntegerField(
+        default=5,
+        help_text="Download speed value"
+    )
+    upload_speed = models.PositiveIntegerField(
+        default=5,
+        help_text="Upload speed value"
+    )
+    speed_unit = models.CharField(
+        max_length=10,
+        choices=SPEED_UNIT_CHOICES,
+        default='MBPS',
+        help_text="Speed unit (Mbps or Kbps)"
+    )
+    
+    # Legacy field - keep for backward compatibility
     speed_limit_mbps = models.CharField(
         max_length=10,
         choices=SPEED_CHOICES,
         default='5',
         help_text="Speed limit in Mbps"
     )
+    
+    # ════════════════════════════════════════════════════════════════
+    # SESSION LIMITS
+    # ════════════════════════════════════════════════════════════════
+    simultaneous_devices = models.PositiveIntegerField(
+        default=1,
+        help_text="Number of devices that can use this plan simultaneously"
+    )
+    
+    # ════════════════════════════════════════════════════════════════
+    # VALID DAYS (Days of week when plan is available)
+    # ════════════════════════════════════════════════════════════════
+    valid_monday = models.BooleanField(default=True)
+    valid_tuesday = models.BooleanField(default=True)
+    valid_wednesday = models.BooleanField(default=True)
+    valid_thursday = models.BooleanField(default=True)
+    valid_friday = models.BooleanField(default=True)
+    valid_saturday = models.BooleanField(default=True)
+    valid_sunday = models.BooleanField(default=True)
     
     # MikroTik Integration
     mikrotik_profile = models.CharField(
@@ -100,9 +205,47 @@ class HotspotPlan(models.Model):
     def __str__(self):
         return f"{self.router.name} - {self.name} (KES {self.price})"
     
+    def save(self, *args, **kwargs):
+        # Sync new fields to legacy fields for backward compatibility
+        self._sync_legacy_fields()
+        super().save(*args, **kwargs)
+    
+    def _sync_legacy_fields(self):
+        """Sync new fields to legacy fields for backward compatibility"""
+        # Sync validity to duration_minutes
+        if self.validity_type == 'MINUTES':
+            self.duration_minutes = self.validity_value
+        elif self.validity_type == 'HOURS':
+            self.duration_minutes = self.validity_value * 60
+        elif self.validity_type == 'DAYS':
+            self.duration_minutes = self.validity_value * 1440
+        elif self.validity_type == 'UNLIMITED':
+            self.duration_minutes = 525600  # 1 year in minutes
+        
+        # Sync data limit
+        if self.limitation_type == 'DATA' and self.data_limit_value:
+            if self.data_limit_unit == 'GB':
+                self.data_limit_mb = self.data_limit_value * 1024
+            else:
+                self.data_limit_mb = self.data_limit_value
+        else:
+            self.data_limit_mb = None
+        
+        # Sync speed to legacy field
+        self.speed_limit_mbps = str(self.download_speed) if self.speed_unit == 'MBPS' else str(self.download_speed // 1024)
+    
     @property
     def duration_display(self) -> str:
         """Human-readable duration"""
+        if self.validity_type == 'UNLIMITED':
+            return "Unlimited"
+        elif self.validity_type == 'MINUTES':
+            return f"{self.validity_value} minute{'s' if self.validity_value > 1 else ''}"
+        elif self.validity_type == 'HOURS':
+            return f"{self.validity_value} hour{'s' if self.validity_value > 1 else ''}"
+        elif self.validity_type == 'DAYS':
+            return f"{self.validity_value} day{'s' if self.validity_value > 1 else ''}"
+        # Fallback to legacy field
         minutes = self.duration_minutes
         if minutes < 60:
             return f"{minutes} minutes"
@@ -116,13 +259,45 @@ class HotspotPlan(models.Model):
     @property
     def data_limit_display(self) -> str:
         """Human-readable data limit"""
-        if not self.data_limit_mb:
+        if self.limitation_type == 'UNLIMITED' or not self.data_limit_value:
             return "Unlimited"
-        elif self.data_limit_mb >= 1024:
-            gb = self.data_limit_mb / 1024
-            return f"{gb:.1f} GB"
-        else:
-            return f"{self.data_limit_mb} MB"
+        if self.data_limit_unit == 'GB':
+            return f"{self.data_limit_value} GB"
+        return f"{self.data_limit_value} MB"
+    
+    @property
+    def speed_display(self) -> str:
+        """Human-readable speed"""
+        unit = 'Mbps' if self.speed_unit == 'MBPS' else 'Kbps'
+        if self.download_speed == self.upload_speed:
+            return f"{self.download_speed} {unit}"
+        return f"{self.download_speed}/{self.upload_speed} {unit}"
+    
+    @property
+    def valid_days_list(self) -> list:
+        """List of valid days"""
+        days = []
+        if self.valid_monday: days.append('Monday')
+        if self.valid_tuesday: days.append('Tuesday')
+        if self.valid_wednesday: days.append('Wednesday')
+        if self.valid_thursday: days.append('Thursday')
+        if self.valid_friday: days.append('Friday')
+        if self.valid_saturday: days.append('Saturday')
+        if self.valid_sunday: days.append('Sunday')
+        return days
+    
+    @property
+    def total_validity_minutes(self) -> int:
+        """Total validity in minutes for RADIUS"""
+        if self.validity_type == 'UNLIMITED':
+            return 525600  # 1 year
+        elif self.validity_type == 'MINUTES':
+            return self.validity_value
+        elif self.validity_type == 'HOURS':
+            return self.validity_value * 60
+        elif self.validity_type == 'DAYS':
+            return self.validity_value * 1440
+        return self.duration_minutes
 
 
 class HotspotSession(models.Model):

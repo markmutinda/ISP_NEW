@@ -14,20 +14,14 @@ class PlanSerializer(serializers.ModelSerializer):
     subscriber_count = serializers.IntegerField(read_only=True)
     subscribers_count = serializers.IntegerField(source='subscriber_count', read_only=True)
     created_by_name = serializers.CharField(source='created_by.get_full_name', read_only=True)
-    validity_display = serializers.CharField(read_only=True)
-    speed_display = serializers.CharField(read_only=True)
-    total_validity_minutes = serializers.IntegerField(read_only=True)
     
     class Meta:
         model = Plan
         fields = [
             'id', 'name', 'code', 'plan_type', 'description',
             'base_price', 'price', 'setup_fee',
-            'download_speed', 'upload_speed', 'speed_unit', 'data_limit',
-            'validity_type', 'duration_days', 'validity_days', 'validity_hours', 'validity_minutes',
-            'validity_display', 'speed_display', 'total_validity_minutes',
-            'max_sessions', 'session_timeout',
-            'burst_download', 'burst_upload', 'burst_threshold', 'burst_time',
+            'download_speed', 'upload_speed', 'data_limit',
+            'duration_days', 'validity_days', 'validity_hours',
             'fup_limit', 'fup_speed',
             'is_active', 'is_public', 'is_popular',
             'features', 'subscriber_count', 'subscribers_count',
@@ -50,17 +44,15 @@ class PlanSerializer(serializers.ModelSerializer):
 
 
 class PlanCreateSerializer(serializers.ModelSerializer):
-    """Serializer for creating plans with full time-based options"""
+    """Serializer for creating plans (without read-only fields)"""
     
     class Meta:
         model = Plan
         fields = [
             'name', 'plan_type', 'description',
             'base_price', 'setup_fee',
-            'download_speed', 'upload_speed', 'speed_unit', 'data_limit',
-            'validity_type', 'duration_days', 'validity_hours', 'validity_minutes',
-            'max_sessions', 'session_timeout',
-            'burst_download', 'burst_upload', 'burst_threshold', 'burst_time',
+            'download_speed', 'upload_speed', 'data_limit',
+            'duration_days', 'validity_hours',
             'fup_limit', 'fup_speed',
             'is_active', 'is_public', 'is_popular',
             'features'
@@ -85,15 +77,6 @@ class PlanCreateSerializer(serializers.ModelSerializer):
         
         if data.get('fup_speed') and data['fup_speed'] <= 0:
             raise serializers.ValidationError({"fup_speed": "FUP speed must be greater than zero"})
-        
-        # Validate validity based on type
-        validity_type = data.get('validity_type', 'DAYS')
-        if validity_type == 'MINUTES' and not data.get('validity_minutes'):
-            raise serializers.ValidationError({"validity_minutes": "Minutes required for minute-based plans"})
-        elif validity_type == 'HOURS' and not data.get('validity_hours'):
-            raise serializers.ValidationError({"validity_hours": "Hours required for hourly plans"})
-        elif validity_type == 'DAYS' and not data.get('duration_days'):
-            data['duration_days'] = 30  # Default to 30 days
         
         return data
 

@@ -47,10 +47,11 @@ class RadiusSyncService:
     
     # Reply attributes
     ATTR_RATE_LIMIT = 'Mikrotik-Rate-Limit'
-    ATTR_SESSION_TIMEOUT = 'Session-Timeout'
+    ATTR_SESSION_TIMEOUT = 'Session-Timeout'  # NOT USED - Use Expiration for wall-clock instead
     ATTR_IDLE_TIMEOUT = 'Idle-Timeout'
     ATTR_FRAMED_IP = 'Framed-IP-Address'
     ATTR_FRAMED_POOL = 'Framed-Pool'
+    ATTR_SIMULTANEOUS_USE = 'Simultaneous-Use'
     
     # ────────────────────────────────────────────────────────────────
     # PUBLIC SCHEMA SYNC (MULTI-TENANT RADIUS SUPPORT)
@@ -597,6 +598,135 @@ class RadiusSyncService:
         logger.info(f"Set static IP for {username}: {ip_address}")
         return True
     
+    def sync_service_connection(self, connection) -> Dict[str, Any]:
+        """
+        Sync a ServiceConnection (hotspot/PPPoE) to RADIUS with wall-clock expiration.
+        
+        This method handles the new time-based validity (minutes/hours/days) plans.
+        It calculates the actual expiration datetime based on plan validity settings.
+        
+        Args:
+            connection: ServiceConnection model instance
+            
+        Returns:
+            Dict with sync results
+        """
+        from datetime import timedelta
+        
+        customer = connection.customer
+        plan = connection.plan
+        
+        # Generate unique RADIUS username
+        radius_username = self._generate_unique_username(
+            connection.username or customer.phone_number
+        )
+        
+        # Get password
+        password = connection.password or customer.phone_number
+        
+        # Build attributes
+        check_attrs = {}
+        reply_attrs = {}
+        
+        # ════════════════════════════════════════════════════════════════
+        # BANDWIDTH from Plan (with burst support)
+        # ════════════════════════════════════════════════════════════════
+        if plan.download_speed and plan.upload_speed:
+            speed_unit = getattr(plan, 'speed_unit', 'MBPS')
+            
+            if speed_unit == 'KBPS':
+                dl_kbps = plan.download_speed
+                ul_kbps = plan.upload_speed
+            else:
+                dl_kbps = plan.download_speed * 1000
+                ul_kbps = plan.upload_speed * 1000
+            
+            rate_limit = f"{ul_kbps}k/{dl_kbps}k"
+            
+            # Add burst if configured
+            burst_dl = getattr(plan, 'burst_download', None)
+            burst_ul = getattr(plan, 'burst_upload', None)
+            burst_thresh = getattr(plan, 'burst_threshold', None)
+            burst_time = getattr(plan, 'burst_time', None)
+            
+            if burst_dl and burst_ul and burst_thresh and burst_time:
+                if speed_unit == 'KBPS':
+                    burst_dl_k, burst_ul_k = burst_dl, burst_ul
+                else:
+                    burst_dl_k = burst_dl * 1000
+                    burst_ul_k = burst_ul * 1000
+                
+                rate_limit = f"{ul_kbps}k/{dl_kbps}k {burst_ul_k}k/{burst_dl_k}k {burst_thresh}k/{burst_thresh}k {burst_time}/{burst_time} 8"
+            
+            reply_attrs[self.ATTR_RATE_LIMIT] = rate_limit
+        
+        # ════════════════════════════════════════════════════════════════
+        # WALL-CLOCK EXPIRATION (based on plan validity_type)
+        # ════════════════════════════════════════════════════════════════
+        # Calculate expiration based on connection start time + plan validity
+        expiration_datetime = None
+        
+        if connection.start_date:
+            start = connection.start_date
+        else:
+            start = timezone.now()
+        
+        validity_type = getattr(plan, 'validity_type', 'DAYS')
+        
+        if validity_type == 'UNLIMITED':
+            # Set far future expiration (10 years)
+            expiration_datetime = start + timedelta(days=3650)
+        elif validity_type == 'MINUTES':
+            validity_minutes = getattr(plan, 'validity_minutes', 0) or 0
+            if validity_minutes > 0:
+                expiration_datetime = start + timedelta(minutes=validity_minutes)
+        elif validity_type == 'HOURS':
+            validity_minutes = getattr(plan, 'validity_minutes', 0) or 0
+            # validity_minutes stores hours * 60 for HOURS type
+            if validity_minutes > 0:
+                expiration_datetime = start + timedelta(minutes=validity_minutes)
+        else:  # DAYS
+            validity_days = getattr(plan, 'validity_days', 30) or 30
+            expiration_datetime = start + timedelta(days=validity_days)
+        
+        if expiration_datetime:
+            check_attrs[self.ATTR_EXPIRATION] = expiration_datetime.strftime("%b %d %Y %H:%M:%S")
+        
+        # ════════════════════════════════════════════════════════════════
+        # SIMULTANEOUS SESSIONS
+        # ════════════════════════════════════════════════════════════════
+        max_sessions = getattr(plan, 'max_sessions', 1) or 1
+        check_attrs[self.ATTR_SIMULTANEOUS_USE] = str(max_sessions)
+        
+        # ════════════════════════════════════════════════════════════════
+        # IDLE TIMEOUT (optional)
+        # ════════════════════════════════════════════════════════════════
+        session_timeout = getattr(plan, 'session_timeout', None)
+        if session_timeout and session_timeout > 0:
+            reply_attrs[self.ATTR_IDLE_TIMEOUT] = str(session_timeout)
+        
+        # Create/update RADIUS user
+        result = self.create_radius_user(
+            username=radius_username,
+            password=password,
+            customer=customer,
+            attributes=check_attrs,
+            reply_attributes=reply_attrs
+        )
+        
+        # Store RADIUS username in connection for reference
+        if hasattr(connection, 'radius_username'):
+            connection.radius_username = radius_username
+            connection.save(update_fields=['radius_username'])
+        
+        result['radius_username'] = radius_username
+        result['expiration'] = check_attrs.get(self.ATTR_EXPIRATION)
+        result['validity_type'] = validity_type
+        
+        logger.info(f"Synced ServiceConnection to RADIUS: {radius_username} (expires: {result['expiration']})")
+        
+        return result
+    
     # ────────────────────────────────────────────────────────────────
     # GROUP MANAGEMENT
     # ────────────────────────────────────────────────────────────────
@@ -735,6 +865,10 @@ class RadiusSyncService:
         Sync a customer to RADIUS.
         Creates/updates RADIUS user based on customer's subscription.
         
+        IMPORTANT: Uses wall-clock Expiration attribute (NOT Session-Timeout).
+        This allows FreeRADIUS to reject logins after the expiration date,
+        while the Celery task handles disconnecting active sessions.
+        
         Args:
             customer: Customer model instance
             
@@ -759,18 +893,66 @@ class RadiusSyncService:
         check_attrs = {}
         reply_attrs = {}
         
-        # Set bandwidth from plan
+        # ════════════════════════════════════════════════════════════════
+        # BANDWIDTH (supports Mbps or Kbps from plan settings)
+        # ════════════════════════════════════════════════════════════════
         if hasattr(plan, 'download_speed') and hasattr(plan, 'upload_speed'):
-            rate_limit = f"{plan.upload_speed}k/{plan.download_speed}k"
+            # Get speed unit (default to Mbps for backwards compatibility)
+            speed_unit = getattr(plan, 'speed_unit', 'MBPS')
+            
+            if speed_unit == 'KBPS':
+                # Already in kbps
+                dl_kbps = plan.download_speed
+                ul_kbps = plan.upload_speed
+            else:
+                # Convert Mbps to kbps
+                dl_kbps = plan.download_speed * 1000
+                ul_kbps = plan.upload_speed * 1000
+            
+            # Basic rate limit format: upload/download
+            rate_limit = f"{ul_kbps}k/{dl_kbps}k"
+            
+            # Add burst settings if available
+            burst_dl = getattr(plan, 'burst_download', None)
+            burst_ul = getattr(plan, 'burst_upload', None)
+            burst_threshold = getattr(plan, 'burst_threshold', None)
+            burst_time = getattr(plan, 'burst_time', None)
+            
+            if burst_dl and burst_ul and burst_threshold and burst_time:
+                # Full MikroTik burst format: 
+                # rx-rate[/tx-rate] [rx-burst-rate[/tx-burst-rate] [rx-burst-threshold[/tx-burst-threshold] [rx-burst-time[/tx-burst-time] [priority]]]]
+                if speed_unit == 'KBPS':
+                    burst_dl_k = burst_dl
+                    burst_ul_k = burst_ul
+                else:
+                    burst_dl_k = burst_dl * 1000
+                    burst_ul_k = burst_ul * 1000
+                
+                rate_limit = f"{ul_kbps}k/{dl_kbps}k {burst_ul_k}k/{burst_dl_k}k {burst_threshold}k/{burst_threshold}k {burst_time}/{burst_time} 8"
+            
             reply_attrs[self.ATTR_RATE_LIMIT] = rate_limit
         
-        # Set expiration
+        # ════════════════════════════════════════════════════════════════
+        # WALL-CLOCK EXPIRATION (NOT Session-Timeout!)
+        # ════════════════════════════════════════════════════════════════
+        # The Expiration attribute tells FreeRADIUS to reject logins after
+        # this date/time. For active session disconnection, we rely on the
+        # Celery disconnect_expired_users task.
         if subscription.end_date:
             check_attrs[self.ATTR_EXPIRATION] = subscription.end_date.strftime("%b %d %Y %H:%M:%S")
         
-        # Set simultaneous use
-        simultaneous = getattr(plan, 'simultaneous_sessions', 1)
-        check_attrs[self.ATTR_SIMULTANEOUS_USE] = str(simultaneous)
+        # ════════════════════════════════════════════════════════════════
+        # SIMULTANEOUS SESSIONS (max_sessions from plan)
+        # ════════════════════════════════════════════════════════════════
+        max_sessions = getattr(plan, 'max_sessions', 1)
+        check_attrs[self.ATTR_SIMULTANEOUS_USE] = str(max_sessions)
+        
+        # ════════════════════════════════════════════════════════════════
+        # IDLE TIMEOUT (optional, from plan.session_timeout)
+        # ════════════════════════════════════════════════════════════════
+        session_timeout = getattr(plan, 'session_timeout', None)
+        if session_timeout and session_timeout > 0:
+            reply_attrs[self.ATTR_IDLE_TIMEOUT] = str(session_timeout)
         
         # Get or generate password
         password = getattr(customer, 'pppoe_password', None) or customer.phone_number

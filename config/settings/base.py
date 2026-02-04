@@ -47,6 +47,16 @@ BASE_APPS = [
     'drf_yasg',
 ]
 
+# Add Celery apps only if celery is installed (production)
+try:
+    import celery
+    BASE_APPS.extend([
+        'django_celery_beat',      # Celery Beat scheduler (periodic tasks)
+        'django_celery_results',   # Celery task results backend
+    ])
+except ImportError:
+    pass  # Celery not installed (local development)
+
 # ────────────────────────────────────────────────────────────────
 #  🚨🚨🚨 FIXED: SHARED vs TENANT APPS (CRITICAL FIX)
 # ────────────────────────────────────────────────────────────────
@@ -150,6 +160,24 @@ DATABASES = {
         'PORT': os.environ.get('DB_PORT', '5432'),
     }
 }
+
+# ────────────────────────────────────────────────────────────────
+#  REDIS & CELERY CONFIGURATION
+# ────────────────────────────────────────────────────────────────
+REDIS_URL = os.environ.get('REDIS_URL', 'redis://localhost:6379/0')
+
+# Celery Configuration
+CELERY_BROKER_URL = REDIS_URL
+CELERY_RESULT_BACKEND = 'django-db'  # Store results in Django DB
+CELERY_CACHE_BACKEND = 'default'
+CELERY_ACCEPT_CONTENT = ['json']
+CELERY_TASK_SERIALIZER = 'json'
+CELERY_RESULT_SERIALIZER = 'json'
+CELERY_TIMEZONE = 'Africa/Nairobi'
+CELERY_ENABLE_UTC = True
+
+# Celery Beat (scheduled tasks) - Use database scheduler
+CELERY_BEAT_SCHEDULER = 'django_celery_beat.schedulers:DatabaseScheduler'
 
 # ────────────────────────────────────────────────────────────────
 #  ROOT URLCONF, TEMPLATES, WSGI

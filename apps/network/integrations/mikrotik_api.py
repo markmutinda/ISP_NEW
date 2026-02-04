@@ -302,6 +302,115 @@ class MikrotikAPI:
         finally: self.disconnect()
 
     # ────────────────────────────────────────────────────────────────
+    # ACTIVE SESSION DISCONNECT (For Expired User Kick)
+    # ────────────────────────────────────────────────────────────────
+    
+    def remove_hotspot_active_user(self, username: str) -> bool:
+        """
+        Kick an active hotspot user off the network.
+        
+        Used when:
+        - Subscription expires
+        - User is disabled
+        - Manual disconnect requested
+        
+        Args:
+            username: The hotspot username to disconnect
+            
+        Returns:
+            True if user was disconnected (or wasn't connected)
+        """
+        try:
+            if not self.connect():
+                return False
+            
+            # Find active session for this user
+            active_users = list(self.api.path('/ip/hotspot/active'))
+            
+            for user in active_users:
+                if user.get('user') == username:
+                    # Remove the active session
+                    self.api.path('/ip/hotspot/active').remove(**{'.id': user['.id']})
+                    logger.info(f"Kicked hotspot user {username} from {self.device.name}")
+                    return True
+            
+            # User not active - that's fine
+            logger.debug(f"Hotspot user {username} not active on {self.device.name}")
+            return True
+            
+        except TrapError as e:
+            logger.error(f"MikroTik trap error kicking hotspot user {username}: {e}")
+            return False
+        except Exception as e:
+            logger.error(f"Failed to kick hotspot user {username}: {e}")
+            return False
+        finally:
+            self.disconnect()
+    
+    def remove_pppoe_active_user(self, username: str) -> bool:
+        """
+        Kick an active PPPoE user off the network.
+        
+        Used when:
+        - Subscription expires
+        - User is disabled
+        - Manual disconnect requested
+        
+        Args:
+            username: The PPPoE username to disconnect
+            
+        Returns:
+            True if user was disconnected (or wasn't connected)
+        """
+        try:
+            if not self.connect():
+                return False
+            
+            # Find active PPPoE session for this user
+            active_sessions = list(self.api.path('/ppp/active'))
+            
+            for session in active_sessions:
+                if session.get('name') == username:
+                    # Remove the active session
+                    self.api.path('/ppp/active').remove(**{'.id': session['.id']})
+                    logger.info(f"Kicked PPPoE user {username} from {self.device.name}")
+                    return True
+            
+            # User not active - that's fine
+            logger.debug(f"PPPoE user {username} not active on {self.device.name}")
+            return True
+            
+        except TrapError as e:
+            logger.error(f"MikroTik trap error kicking PPPoE user {username}: {e}")
+            return False
+        except Exception as e:
+            logger.error(f"Failed to kick PPPoE user {username}: {e}")
+            return False
+        finally:
+            self.disconnect()
+    
+    def disconnect_user(self, username: str, connection_type: str = 'both') -> Dict[str, bool]:
+        """
+        Disconnect a user from both hotspot and PPPoE (or specific type).
+        
+        Args:
+            username: Username to disconnect
+            connection_type: 'hotspot', 'pppoe', or 'both'
+            
+        Returns:
+            Dict with results for each type attempted
+        """
+        results = {}
+        
+        if connection_type in ('hotspot', 'both'):
+            results['hotspot'] = self.remove_hotspot_active_user(username)
+        
+        if connection_type in ('pppoe', 'both'):
+            results['pppoe'] = self.remove_pppoe_active_user(username)
+        
+        return results
+
+    # ────────────────────────────────────────────────────────────────
     # HELPER METHODS
     # ────────────────────────────────────────────────────────────────
 
