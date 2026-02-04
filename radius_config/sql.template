@@ -148,7 +148,13 @@ sql {
         WHERE acctstoptime IS NULL \
         AND nasipaddress = '%{NAS-IP-Address}'"
     
-    accounting_off_query = "${..accounting_on_query}"
+    accounting_off_query = "\
+        UPDATE radacct \
+        SET \
+            acctstoptime = TO_TIMESTAMP(%{integer:Event-Timestamp}), \
+            acctterminatecause = 'NAS-Reboot' \
+        WHERE acctstoptime IS NULL \
+        AND nasipaddress = '%{NAS-IP-Address}'"
     
     # ═══════════════════════════════════════════════════════════════
     # POST-AUTH QUERY (Auth Logging)
