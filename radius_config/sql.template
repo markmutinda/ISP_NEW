@@ -1,9 +1,16 @@
+# ────────────────────────────────────────────────────────────────
+# FreeRADIUS SQL Configuration (FLAT SYNTAX - REQUIRED FOR ACCOUNTING)
+# ────────────────────────────────────────────────────────────────
+# IMPORTANT: This file uses flat variable syntax for accounting queries.
+# Do NOT use nested blocks like: accounting { start { ... } }
+# FreeRADIUS 3.x requires flat variables: accounting_start_query = "..."
+# ────────────────────────────────────────────────────────────────
+
 sql {
     driver = "rlm_sql_postgresql"
     dialect = "postgresql"
     
-    # Database connection settings
-    # These are substituted by envsubst in radius-entrypoint.sh
+    # Database connection settings (substituted by envsubst in entrypoint)
     server = "${DB_HOST}"
     port = ${DB_PORT}
     login = "${DB_USER}"
@@ -11,12 +18,12 @@ sql {
     radius_db = "${DB_NAME}"
     
     # Set the search_path to public schema for multi-tenant support
-    # This allows all tenants' users to be authenticated from public schema
     connect_query = "SET search_path TO ${DB_SCHEMA}"
     
     # Set SQL-User-Name from User-Name attribute
     sql_user_name = "%{User-Name}"
     
+    # Connection Pool Settings
     pool {
         start = 5
         min = 4
@@ -28,7 +35,10 @@ sql {
     }
     
     read_clients = no
+    read_groups = yes
+    delete_stale_sessions = yes
     
+    # Table Names
     authcheck_table = "radcheck"
     authreply_table = "radreply"
     groupcheck_table = "radgroupcheck"
@@ -39,6 +49,119 @@ sql {
     postauth_table = "radpostauth"
     client_table = "nas"
     
-    # Include queries from the standard location
-    $$INCLUDE $${modconfdir}/$${.:name}/main/$${dialect}/queries.conf
+    # ═══════════════════════════════════════════════════════════════
+    # AUTHORIZATION QUERIES (User Lookup)
+    # ═══════════════════════════════════════════════════════════════
+    
+    authorize_check_query = "\
+        SELECT id, username, attribute, value, op \
+        FROM radcheck \
+        WHERE username = '%{SQL-User-Name}' \
+        ORDER BY id"
+    
+    authorize_reply_query = "\
+        SELECT id, username, attribute, value, op \
+        FROM radreply \
+        WHERE username = '%{SQL-User-Name}' \
+        ORDER BY id"
+    
+    group_membership_query = "\
+        SELECT groupname \
+        FROM radusergroup \
+        WHERE username = '%{SQL-User-Name}' \
+        ORDER BY priority"
+    
+    authorize_group_check_query = "\
+        SELECT id, groupname, attribute, value, op \
+        FROM radgroupcheck \
+        WHERE groupname = '%{Sql-Group}' \
+        ORDER BY id"
+    
+    authorize_group_reply_query = "\
+        SELECT id, groupname, attribute, value, op \
+        FROM radgroupreply \
+        WHERE groupname = '%{Sql-Group}' \
+        ORDER BY id"
+    
+    # ═══════════════════════════════════════════════════════════════
+    # ACCOUNTING QUERIES (FLAT SYNTAX - CRITICAL FOR [sql] = noop FIX)
+    # ═══════════════════════════════════════════════════════════════
+    
+    # Accounting Start - Records session beginning
+    accounting_start_query = "\
+        INSERT INTO radacct \
+            (acctsessionid, acctuniqueid, username, nasipaddress, \
+             nasportid, nasporttype, acctstarttime, acctupdatetime, \
+             acctauthentic, connectinfo_start, acctinputoctets, \
+             acctoutputoctets, calledstationid, callingstationid, \
+             servicetype, framedprotocol, framedipaddress) \
+        VALUES \
+            ('%{Acct-Session-Id}', '%{Acct-Unique-Session-Id}', \
+             '%{SQL-User-Name}', '%{NAS-IP-Address}', \
+             '%{%{NAS-Port-Id}:-%{NAS-Port}}', '%{NAS-Port-Type}', \
+             TO_TIMESTAMP(%{integer:Event-Timestamp}), \
+             TO_TIMESTAMP(%{integer:Event-Timestamp}), \
+             '%{Acct-Authentic}', '%{Connect-Info}', \
+             0, 0, \
+             '%{Called-Station-Id}', '%{Calling-Station-Id}', \
+             '%{Service-Type}', '%{Framed-Protocol}', '%{Framed-IP-Address}')"
+    
+    # Accounting Interim-Update - Updates session data periodically
+    accounting_update_query = "\
+        UPDATE radacct \
+        SET \
+            acctupdatetime = TO_TIMESTAMP(%{integer:Event-Timestamp}), \
+            acctinterval = %{%{Acct-Delay-Time}:-0} + %{integer:Event-Timestamp} - \
+                EXTRACT(EPOCH FROM acctupdatetime)::integer, \
+            framedipaddress = '%{Framed-IP-Address}', \
+            acctsessiontime = %{%{Acct-Session-Time}:-0}, \
+            acctinputoctets = (('%{%{Acct-Input-Gigawords}:-0}'::bigint * 4294967296) + \
+                '%{%{Acct-Input-Octets}:-0}'::bigint), \
+            acctoutputoctets = (('%{%{Acct-Output-Gigawords}:-0}'::bigint * 4294967296) + \
+                '%{%{Acct-Output-Octets}:-0}'::bigint) \
+        WHERE acctsessionid = '%{Acct-Session-Id}' \
+        AND username = '%{SQL-User-Name}' \
+        AND nasipaddress = '%{NAS-IP-Address}'"
+    
+    # Accounting Stop - Records session end
+    accounting_stop_query = "\
+        UPDATE radacct \
+        SET \
+            acctstoptime = TO_TIMESTAMP(%{integer:Event-Timestamp}), \
+            acctsessiontime = %{%{Acct-Session-Time}:-0}, \
+            acctinputoctets = (('%{%{Acct-Input-Gigawords}:-0}'::bigint * 4294967296) + \
+                '%{%{Acct-Input-Octets}:-0}'::bigint), \
+            acctoutputoctets = (('%{%{Acct-Output-Gigawords}:-0}'::bigint * 4294967296) + \
+                '%{%{Acct-Output-Octets}:-0}'::bigint), \
+            acctterminatecause = '%{Acct-Terminate-Cause}', \
+            connectinfo_stop = '%{Connect-Info}' \
+        WHERE acctsessionid = '%{Acct-Session-Id}' \
+        AND username = '%{SQL-User-Name}' \
+        AND nasipaddress = '%{NAS-IP-Address}'"
+    
+    # Accounting On/Off - Bulk session handling
+    accounting_on_query = "\
+        UPDATE radacct \
+        SET \
+            acctstoptime = TO_TIMESTAMP(%{integer:Event-Timestamp}), \
+            acctterminatecause = 'NAS-Reboot' \
+        WHERE acctstoptime IS NULL \
+        AND nasipaddress = '%{NAS-IP-Address}'"
+    
+    accounting_off_query = "${..accounting_on_query}"
+    
+    # ═══════════════════════════════════════════════════════════════
+    # POST-AUTH QUERY (Auth Logging)
+    # ═══════════════════════════════════════════════════════════════
+    
+    postauth_query = "\
+        INSERT INTO radpostauth \
+            (username, pass, reply, authdate, nasipaddress, nasportid) \
+        VALUES \
+            ('%{SQL-User-Name}', \
+             '%{%{User-Password}:-%{Chap-Password}}', \
+             '%{reply:Packet-Type}', \
+             NOW(), \
+             '%{NAS-IP-Address}', \
+             '%{NAS-Port-Id}')"
 }
