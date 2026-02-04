@@ -15,7 +15,7 @@ RUN apt-get update && apt-get install -y \
     && rm -rf /var/lib/apt/lists/*
 
 # 2. Create directory for custom configs
-RUN mkdir -p /etc/raddb/mods-config/sql/main/postgresql
+RUN mkdir -p /etc/freeradius/mods-config/sql/main/postgresql
 
 # 3. Copy the Entrypoint Script & FIX Line Endings
 COPY docker/radius-entrypoint.sh /usr/local/bin/radius-entrypoint.sh
@@ -23,13 +23,13 @@ RUN dos2unix /usr/local/bin/radius-entrypoint.sh && \
     chmod +x /usr/local/bin/radius-entrypoint.sh
 
 # 4. Copy the SQL Config (Treating it as a template for env substitution)
-# Note: We assume the file is in docker/freeradius/sql.conf based on your setup
-COPY docker/freeradius/sql.conf /etc/raddb/sql.template
-RUN dos2unix /etc/raddb/sql.template
+# NOTE: Uses /etc/freeradius (Debian/Ubuntu) not /etc/raddb (RedHat/CentOS)
+COPY docker/freeradius/sql.conf /etc/freeradius/sql.template
+RUN dos2unix /etc/freeradius/sql.template
 
 # 5. Copy the Clients Config
-COPY docker/freeradius/clients.conf /etc/raddb/clients.conf
-RUN dos2unix /etc/raddb/clients.conf
+COPY docker/freeradius/clients.conf /etc/freeradius/clients.conf
+RUN dos2unix /etc/freeradius/clients.conf
 
 # 6. Setup Sites (Optional: Use default if you don't have custom ones)
 # COPY radius_config/sites-available/default /etc/raddb/sites-available/default
