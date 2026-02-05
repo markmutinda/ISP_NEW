@@ -643,6 +643,17 @@ class CompanyRegisterView(generics.CreateAPIView):
         from django.db import connection
         connection.set_schema_to_public()
         
+        # 1. Generate Slug BEFORE creating the object
+        from django.utils.text import slugify
+        slug = slugify(data['company_name']) or 'company'
+        
+        # 2. Ensure Slug Uniqueness (Handle duplicates like "Blue Net" vs "Blue Net")
+        original_slug = slug
+        counter = 1
+        while Company.objects.filter(slug=slug).exists():
+            slug = f"{original_slug}-{counter}"
+            counter += 1
+
         # Create company in public schema
         company = Company.objects.create(
             name=data['company_name'],
@@ -659,12 +670,7 @@ class CompanyRegisterView(generics.CreateAPIView):
             is_active=True
         )
         
-        # Generate slug
-        if not company.slug:
-            from django.utils.text import slugify
-            slug = slugify(company.name) or 'company'
-            company.slug = slug
-            company.save()
+
         
         # Create Tenant in public schema
         trial_end = timezone.now() + timedelta(days=14)
