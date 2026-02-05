@@ -903,3 +903,86 @@ class CustomerRadiusCredentialsViewSet(viewsets.ModelViewSet):
             'new_username': new_username,
             'message': f'Username regenerated from {old_username} to {new_username}'
         })
+
+    @action(detail=True, methods=['post'])
+    def renew(self, request, pk=None):
+        """
+        Renew subscription - extends expiration date based on current plan.
+        
+        POST /api/v1/radius/credentials/{id}/renew/
+        
+        This endpoint:
+        1. Gets the customer's active service connection with a plan
+        2. Calculates new expiration based on plan validity settings
+        3. Updates the credentials expiration_date
+        4. Re-enables the account if disabled
+        5. Syncs to RADIUS tables
+        
+        Returns:
+            {
+                "status": "success",
+                "message": "Subscription renewed",
+                "username": "712345678",
+                "new_expiration": "2026-02-06T14:30:00Z"
+            }
+        """
+        from django.utils import timezone
+        from apps.radius.signals_auto_sync import calculate_expiration_from_plan
+        
+        credentials = self.get_object()
+        customer = credentials.customer
+        
+        # Find active service with a plan
+        service = customer.services.filter(
+            status='ACTIVE',
+            auth_connection_type__in=['PPPOE', 'HOTSPOT'],
+            plan__isnull=False
+        ).first()
+        
+        if not service or not service.plan:
+            # Try to find any service with a plan
+            service = customer.services.filter(
+                plan__isnull=False
+            ).first()
+        
+        if not service or not service.plan:
+            return Response({
+                'status': 'error',
+                'message': 'No plan found for this customer. Please assign a plan first.'
+            }, status=status.HTTP_400_BAD_REQUEST)
+        
+        # Calculate new expiration
+        new_expiration = calculate_expiration_from_plan(service.plan)
+        
+        # Update credentials
+        credentials.expiration_date = new_expiration
+        credentials.is_enabled = True
+        credentials.disabled_reason = ''
+        credentials.save()
+        
+        # Force sync to RADIUS
+        try:
+            credentials.sync_to_radius()
+        except Exception as e:
+            logger.warning(f"Failed to sync after renewal: {e}")
+        
+        # Format expiration for response
+        expiration_str = None
+        if new_expiration:
+            expiration_str = new_expiration.isoformat()
+        
+        logger.info(
+            f"Renewed subscription for {credentials.username}: "
+            f"Plan={service.plan.name}, "
+            f"ValidityType={service.plan.validity_type}, "
+            f"NewExpiration={expiration_str or 'Unlimited'}"
+        )
+        
+        return Response({
+            'status': 'success',
+            'message': f'Subscription renewed based on plan: {service.plan.name}',
+            'username': credentials.username,
+            'new_expiration': expiration_str,
+            'plan_name': service.plan.name,
+            'validity_type': service.plan.validity_type
+        })

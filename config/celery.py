@@ -32,11 +32,33 @@ app.autodiscover_tasks()
 app.conf.beat_schedule = {
     # ────────────────────────────────────────────────────────────────
     # RADIUS Session Management - Runs every 5 minutes
+    # Disconnects users whose Expiration attribute has passed
     # ────────────────────────────────────────────────────────────────
     'disconnect-expired-users-every-5-min': {
         'task': 'apps.radius.tasks.disconnect_expired_users',
         'schedule': crontab(minute='*/5'),  # Every 5 minutes
         'options': {'queue': 'radius'}
+    },
+    
+    # ────────────────────────────────────────────────────────────────
+    # Process Expired Subscriptions - Every 15 minutes
+    # Backup check: Disables RADIUS credentials based on expiration_date
+    # ────────────────────────────────────────────────────────────────
+    'process-expired-subscriptions-every-15-min': {
+        'task': 'apps.radius.tasks.process_expired_subscriptions',
+        'schedule': crontab(minute='*/15'),  # Every 15 minutes
+        'options': {'queue': 'radius'}
+    },
+    
+    # ────────────────────────────────────────────────────────────────
+    # Expiry Warning Notifications - Every hour
+    # Notifies customers 24 hours before expiration
+    # ────────────────────────────────────────────────────────────────
+    'notify-expiring-soon-hourly': {
+        'task': 'apps.radius.tasks.notify_expiring_soon',
+        'schedule': crontab(minute=30),  # Every hour at :30
+        'args': (24,),  # 24 hours before expiry
+        'options': {'queue': 'notifications'}
     },
     
     # ────────────────────────────────────────────────────────────────

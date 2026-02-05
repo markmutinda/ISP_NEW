@@ -8,14 +8,17 @@ This module provides AUTOMATIC synchronization between Django and RADIUS:
 4. When Plan is updated → Update bandwidth for all users on that plan
 5. When Invoice is overdue → Suspend RADIUS access
 6. When Payment received → Restore RADIUS access
+7. When Service is activated → Calculate expiration based on Plan validity
 """
 
 import logging
 import secrets
 import string
-from django.db.models.signals import post_save, post_delete
+from datetime import timedelta
+from django.db.models.signals import post_save, post_delete, pre_save
 from django.dispatch import receiver
 from django.db import transaction
+from django.utils import timezone
 
 logger = logging.getLogger(__name__)
 
@@ -44,6 +47,42 @@ def get_radius_sync_service():
     """Lazy import to avoid circular imports."""
     from .services.radius_sync_service import RadiusSyncService
     return RadiusSyncService()
+
+
+def calculate_expiration_from_plan(plan, start_time=None):
+    """
+    Calculate expiration datetime based on Plan validity settings.
+    
+    Args:
+        plan: Plan instance with validity_type and validity fields
+        start_time: Optional start time (defaults to now)
+        
+    Returns:
+        datetime: Expiration datetime, or None for unlimited plans
+    """
+    if not plan:
+        return None
+    
+    now = start_time or timezone.now()
+    
+    validity_type = (plan.validity_type or 'DAYS').upper()
+    
+    if validity_type == 'UNLIMITED':
+        return None
+    
+    elif validity_type == 'MINUTES' and plan.validity_minutes:
+        return now + timedelta(minutes=plan.validity_minutes)
+    
+    elif validity_type == 'HOURS' and plan.validity_hours:
+        return now + timedelta(hours=plan.validity_hours)
+    
+    elif validity_type == 'DAYS':
+        days = plan.duration_days or 30
+        return now + timedelta(days=days)
+    
+    else:
+        # Default to 30 days if validity_type not recognized
+        return now + timedelta(days=30)
 
 
 # ────────────────────────────────────────────────────────────────
@@ -117,27 +156,46 @@ def auto_create_radius_for_service(sender, instance, created, **kwargs):
         # Check if customer already has RADIUS credentials
         if hasattr(customer, 'radius_credentials'):
             credentials = customer.radius_credentials
+            needs_save = False
             
-            # Update if service is active, or status changed
+            # 🎯 Handle RENEWAL: When status changes from non-ACTIVE to ACTIVE
+            # This is the key moment to reset the expiration date
             if instance.status == 'ACTIVE' and not credentials.is_enabled:
                 credentials.is_enabled = True
                 credentials.disabled_reason = ''
-                credentials.save()
+                
+                # 🎯 RENEWAL LOGIC: Recalculate expiration when re-activating
+                if instance.plan:
+                    new_expiration = calculate_expiration_from_plan(instance.plan)
+                    credentials.expiration_date = new_expiration
+                    if new_expiration:
+                        logger.info(
+                            f"Renewed RADIUS for {credentials.username}: "
+                            f"New expiration={new_expiration.strftime('%b %d %Y %H:%M:%S')}"
+                        )
+                    else:
+                        logger.info(f"Renewed RADIUS for {credentials.username}: Unlimited validity")
+                
+                needs_save = True
                 logger.info(f"Re-enabled RADIUS for customer: {customer.customer_code}")
                 
             elif instance.status in ['SUSPENDED', 'TERMINATED'] and credentials.is_enabled:
                 credentials.is_enabled = False
                 credentials.disabled_reason = f"Service {instance.status.lower()}"
-                credentials.save()
+                needs_save = True
                 logger.info(f"Disabled RADIUS for customer: {customer.customer_code}")
             
-            # Update bandwidth profile if plan changed
+            # 🎯 Handle PLAN CHANGE: Update bandwidth profile and expiration
             if instance.plan:
                 profile = _get_or_create_bandwidth_profile(instance)
                 if profile and credentials.bandwidth_profile != profile:
                     credentials.bandwidth_profile = profile
-                    credentials.save()
+                    needs_save = True
                     logger.info(f"Updated bandwidth profile for: {credentials.username}")
+            
+            # Save all changes in one go
+            if needs_save:
+                credentials.save()
             
             return
         
@@ -159,6 +217,19 @@ def auto_create_radius_for_service(sender, instance, created, **kwargs):
         conn_type = 'PPPOE' if auth_type == 'PPPOE' else 'HOTSPOT'
         profile = _get_or_create_bandwidth_profile(instance) if instance.plan else None
         
+        # 🎯 Calculate Expiration Date based on Plan
+        expiration_date = calculate_expiration_from_plan(instance.plan)
+        
+        if expiration_date:
+            logger.info(
+                f"Setting RADIUS expiration for {username}: "
+                f"Plan={instance.plan.name}, "
+                f"ValidityType={instance.plan.validity_type}, "
+                f"Expires={expiration_date.strftime('%b %d %Y %H:%M:%S')}"
+            )
+        else:
+            logger.info(f"RADIUS user {username} has unlimited validity (no expiration)")
+        
         # Create the credentials (triggers the sync_credentials_to_radius signal above)
         CustomerRadiusCredentials.objects.create(
             customer=customer,
@@ -168,6 +239,7 @@ def auto_create_radius_for_service(sender, instance, created, **kwargs):
             connection_type=conn_type,
             is_enabled=instance.status == 'ACTIVE',
             simultaneous_use=1,
+            expiration_date=expiration_date,  # 🎯 CRITICAL: Set expiration
         )
         
         logger.info(f"Auto-created RADIUS credentials: username={username}")

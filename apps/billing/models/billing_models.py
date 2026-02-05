@@ -184,6 +184,68 @@ class Plan(models.Model):
         else:  # DAYS
             return (self.duration_days or 30) * 24 * 60
 
+    def calculate_expiration(self, start_time=None):
+        """
+        Calculate expiration datetime based on this plan's validity settings.
+        
+        Args:
+            start_time: Optional start time (defaults to now)
+            
+        Returns:
+            datetime: Expiration datetime, or None for unlimited plans
+            
+        Example:
+            >>> plan = Plan.objects.get(code='HOTSPOT_1HR')
+            >>> plan.calculate_expiration()
+            datetime.datetime(2026, 2, 5, 15, 30, 0, tzinfo=<UTC>)
+        """
+        from datetime import timedelta
+        from django.utils import timezone as tz
+        
+        now = start_time or tz.now()
+        validity_type = (self.validity_type or 'DAYS').upper()
+        
+        if validity_type == 'UNLIMITED':
+            return None
+        elif validity_type == 'MINUTES' and self.validity_minutes:
+            return now + timedelta(minutes=self.validity_minutes)
+        elif validity_type == 'HOURS' and self.validity_hours:
+            return now + timedelta(hours=self.validity_hours)
+        elif validity_type == 'DAYS':
+            days = self.duration_days or 30
+            return now + timedelta(days=days)
+        else:
+            # Default to 30 days
+            return now + timedelta(days=30)
+    
+    def get_validity_timedelta(self):
+        """
+        Get the validity duration as a timedelta object.
+        
+        Returns:
+            timedelta: Duration of the plan, or None for unlimited
+            
+        Example:
+            >>> plan = Plan.objects.get(validity_type='HOURS', validity_hours=2)
+            >>> plan.get_validity_timedelta()
+            timedelta(hours=2)
+        """
+        from datetime import timedelta
+        
+        validity_type = (self.validity_type or 'DAYS').upper()
+        
+        if validity_type == 'UNLIMITED':
+            return None
+        elif validity_type == 'MINUTES' and self.validity_minutes:
+            return timedelta(minutes=self.validity_minutes)
+        elif validity_type == 'HOURS' and self.validity_hours:
+            return timedelta(hours=self.validity_hours)
+        elif validity_type == 'DAYS':
+            days = self.duration_days or 30
+            return timedelta(days=days)
+        else:
+            return timedelta(days=30)
+
 
 class BillingCycle(models.Model):
     CYCLE_STATUS = [

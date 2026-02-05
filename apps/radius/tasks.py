@@ -357,3 +357,216 @@ def update_user_expiration(username: str, new_expiration: str):
     except Exception as e:
         logger.error(f"[EXPIRATION UPDATE] Failed for {username}: {e}")
         return False
+
+
+@shared_task(bind=True, max_retries=3, default_retry_delay=30)
+def extend_user_validity(self, credentials_id: int, extend_by_plan: bool = True):
+    """
+    Extend a user's RADIUS validity period.
+    
+    Called when:
+    - Payment is received for subscription renewal
+    - Admin manually extends validity
+    - Automatic renewal is triggered
+    
+    Args:
+        credentials_id: CustomerRadiusCredentials ID
+        extend_by_plan: If True, extend based on the current plan's validity
+                       If False, just re-enable without changing expiration
+        
+    Returns:
+        Dict with result details
+    """
+    from apps.radius.models import CustomerRadiusCredentials
+    
+    result = {
+        'success': False,
+        'credentials_id': credentials_id,
+        'username': None,
+        'new_expiration': None,
+        'error': None
+    }
+    
+    try:
+        credentials = CustomerRadiusCredentials.objects.select_related(
+            'customer__services__plan'
+        ).get(id=credentials_id)
+        
+        result['username'] = credentials.username
+        
+        if extend_by_plan:
+            # Get the active service connection with a plan
+            service = credentials.customer.services.filter(
+                status='ACTIVE',
+                plan__isnull=False
+            ).first()
+            
+            if service and service.plan:
+                # Calculate new expiration from plan
+                new_expiration = service.plan.calculate_expiration()
+                credentials.expiration_date = new_expiration
+                
+                if new_expiration:
+                    result['new_expiration'] = new_expiration.strftime('%b %d %Y %H:%M:%S')
+                    logger.info(
+                        f"[EXTEND VALIDITY] Extended {credentials.username} to "
+                        f"{result['new_expiration']} based on plan {service.plan.name}"
+                    )
+                else:
+                    logger.info(
+                        f"[EXTEND VALIDITY] Set {credentials.username} to unlimited validity"
+                    )
+            else:
+                logger.warning(
+                    f"[EXTEND VALIDITY] No active service with plan found for "
+                    f"{credentials.username}, just enabling account"
+                )
+        
+        # Enable the account
+        credentials.is_enabled = True
+        credentials.disabled_reason = ''
+        credentials.save()
+        
+        result['success'] = True
+        return result
+        
+    except CustomerRadiusCredentials.DoesNotExist:
+        result['error'] = f"Credentials not found: {credentials_id}"
+        logger.error(f"[EXTEND VALIDITY] {result['error']}")
+        return result
+        
+    except Exception as e:
+        result['error'] = str(e)
+        logger.error(f"[EXTEND VALIDITY] Task failed: {e}")
+        self.retry(exc=e)
+
+
+@shared_task
+def process_expired_subscriptions():
+    """
+    Process all expired subscriptions and disable RADIUS access.
+    
+    This is a backup task that runs every 15 minutes to catch any
+    users who should have been disconnected but weren't.
+    
+    It checks the CustomerRadiusCredentials.expiration_date against
+    the current time and disables access for expired users.
+    
+    Returns:
+        Dict with processing statistics
+    """
+    from apps.radius.models import CustomerRadiusCredentials
+    
+    now = timezone.now()
+    stats = {
+        'checked': 0,
+        'expired': 0,
+        'disabled': 0,
+        'errors': 0
+    }
+    
+    try:
+        # Find all enabled credentials with past expiration dates
+        expired_credentials = CustomerRadiusCredentials.objects.filter(
+            is_enabled=True,
+            expiration_date__isnull=False,
+            expiration_date__lt=now
+        )
+        
+        stats['checked'] = expired_credentials.count()
+        
+        for credentials in expired_credentials:
+            try:
+                stats['expired'] += 1
+                
+                # Disable the credentials
+                credentials.is_enabled = False
+                credentials.disabled_reason = 'Subscription expired'
+                credentials.save()
+                
+                stats['disabled'] += 1
+                logger.info(
+                    f"[EXPIRED CHECK] Disabled expired user: {credentials.username}, "
+                    f"expired at {credentials.expiration_date}"
+                )
+                
+                # Optionally disconnect from router immediately
+                disconnect_user_immediately.delay(
+                    username=credentials.username,
+                    connection_type='both'
+                )
+                
+            except Exception as e:
+                stats['errors'] += 1
+                logger.error(f"[EXPIRED CHECK] Error processing {credentials.username}: {e}")
+        
+        logger.info(f"[EXPIRED CHECK] Complete: {stats}")
+        return stats
+        
+    except Exception as e:
+        logger.error(f"[EXPIRED CHECK] Task failed: {e}")
+        return stats
+
+
+@shared_task
+def notify_expiring_soon(hours_before: int = 24):
+    """
+    Send notifications to customers whose subscriptions are expiring soon.
+    
+    Args:
+        hours_before: Number of hours before expiration to send notification
+        
+    Returns:
+        Dict with notification statistics
+    """
+    from apps.radius.models import CustomerRadiusCredentials
+    from apps.notifications.services import notification_service
+    
+    now = timezone.now()
+    expiry_window = now + timedelta(hours=hours_before)
+    
+    stats = {
+        'checked': 0,
+        'notified': 0,
+        'errors': 0
+    }
+    
+    try:
+        # Find credentials expiring in the next X hours
+        expiring_soon = CustomerRadiusCredentials.objects.filter(
+            is_enabled=True,
+            expiration_date__isnull=False,
+            expiration_date__gt=now,
+            expiration_date__lte=expiry_window
+        ).select_related('customer__user')
+        
+        stats['checked'] = expiring_soon.count()
+        
+        for credentials in expiring_soon:
+            try:
+                customer = credentials.customer
+                time_remaining = credentials.expiration_date - now
+                hours_left = int(time_remaining.total_seconds() // 3600)
+                
+                # Send SMS/Email notification
+                notification_service.send_expiry_warning(
+                    customer=customer,
+                    hours_remaining=hours_left,
+                    username=credentials.username
+                )
+                
+                stats['notified'] += 1
+                logger.info(
+                    f"[EXPIRY NOTICE] Sent notification to {customer.customer_code}: "
+                    f"{hours_left} hours remaining"
+                )
+                
+            except Exception as e:
+                stats['errors'] += 1
+                logger.error(f"[EXPIRY NOTICE] Error notifying {credentials.username}: {e}")
+        
+        return stats
+        
+    except Exception as e:
+        logger.error(f"[EXPIRY NOTICE] Task failed: {e}")
+        return stats
