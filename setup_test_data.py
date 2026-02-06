@@ -5,14 +5,18 @@ Simplified version - directly populates radcheck table for testing
 import os
 import sys
 import django
+import dotenv
 
 # Setup Django
-os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'config.settings.production')
+dotenv.load_dotenv()
+# Setup Django
+os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'config.settings.base')
 django.setup()
+
 
 from django.utils import timezone
 from django.db import connection
-from datetime import timedelta
+from datetime import datetime, timedelta
 
 
 def setup_radius_test_user():
@@ -26,7 +30,7 @@ def setup_radius_test_user():
     password = 'testpass123'
     
     # Calculate expiration 1 minute from now
-    expiration_time = timezone.now() + timedelta(minutes=1)
+    expiration_time = datetime.utcnow() + timedelta(minutes=5)
     # FreeRADIUS expects format: "Feb 06 2026 14:30:00"
     expiration_str = expiration_time.strftime("%b %d %Y %H:%M:%S")
     

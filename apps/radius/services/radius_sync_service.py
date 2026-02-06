@@ -13,6 +13,7 @@ This service handles:
 import re
 import logging
 from typing import Optional, Dict, List, Any
+import datetime
 from django.utils import timezone
 from django.db import transaction, connection
 
@@ -51,7 +52,6 @@ class RadiusSyncService:
     ATTR_IDLE_TIMEOUT = 'Idle-Timeout'
     ATTR_FRAMED_IP = 'Framed-IP-Address'
     ATTR_FRAMED_POOL = 'Framed-Pool'
-    ATTR_SIMULTANEOUS_USE = 'Simultaneous-Use'
     
     # ────────────────────────────────────────────────────────────────
     # PUBLIC SCHEMA SYNC (MULTI-TENANT RADIUS SUPPORT)
@@ -98,15 +98,6 @@ class RadiusSyncService:
         
         This is the CRITICAL method for multi-tenant RADIUS support.
         FreeRADIUS only queries public schema, so all users must be synced here.
-        
-        Args:
-            username: Globally unique username (e.g., 'yellow_254712345678')
-            password: Cleartext password
-            check_attributes: Additional check attributes (Expiration, etc.)
-            reply_attributes: Reply attributes (Rate-Limit, Framed-IP, etc.)
-            
-        Returns:
-            True if sync succeeded
         """
         tenant_schema = self._get_tenant_schema()
         check_attributes = check_attributes or {}
@@ -166,7 +157,6 @@ class RadiusSyncService:
     def _delete_from_public_schema(self, username: str) -> bool:
         """
         Remove a RADIUS user from public schema.
-        
         Called when deleting a user from tenant or during cleanup.
         """
         try:
@@ -185,7 +175,6 @@ class RadiusSyncService:
     def _update_public_schema_status(self, username: str, enabled: bool) -> bool:
         """
         Enable or disable a user in public schema.
-        
         Disabled users get Auth-Type := Reject which blocks authentication.
         """
         tenant_schema = self._get_tenant_schema()
@@ -230,12 +219,10 @@ class RadiusSyncService:
             return False
     
     def _sync_nas_to_public_schema(self, nasname: str, shortname: str, secret: str, 
-                                    nas_type: str = 'mikrotik', description: str = None) -> bool:
+                                   nas_type: str = 'mikrotik', description: str = None) -> bool:
         """
         Register a NAS (router) in public schema for FreeRADIUS.
-        
-        NAS entries must be in public.nas for FreeRADIUS to accept RADIUS
-        requests from routers.
+        NAS entries must be in public.nas for FreeRADIUS to accept RADIUS requests.
         """
         tenant_schema = self._get_tenant_schema()
         
@@ -280,18 +267,6 @@ class RadiusSyncService:
     ) -> Dict[str, Any]:
         """
         Create a RADIUS user with check and reply attributes.
-        
-        Args:
-            username: RADIUS username
-            password: Password (stored as Cleartext-Password)
-            customer: Optional Customer model instance
-            profile: Optional bandwidth profile
-            attributes: Additional check attributes
-            reply_attributes: Additional reply attributes
-            groupname: Optional group to assign user to
-            
-        Returns:
-            Dict with created user info
         """
         attributes = attributes or {}
         reply_attributes = reply_attributes or {}
@@ -373,18 +348,7 @@ class RadiusSyncService:
         attributes: Dict[str, str] = None,
         reply_attributes: Dict[str, str] = None
     ) -> bool:
-        """
-        Update an existing RADIUS user.
-        
-        Args:
-            username: RADIUS username
-            password: New password (optional)
-            attributes: Check attributes to update
-            reply_attributes: Reply attributes to update
-            
-        Returns:
-            True if user was updated
-        """
+        """Update an existing RADIUS user."""
         # Check if user exists
         if not RadCheck.objects.filter(username=username).exists():
             logger.warning(f"RADIUS user not found: {username}")
@@ -441,16 +405,7 @@ class RadiusSyncService:
             return True
     
     def disable_radius_user(self, username: str, reason: str = "Disabled") -> bool:
-        """
-        Disable a RADIUS user by setting Auth-Type to Reject.
-        
-        Args:
-            username: RADIUS username
-            reason: Reason for disabling
-            
-        Returns:
-            True if user was disabled
-        """
+        """Disable a RADIUS user by setting Auth-Type to Reject."""
         if not RadCheck.objects.filter(username=username).exists():
             return False
         
@@ -470,15 +425,7 @@ class RadiusSyncService:
         return True
     
     def enable_radius_user(self, username: str) -> bool:
-        """
-        Enable a previously disabled RADIUS user.
-        
-        Args:
-            username: RADIUS username
-            
-        Returns:
-            True if user was enabled
-        """
+        """Enable a previously disabled RADIUS user."""
         # Remove Auth-Type := Reject
         deleted, _ = RadCheck.objects.filter(
             username=username,
@@ -497,15 +444,7 @@ class RadiusSyncService:
         return False
     
     def delete_radius_user(self, username: str) -> bool:
-        """
-        Completely remove a RADIUS user.
-        
-        Args:
-            username: RADIUS username
-            
-        Returns:
-            True if user was deleted
-        """
+        """Completely remove a RADIUS user."""
         with transaction.atomic():
             RadCheck.objects.filter(username=username).delete()
             RadReply.objects.filter(username=username).delete()
@@ -527,19 +466,7 @@ class RadiusSyncService:
         burst_download: int = None,
         burst_upload: int = None
     ) -> bool:
-        """
-        Set bandwidth limit for a RADIUS user.
-        
-        Args:
-            username: RADIUS username
-            download_kbps: Download speed in kbps
-            upload_kbps: Upload speed in kbps
-            burst_download: Burst download in kbps (optional)
-            burst_upload: Burst upload in kbps (optional)
-            
-        Returns:
-            True if bandwidth was set
-        """
+        """Set bandwidth limit for a RADIUS user."""
         # Build MikroTik rate limit string
         rate_limit = f"{upload_kbps}k/{download_kbps}k"
         
@@ -559,15 +486,18 @@ class RadiusSyncService:
         """
         Set expiration date for a RADIUS user.
         
-        Args:
-            username: RADIUS username
-            expiration: Expiration datetime
-            
-        Returns:
-            True if expiration was set
+        🚨 CRITICAL: Always converts to UTC before writing string.
+        FreeRADIUS runs in UTC, so writing Local Time creates a time mismatch.
         """
-        # Format: "Jan 01 2026 00:00:00"
-        exp_str = expiration.strftime("%b %d %Y %H:%M:%S")
+        # 1. Ensure timezone awareness
+        if timezone.is_naive(expiration):
+             expiration = timezone.make_aware(expiration)
+        
+        # 2. Convert to UTC (the "Wall Clock Fix")
+        expiration_utc = expiration.astimezone(datetime.timezone.utc)
+        
+        # 3. Format: "Jan 01 2026 00:00:00"
+        exp_str = expiration_utc.strftime("%b %d %Y %H:%M:%S")
         
         RadCheck.objects.update_or_create(
             username=username,
@@ -575,20 +505,11 @@ class RadiusSyncService:
             defaults={'op': ':=', 'value': exp_str}
         )
         
-        logger.info(f"Set expiration for {username}: {exp_str}")
+        logger.info(f"Set expiration for {username}: {exp_str} (UTC)")
         return True
     
     def set_static_ip(self, username: str, ip_address: str) -> bool:
-        """
-        Assign a static IP to a RADIUS user.
-        
-        Args:
-            username: RADIUS username
-            ip_address: Static IP address
-            
-        Returns:
-            True if IP was set
-        """
+        """Assign a static IP to a RADIUS user."""
         RadReply.objects.update_or_create(
             username=username,
             attribute=self.ATTR_FRAMED_IP,
@@ -601,15 +522,6 @@ class RadiusSyncService:
     def sync_service_connection(self, connection) -> Dict[str, Any]:
         """
         Sync a ServiceConnection (hotspot/PPPoE) to RADIUS with wall-clock expiration.
-        
-        This method handles the new time-based validity (minutes/hours/days) plans.
-        It calculates the actual expiration datetime based on plan validity settings.
-        
-        Args:
-            connection: ServiceConnection model instance
-            
-        Returns:
-            Dict with sync results
         """
         from datetime import timedelta
         
@@ -663,7 +575,6 @@ class RadiusSyncService:
         # ════════════════════════════════════════════════════════════════
         # WALL-CLOCK EXPIRATION (based on plan validity_type)
         # ════════════════════════════════════════════════════════════════
-        # Calculate expiration based on connection start time + plan validity
         expiration_datetime = None
         
         if connection.start_date:
@@ -674,7 +585,6 @@ class RadiusSyncService:
         validity_type = getattr(plan, 'validity_type', 'DAYS')
         
         if validity_type == 'UNLIMITED':
-            # Set far future expiration (10 years)
             expiration_datetime = start + timedelta(days=3650)
         elif validity_type == 'MINUTES':
             validity_minutes = getattr(plan, 'validity_minutes', 0) or 0
@@ -682,7 +592,6 @@ class RadiusSyncService:
                 expiration_datetime = start + timedelta(minutes=validity_minutes)
         elif validity_type == 'HOURS':
             validity_minutes = getattr(plan, 'validity_minutes', 0) or 0
-            # validity_minutes stores hours * 60 for HOURS type
             if validity_minutes > 0:
                 expiration_datetime = start + timedelta(minutes=validity_minutes)
         else:  # DAYS
@@ -690,7 +599,18 @@ class RadiusSyncService:
             expiration_datetime = start + timedelta(days=validity_days)
         
         if expiration_datetime:
-            check_attrs[self.ATTR_EXPIRATION] = expiration_datetime.strftime("%b %d %Y %H:%M:%S")
+            # 🚨 CRITICAL FIX: Convert to UTC before string formatting
+            # FreeRADIUS in Docker runs in UTC. Sending Local Time (EAT) here
+            # creates a mismatch. We MUST convert to UTC.
+            
+            # 1. Ensure aware
+            if timezone.is_naive(expiration_datetime):
+                 expiration_datetime = timezone.make_aware(expiration_datetime)
+            
+            # 2. Convert to UTC
+            expiration_utc = expiration_datetime.astimezone(datetime.timezone.utc)
+            
+            check_attrs[self.ATTR_EXPIRATION] = expiration_utc.strftime("%b %d %Y %H:%M:%S")
         
         # ════════════════════════════════════════════════════════════════
         # SIMULTANEOUS SESSIONS
@@ -699,7 +619,7 @@ class RadiusSyncService:
         check_attrs[self.ATTR_SIMULTANEOUS_USE] = str(max_sessions)
         
         # ════════════════════════════════════════════════════════════════
-        # IDLE TIMEOUT (optional)
+        # IDLE TIMEOUT
         # ════════════════════════════════════════════════════════════════
         session_timeout = getattr(plan, 'session_timeout', None)
         if session_timeout and session_timeout > 0:
@@ -714,7 +634,7 @@ class RadiusSyncService:
             reply_attributes=reply_attrs
         )
         
-        # Store RADIUS username in connection for reference
+        # Store RADIUS username in connection
         if hasattr(connection, 'radius_username'):
             connection.radius_username = radius_username
             connection.save(update_fields=['radius_username'])
@@ -736,16 +656,7 @@ class RadiusSyncService:
         groupname: str,
         profile: RadiusBandwidthProfile
     ) -> bool:
-        """
-        Create a RADIUS group from a bandwidth profile.
-        
-        Args:
-            groupname: Group name
-            profile: Bandwidth profile
-            
-        Returns:
-            True if group was created
-        """
+        """Create a RADIUS group from a bandwidth profile."""
         with transaction.atomic():
             # Remove existing group attributes
             RadGroupReply.objects.filter(groupname=groupname).delete()
@@ -763,12 +674,7 @@ class RadiusSyncService:
         return True
     
     def sync_all_bandwidth_profiles(self) -> int:
-        """
-        Sync all bandwidth profiles to RADIUS groups.
-        
-        Returns:
-            Number of groups synced
-        """
+        """Sync all bandwidth profiles to RADIUS groups."""
         profiles = RadiusBandwidthProfile.objects.filter(is_active=True)
         count = 0
         
@@ -789,16 +695,7 @@ class RadiusSyncService:
         router,
         secret: str = None
     ) -> Nas:
-        """
-        Register a router as a NAS entry.
-        
-        Args:
-            router: Router model instance
-            secret: RADIUS shared secret (uses router.shared_secret if not provided)
-            
-        Returns:
-            Nas instance
-        """
+        """Register a router as a NAS entry."""
         secret = secret or router.shared_secret
         
         nas, created = Nas.objects.update_or_create(
@@ -818,15 +715,7 @@ class RadiusSyncService:
         return nas
     
     def unregister_nas(self, router) -> bool:
-        """
-        Remove a router's NAS entry.
-        
-        Args:
-            router: Router model instance
-            
-        Returns:
-            True if NAS was removed
-        """
+        """Remove a router's NAS entry."""
         deleted, _ = Nas.objects.filter(router=router).delete()
         
         if deleted > 0:
@@ -835,12 +724,7 @@ class RadiusSyncService:
         return False
     
     def sync_all_routers(self) -> int:
-        """
-        Sync all routers to NAS table.
-        
-        Returns:
-            Number of routers synced
-        """
+        """Sync all routers to NAS table."""
         from apps.network.models import Router
         
         routers = Router.objects.filter(
@@ -864,16 +748,6 @@ class RadiusSyncService:
         """
         Sync a customer to RADIUS.
         Creates/updates RADIUS user based on customer's subscription.
-        
-        IMPORTANT: Uses wall-clock Expiration attribute (NOT Session-Timeout).
-        This allows FreeRADIUS to reject logins after the expiration date,
-        while the Celery task handles disconnecting active sessions.
-        
-        Args:
-            customer: Customer model instance
-            
-        Returns:
-            Dict with sync results
         """
         # Generate username (phone number or custom)
         username = customer.phone_number or f"cust_{customer.id}"
@@ -897,19 +771,15 @@ class RadiusSyncService:
         # BANDWIDTH (supports Mbps or Kbps from plan settings)
         # ════════════════════════════════════════════════════════════════
         if hasattr(plan, 'download_speed') and hasattr(plan, 'upload_speed'):
-            # Get speed unit (default to Mbps for backwards compatibility)
             speed_unit = getattr(plan, 'speed_unit', 'MBPS')
             
             if speed_unit == 'KBPS':
-                # Already in kbps
                 dl_kbps = plan.download_speed
                 ul_kbps = plan.upload_speed
             else:
-                # Convert Mbps to kbps
                 dl_kbps = plan.download_speed * 1000
                 ul_kbps = plan.upload_speed * 1000
             
-            # Basic rate limit format: upload/download
             rate_limit = f"{ul_kbps}k/{dl_kbps}k"
             
             # Add burst settings if available
@@ -919,8 +789,6 @@ class RadiusSyncService:
             burst_time = getattr(plan, 'burst_time', None)
             
             if burst_dl and burst_ul and burst_threshold and burst_time:
-                # Full MikroTik burst format: 
-                # rx-rate[/tx-rate] [rx-burst-rate[/tx-burst-rate] [rx-burst-threshold[/tx-burst-threshold] [rx-burst-time[/tx-burst-time] [priority]]]]
                 if speed_unit == 'KBPS':
                     burst_dl_k = burst_dl
                     burst_ul_k = burst_ul
@@ -935,20 +803,24 @@ class RadiusSyncService:
         # ════════════════════════════════════════════════════════════════
         # WALL-CLOCK EXPIRATION (NOT Session-Timeout!)
         # ════════════════════════════════════════════════════════════════
-        # The Expiration attribute tells FreeRADIUS to reject logins after
-        # this date/time. For active session disconnection, we rely on the
-        # Celery disconnect_expired_users task.
         if subscription.end_date:
-            check_attrs[self.ATTR_EXPIRATION] = subscription.end_date.strftime("%b %d %Y %H:%M:%S")
+            expiration = subscription.end_date
+            
+            # 🚨 CRITICAL FIX: Convert to UTC
+            if timezone.is_naive(expiration):
+                expiration = timezone.make_aware(expiration)
+            
+            expiration_utc = expiration.astimezone(datetime.timezone.utc)
+            check_attrs[self.ATTR_EXPIRATION] = expiration_utc.strftime("%b %d %Y %H:%M:%S")
         
         # ════════════════════════════════════════════════════════════════
-        # SIMULTANEOUS SESSIONS (max_sessions from plan)
+        # SIMULTANEOUS SESSIONS
         # ════════════════════════════════════════════════════════════════
         max_sessions = getattr(plan, 'max_sessions', 1)
         check_attrs[self.ATTR_SIMULTANEOUS_USE] = str(max_sessions)
         
         # ════════════════════════════════════════════════════════════════
-        # IDLE TIMEOUT (optional, from plan.session_timeout)
+        # IDLE TIMEOUT
         # ════════════════════════════════════════════════════════════════
         session_timeout = getattr(plan, 'session_timeout', None)
         if session_timeout and session_timeout > 0:
@@ -977,12 +849,7 @@ class RadiusSyncService:
         return result
     
     def sync_all_customers(self) -> Dict[str, int]:
-        """
-        Sync all customers to RADIUS.
-        
-        Returns:
-            Dict with sync statistics
-        """
+        """Sync all customers to RADIUS."""
         from apps.customers.models import Customer
         
         customers = Customer.objects.filter(is_active=True)
@@ -1012,30 +879,12 @@ class RadiusSyncService:
         return stats
 
     def bulk_update_plan_users(self, plan, profile=None) -> Dict[str, Any]:
-        """
-        Update all RADIUS users on a plan when the plan changes.
-        
-        Called when bandwidth or other plan attributes are modified.
-        
-        Args:
-            plan: billing.Plan model instance
-            profile: Optional RadiusBandwidthProfile to use
-            
-        Returns:
-            Dict with update statistics
-        """
+        """Update all RADIUS users on a plan when the plan changes."""
         from apps.radius.models import RadCheck
         
-        # Find all active service connections on this plan
-        # ServiceConnection uses 'plan' FK to billing.Plan with related_name='service_connections'
-        connections = plan.service_connections.filter(
-            status='ACTIVE'
-        )
-        
-        # Get all customer IDs from these connections
+        connections = plan.service_connections.filter(status='ACTIVE')
         customer_ids = connections.values_list('customer_id', flat=True).distinct()
         
-        # Get all RADIUS usernames for these customers
         usernames = RadCheck.objects.filter(
             customer_id__in=customer_ids,
             attribute='Cleartext-Password'
@@ -1051,11 +900,9 @@ class RadiusSyncService:
             logger.info(f"No RADIUS users found for plan {plan.name}")
             return stats
         
-        # Get bandwidth from plan (in Mbps) and convert to kbps
         download_kbps = (plan.download_speed or 10) * 1000
         upload_kbps = (plan.upload_speed or 5) * 1000
         
-        # Use profile if provided, otherwise use plan values
         if profile:
             download_kbps = profile.download_speed
             upload_kbps = profile.upload_speed
