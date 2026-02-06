@@ -58,8 +58,14 @@ services:
     environment:
       - PYTHONPATH=/app
       - DJANGO_SETTINGS_MODULE=config.settings.production
+      - DJANGO_SECRET_KEY=super-secret-key-for-docker-testing-12345
+      - DJANGO_ALLOWED_HOSTS=localhost,127.0.0.1,web,netily_backend
       - REDIS_URL=redis://netily_redis:6379/0
-      - DATABASE_URL=postgres://isp_user:2202@netily_db:5432/isp_management
+      - DB_HOST=netily_db
+      - DB_NAME=isp_management
+      - DB_USER=isp_user
+      - DB_PASSWORD=2202
+      - DB_PORT=5432
     depends_on:
       db:
         condition: service_healthy
@@ -85,8 +91,13 @@ services:
     environment:
       - PYTHONPATH=/app
       - DJANGO_SETTINGS_MODULE=config.settings.production
+      - DJANGO_SECRET_KEY=super-secret-key-for-docker-testing-12345
       - REDIS_URL=redis://netily_redis:6379/0
-      - DATABASE_URL=postgres://isp_user:2202@netily_db:5432/isp_management
+      - DB_HOST=netily_db
+      - DB_NAME=isp_management
+      - DB_USER=isp_user
+      - DB_PASSWORD=2202
+      - DB_PORT=5432
     depends_on:
       db:
         condition: service_healthy
@@ -110,8 +121,13 @@ services:
     environment:
       - PYTHONPATH=/app
       - DJANGO_SETTINGS_MODULE=config.settings.production
+      - DJANGO_SECRET_KEY=super-secret-key-for-docker-testing-12345
       - REDIS_URL=redis://netily_redis:6379/0
-      - DATABASE_URL=postgres://isp_user:2202@netily_db:5432/isp_management
+      - DB_HOST=netily_db
+      - DB_NAME=isp_management
+      - DB_USER=isp_user
+      - DB_PASSWORD=2202
+      - DB_PORT=5432
     depends_on:
       db:
         condition: service_healthy
