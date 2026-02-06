@@ -14,52 +14,80 @@ class PlanSerializer(serializers.ModelSerializer):
     subscriber_count = serializers.IntegerField(read_only=True)
     subscribers_count = serializers.IntegerField(source='subscriber_count', read_only=True)
     created_by_name = serializers.CharField(source='created_by.get_full_name', read_only=True)
+    # Computed display properties
+    validity_display = serializers.CharField(read_only=True)
+    speed_display = serializers.CharField(read_only=True)
+    total_validity_minutes = serializers.IntegerField(read_only=True)
     
     class Meta:
         model = Plan
         fields = [
             'id', 'name', 'code', 'plan_type', 'description',
             'base_price', 'price', 'setup_fee',
-            'download_speed', 'upload_speed', 'data_limit',
-            'duration_days', 'validity_days', 'validity_hours',
+            # Speed & Data
+            'download_speed', 'upload_speed', 'speed_unit', 'data_limit',
+            # Validity - flexible time-based
+            'validity_type', 'duration_days', 'validity_days',
+            'validity_hours', 'validity_minutes',
+            'validity_display', 'speed_display', 'total_validity_minutes',
+            # Session/Connection limits
+            'max_sessions', 'session_timeout',
+            # Burst Speed (MikroTik)
+            'burst_download', 'burst_upload', 'burst_threshold', 'burst_time',
+            # Fair Usage Policy
             'fup_limit', 'fup_speed',
+            # Status & Visibility
             'is_active', 'is_public', 'is_popular',
             'features', 'subscriber_count', 'subscribers_count',
             'created_by', 'created_by_name',
             'created_at', 'updated_at'
         ]
-        read_only_fields = ['id', 'code', 'subscriber_count', 'created_by', 'created_at', 'updated_at']
+        read_only_fields = [
+            'id', 'code', 'subscriber_count', 'created_by',
+            'created_at', 'updated_at',
+            'validity_display', 'speed_display', 'total_validity_minutes',
+        ]
     
     def validate_base_price(self, value):
         """Validate base price is positive"""
         if value <= 0:
             raise serializers.ValidationError("Base price must be greater than zero")
         return value
-    
-    def validate_duration_days(self, value):
-        """Validate duration days is positive"""
-        if value <= 0:
-            raise serializers.ValidationError("Duration days must be greater than zero")
-        return value
 
 
 class PlanCreateSerializer(serializers.ModelSerializer):
-    """Serializer for creating plans (without read-only fields)"""
+    """
+    Serializer for creating/updating plans.
+    
+    Supports all validity types for any plan_type (PPPoE, Hotspot, Static, etc.):
+    - MINUTES: Short-term plans (e.g., 30min hotspot, 1hr PPPoE)
+    - HOURS:   Hourly plans (e.g., 3hr, 6hr, 12hr, 24hr)
+    - DAYS:    Daily/weekly/monthly plans (e.g., 1 day, 7 days, 30 days)
+    - UNLIMITED: No expiration
+    """
     
     class Meta:
         model = Plan
         fields = [
             'name', 'plan_type', 'description',
             'base_price', 'setup_fee',
-            'download_speed', 'upload_speed', 'data_limit',
-            'duration_days', 'validity_hours',
+            # Speed & Data
+            'download_speed', 'upload_speed', 'speed_unit', 'data_limit',
+            # Validity - flexible time-based
+            'validity_type', 'duration_days', 'validity_hours', 'validity_minutes',
+            # Session/Connection limits
+            'max_sessions', 'session_timeout',
+            # Burst Speed (MikroTik)
+            'burst_download', 'burst_upload', 'burst_threshold', 'burst_time',
+            # Fair Usage Policy
             'fup_limit', 'fup_speed',
+            # Status & Visibility
             'is_active', 'is_public', 'is_popular',
-            'features'
+            'features',
         ]
     
     def validate(self, data):
-        """Validate the entire plan data"""
+        """Validate plan data with cross-field validity checks."""
         # Validate download/upload speeds
         if data.get('download_speed') and data['download_speed'] <= 0:
             raise serializers.ValidationError({"download_speed": "Download speed must be greater than zero"})
@@ -77,6 +105,29 @@ class PlanCreateSerializer(serializers.ModelSerializer):
         
         if data.get('fup_speed') and data['fup_speed'] <= 0:
             raise serializers.ValidationError({"fup_speed": "FUP speed must be greater than zero"})
+        
+        # Cross-validate validity_type with corresponding duration field
+        validity_type = data.get('validity_type', self.instance.validity_type if self.instance else 'DAYS')
+        
+        if validity_type == 'MINUTES':
+            minutes = data.get('validity_minutes')
+            if minutes is not None and minutes <= 0:
+                raise serializers.ValidationError(
+                    {"validity_minutes": "Duration in minutes must be greater than zero"}
+                )
+        elif validity_type == 'HOURS':
+            hours = data.get('validity_hours')
+            if hours is not None and hours <= 0:
+                raise serializers.ValidationError(
+                    {"validity_hours": "Duration in hours must be greater than zero"}
+                )
+        elif validity_type == 'DAYS':
+            days = data.get('duration_days')
+            if days is not None and days <= 0:
+                raise serializers.ValidationError(
+                    {"duration_days": "Duration in days must be greater than zero"}
+                )
+        # UNLIMITED needs no duration validation
         
         return data
 

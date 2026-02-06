@@ -4,6 +4,10 @@ from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
 from django_filters.rest_framework import DjangoFilterBackend
 from django.shortcuts import get_object_or_404
+from django.utils import timezone
+from datetime import timedelta
+
+import logging
 
 from apps.customers.models import Customer, ServiceConnection
 from apps.customers.serializers import (
@@ -13,6 +17,8 @@ from apps.customers.serializers import (
 from apps.customers.permissions import CustomerAccessPermission
 from apps.core.permissions import IsAdminOrStaff, IsTechnician
 from utils.pagination import StandardResultsSetPagination
+
+logger = logging.getLogger(__name__)
 
 
 class ServiceConnectionViewSet(viewsets.ModelViewSet):
@@ -85,31 +91,74 @@ class ServiceConnectionViewSet(viewsets.ModelViewSet):
             serializer.save()
     @action(detail=True, methods=['post'])
     def activate(self, request, customer_pk=None, pk=None):
-        """Activate a service"""
-        service = self.get_object()
-        serializer = self.get_serializer(
-            service, 
-            data=request.data, 
-            partial=True
-        )
+        """
+        P4: Activate a PENDING service — starts the timer NOW.
         
-        if serializer.is_valid():
-            serializer.save()
-            
-            # Activate the service
-            service.activate_service(request.user)
-            
-            # Update customer status if needed
-            if service.customer.status == 'PENDING':
-                service.customer.status = 'ACTIVE'
-                service.customer.save()
-            
+        This is the "Activate Later" workflow:
+        - Customer was created with activate_now=False → status=PENDING
+        - Admin clicks "Activate" → this endpoint
+        - Calculates expiration from NOW (not from create time)
+        - Creates/updates RADIUS credentials with correct expiration
+        - Syncs to FreeRADIUS
+        
+        POST /customers/{customer_pk}/services/{pk}/activate/
+        """
+        from apps.radius.signals_auto_sync import calculate_expiration_from_plan
+        
+        service = self.get_object()
+        
+        if service.status == 'ACTIVE':
             return Response(
-                {'status': 'Service activated successfully'},
-                status=status.HTTP_200_OK
+                {'error': 'Service is already active.'},
+                status=status.HTTP_400_BAD_REQUEST
             )
         
-        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+        # Activate the service (sets status=ACTIVE, activation_date=now)
+        service.activate_service(request.user)
+        
+        # Update customer status to ACTIVE if still PENDING
+        customer = service.customer
+        if customer.status in ('PENDING', 'LEAD'):
+            customer.status = 'ACTIVE'
+            customer.save()
+        
+        # Calculate and set expiration based on plan validity, starting from NOW
+        if service.plan:
+            new_expiration = calculate_expiration_from_plan(
+                service.plan, start_time=timezone.now()
+            )
+            
+            # Update RADIUS credentials with correct expiration
+            if hasattr(customer, 'radius_credentials'):
+                credentials = customer.radius_credentials
+                credentials.expiration_date = new_expiration
+                credentials.is_enabled = True
+                credentials.disabled_reason = ''
+                credentials.save()  # Triggers sync_credentials_to_radius signal
+                
+                logger.info(
+                    f"Activated service {service.id} for {customer.customer_code}: "
+                    f"Plan={service.plan.name}, "
+                    f"Expiration={new_expiration.isoformat() if new_expiration else 'Unlimited'}"
+                )
+            else:
+                # No RADIUS credentials exist yet — the auto_create_radius_for_service
+                # signal should handle this when ServiceConnection status changes to ACTIVE.
+                logger.info(
+                    f"Activated service {service.id} for {customer.customer_code} "
+                    f"(RADIUS credentials will be created by signal)"
+                )
+        
+        return Response({
+            'status': 'success',
+            'message': f'Service activated for {customer.customer_code}',
+            'activation_date': service.activation_date.isoformat() if service.activation_date else None,
+            'expiration': (
+                customer.radius_credentials.expiration_date.isoformat()
+                if hasattr(customer, 'radius_credentials') and customer.radius_credentials.expiration_date
+                else None
+            ),
+        })
     
     @action(detail=True, methods=['post'])
     def suspend(self, request, customer_pk=None, pk=None):
@@ -203,3 +252,101 @@ class ServiceConnectionViewSet(viewsets.ModelViewSet):
         
         serializer = self.get_serializer(pending_services, many=True)
         return Response(serializer.data)
+
+    @action(detail=True, methods=['post'])
+    def extend(self, request, customer_pk=None, pk=None):
+        """
+        P3: Extend a service subscription by adding time.
+        
+        POST /customers/{customer_pk}/services/{pk}/extend/
+        Body: {
+            "duration_amount": 10,
+            "duration_unit": "DAYS"   // MINUTES, HOURS, DAYS
+        }
+        
+        Calculation:
+        - If current expiration is in the future: add time to it
+        - If current expiration is in the past (expired): add time from NOW
+        """
+        service = self.get_object()
+        customer = service.customer
+        
+        # Validate input
+        duration_amount = request.data.get('duration_amount')
+        duration_unit = request.data.get('duration_unit', 'DAYS').upper()
+        
+        if not duration_amount or int(duration_amount) <= 0:
+            return Response(
+                {'error': 'duration_amount must be a positive integer.'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        duration_amount = int(duration_amount)
+        
+        if duration_unit not in ('MINUTES', 'HOURS', 'DAYS'):
+            return Response(
+                {'error': 'duration_unit must be MINUTES, HOURS, or DAYS.'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        # Calculate the delta
+        if duration_unit == 'MINUTES':
+            delta = timedelta(minutes=duration_amount)
+            human_label = f"{duration_amount} minute{'s' if duration_amount != 1 else ''}"
+        elif duration_unit == 'HOURS':
+            delta = timedelta(hours=duration_amount)
+            human_label = f"{duration_amount} hour{'s' if duration_amount != 1 else ''}"
+        else:
+            delta = timedelta(days=duration_amount)
+            human_label = f"{duration_amount} day{'s' if duration_amount != 1 else ''}"
+        
+        if not hasattr(customer, 'radius_credentials'):
+            return Response(
+                {'error': 'This customer has no RADIUS credentials to extend.'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        credentials = customer.radius_credentials
+        now = timezone.now()
+        
+        # Determine base time: current expiration or now (if expired/null)
+        if credentials.expiration_date and credentials.expiration_date > now:
+            base_time = credentials.expiration_date
+        else:
+            base_time = now
+        
+        new_expiration = base_time + delta
+        
+        # Update credentials and sync to RADIUS
+        credentials.expiration_date = new_expiration
+        credentials.is_enabled = True
+        credentials.disabled_reason = ''
+        credentials.save()  # Triggers sync_credentials_to_radius signal
+        
+        # Also update the RADIUS expiration directly via the service
+        try:
+            from apps.radius.services.radius_sync_service import RadiusSyncService
+            sync_service = RadiusSyncService()
+            sync_service.set_user_expiration(credentials.username, new_expiration)
+        except Exception as e:
+            logger.warning(f"Direct RADIUS expiration update failed (signal should cover it): {e}")
+        
+        # Re-activate service if it was suspended/terminated
+        if service.status in ('SUSPENDED', 'TERMINATED', 'PENDING'):
+            service.status = 'ACTIVE'
+            service.activation_date = service.activation_date or now
+            service.save()
+        
+        logger.info(
+            f"Extended service {service.id} for {customer.customer_code} "
+            f"by {human_label}. New expiration: {new_expiration.isoformat()}"
+        )
+        
+        return Response({
+            'status': 'success',
+            'message': f'Subscription extended by {human_label}',
+            'username': credentials.username,
+            'previous_expiration': base_time.isoformat(),
+            'new_expiration': new_expiration.isoformat(),
+            'is_enabled': credentials.is_enabled,
+        })

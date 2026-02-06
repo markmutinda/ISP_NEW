@@ -4,6 +4,7 @@ from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
 from django_filters.rest_framework import DjangoFilterBackend
 from django.shortcuts import get_object_or_404
+from django.utils import timezone
 
 from apps.customers.models import (
     Customer, CustomerAddress, CustomerDocument, 
@@ -21,6 +22,9 @@ from apps.customers.permissions import (
 )
 from apps.core.permissions import IsAdminOrStaff
 from utils.pagination import StandardResultsSetPagination
+
+import logging
+logger = logging.getLogger(__name__)
 
 
 class CustomerViewSet(viewsets.ModelViewSet):
@@ -141,6 +145,84 @@ class CustomerViewSet(viewsets.ModelViewSet):
         )
         
         return Response({'status': 'Status updated successfully'})
+
+    def destroy(self, request, *args, **kwargs):
+        """
+        Delete a customer. Signals handle:
+        - RADIUS cleanup (pre_delete removes radcheck/radreply entries)
+        - User cleanup (post_delete removes the orphaned Django User)
+        """
+        customer = self.get_object()
+        customer_code = customer.customer_code
+        customer_name = customer.full_name
+
+        # Delete all service connections first (triggers RADIUS cleanup)
+        customer.services.all().delete()
+
+        # Now delete the customer (signals handle RADIUS + User cleanup)
+        self.perform_destroy(customer)
+
+        logger.info(
+            f"Customer {customer_code} ({customer_name}) deleted by {request.user}"
+        )
+
+        return Response(
+            {
+                'status': 'success',
+                'message': f'Customer {customer_code} deleted successfully. '
+                           f'RADIUS credentials and user account have been cleaned up.'
+            },
+            status=status.HTTP_200_OK
+        )
+
+    @action(detail=True, methods=['post'])
+    def toggle_radius(self, request, pk=None):
+        """
+        P5: Disable/Enable RADIUS access without deleting the customer.
+        
+        POST /customers/{id}/toggle_radius/
+        Body: { "enabled": true/false, "reason": "optional reason" }
+        
+        Kill switch: immediately blocks/restores FreeRADIUS authentication.
+        """
+        customer = self.get_object()
+
+        if not hasattr(customer, 'radius_credentials'):
+            return Response(
+                {'error': 'This customer has no RADIUS credentials.'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        credentials = customer.radius_credentials
+        enabled = request.data.get('enabled')
+        reason = request.data.get('reason', '')
+
+        if enabled is None:
+            # Toggle: flip the current state
+            enabled = not credentials.is_enabled
+
+        if enabled:
+            credentials.is_enabled = True
+            credentials.disabled_reason = ''
+            credentials.save()
+            action_label = 'enabled'
+        else:
+            credentials.is_enabled = False
+            credentials.disabled_reason = reason or 'Manually disabled by admin'
+            credentials.save()
+            action_label = 'disabled'
+
+        logger.info(
+            f"RADIUS {action_label} for customer {customer.customer_code} "
+            f"by {request.user}. Reason: {reason}"
+        )
+
+        return Response({
+            'status': 'success',
+            'message': f'RADIUS access {action_label} for {customer.customer_code}',
+            'is_enabled': credentials.is_enabled,
+            'username': credentials.username,
+        })
 
 
 class CustomerAddressViewSet(viewsets.ModelViewSet):

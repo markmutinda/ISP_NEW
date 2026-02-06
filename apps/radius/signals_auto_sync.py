@@ -203,6 +203,15 @@ def auto_create_radius_for_service(sender, instance, created, **kwargs):
         if not created:
             return
         
+        # 🎯 P4 "Activate Later": Do NOT create RADIUS credentials for PENDING services
+        # The timer should not start until the admin clicks "Activate"
+        if instance.status == 'PENDING':
+            logger.info(
+                f"Skipping RADIUS creation for PENDING service {instance.id} "
+                f"(customer: {customer.customer_code}). Use /activate/ to start timer."
+            )
+            return
+        
         # Generate credentials
         # Username: simplified to phone number (last 9 digits)
         username = generate_pppoe_username(customer)

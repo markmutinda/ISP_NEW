@@ -13,7 +13,10 @@ User = get_user_model()
 
 class CustomerCreateSerializer(serializers.ModelSerializer):
     """Serializer for creating new customers"""
-    email = serializers.EmailField(required=True)
+    email = serializers.EmailField(
+        required=False, allow_blank=True, allow_null=True,
+        help_text="Optional. Leave blank if the customer has no email."
+    )
     first_name = serializers.CharField(max_length=100, required=True)
     last_name = serializers.CharField(max_length=100, required=True)
     phone_number = serializers.CharField(required=True)
@@ -31,11 +34,17 @@ class CustomerCreateSerializer(serializers.ModelSerializer):
         ]
     
     def validate(self, data):
-        # Check if user with email exists
-        if User.objects.filter(email=data['email']).exists():
-            raise serializers.ValidationError(
-                {"email": "A user with this email already exists."}
-            )
+        # Email uniqueness check — only if email is actually provided
+        email = data.get('email', '').strip() if data.get('email') else ''
+        if email:
+            # Check against customer-role users only (not admin/staff)
+            if User.objects.filter(email=email, role='customer').exists():
+                raise serializers.ValidationError(
+                    {"email": "A customer with this email already exists."}
+                )
+        else:
+            # Normalise empty email to empty string for User creation
+            data['email'] = ''
         
         # Validate and format phone number first
         try:

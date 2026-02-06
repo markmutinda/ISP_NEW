@@ -81,6 +81,19 @@ class ServiceCreateSerializer(serializers.ModelSerializer):
         help_text="Password for RADIUS authentication (PPPoE/Hotspot login)"
     )
     
+    # P4: "Activate Later" — when False, creates service as PENDING
+    # and does NOT start the expiration timer or sync to RADIUS
+    activate_now = serializers.BooleanField(
+        default=True,
+        required=False,
+        write_only=True,
+        help_text=(
+            "If True (default), service goes ACTIVE immediately and "
+            "expiration timer starts. If False, service is PENDING — "
+            "use the /activate/ endpoint later to start the timer."
+        )
+    )
+    
     class Meta:
         model = ServiceConnection
         fields = [
@@ -90,7 +103,8 @@ class ServiceCreateSerializer(serializers.ModelSerializer):
             'download_speed', 'upload_speed', 'data_cap', 'qos_profile',
             'installation_address', 'installation_notes',
             'monthly_price', 'setup_fee', 'prorated_billing',
-            'auto_renew', 'contract_period', 'status', 'radius_password'
+            'auto_renew', 'contract_period', 'status',
+            'radius_password', 'activate_now',
         ]
     
     def validate_mac_address(self, value):
@@ -102,15 +116,36 @@ class ServiceCreateSerializer(serializers.ModelSerializer):
         return value
     
     def create(self, validated_data):
-        """Create service and pass RADIUS password to signal."""
+        """
+        Create service connection.
+        
+        If activate_now=False (Activate Later), the service is created
+        as PENDING with no RADIUS sync. The expiration timer does NOT start.
+        """
         radius_password = validated_data.pop('radius_password', None)
+        activate_now = validated_data.pop('activate_now', True)
+        
+        # If activate_now is False, force status to PENDING
+        if not activate_now:
+            validated_data['status'] = 'PENDING'
+        
         instance = super().create(validated_data)
         
         # Attach the password so the signal can use it
         if radius_password:
             instance._radius_password = radius_password
-            # Trigger save again to let signal pick it up
+        
+        # Attach the activate_now flag so the signal knows whether
+        # to create RADIUS credentials or skip
+        instance._activate_now = activate_now
+        
+        if activate_now and radius_password:
+            # Trigger save to let auto_create_radius_for_service signal run
             instance.save()
+        elif not activate_now:
+            # Don't trigger RADIUS creation — service stays PENDING
+            # The signal checks instance.status == 'ACTIVE' before creating creds
+            pass
         
         return instance
     

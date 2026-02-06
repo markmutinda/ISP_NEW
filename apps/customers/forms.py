@@ -38,7 +38,10 @@ def validate_id_number_local(id_number, id_type='NATIONAL_ID'):
 
 class CustomerForm(forms.ModelForm):
     """Form for creating/updating customers"""
-    email = forms.EmailField(required=True)
+    email = forms.EmailField(
+        required=False,
+        help_text="Optional. Leave blank if the customer has no email."
+    )
     first_name = forms.CharField(max_length=100, required=True)
     last_name = forms.CharField(max_length=100, required=True)
     phone_number = forms.CharField(
