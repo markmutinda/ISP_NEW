@@ -657,6 +657,7 @@ class CompanyRegisterView(generics.CreateAPIView):
         # Create company in public schema
         company = Company.objects.create(
             name=data['company_name'],
+            slug=slug,  # Use the generated unique slug
             email=data['company_email'],
             phone_number=data.get('company_phone', ''),
             address=data.get('company_address', ''),
