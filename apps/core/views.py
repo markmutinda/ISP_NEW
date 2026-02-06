@@ -654,9 +654,10 @@ class CompanyRegisterView(generics.CreateAPIView):
             slug = f"{original_slug}-{counter}"
             counter += 1
 
-        # Create company in public schema
+        # 3. Create company in public schema (With the slug!)
         company = Company.objects.create(
             name=data['company_name'],
+            slug=slug,  # <--- CRITICAL FIX: Passing the generated slug
             email=data['company_email'],
             phone_number=data.get('company_phone', ''),
             address=data.get('company_address', ''),
@@ -669,8 +670,6 @@ class CompanyRegisterView(generics.CreateAPIView):
             subscription_plan='basic',
             is_active=True
         )
-        
-
         
         # Create Tenant in public schema
         trial_end = timezone.now() + timedelta(days=14)
@@ -689,8 +688,13 @@ class CompanyRegisterView(generics.CreateAPIView):
             subscription_expiry=trial_end.date()
         )
         
-        # Create Domain in public schema
+        # 4. Create Domain in public schema (With Port Check!)
         domain_name = f"{tenant.subdomain}.localhost"
+        
+        # <--- CRITICAL FIX: Add port 8000 for localhost development
+        if settings.DEBUG:
+             domain_name = f"{tenant.subdomain}.localhost:8000"
+
         Domain.objects.create(
             domain=domain_name,
             tenant=tenant,
@@ -701,10 +705,10 @@ class CompanyRegisterView(generics.CreateAPIView):
         from django.core.management import call_command
         call_command('migrate_schemas', schema_name=tenant.schema_name, interactive=False)
         
-         # Switch to tenant schema
+        # Switch to tenant schema
         connection.set_tenant(tenant)
     
-         # Create user with all necessary info
+        # Create user with all necessary info
         user = User.objects.create(
            email=data['admin_email'],
            first_name=data['admin_first_name'],
@@ -727,7 +731,7 @@ class CompanyRegisterView(generics.CreateAPIView):
     
         print(f"DEBUG: Created user {user.email} with company_name={user.company_name}, tenant_subdomain={user.tenant_subdomain}")
     
-          # Switch back to public schema
+        # Switch back to public schema
         connection.set_schema_to_public()
         
         # Generate tokens
@@ -737,7 +741,8 @@ class CompanyRegisterView(generics.CreateAPIView):
             'message': 'Company created successfully',
             'company': company.name,
             'tenant': tenant.subdomain,
-            'login_url': f'http://{domain_name}:3000/admin/login/',
+            # Return URL with the correct port
+            'login_url': f'http://{domain_name}/admin/login/',
             'email': user.email,
             'access': str(refresh.access_token),
         }, status=status.HTTP_201_CREATED)
@@ -748,7 +753,7 @@ class CompanyRegisterView(generics.CreateAPIView):
         context = {
             'user': user,
             'company': tenant.company,
-            'subdomain_url': f"http://{domain_name}:8000/",  # Dev - in production: https://{domain_name}/
+            'subdomain_url': f"http://{domain_name}/", 
             'username': user.email,
             'password': password,  # Note: Sending plain password is insecure - consider reset link instead
             'expiry': tenant.subscription_expiry,
