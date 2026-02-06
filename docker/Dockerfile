@@ -18,10 +18,12 @@ RUN apt-get update && apt-get install -y \
 WORKDIR /app
 
 # Install Python dependencies first (layer caching)
-COPY requirements.txt .
+# Copy the entire requirements folder
+COPY requirements/ /app/requirements/
 
+# Install dependencies from local.txt (which includes base.txt)
 RUN pip install --upgrade pip && \
-    pip install -r requirements.txt
+    pip install -r /app/requirements/local.txt
 
 # Copy project files
 COPY . .
