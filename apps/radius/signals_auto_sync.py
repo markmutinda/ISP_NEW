@@ -200,7 +200,12 @@ def auto_create_radius_for_service(sender, instance, created, **kwargs):
             return
         
         # Create new RADIUS credentials for this customer
-        if not created:
+        # Allow creation when:
+        # 1. created=True (first save of a new service), OR
+        # 2. _force_radius_creation flag is set (second save from serializer
+        #    that attaches _radius_password after initial create)
+        force_creation = getattr(instance, '_force_radius_creation', False)
+        if not created and not force_creation:
             return
         
         # 🎯 P4 "Activate Later": Do NOT create RADIUS credentials for PENDING services

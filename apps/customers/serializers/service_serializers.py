@@ -121,6 +121,9 @@ class ServiceCreateSerializer(serializers.ModelSerializer):
         
         If activate_now=False (Activate Later), the service is created
         as PENDING with no RADIUS sync. The expiration timer does NOT start.
+        
+        If activate_now=True, we set _radius_password on the model instance
+        and trigger a save so the post_save signal creates RADIUS credentials.
         """
         radius_password = validated_data.pop('radius_password', None)
         activate_now = validated_data.pop('activate_now', True)
@@ -131,21 +134,18 @@ class ServiceCreateSerializer(serializers.ModelSerializer):
         
         instance = super().create(validated_data)
         
-        # Attach the password so the signal can use it
-        if radius_password:
-            instance._radius_password = radius_password
-        
-        # Attach the activate_now flag so the signal knows whether
-        # to create RADIUS credentials or skip
-        instance._activate_now = activate_now
+        # The first save (from super().create) triggers post_save with created=True,
+        # but _radius_password isn't set yet. The signal will try to auto-generate
+        # a password. However, if we want the user-provided password, we need
+        # to update the credentials after creation OR trigger a second save.
         
         if activate_now and radius_password:
-            # Trigger save to let auto_create_radius_for_service signal run
+            # Attach password and trigger save so the signal can pick it up.
+            # The signal handles both created=True (first save) and the case
+            # where credentials need to be created for an existing service.
+            instance._radius_password = radius_password
+            instance._force_radius_creation = True  # Signal flag to force creation
             instance.save()
-        elif not activate_now:
-            # Don't trigger RADIUS creation — service stays PENDING
-            # The signal checks instance.status == 'ACTIVE' before creating creds
-            pass
         
         return instance
     

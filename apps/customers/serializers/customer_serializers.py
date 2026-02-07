@@ -194,14 +194,20 @@ class CustomerListSerializer(serializers.ModelSerializer):
     
     def get_radius_credentials(self, obj):
         """Get customer RADIUS credentials for PPPoE/Hotspot login"""
-        if hasattr(obj, 'radius_credentials'):
+        try:
             creds = obj.radius_credentials
-            return {
-                'username': creds.username,
-                'password': creds.password,
-                'is_enabled': creds.is_enabled,
-                'connection_type': creds.connection_type,
-            }
+            if creds is not None:
+                return {
+                    'id': creds.id,
+                    'username': creds.username,
+                    'password': creds.password,
+                    'is_enabled': creds.is_enabled,
+                    'connection_type': creds.connection_type,
+                    'expiration_date': creds.expiration_date.isoformat() if creds.expiration_date else None,
+                    'synced_to_radius': creds.synced_to_radius,
+                }
+        except Exception:
+            pass
         return None
 
 

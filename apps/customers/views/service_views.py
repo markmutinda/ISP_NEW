@@ -1,7 +1,7 @@
 from rest_framework import viewsets, status
 from rest_framework.decorators import action
 from rest_framework.response import Response
-from rest_framework.permissions import IsAuthenticated
+from rest_framework.permissions import IsAuthenticated, BasePermission
 from django_filters.rest_framework import DjangoFilterBackend
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
@@ -21,11 +21,20 @@ from utils.pagination import StandardResultsSetPagination
 logger = logging.getLogger(__name__)
 
 
+class IsAdminStaffOrTechnician(BasePermission):
+    """Combined permission: allows admin, staff, or technician roles."""
+    def has_permission(self, request, view):
+        return (
+            IsAdminOrStaff().has_permission(request, view) or
+            IsTechnician().has_permission(request, view)
+        )
+
+
 class ServiceConnectionViewSet(viewsets.ModelViewSet):
     """ViewSet for managing service connections - company filtered"""
     queryset = ServiceConnection.objects.select_related(
-        'customer', 'customer__user', 'installation_address', 'customer__company'
-    ).prefetch_related('customer__company')
+        'customer', 'customer__user', 'installation_address'
+    ).all()
     
     serializer_class = ServiceConnectionSerializer
     permission_classes = [IsAuthenticated, CustomerAccessPermission]
@@ -46,7 +55,7 @@ class ServiceConnectionViewSet(viewsets.ModelViewSet):
         if self.action in ['create', 'update', 'partial_update', 'destroy']:
             return [IsAuthenticated(), IsAdminOrStaff()]
         elif self.action in ['activate', 'suspend', 'terminate']:
-            return [IsAuthenticated(), IsAdminOrStaff() | IsTechnician()]
+            return [IsAuthenticated(), IsAdminStaffOrTechnician()]
         return [IsAuthenticated(), CustomerAccessPermission()]
     
     def get_queryset(self):

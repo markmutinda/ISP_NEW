@@ -60,7 +60,8 @@ class CustomerViewSet(viewsets.ModelViewSet):
         return CustomerListSerializer
     
     def get_permissions(self):
-        if self.action in ['create', 'update', 'partial_update', 'destroy']:
+        if self.action in ['create', 'update', 'partial_update', 'destroy',
+                           'toggle_radius', 'change_status']:
             permission_classes = [IsAuthenticated, IsAdminOrStaff]
         else:
             permission_classes = [IsAuthenticated, CustomerAccessPermission]
