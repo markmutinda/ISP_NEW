@@ -448,8 +448,12 @@ class RadiusUserActionView(APIView):
             return Response({'status': 'disabled' if result else 'not_found', 'username': username})
         
         elif action == 'disconnect':
-            # TODO: Implement CoA disconnect
-            return Response({'status': 'not_implemented'}, status=status.HTTP_501_NOT_IMPLEMENTED)
+            terminated = service.disconnect_user(username)
+            return Response({
+                'status': 'disconnected',
+                'username': username,
+                'sessions_terminated': terminated,
+            })
         
         return Response({'error': 'Invalid action'}, status=status.HTTP_400_BAD_REQUEST)
 

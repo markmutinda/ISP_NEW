@@ -211,6 +211,17 @@ class CustomerViewSet(viewsets.ModelViewSet):
             credentials.is_enabled = False
             credentials.disabled_reason = reason or 'Manually disabled by admin'
             credentials.save()
+
+            # Belt-and-suspenders: explicitly disconnect active sessions
+            try:
+                from apps.radius.services.radius_sync_service import RadiusSyncService
+                sync = RadiusSyncService()
+                terminated = sync.disconnect_user(credentials.username)
+                if terminated:
+                    logger.info(f"Disconnected {terminated} active session(s) for {credentials.username}")
+            except Exception as e:
+                logger.warning(f"Failed to disconnect sessions for {credentials.username}: {e}")
+
             action_label = 'disabled'
 
         logger.info(

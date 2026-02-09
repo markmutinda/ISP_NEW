@@ -54,7 +54,7 @@ class ServiceConnectionViewSet(viewsets.ModelViewSet):
     def get_permissions(self):
         if self.action in ['create', 'update', 'partial_update', 'destroy']:
             return [IsAuthenticated(), IsAdminOrStaff()]
-        elif self.action in ['activate', 'suspend', 'terminate']:
+        elif self.action in ['activate', 'suspend', 'terminate', 'extend']:
             return [IsAuthenticated(), IsAdminStaffOrTechnician()]
         return [IsAuthenticated(), CustomerAccessPermission()]
     
@@ -67,16 +67,14 @@ class ServiceConnectionViewSet(viewsets.ModelViewSet):
         qs = super().get_queryset()
         user = self.request.user
         
-        if user.is_superuser:
-            # Optional: filter by company via query param
-            company_id = self.request.query_params.get('company_id')
-            if company_id:
-                return qs.filter(customer__company_id=company_id)
+        # With django-tenants, schema-level scoping handles tenant isolation.
+        # Superusers and staff see all services in the current tenant schema.
+        if user.is_superuser or user.is_staff:
             return qs
         
-        # Company users only see their company's services
-        if hasattr(user, 'company') and user.company:
-            return qs.filter(customer__company=user.company)
+        # Admin/staff roles (tenant-level)
+        if hasattr(user, 'role') and user.role in ('admin', 'staff', 'technician'):
+            return qs
         
         # Customers see only their own
         if hasattr(user, 'customer_profile'):
@@ -107,12 +105,18 @@ class ServiceConnectionViewSet(viewsets.ModelViewSet):
         - Customer was created with activate_now=False → status=PENDING
         - Admin clicks "Activate" → this endpoint
         - Calculates expiration from NOW (not from create time)
-        - Creates/updates RADIUS credentials with correct expiration
+        - Creates RADIUS credentials if they don't exist
         - Syncs to FreeRADIUS
         
         POST /customers/{customer_pk}/services/{pk}/activate/
         """
-        from apps.radius.signals_auto_sync import calculate_expiration_from_plan
+        from apps.radius.signals_auto_sync import (
+            calculate_expiration_from_plan,
+            generate_pppoe_username,
+            generate_password,
+            _get_or_create_bandwidth_profile,
+        )
+        from apps.radius.models import CustomerRadiusCredentials
         
         service = self.get_object()
         
@@ -122,51 +126,94 @@ class ServiceConnectionViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_400_BAD_REQUEST
             )
         
-        # Activate the service (sets status=ACTIVE, activation_date=now)
-        service.activate_service(request.user)
-        
-        # Update customer status to ACTIVE if still PENDING
         customer = service.customer
-        if customer.status in ('PENDING', 'LEAD'):
-            customer.status = 'ACTIVE'
-            customer.save()
         
-        # Calculate and set expiration based on plan validity, starting from NOW
+        # Calculate expiration based on plan, starting from NOW
+        new_expiration = None
         if service.plan:
             new_expiration = calculate_expiration_from_plan(
                 service.plan, start_time=timezone.now()
             )
+        
+        # Check if RADIUS credentials exist
+        has_credentials = False
+        try:
+            credentials = customer.radius_credentials
+            has_credentials = True
+        except CustomerRadiusCredentials.DoesNotExist:
+            has_credentials = False
+        
+        if has_credentials:
+            # Update existing credentials
+            credentials.expiration_date = new_expiration
+            credentials.is_enabled = True
+            credentials.disabled_reason = ''
+            credentials.save()  # Triggers sync_credentials_to_radius signal
             
-            # Update RADIUS credentials with correct expiration
-            if hasattr(customer, 'radius_credentials'):
-                credentials = customer.radius_credentials
-                credentials.expiration_date = new_expiration
-                credentials.is_enabled = True
-                credentials.disabled_reason = ''
-                credentials.save()  # Triggers sync_credentials_to_radius signal
+            logger.info(
+                f"Activated service {service.id} for {customer.customer_code}: "
+                f"Updated existing RADIUS credentials. "
+                f"Plan={service.plan.name if service.plan else 'None'}, "
+                f"Expiration={new_expiration.isoformat() if new_expiration else 'Unlimited'}"
+            )
+        else:
+            # Create RADIUS credentials — this is the key fix for "Activate Later"
+            auth_type = (service.auth_connection_type or '').upper()
+            if auth_type in ['PPPOE', 'HOTSPOT']:
+                username = generate_pppoe_username(customer)
+                password = generate_password(8)
+                conn_type = 'PPPOE' if auth_type == 'PPPOE' else 'HOTSPOT'
+                profile = _get_or_create_bandwidth_profile(service) if service.plan else None
+                
+                credentials = CustomerRadiusCredentials.objects.create(
+                    customer=customer,
+                    username=username,
+                    password=password,
+                    bandwidth_profile=profile,
+                    connection_type=conn_type,
+                    is_enabled=True,
+                    simultaneous_use=1,
+                    expiration_date=new_expiration,
+                )
                 
                 logger.info(
                     f"Activated service {service.id} for {customer.customer_code}: "
-                    f"Plan={service.plan.name}, "
+                    f"Created RADIUS credentials username={username}. "
+                    f"Plan={service.plan.name if service.plan else 'None'}, "
                     f"Expiration={new_expiration.isoformat() if new_expiration else 'Unlimited'}"
                 )
             else:
-                # No RADIUS credentials exist yet — the auto_create_radius_for_service
-                # signal should handle this when ServiceConnection status changes to ACTIVE.
                 logger.info(
                     f"Activated service {service.id} for {customer.customer_code} "
-                    f"(RADIUS credentials will be created by signal)"
+                    f"(non-RADIUS connection type: {auth_type})"
                 )
+        
+        # Activate the service (sets status=ACTIVE, activation_date=now)
+        service.activate_service(request.user)
+        
+        # Update customer status to ACTIVE if still PENDING
+        if customer.status in ('PENDING', 'LEAD'):
+            customer.status = 'ACTIVE'
+            customer.save()
+        
+        # Refresh credentials reference after creation
+        try:
+            customer.refresh_from_db()
+            creds = customer.radius_credentials
+            creds_data = {
+                'username': creds.username,
+                'password': creds.password,
+                'expiration': creds.expiration_date.isoformat() if creds.expiration_date else None,
+                'is_enabled': creds.is_enabled,
+            }
+        except Exception:
+            creds_data = None
         
         return Response({
             'status': 'success',
             'message': f'Service activated for {customer.customer_code}',
             'activation_date': service.activation_date.isoformat() if service.activation_date else None,
-            'expiration': (
-                customer.radius_credentials.expiration_date.isoformat()
-                if hasattr(customer, 'radius_credentials') and customer.radius_credentials.expiration_date
-                else None
-            ),
+            'radius_credentials': creds_data,
         })
     
     @action(detail=True, methods=['post'])
@@ -265,24 +312,32 @@ class ServiceConnectionViewSet(viewsets.ModelViewSet):
     @action(detail=True, methods=['post'])
     def extend(self, request, customer_pk=None, pk=None):
         """
-        P3: Extend a service subscription by adding time.
+        P3: Extend a service subscription by adding time, with optional plan change.
         
         POST /customers/{customer_pk}/services/{pk}/extend/
         Body: {
             "duration_amount": 10,
-            "duration_unit": "DAYS"   // MINUTES, HOURS, DAYS
+            "duration_unit": "DAYS",       // MINUTES, HOURS, DAYS
+            "plan_id": 2                   // optional — change plan at the same time
         }
         
         Calculation:
         - If current expiration is in the future: add time to it
         - If current expiration is in the past (expired): add time from NOW
+        - If plan_id is provided: switch to new plan, update bandwidth, recalculate
         """
+        from apps.billing.models import Plan
+        from apps.radius.signals_auto_sync import _get_or_create_bandwidth_profile
+        from apps.radius.models import CustomerRadiusCredentials
+        from utils.helpers import generate_pppoe_username, generate_password
+        
         service = self.get_object()
         customer = service.customer
         
         # Validate input
         duration_amount = request.data.get('duration_amount')
         duration_unit = request.data.get('duration_unit', 'DAYS').upper()
+        plan_id = request.data.get('plan_id')
         
         if not duration_amount or int(duration_amount) <= 0:
             return Response(
@@ -298,6 +353,30 @@ class ServiceConnectionViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_400_BAD_REQUEST
             )
         
+        # Handle optional plan change
+        plan_changed = False
+        new_plan = None
+        if plan_id:
+            try:
+                new_plan = Plan.objects.get(id=plan_id, is_active=True)
+            except Plan.DoesNotExist:
+                return Response(
+                    {'error': 'Plan not found or inactive.'},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+            if service.plan_id != new_plan.id:
+                old_plan_name = service.plan.name if service.plan else 'None'
+                service.plan = new_plan
+                service.download_speed = new_plan.download_speed or service.download_speed
+                service.upload_speed = new_plan.upload_speed or service.upload_speed
+                service.monthly_price = new_plan.base_price or service.monthly_price
+                service.save()
+                plan_changed = True
+                logger.info(
+                    f"Plan changed for service {service.id}: "
+                    f"{old_plan_name} → {new_plan.name}"
+                )
+        
         # Calculate the delta
         if duration_unit == 'MINUTES':
             delta = timedelta(minutes=duration_amount)
@@ -310,10 +389,29 @@ class ServiceConnectionViewSet(viewsets.ModelViewSet):
             human_label = f"{duration_amount} day{'s' if duration_amount != 1 else ''}"
         
         if not hasattr(customer, 'radius_credentials'):
-            return Response(
-                {'error': 'This customer has no RADIUS credentials to extend.'},
-                status=status.HTTP_400_BAD_REQUEST
-            )
+            # Auto-create RADIUS credentials so extend works for PENDING services too
+            if service.auth_connection_type in ('PPPOE', 'HOTSPOT'):
+                phone = customer.user.phone_number or ''
+                username = generate_pppoe_username(phone, customer.customer_code)
+                password = generate_password()
+                profile = _get_or_create_bandwidth_profile(service)
+                
+                credentials = CustomerRadiusCredentials.objects.create(
+                    customer=customer,
+                    username=username,
+                    password=password,
+                    connection_type=service.auth_connection_type,
+                    bandwidth_profile=profile,
+                    is_enabled=True,
+                )
+                # Refresh from DB so hasattr works below
+                customer.refresh_from_db()
+                logger.info(f"Auto-created RADIUS credentials for extend: {username}")
+            else:
+                return Response(
+                    {'error': 'This service type does not use RADIUS credentials.'},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
         
         credentials = customer.radius_credentials
         now = timezone.now()
@@ -330,6 +428,13 @@ class ServiceConnectionViewSet(viewsets.ModelViewSet):
         credentials.expiration_date = new_expiration
         credentials.is_enabled = True
         credentials.disabled_reason = ''
+        
+        # Update bandwidth profile if plan changed
+        if plan_changed and new_plan:
+            profile = _get_or_create_bandwidth_profile(service)
+            if profile:
+                credentials.bandwidth_profile = profile
+        
         credentials.save()  # Triggers sync_credentials_to_radius signal
         
         # Also update the RADIUS expiration directly via the service
@@ -346,16 +451,23 @@ class ServiceConnectionViewSet(viewsets.ModelViewSet):
             service.activation_date = service.activation_date or now
             service.save()
         
+        msg_parts = [f'Subscription extended by {human_label}']
+        if plan_changed:
+            msg_parts.append(f'Plan changed to {new_plan.name}')
+        
         logger.info(
             f"Extended service {service.id} for {customer.customer_code} "
             f"by {human_label}. New expiration: {new_expiration.isoformat()}"
+            f"{f' Plan: {new_plan.name}' if plan_changed else ''}"
         )
         
         return Response({
             'status': 'success',
-            'message': f'Subscription extended by {human_label}',
+            'message': '. '.join(msg_parts),
             'username': credentials.username,
             'previous_expiration': base_time.isoformat(),
             'new_expiration': new_expiration.isoformat(),
             'is_enabled': credentials.is_enabled,
+            'plan_changed': plan_changed,
+            'plan_name': new_plan.name if new_plan else (service.plan.name if service.plan else None),
         })

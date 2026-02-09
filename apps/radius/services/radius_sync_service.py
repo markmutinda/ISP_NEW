@@ -98,124 +98,136 @@ class RadiusSyncService:
         
         This is the CRITICAL method for multi-tenant RADIUS support.
         FreeRADIUS only queries public schema, so all users must be synced here.
+        Uses a savepoint so missing tables don't abort outer transactions.
         """
         tenant_schema = self._get_tenant_schema()
         check_attributes = check_attributes or {}
         reply_attributes = reply_attributes or {}
         
         try:
-            with connection.cursor() as cursor:
-                # 1. Delete existing entries for this user in public schema
-                cursor.execute(
-                    "DELETE FROM public.radcheck WHERE username = %s",
-                    [username]
-                )
-                cursor.execute(
-                    "DELETE FROM public.radreply WHERE username = %s",
-                    [username]
-                )
-                
-                # 2. Insert Password (Cleartext-Password)
-                cursor.execute(
-                    """
-                    INSERT INTO public.radcheck 
-                        (username, attribute, op, value, tenant_schema, created_at, updated_at)
-                    VALUES (%s, %s, %s, %s, %s, NOW(), NOW())
-                    """,
-                    [username, self.ATTR_PASSWORD, ':=', password, tenant_schema]
-                )
-                
-                # 3. Insert additional check attributes
-                for attr, value in check_attributes.items():
+            from django.db import transaction as db_transaction
+            with db_transaction.atomic():
+                with connection.cursor() as cursor:
+                    # 1. Delete existing entries for this user in public schema
+                    cursor.execute(
+                        "DELETE FROM public.radcheck WHERE username = %s",
+                        [username]
+                    )
+                    cursor.execute(
+                        "DELETE FROM public.radreply WHERE username = %s",
+                        [username]
+                    )
+                    
+                    # 2. Insert Password (Cleartext-Password)
                     cursor.execute(
                         """
                         INSERT INTO public.radcheck 
                             (username, attribute, op, value, tenant_schema, created_at, updated_at)
                         VALUES (%s, %s, %s, %s, %s, NOW(), NOW())
                         """,
-                        [username, attr, ':=', str(value), tenant_schema]
+                        [username, self.ATTR_PASSWORD, ':=', password, tenant_schema]
                     )
-                
-                # 4. Insert reply attributes (bandwidth, IP, etc.)
-                for attr, value in reply_attributes.items():
-                    cursor.execute(
-                        """
-                        INSERT INTO public.radreply 
-                            (username, attribute, op, value, tenant_schema, created_at, updated_at)
-                        VALUES (%s, %s, %s, %s, %s, NOW(), NOW())
-                        """,
-                        [username, attr, '=', str(value), tenant_schema]
-                    )
+                    
+                    # 3. Insert additional check attributes
+                    for attr, value in check_attributes.items():
+                        cursor.execute(
+                            """
+                            INSERT INTO public.radcheck 
+                                (username, attribute, op, value, tenant_schema, created_at, updated_at)
+                            VALUES (%s, %s, %s, %s, %s, NOW(), NOW())
+                            """,
+                            [username, attr, ':=', str(value), tenant_schema]
+                        )
+                    
+                    # 4. Insert reply attributes (bandwidth, IP, etc.)
+                    for attr, value in reply_attributes.items():
+                        cursor.execute(
+                            """
+                            INSERT INTO public.radreply 
+                                (username, attribute, op, value, tenant_schema, created_at, updated_at)
+                            VALUES (%s, %s, %s, %s, %s, NOW(), NOW())
+                            """,
+                            [username, attr, '=', str(value), tenant_schema]
+                        )
             
             logger.info(f"[PUBLIC SYNC] User {username} synced to public schema (tenant: {tenant_schema})")
             return True
             
         except Exception as e:
-            logger.error(f"[PUBLIC SYNC] Failed to sync {username} to public schema: {e}")
+            # Savepoint rolled back — outer transaction NOT aborted
+            logger.warning(f"[PUBLIC SYNC] Failed to sync {username} to public schema: {e}")
             return False
     
     def _delete_from_public_schema(self, username: str) -> bool:
         """
         Remove a RADIUS user from public schema.
         Called when deleting a user from tenant or during cleanup.
+        Uses a savepoint so missing tables don't abort outer transactions.
         """
         try:
-            with connection.cursor() as cursor:
-                cursor.execute("DELETE FROM public.radcheck WHERE username = %s", [username])
-                cursor.execute("DELETE FROM public.radreply WHERE username = %s", [username])
-                cursor.execute("DELETE FROM public.radusergroup WHERE username = %s", [username])
+            from django.db import transaction as db_transaction
+            with db_transaction.atomic():
+                with connection.cursor() as cursor:
+                    cursor.execute("DELETE FROM public.radcheck WHERE username = %s", [username])
+                    cursor.execute("DELETE FROM public.radreply WHERE username = %s", [username])
+                    cursor.execute("DELETE FROM public.radusergroup WHERE username = %s", [username])
             
             logger.info(f"[PUBLIC SYNC] Deleted user {username} from public schema")
             return True
             
         except Exception as e:
-            logger.error(f"[PUBLIC SYNC] Failed to delete {username} from public schema: {e}")
+            # Savepoint rolled back — outer transaction NOT aborted
+            logger.warning(f"[PUBLIC SYNC] Failed to delete {username} from public schema: {e}")
             return False
     
     def _update_public_schema_status(self, username: str, enabled: bool) -> bool:
         """
         Enable or disable a user in public schema.
         Disabled users get Auth-Type := Reject which blocks authentication.
+        Uses a savepoint so a missing public.radcheck table doesn't abort the outer transaction.
         """
         tenant_schema = self._get_tenant_schema()
         
         try:
-            with connection.cursor() as cursor:
-                if enabled:
-                    # Remove Auth-Type := Reject to enable
-                    cursor.execute(
-                        """
-                        DELETE FROM public.radcheck 
-                        WHERE username = %s AND attribute = 'Auth-Type' AND value = 'Reject'
-                        """,
-                        [username]
-                    )
-                    logger.info(f"[PUBLIC SYNC] Enabled user {username} in public schema")
-                else:
-                    # Check if already disabled
-                    cursor.execute(
-                        """
-                        SELECT id FROM public.radcheck 
-                        WHERE username = %s AND attribute = 'Auth-Type' AND value = 'Reject'
-                        """,
-                        [username]
-                    )
-                    if not cursor.fetchone():
-                        # Add Auth-Type := Reject to disable
+            from django.db import transaction as db_transaction
+            with db_transaction.atomic():
+                with connection.cursor() as cursor:
+                    if enabled:
+                        # Remove Auth-Type := Reject to enable
                         cursor.execute(
                             """
-                            INSERT INTO public.radcheck 
-                                (username, attribute, op, value, tenant_schema, created_at, updated_at)
-                            VALUES (%s, 'Auth-Type', ':=', 'Reject', %s, NOW(), NOW())
+                            DELETE FROM public.radcheck 
+                            WHERE username = %s AND attribute = 'Auth-Type' AND value = 'Reject'
                             """,
-                            [username, tenant_schema]
+                            [username]
                         )
-                    logger.info(f"[PUBLIC SYNC] Disabled user {username} in public schema")
+                        logger.info(f"[PUBLIC SYNC] Enabled user {username} in public schema")
+                    else:
+                        # Check if already disabled
+                        cursor.execute(
+                            """
+                            SELECT id FROM public.radcheck 
+                            WHERE username = %s AND attribute = 'Auth-Type' AND value = 'Reject'
+                            """,
+                            [username]
+                        )
+                        if not cursor.fetchone():
+                            # Add Auth-Type := Reject to disable
+                            cursor.execute(
+                                """
+                                INSERT INTO public.radcheck 
+                                    (username, attribute, op, value, tenant_schema, created_at, updated_at)
+                                VALUES (%s, 'Auth-Type', ':=', 'Reject', %s, NOW(), NOW())
+                                """,
+                                [username, tenant_schema]
+                            )
+                        logger.info(f"[PUBLIC SYNC] Disabled user {username} in public schema")
             
             return True
             
         except Exception as e:
-            logger.error(f"[PUBLIC SYNC] Failed to update status for {username}: {e}")
+            # Savepoint was rolled back — outer transaction is NOT aborted
+            logger.warning(f"[PUBLIC SYNC] Failed to update status for {username}: {e}")
             return False
     
     def _sync_nas_to_public_schema(self, nasname: str, shortname: str, secret: str, 
@@ -223,32 +235,36 @@ class RadiusSyncService:
         """
         Register a NAS (router) in public schema for FreeRADIUS.
         NAS entries must be in public.nas for FreeRADIUS to accept RADIUS requests.
+        Uses a savepoint so missing tables don't abort outer transactions.
         """
         tenant_schema = self._get_tenant_schema()
         
         try:
-            with connection.cursor() as cursor:
-                # Upsert NAS entry
-                cursor.execute(
-                    """
-                    INSERT INTO public.nas 
-                        (nasname, shortname, type, secret, description, tenant_schema)
-                    VALUES (%s, %s, %s, %s, %s, %s)
-                    ON CONFLICT (nasname) DO UPDATE SET
-                        shortname = EXCLUDED.shortname,
-                        type = EXCLUDED.type,
-                        secret = EXCLUDED.secret,
-                        description = EXCLUDED.description,
-                        tenant_schema = EXCLUDED.tenant_schema
-                    """,
-                    [nasname, shortname[:32], nas_type, secret, description or '', tenant_schema]
-                )
+            from django.db import transaction as db_transaction
+            with db_transaction.atomic():
+                with connection.cursor() as cursor:
+                    # Upsert NAS entry
+                    cursor.execute(
+                        """
+                        INSERT INTO public.nas 
+                            (nasname, shortname, type, secret, description, tenant_schema)
+                        VALUES (%s, %s, %s, %s, %s, %s)
+                        ON CONFLICT (nasname) DO UPDATE SET
+                            shortname = EXCLUDED.shortname,
+                            type = EXCLUDED.type,
+                            secret = EXCLUDED.secret,
+                            description = EXCLUDED.description,
+                            tenant_schema = EXCLUDED.tenant_schema
+                        """,
+                        [nasname, shortname[:32], nas_type, secret, description or '', tenant_schema]
+                    )
             
             logger.info(f"[PUBLIC SYNC] NAS {nasname} synced to public schema")
             return True
             
         except Exception as e:
-            logger.error(f"[PUBLIC SYNC] Failed to sync NAS {nasname}: {e}")
+            # Savepoint rolled back — outer transaction NOT aborted
+            logger.warning(f"[PUBLIC SYNC] Failed to sync NAS {nasname}: {e}")
             return False
     
     # ────────────────────────────────────────────────────────────────
@@ -405,7 +421,10 @@ class RadiusSyncService:
             return True
     
     def disable_radius_user(self, username: str, reason: str = "Disabled") -> bool:
-        """Disable a RADIUS user by setting Auth-Type to Reject."""
+        """
+        Disable a RADIUS user by setting Auth-Type to Reject,
+        then terminate all active sessions to kick the user off immediately.
+        """
         if not RadCheck.objects.filter(username=username).exists():
             return False
         
@@ -421,8 +440,73 @@ class RadiusSyncService:
         # ════════════════════════════════════════════════════════════
         self._update_public_schema_status(username, enabled=False)
         
+        # ════════════════════════════════════════════════════════════
+        # KICK: Terminate active sessions to disconnect the user NOW
+        # ════════════════════════════════════════════════════════════
+        self.disconnect_user(username)
+        
         logger.info(f"Disabled RADIUS user: {username} - {reason}")
         return True
+    
+    def disconnect_user(self, username: str) -> int:
+        """
+        Disconnect a RADIUS user by terminating all active sessions.
+        
+        This works by:
+        1. Updating radacct: set acctstoptime=NOW for all open sessions
+           in BOTH tenant and public schemas
+        2. MikroTik's interim-update or session-timeout check will then
+           see Auth-Type=Reject on the next re-auth and drop the connection
+        3. For immediate disconnect on MikroTik, the NAS must have
+           interim-update configured (recommended: 60-120 seconds)
+        
+        Returns: Number of sessions terminated
+        """
+        from ..models import RadAcct
+        
+        now = timezone.now()
+        terminated = 0
+        
+        # Terminate active sessions in tenant schema (ORM)
+        active_sessions = RadAcct.objects.filter(
+            username=username,
+            acctstoptime__isnull=True
+        )
+        count = active_sessions.count()
+        if count > 0:
+            active_sessions.update(
+                acctstoptime=now,
+                acctterminatecause='Admin-Reset'
+            )
+            terminated += count
+            logger.info(f"Terminated {count} active session(s) in tenant schema for: {username}")
+        
+        # Terminate active sessions in public schema (raw SQL)
+        # Use a savepoint so a missing radacct table doesn't abort the outer transaction
+        try:
+            from django.db import transaction as db_transaction
+            with db_transaction.atomic():
+                with connection.cursor() as cursor:
+                    cursor.execute(
+                        """
+                        UPDATE public.radacct
+                        SET acctstoptime = NOW(),
+                            acctterminatecause = 'Admin-Reset'
+                        WHERE username = %s AND acctstoptime IS NULL
+                        """,
+                        [username]
+                    )
+                    public_count = cursor.rowcount
+                    if public_count > 0:
+                        terminated += public_count
+                        logger.info(
+                            f"Terminated {public_count} active session(s) in public schema for: {username}"
+                        )
+        except Exception as e:
+            # Savepoint was rolled back — the outer transaction is NOT aborted
+            logger.warning(f"Failed to terminate public sessions for {username}: {e}")
+        
+        return terminated
     
     def enable_radius_user(self, username: str) -> bool:
         """Enable a previously disabled RADIUS user."""

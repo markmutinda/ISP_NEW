@@ -46,11 +46,17 @@ class AuditMixin(models.Model):
 class UserManager(BaseUserManager):
     """Custom user manager for handling user creation"""
     
-    def create_user(self, email, password=None, **extra_fields):
-        """Create and save a regular User with the given email and password."""
-        if not email:
-            raise ValueError('The Email field must be set')
-        email = self.normalize_email(email)
+    def create_user(self, email=None, password=None, **extra_fields):
+        """Create and save a regular User with the given email and password.
+        
+        Email is OPTIONAL for customer accounts — many Kenyan ISP subscribers
+        don't have email addresses. When email is empty/None, the user is
+        identified by phone_number instead.
+        """
+        # Normalise: None / whitespace-only → empty string
+        email = (email or '').strip()
+        if email:
+            email = self.normalize_email(email)
         user = self.model(email=email, **extra_fields)
         user.set_password(password)
         user.save(using=self._db)
