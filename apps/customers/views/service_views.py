@@ -329,8 +329,11 @@ class ServiceConnectionViewSet(viewsets.ModelViewSet):
         from apps.billing.models import Plan
         from apps.radius.signals_auto_sync import _get_or_create_bandwidth_profile
         from apps.radius.models import CustomerRadiusCredentials
-        from utils.helpers import generate_pppoe_username, generate_password
-        
+        from apps.radius.signals_auto_sync import (
+            _get_or_create_bandwidth_profile, 
+            generate_pppoe_username, 
+            generate_password
+        )
         service = self.get_object()
         customer = service.customer
         
