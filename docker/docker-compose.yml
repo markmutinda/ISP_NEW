@@ -75,6 +75,7 @@ services:
       - "8000:8000"
     networks:
       - isp_network
+      - vpn_network
 
   # ────────────────────────────────────────────────────────────────
   # CELERY WORKER
@@ -105,6 +106,7 @@ services:
         condition: service_healthy
     networks:
       - isp_network
+      - vpn_network
 
   # ────────────────────────────────────────────────────────────────
   # CELERY BEAT SCHEDULER
@@ -147,6 +149,7 @@ services:
     ports:
       - "1812:1812/udp"
       - "1813:1813/udp"
+      - "3799:3799/udp"
       - "18120:18120/tcp"
     environment:
       - DB_HOST=netily_db
@@ -165,6 +168,7 @@ services:
         condition: service_healthy
     networks:
       - isp_network
+      - vpn_network
 
   # ────────────────────────────────────────────────────────────────
   # NGINX REVERSE PROXY
@@ -199,6 +203,7 @@ services:
       - "7505:7505"
     volumes:
       - openvpn_data:/etc/openvpn
+      - openvpn_ccd:/etc/openvpn/ccd
       - openvpn_logs:/var/log/openvpn
     environment:
       - OPENVPN_OPTS=--management localhost 7505
@@ -230,6 +235,7 @@ volumes:
   static_volume:
   media_volume:
   openvpn_data:
+  openvpn_ccd:
   openvpn_logs:
   freeradius_data:
   freeradius_logs:

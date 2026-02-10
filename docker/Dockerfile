@@ -21,9 +21,10 @@ WORKDIR /app
 # Copy the entire requirements folder
 COPY requirements/ /app/requirements/
 
-# Install dependencies from local.txt (which includes base.txt)
+# Install dependencies from production.txt (which includes base.txt)
+# NOTE: local.txt is for development only; Docker uses production settings
 RUN pip install --upgrade pip && \
-    pip install -r /app/requirements/local.txt
+    pip install -r /app/requirements/production.txt
 
 # Copy project files
 COPY . .

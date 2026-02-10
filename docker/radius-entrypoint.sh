@@ -38,6 +38,15 @@ mv /etc/freeradius/clients.conf.tmp /etc/freeradius/clients.conf
 # Enable SQL module
 ln -sf /etc/freeradius/mods-available/sql /etc/freeradius/mods-enabled/sql
 
+# Enable CoA (Change of Authorization) site for disconnect/bandwidth-change support
+if [ -f /etc/freeradius/sites-available/coa ] && [ ! -L /etc/freeradius/sites-enabled/coa ]; then
+    echo "Enabling CoA site..."
+    ln -sf /etc/freeradius/sites-available/coa /etc/freeradius/sites-enabled/coa
+    echo "✓ CoA site enabled (port 3799)"
+else
+    echo "✓ CoA site already enabled or not available"
+fi
+
 # Fix permissions
 chown -R freerad:freerad /etc/freeradius
 

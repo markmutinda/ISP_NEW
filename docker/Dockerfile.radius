@@ -35,8 +35,8 @@ RUN dos2unix /etc/freeradius/clients.conf
 # COPY radius_config/sites-available/default /etc/raddb/sites-available/default
 # COPY radius_config/sites-available/inner-tunnel /etc/raddb/sites-available/inner-tunnel
 
-# Expose ports
-EXPOSE 1812/udp 1813/udp
+# Expose ports (Auth, Accounting, CoA)
+EXPOSE 1812/udp 1813/udp 3799/udp
 
 # Start using the fixed entrypoint
 ENTRYPOINT ["/usr/local/bin/radius-entrypoint.sh"]
