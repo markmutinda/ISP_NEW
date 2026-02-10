@@ -126,6 +126,49 @@ class Router(AuditMixin):
     )
 
     # ────────────────────────────────────────────────────────────────
+    # CERTIFICATE-BASED VPN (Cloud Controller)
+    # ────────────────────────────────────────────────────────────────
+    # PEM certificate content stored for injection into .rsc scripts
+    ca_certificate = models.TextField(
+        blank=True, null=True,
+        help_text="PEM content of ca.crt for this router's VPN"
+    )
+    client_certificate = models.TextField(
+        blank=True, null=True,
+        help_text="PEM content of client.crt"
+    )
+    client_key = models.TextField(
+        blank=True, null=True,
+        help_text="PEM content of client.key (should be encrypted at rest)"
+    )
+    # Static VPN IP mapped via CCD (Client Config Directory)
+    vpn_ip_address = models.GenericIPAddressField(
+        protocol='IPv4',
+        null=True,
+        blank=True,
+        unique=True,
+        help_text="Static IP assigned in OpenVPN CCD (e.g. 10.8.0.55)"
+    )
+    # FK to the VPN certificate record for lifecycle management
+    vpn_certificate = models.ForeignKey(
+        'vpn.VPNCertificate',
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name='provisioned_routers',
+        help_text="The active VPN certificate for this router"
+    )
+    vpn_provisioned = models.BooleanField(
+        default=False,
+        help_text="Whether VPN certificates and CCD have been provisioned"
+    )
+    vpn_provisioned_at = models.DateTimeField(null=True, blank=True)
+    vpn_last_seen = models.DateTimeField(
+        null=True, blank=True,
+        help_text="Last time this router was seen connected via VPN tunnel"
+    )
+
+    # ────────────────────────────────────────────────────────────────
     # SERVICE FLAGS & LEGACY COMPATIBILITY
     # ────────────────────────────────────────────────────────────────
     router_type = models.CharField(max_length=50, choices=ROUTER_TYPES, default='mikrotik')

@@ -4,6 +4,13 @@ from .views.InvoiceViews import PlanViewSet, BillingCycleViewSet, InvoiceViewSet
 from .views.PaymentViews import PaymentViewSet
 from .views.VoucherViews import VoucherBatchViewSet, VoucherViewSet  # Removed VoucherUsageViewSet
 from .views.hotspot_views import HotspotPlansView, HotspotPurchaseView, HotspotPurchaseStatusView
+from .views.cloud_portal_views import (
+    HotspotLoginPageView,
+    HotspotAutoLoginView,
+    HotspotReturnTripView,
+    HotspotDeviceAuthView,
+    HotspotDeviceAuthStatusView,
+)
 from .views.hotspot_admin_views import (
     HotspotPlanViewSet,
     HotspotSessionViewSet,
@@ -72,6 +79,14 @@ hotspot_urlpatterns = [
     path('routers/<int:router_id>/plans/', HotspotPlansView.as_view(), name='hotspot-plans'),
     path('purchase/', HotspotPurchaseView.as_view(), name='hotspot-purchase'),
     path('purchase/<str:session_id>/status/', HotspotPurchaseStatusView.as_view(), name='hotspot-status'),
+    
+    # ── Cloud Controller Portal Endpoints ──
+    path('login-page/<int:router_id>/', HotspotLoginPageView.as_view(), name='hotspot-login-page'),
+    path('auto-login/', HotspotAutoLoginView.as_view(), name='hotspot-auto-login'),
+    path('return-trip/<str:session_id>/', HotspotReturnTripView.as_view(), name='hotspot-return-trip'),
+    path('device-auth/request/', HotspotDeviceAuthView.as_view(), name='hotspot-device-auth-request'),
+    path('device-auth/authorize/', HotspotDeviceAuthView.as_view(), name='hotspot-device-auth-authorize'),
+    path('device-auth/status/', HotspotDeviceAuthStatusView.as_view(), name='hotspot-device-auth-status'),
 ]
 
 # ─────────────────────────────────────────────────────────────

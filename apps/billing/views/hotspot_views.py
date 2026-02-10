@@ -246,6 +246,7 @@ class HotspotPurchaseStatusView(APIView):
                 'duration_display': session.plan.duration_display,
                 'data_remaining_mb': session.data_remaining_mb,
                 'speed': f"{session.plan.speed_limit_mbps}Mbps",
+                'login_url': request.query_params.get('login_url', ''),
             })
         
         elif session.status == 'failed':
@@ -261,10 +262,34 @@ class HotspotPurchaseStatusView(APIView):
             })
         
         elif session.status == 'paid':
-            # Payment received, activating on router
+            # Payment received but not yet activated — activate now
+            session.activate()
+            
+            # Create RADIUS credentials
+            try:
+                from apps.billing.services.hotspot_radius_service import HotspotRadiusService
+                
+                radius_service = HotspotRadiusService()
+                radius_service.create_hotspot_credentials(
+                    username=session.access_code,
+                    password=session.access_code,
+                    router=session.router,
+                    plan=session.plan,
+                    expires_at=session.expires_at,
+                    mac_address=session.mac_address or '',
+                )
+            except Exception as e:
+                logger.error(f"RADIUS activation failed for paid session {session.session_id}: {e}")
+            
             return Response({
-                'status': 'activating',
-                'message': 'Payment received! Activating your connection...',
+                'status': 'success',
+                'message': 'Payment received! You are now connected.',
+                'access_code': session.access_code,
+                'expires_at': session.expires_at,
+                'duration_display': session.plan.duration_display,
+                'data_remaining_mb': session.data_remaining_mb,
+                'speed': f"{session.plan.speed_limit_mbps}Mbps",
+                'login_url': request.query_params.get('login_url', ''),
             })
         
         # Still pending - check with PayHero
@@ -279,13 +304,31 @@ class HotspotPurchaseStatusView(APIView):
                     # Payment successful - activate session
                     session.mark_paid(status_response.mpesa_receipt)
                     
-                    # Activate on router (in production this would call MikroTik API)
-                    # For now, we just set access code
+                    # Activate session (generates access code + expiry)
                     session.activate()
                     
-                    # Record commission
-                    # Note: Need to get company from router's tenant
-                    # This is handled in webhook for proper tenant context
+                    # ── CLOUD CONTROLLER: Create RADIUS credentials ──
+                    # This is the critical step that closes the payment→access loop.
+                    # Without this, the user pays but can't authenticate on MikroTik.
+                    try:
+                        from apps.billing.services.hotspot_radius_service import HotspotRadiusService
+                        
+                        radius_service = HotspotRadiusService()
+                        radius_service.create_hotspot_credentials(
+                            username=session.access_code,
+                            password=session.access_code,
+                            router=session.router,
+                            plan=session.plan,
+                            expires_at=session.expires_at,
+                            mac_address=session.mac_address or '',
+                        )
+                    except Exception as e:
+                        logger.error(
+                            f"Failed to create RADIUS credentials for session "
+                            f"{session.session_id}: {e}",
+                            exc_info=True
+                        )
+                    # ── END CLOUD CONTROLLER ──
                     
                     return Response({
                         'status': 'success',

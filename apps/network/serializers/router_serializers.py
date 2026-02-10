@@ -41,7 +41,11 @@ class RouterSerializer(serializers.ModelSerializer):
             'status', 'status_display', 'total_users', 'active_users', 'uptime',
             'uptime_percentage', 'sla_target', 'last_seen', 'tags', 'notes',
             'is_active', 'auth_key', 'is_authenticated', 'authenticated_at',
-            'auth_status', 'shared_secret', 'is_editable', 'created_at', 'updated_at',
+            'auth_status', 'shared_secret', 'is_editable',
+            # Cloud Controller / VPN fields
+            'vpn_provisioned', 'vpn_provisioned_at', 'vpn_ip_address', 'vpn_last_seen',
+            'ca_certificate', 'client_certificate', 'client_key',
+            'created_at', 'updated_at',
         ]
         extra_kwargs = {
             'api_password': {'write_only': True, 'required': False, 'allow_blank': True},
@@ -65,6 +69,14 @@ class RouterSerializer(serializers.ModelSerializer):
             'is_authenticated': {'read_only': True},
             'authenticated_at': {'read_only': True},
             'shared_secret': {'read_only': True},
+            # VPN fields are managed by provisioning service, not API
+            'vpn_provisioned': {'read_only': True},
+            'vpn_provisioned_at': {'read_only': True},
+            'vpn_ip_address': {'read_only': True},
+            'vpn_last_seen': {'read_only': True},
+            'ca_certificate': {'read_only': True},
+            'client_certificate': {'read_only': True},
+            'client_key': {'read_only': True},
         }
 
     def get_auth_status(self, obj):

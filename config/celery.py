@@ -87,6 +87,39 @@ app.conf.beat_schedule = {
         'schedule': crontab(minute=0),  # Every hour at :00
         'options': {'queue': 'radius'}
     },
+
+    # ════════════════════════════════════════════════════════════════
+    # CLOUD CONTROLLER — Hotspot RADIUS Cleanup
+    # ════════════════════════════════════════════════════════════════
+    'cleanup-expired-hotspot-sessions-every-5-min': {
+        'task': 'apps.billing.tasks.cleanup_expired_hotspot_sessions',
+        'schedule': crontab(minute='*/5'),
+        'options': {'queue': 'billing'}
+    },
+    'expire-stale-pending-payments-every-10-min': {
+        'task': 'apps.billing.tasks.expire_stale_pending_payments',
+        'schedule': crontab(minute='*/10'),
+        'options': {'queue': 'billing'}
+    },
+
+    # ════════════════════════════════════════════════════════════════
+    # CLOUD CONTROLLER — VPN Tunnel Monitoring
+    # ════════════════════════════════════════════════════════════════
+    'monitor-vpn-tunnels-every-2-min': {
+        'task': 'apps.vpn.tasks.monitor_vpn_tunnels',
+        'schedule': crontab(minute='*/2'),
+        'options': {'queue': 'default'}
+    },
+    'check-vpn-health-every-minute': {
+        'task': 'apps.vpn.tasks.check_vpn_health',
+        'schedule': crontab(minute='*/1'),
+        'options': {'queue': 'default'}
+    },
+    'cleanup-orphaned-ccd-daily': {
+        'task': 'apps.vpn.tasks.cleanup_orphaned_ccd',
+        'schedule': crontab(hour=4, minute=0),  # Daily at 4 AM
+        'options': {'queue': 'default'}
+    },
 }
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -97,6 +130,7 @@ app.conf.task_routes = {
     'apps.radius.tasks.*': {'queue': 'radius'},
     'apps.notifications.tasks.*': {'queue': 'notifications'},
     'apps.billing.tasks.*': {'queue': 'billing'},
+    'apps.vpn.tasks.*': {'queue': 'default'},
 }
 
 # ════════════════════════════════════════════════════════════════════════════

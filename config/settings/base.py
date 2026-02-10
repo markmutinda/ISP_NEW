@@ -414,3 +414,24 @@ elif PUBLIC_DOMAIN:
     BASE_URL = f"https://{PUBLIC_DOMAIN}"
 else:
     BASE_URL = ''
+
+# ────────────────────────────────────────────────────────────────
+#  CLOUD CONTROLLER / VPN SETTINGS
+# ────────────────────────────────────────────────────────────────
+VPN_SERVER_IP = os.environ.get('VPN_SERVER_IP', '10.8.0.1')
+VPN_NETWORK_CIDR = os.environ.get('VPN_NETWORK_CIDR', '10.8.0.0/24')
+VPN_IP_RANGE_START = int(os.environ.get('VPN_IP_RANGE_START', '10'))   # 10.8.0.10
+VPN_IP_RANGE_END = int(os.environ.get('VPN_IP_RANGE_END', '250'))      # 10.8.0.250
+
+# OpenVPN Management Interface (for monitoring connected routers)
+OPENVPN_MANAGEMENT_HOST = os.environ.get('OPENVPN_MANAGEMENT_HOST', '127.0.0.1')
+OPENVPN_MANAGEMENT_PORT = int(os.environ.get('OPENVPN_MANAGEMENT_PORT', '7505'))
+
+# CCD path inside the OpenVPN Docker container volume
+OPENVPN_CCD_PATH = os.environ.get('OPENVPN_CCD_PATH', '/etc/openvpn/ccd')
+
+# Captive Portal (Next.js frontend for WiFi users)
+CAPTIVE_PORTAL_URL = os.environ.get('CAPTIVE_PORTAL_URL', 'https://portal.netily.co.ke')
+
+# VPN API endpoint (how routers reach Django through the tunnel)
+VPN_API_URL = f"http://{VPN_SERVER_IP}:8000"

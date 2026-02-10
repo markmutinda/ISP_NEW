@@ -79,7 +79,19 @@ class RouterViewSet(viewsets.ModelViewSet):
     
     def perform_create(self, serializer):
         # The serializer will handle adding company_name and tenant_subdomain
-        serializer.save()
+        router = serializer.save()
+        
+        # ── CLOUD CONTROLLER: Auto-provision VPN tunnel for new router ──
+        try:
+            from apps.vpn.services.vpn_provisioning_service import VPNProvisioningService
+            
+            vpn_service = VPNProvisioningService()
+            vpn_service.provision_router(router)
+            logger.info(f"VPN provisioned for new router: {router.name} (IP: {router.vpn_ip_address})")
+        except Exception as e:
+            # Don't fail router creation if VPN provisioning fails
+            # Admin can re-provision later from the router detail page
+            logger.error(f"VPN provisioning failed for router {router.name}: {e}", exc_info=True)
        
     # Optional: Add this method to debug the request
     def create(self, request, *args, **kwargs):
@@ -1636,6 +1648,121 @@ mute 20
                 'download_script': f"{base_url}/download/script/7/{router.auth_key}",
             }
         })
+
+    # ------------------------------------------
+    # CLOUD CONTROLLER / VPN ACTIONS
+    # ------------------------------------------
+
+    @action(detail=True, methods=['get'], url_path='vpn_status')
+    def vpn_status(self, request, pk=None):
+        """Get VPN tunnel status for a router."""
+        router = self.get_object()
+        
+        tunnel_status = 'unknown'
+        bytes_received = 0
+        bytes_sent = 0
+        connected_since = None
+        certificate_expires_at = None
+        
+        # Try to get live tunnel info from OpenVPN management
+        if router.vpn_provisioned and router.vpn_ip_address:
+            try:
+                from apps.vpn.services.openvpn_management import OpenVPNManagementClient
+                mgmt = OpenVPNManagementClient()
+                clients = mgmt.get_connected_clients()
+                for client in clients:
+                    if client.get('virtual_address') == router.vpn_ip_address:
+                        tunnel_status = 'connected'
+                        bytes_received = client.get('bytes_received', 0)
+                        bytes_sent = client.get('bytes_sent', 0)
+                        connected_since = client.get('connected_since')
+                        break
+                else:
+                    tunnel_status = 'disconnected'
+            except Exception as e:
+                logger.warning(f"Could not check VPN status for router {router.id}: {e}")
+                tunnel_status = 'unknown'
+        
+        # Get certificate expiry
+        if router.vpn_certificate_id:
+            try:
+                cert = router.vpn_certificate
+                if cert and cert.expires_at:
+                    certificate_expires_at = cert.expires_at.isoformat()
+            except Exception:
+                pass
+        
+        return Response({
+            'vpn_provisioned': router.vpn_provisioned,
+            'vpn_ip_address': router.vpn_ip_address,
+            'vpn_provisioned_at': router.vpn_provisioned_at.isoformat() if router.vpn_provisioned_at else None,
+            'tunnel_status': tunnel_status,
+            'last_seen': router.vpn_last_seen.isoformat() if hasattr(router, 'vpn_last_seen') and router.vpn_last_seen else None,
+            'bytes_received': bytes_received,
+            'bytes_sent': bytes_sent,
+            'connected_since': connected_since,
+            'certificate_expires_at': certificate_expires_at,
+        })
+    
+    @action(detail=True, methods=['post'], url_path='reprovision_vpn')
+    def reprovision_vpn(self, request, pk=None):
+        """(Re-)provision VPN certificates and CCD for a router."""
+        router = self.get_object()
+        
+        try:
+            from apps.vpn.services.vpn_provisioning_service import VPNProvisioningService
+            service = VPNProvisioningService()
+            result = service.provision_router(router)
+            
+            router.refresh_from_db()
+            
+            RouterEvent.objects.create(
+                router=router,
+                event_type='vpn_provisioned',
+                message=f"VPN {'re-' if result.get('reprovisioned') else ''}provisioned — IP: {router.vpn_ip_address}"
+            )
+            
+            return Response({
+                'status': 'success',
+                'vpn_ip': router.vpn_ip_address,
+            })
+        except Exception as e:
+            logger.error(f"VPN provisioning failed for router {router.id}: {e}")
+            return Response({'error': str(e)}, status=400)
+    
+    @action(detail=True, methods=['post'], url_path='revoke_vpn')
+    def revoke_vpn(self, request, pk=None):
+        """Revoke VPN access for a router — removes CCD, marks certificate revoked."""
+        router = self.get_object()
+        
+        try:
+            # Remove CCD file
+            if router.vpn_ip_address:
+                from apps.vpn.services.ccd_manager import CCDManager
+                ccd = CCDManager()
+                ccd.remove_client(f"router-{router.id}")
+            
+            # Clear VPN fields
+            router.vpn_provisioned = False
+            router.vpn_ip_address = None
+            router.ca_certificate = ''
+            router.client_certificate = ''
+            router.client_key = ''
+            router.save(update_fields=[
+                'vpn_provisioned', 'vpn_ip_address',
+                'ca_certificate', 'client_certificate', 'client_key'
+            ])
+            
+            RouterEvent.objects.create(
+                router=router,
+                event_type='vpn_revoked',
+                message="VPN access revoked"
+            )
+            
+            return Response({'status': 'success'})
+        except Exception as e:
+            logger.error(f"VPN revocation failed for router {router.id}: {e}")
+            return Response({'error': str(e)}, status=400)
 
 # ────────────────────────────────────────────────────────────────
 # ROUTER PORTS & HOTSPOT CONFIGURATION VIEWS

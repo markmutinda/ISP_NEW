@@ -1,27 +1,143 @@
 <!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
-    <title>YourISP Hotspot Login</title>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta http-equiv="pragma" content="no-cache">
+    <meta http-equiv="cache-control" content="no-cache, no-store, must-revalidate">
+    <title>Connecting...</title>
     <style>
-        body { font-family: Arial, sans-serif; text-align: center; margin-top: 50px; }
-        .logo { max-width: 200px; margin-bottom: 20px; }
-        .login-box { border: 1px solid #ddd; padding: 20px; width: 300px; margin: 0 auto; }
-        input { width: 100%; padding: 8px; margin: 5px 0; }
-        button { background: #007bff; color: white; border: none; padding: 10px 20px; cursor: pointer; }
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            min-height: 100vh;
+            color: #333;
+        }
+        .card {
+            background: rgba(255,255,255,0.95);
+            border-radius: 16px;
+            padding: 40px 32px;
+            text-align: center;
+            max-width: 380px;
+            width: 90%;
+            box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+        }
+        .spinner {
+            width: 48px; height: 48px;
+            border: 4px solid #e0e0e0;
+            border-top: 4px solid #667eea;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+            margin: 0 auto 24px;
+        }
+        @keyframes spin { to { transform: rotate(360deg); } }
+        h2 { font-size: 20px; margin-bottom: 8px; }
+        p { font-size: 14px; color: #666; margin-bottom: 16px; }
+        .link { color: #667eea; text-decoration: none; font-weight: 500; }
+        .link:hover { text-decoration: underline; }
+        .meta { font-size: 11px; color: #999; margin-top: 20px; }
     </style>
 </head>
 <body>
-    <img src="/hotspot/logo.png" class="logo" alt="YourISP Logo">
-    <div class="login-box">
-        <h2>Welcome to YourISP</h2>
-        <form method="post" action="$(link-login)">
-            <input type="hidden" name="dst" value="$(link-orig)">
-            <input type="hidden" name="popup" value="true">
-            <input type="text" name="username" placeholder="Username" required>
-            <input type="password" name="password" placeholder="Password" required>
-            <button type="submit">Login</button>
-        </form>
-        <p><a href="https://app.yourisp.com">Create Account</a></p>
+    <div class="card">
+        <div class="spinner"></div>
+        <h2>Connecting to WiFi...</h2>
+        <p>You'll be redirected to our portal in a moment.</p>
+        <p style="font-size:13px">
+            Not redirected? <a id="manual-link" href="#" class="link">Click here</a>
+        </p>
+        <div class="meta" id="debug-info"></div>
     </div>
+
+    <!--
+        Cloud Redirector v3.0 — Netily Cloud Controller
+        MikroTik replaces $(variables) at serve time:
+          $(mac)             → Client MAC address
+          $(ip)              → Client IP address
+          $(identity)        → Router identity (name)
+          $(link-login-only) → MikroTik login URL for "Return Trip"
+          $(error)           → Auth error message (if any)
+          $(interface-name)  → Interface client connected on
+    -->
+    <script>
+    (function() {
+        // MikroTik variables (replaced server-side by RouterOS)
+        var mac       = '$(mac)';
+        var ip        = '$(ip)';
+        var identity  = '$(identity)';
+        var loginUrl  = '$(link-login-only)';
+        var error     = '$(error)';
+
+        // Cloud portal base URL (injected by script generator or fetched dynamically)
+        // Fallback: detect from the page request if served via /tool fetch
+        var portalBase = '{{PORTAL_URL}}';
+
+        // If portalBase wasn't replaced (static file), try the dynamic login page endpoint
+        if (portalBase.indexOf('{{') === 0) {
+            // Fetch router config from API to get the portal URL
+            portalBase = '';
+        }
+
+        // Smart TV / Limited Browser Detection
+        var ua = navigator.userAgent.toLowerCase();
+        var isSmartTV = /smart-?tv|webos|tizen|vidaa|hbbtv|roku|firetv|apple\s?tv/i.test(ua);
+        var isLimitedBrowser = isSmartTV || !window.fetch || !window.Promise;
+
+        // Build redirect URL
+        var params = [
+            'mac=' + encodeURIComponent(mac),
+            'ip=' + encodeURIComponent(ip),
+            'router=' + encodeURIComponent(identity),
+            'login_url=' + encodeURIComponent(loginUrl),
+            'error=' + encodeURIComponent(error),
+            'smart_tv=' + (isSmartTV ? '1' : '0')
+        ];
+
+        var queryString = params.join('&');
+
+        // If we don't have a portal URL, try to get it from the dynamic endpoint
+        if (!portalBase) {
+            // The script generator will replace this with the actual portal URL
+            // For now, try fetching from the login-page API via the VPN
+            var apiUrl = 'http://10.8.0.1:8000/api/v1/hotspot/login-page/detect/';
+            try {
+                var xhr = new XMLHttpRequest();
+                xhr.open('GET', apiUrl + '?identity=' + encodeURIComponent(identity), false); // sync
+                xhr.timeout = 3000;
+                xhr.send();
+                if (xhr.status === 200) {
+                    var data = JSON.parse(xhr.responseText);
+                    portalBase = data.portal_url || '';
+                }
+            } catch(e) {
+                // Fallback to a known default
+                portalBase = 'https://portal.netily.co.ke';
+            }
+        }
+
+        // Construct final redirect
+        // Router ID is extracted by the Next.js portal from the 'router' (identity) param
+        // or we include it if we have it from the API
+        var redirectUrl = portalBase + '/hotspot/detect?' + queryString;
+
+        // Set manual link
+        document.getElementById('manual-link').href = redirectUrl;
+
+        // Show debug info in development
+        var debugEl = document.getElementById('debug-info');
+        if (mac && mac !== '$(mac)') {
+            debugEl.textContent = 'MAC: ' + mac + ' | IP: ' + ip;
+        }
+
+        // Redirect after a tiny delay (allows MikroTik to finish serving)
+        setTimeout(function() {
+            window.location.href = redirectUrl;
+        }, 500);
+    })();
+    </script>
 </body>
 </html>
