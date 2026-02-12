@@ -12,6 +12,7 @@ from apps.network.views.router_views import (
     RouterHotspotConfigView,
     RouterHotspotConfigureView,
     RouterHotspotDisableView,
+    download_router_cert,
 )
 
 # ===== IPAM =====
@@ -66,8 +67,6 @@ router.register(r'tr069-sessions', TR069SessionViewSet)
 # URLPATTERNS - Clean & Conflict-Free
 # =========================
 urlpatterns = [
-    
-    
     path('network/routers/auth/', RouterAuthenticateView.as_view(), name='router-auth'),
     path('routers/heartbeat/', RouterHeartbeatView.as_view(), name='router-heartbeat'),
     
@@ -75,10 +74,12 @@ urlpatterns = [
     path('routers/<int:pk>/ports/', RouterPortsView.as_view(), name='router-ports'),
     path('routers/<int:pk>/hotspot/config/', RouterHotspotConfigView.as_view(), name='router-hotspot-config'),
     path('routers/<int:pk>/hotspot/configure/', RouterHotspotConfigureView.as_view(), name='router-hotspot-configure'),
+    
+    # This line works now because we imported the function above
+    path('routers/<int:router_id>/cert/<str:cert_type>/', download_router_cert, name='router-cert-download'),
+    
     path('routers/<int:pk>/hotspot/disable/', RouterHotspotDisableView.as_view(), name='router-hotspot-disable'),
 
-    
     path('', include(router.urls)),
-
 ]
 
