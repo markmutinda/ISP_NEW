@@ -259,33 +259,40 @@ class Router(AuditMixin):
         return f"{self.name} ({self.ip_address or 'No IP'})"
 
     def save(self, *args, **kwargs):
-        """Auto-generate credentials and schema links."""
-        # 1. Tenant Sync
-        if self.tenant_subdomain:
-            clean_sub = self.tenant_subdomain.lower().replace('-', '_')
-            self.schema_name = f"tenant_{clean_sub}"
-        
-        # 2. VPN Credentials
-        if self.enable_openvpn and not self.openvpn_username:
-            prefix = (self.tenant_subdomain or 'public')[:5]
-            clean_name = self.name.lower().replace(' ', '')[:8]
-            suffix = secrets.token_hex(2)
-            self.openvpn_username = f"{prefix}_{clean_name}_{suffix}"
-            self.openvpn_password = secrets.token_urlsafe(12)
-        
-        # 3. API Credentials
-        if not self.api_password:
-            self.api_password = secrets.token_urlsafe(12)
+            """Auto-generate credentials and schema links."""
+            
+            # ────────────────────────────────────────────────────────────────
+            # SAFETY CHECK: Protect the MikroTik 'admin' account!
+            # ────────────────────────────────────────────────────────────────
+            if not self.api_username or self.api_username.lower() == 'admin':
+                self.api_username = 'netily_api'
+                
+            # 1. Tenant Sync
+            if self.tenant_subdomain:
+                clean_sub = self.tenant_subdomain.lower().replace('-', '_')
+                self.schema_name = f"tenant_{clean_sub}"
+            
+            # 2. VPN Credentials
+            if self.enable_openvpn and not self.openvpn_username:
+                prefix = (self.tenant_subdomain or 'public')[:5]
+                clean_name = self.name.lower().replace(' ', '')[:8]
+                suffix = secrets.token_hex(2)
+                self.openvpn_username = f"{prefix}_{clean_name}_{suffix}"
+                self.openvpn_password = secrets.token_urlsafe(12)
+            
+            # 3. API Credentials
+            if not self.api_password:
+                self.api_password = secrets.token_urlsafe(12)
 
-        # 4. Provision Slug (short URL-safe identifier)
-        if not self.provision_slug:
-            self.provision_slug = secrets.token_hex(4).lower()
+            # 4. Provision Slug (short URL-safe identifier)
+            if not self.provision_slug:
+                self.provision_slug = secrets.token_hex(4).lower()
 
-        # 5. Radius Defaults
-        if self.enable_openvpn and not self.radius_server:
-            self.radius_server = "10.8.0.1" 
+            # 5. Radius Defaults
+            if self.enable_openvpn and not self.radius_server:
+                self.radius_server = "10.8.0.1" 
 
-        super().save(*args, **kwargs)
+            super().save(*args, **kwargs)
 
     # ────────────────────────────────────────────────────────────────
     # SMART PROPERTIES (The "Brains" for the Script Generator)

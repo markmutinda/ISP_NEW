@@ -18,20 +18,22 @@ class MikrotikAPI:
         self.api = None
     
     def connect(self) -> bool:
-        """Connect to Mikrotik device"""
-        try:
-            self.api = connect(
-                username=self.device.api_username,
-                password=self.device.api_password,
-                host=self.device.ip_address,
-                port=self.device.api_port or 8728,
-                timeout=30  # Keep 30s timeout for stability
-            )
-            logger.info(f"Connected to Mikrotik {self.device.name} ({self.device.ip_address})")
-            return True
-        except Exception as e:
-            logger.error(f"Failed to connect to {self.device.name}: {str(e)}")
-            return False
+            """Connect to Mikrotik device"""
+            try:
+                self.api = connect(
+                    username=self.device.api_username,
+                    password=self.device.api_password,
+                    host=self.device.ip_address,
+                    port=self.device.api_port or 8728,
+                    timeout=30,
+                    plain_login=True  # <--- ADD THIS FOR ROS v7
+                )
+                logger.info(f"Connected to Mikrotik {self.device.name} ({self.device.ip_address})")
+                return True
+            except Exception as e:
+                # Let's see the EXACT error (e.g., authentication vs timeout)
+                logger.error(f"Failed to connect to {self.device.name}: {str(e)}")
+                return False
     
     def disconnect(self):
         """Disconnect from Mikrotik device"""

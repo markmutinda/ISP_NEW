@@ -189,7 +189,7 @@ services:
     networks:
       - isp_network
 
-  # ────────────────────────────────────────────────────────────────
+# ────────────────────────────────────────────────────────────────
   # OPENVPN SERVER
   # ────────────────────────────────────────────────────────────────
   openvpn:
@@ -201,19 +201,23 @@ services:
       - "1194:1194/udp"
       - "1194:1194/tcp"
       - "7505:7505"
+      - "8728:8728"  # Allowed Django to talk to MikroTik API
     volumes:
       - openvpn_data:/etc/openvpn
       - openvpn_ccd:/etc/openvpn/ccd
       - openvpn_logs:/var/log/openvpn
+      # If you created the check_auth.sh file on your laptop, add it here:
+      # - ./check_auth.sh:/etc/openvpn/check_auth.sh 
     environment:
       - OPENVPN_OPTS=--management localhost 7505
+    # CLEANED COMMAND: removed the empty tls-auth string
+    command: ovpn_run --auth none
     restart: unless-stopped
     sysctls:
       - net.ipv4.ip_forward=1
     networks:
       - vpn_network
       - isp_network
-
 # ────────────────────────────────────────────────────────────────
 # NETWORKS
 # ────────────────────────────────────────────────────────────────
