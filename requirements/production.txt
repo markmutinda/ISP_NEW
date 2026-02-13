@@ -9,8 +9,8 @@ sentry-sdk==1.35.0
 redis==5.0.1
 
 # Celery with compatible versions
-celery==5.3.4
-django-celery-beat==2.5.0  # Compatible with Django 4.2
+
+
 django-redis==5.3.0
 django-timezone-field==6.1  # Compatible with Django 4.2
 

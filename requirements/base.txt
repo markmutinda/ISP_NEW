@@ -8,10 +8,10 @@ django-tenants>=3.5.0
 
 # Server & Workers
 gunicorn==21.2.0
-celery==5.3.6
+celery>=5.3.4
 redis==5.0.1
 django-celery-beat==2.6.0
-django-celery-results==2.5.1  # <--- ADDED THIS
+django-celery-results==2.5.1
 
 # Database
 psycopg2-binary==2.9.7
@@ -44,3 +44,15 @@ requests==2.31.0
 
 # VPN/Certificate Management
 cryptography==42.0.0
+
+# SMS Integration
+africastalking==1.2.2
+
+django-extensions==3.2.3
+setuptools==69.0.3
+
+# Developer Tools
+django-debug-toolbar==4.2.0
+pandas==2.2.1
+django-health-check==3.18.1
+psutil==5.9.8

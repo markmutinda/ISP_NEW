@@ -89,14 +89,13 @@ urlpatterns = [
     
     path('routers/<int:pk>/hotspot/disable/', RouterHotspotDisableView.as_view(), name='router-hotspot-disable'),
 
-<<<<<<< HEAD
     # ─── Provisioning Endpoints (PUBLIC — for MikroTik /tool fetch) ───
     # Stage 1: Base script download (the "Magic Link" destination)
     path('network/provision/<str:auth_key>/<slug:slug>/script.rsc',
          ProvisionBaseScriptView.as_view(), name='provision-base-script'),
     
-    # Stage 2: Version-specific config download
-    path('network/provision/<str:auth_key>/config',
+ # Stage 2: Version-specific config download (Added <slug:slug> to fix 404/HTML issue)
+    path('network/provision/<str:auth_key>/<slug:slug>/config',
          ProvisionConfigView.as_view(), name='provision-config'),
     
     # Certificate downloads
@@ -111,8 +110,6 @@ urlpatterns = [
     path('network/routers/config/', LegacyScriptDownloadView.as_view(), name='legacy-script-download'),
 
     
-=======
->>>>>>> 9fb26f9b9e1561c3cadb44471a2dfdfa8d44d90a
     path('', include(router.urls)),
 ]
 

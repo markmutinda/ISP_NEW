@@ -45,8 +45,6 @@ class VPNProvisioningService:
         3. Generate a client certificate
         4. Write the CCD file
         5. Store everything on the Router record
-
-        Returns dict with provisioning details.
         """
         from apps.network.models.router_models import Router  # late import to avoid circular
 
@@ -147,23 +145,12 @@ class VPNProvisioningService:
             return ca
 
         logger.info("No active CA found. Creating a new Certificate Authority...")
-        ca_data = self.cert_service.create_ca(
-            common_name="Netily Cloud Controller CA",
-            organization="Netily ISP Platform",
-            country="KE",
-        )
-        ca = CertificateAuthority.objects.create(
+        # The CertificateService handles DB creation and returns the CA object
+        ca = self.cert_service.create_ca(
             name="Netily Cloud CA",
             common_name="Netily Cloud Controller CA",
             organization="Netily ISP Platform",
             country="KE",
-            ca_certificate=ca_data['certificate'],
-            ca_private_key=ca_data['private_key'],
-            dh_parameters=ca_data.get('dh_params', ''),
-            tls_auth_key=ca_data.get('tls_auth', ''),
-            valid_from=ca_data.get('valid_from', timezone.now()),
-            valid_until=ca_data.get('valid_until'),
-            is_active=True,
         )
         logger.info(f"Created new CA: {ca.name}")
         return ca
@@ -210,33 +197,22 @@ class VPNProvisioningService:
         self, ca: CertificateAuthority, router, common_name: str
     ) -> VPNCertificate:
         """Generate a client certificate using the CertificateService."""
-
         # Check if there's an existing active cert for this router
         existing = VPNCertificate.objects.filter(
             router=router,
             status='active',
             certificate_type='client',
         ).first()
+        
         if existing:
             # Revoke old cert before generating new one
             existing.revoke(reason="Replaced by new provisioning")
 
-        # Generate the certificate
-        cert_data = self.cert_service.generate_client_certificate(
-            ca_cert_pem=ca.ca_certificate,
-            ca_key_pem=ca.ca_private_key,
-            common_name=common_name,
-        )
-
-        cert_record = VPNCertificate.objects.create(
+        # The CertificateService handles DB creation and returns the Cert object
+        cert_record = self.cert_service.generate_client_certificate(
             ca=ca,
             router=router,
             common_name=common_name,
-            certificate_type='client',
-            certificate=cert_data['certificate'],
-            private_key=cert_data['private_key'],
-            valid_from=cert_data.get('valid_from', timezone.now()),
-            valid_until=cert_data.get('valid_until'),
-            status='active',
         )
+
         return cert_record

@@ -49,11 +49,27 @@ class ProvisionRateThrottle(AnonRateThrottle):
 
 # ─── Helper ───────────────────────────────────────────────────
 def _get_router_by_auth_key(auth_key: str) -> Router:
-    """Lookup router by auth_key. Raises Http404 if not found."""
-    try:
-        return Router.objects.get(auth_key=auth_key, is_active=True)
-    except Router.DoesNotExist:
-        raise Http404("Router not found")
+    """Lookup router by auth_key across all ISP tenants. Raises Http404 if not found."""
+    from django.db import connection
+    from apps.core.models import Tenant
+    
+    # Check every active ISP to find which one owns this router
+    tenants = Tenant.objects.filter(is_active=True)
+    for tenant in tenants:
+        try:
+            connection.set_tenant(tenant)
+            router = Router.objects.get(auth_key=auth_key, is_active=True)
+            # If found, we intentionally leave the connection on this tenant 
+            # so the rest of the script generator works!
+            return router 
+        except Router.DoesNotExist:
+            continue
+        except Exception:
+            continue
+            
+    # If we check all ISPs and don't find it, revert to public and fail
+    connection.set_schema_to_public()
+    raise Http404("Router not found")
 
 
 def _plain_text_response(content: str, filename: str = None) -> HttpResponse:
@@ -109,7 +125,7 @@ class ProvisionBaseScriptView(APIView):
             raise Http404("Invalid provisioning link")
 
         # Generate Stage 1 script
-        gen = MikrotikScriptGenerator(router)
+        gen = MikrotikScriptGenerator(router, request=request)  # <-- ADDED request=request
         script = gen.generate_base_script()
 
         # Log the provisioning attempt
@@ -126,10 +142,14 @@ class ProvisionBaseScriptView(APIView):
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 class ProvisionConfigView(APIView):
     """
-    GET /api/v1/network/provision/{auth_key}/config?version=7&router=1&subdomain=xyz
+    GET /api/v1/network/provision/{auth_key}/{slug}/config?version=7&router=1&subdomain=xyz
 
     Returns the full RouterOS configuration script, tailored to the
     detected version (6 or 7). Called by the Stage 1 base script.
+
+    Path Parameters:
+        auth_key — Router authentication key
+        slug     — Provision slug (for secondary validation)
 
     Query Parameters:
         version  — RouterOS major version ("6" or "7")
@@ -140,8 +160,16 @@ class ProvisionConfigView(APIView):
     throttle_classes = [ProvisionRateThrottle]
     authentication_classes = []
 
-    def get(self, request, auth_key):
+    def get(self, request, auth_key, slug):
         router = _get_router_by_auth_key(auth_key)
+
+        # Validate slug (same security check as Stage 1)
+        if router.provision_slug and router.provision_slug != slug:
+            logger.warning(
+                f"Provision config: Invalid slug for router '{router.name}' (id={router.id}). "
+                f"Expected={router.provision_slug}, got={slug}"
+            )
+            raise Http404("Invalid provisioning link")
 
         # Extract query params
         version = request.query_params.get('version', '7')
