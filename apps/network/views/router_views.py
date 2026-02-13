@@ -7,7 +7,8 @@ from django_filters.rest_framework import DjangoFilterBackend
 from django.utils import timezone
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from django.db.models import Sum, Avg, F, Count
-from django.http import HttpResponse
+from django.http import HttpResponse, Http404
+import textwrap  # <--- Add this
 from apps.network.services.mikrotik_script_generator import MikrotikScriptGenerator
 from rest_framework import serializers
 import json
@@ -55,6 +56,68 @@ def find_router_across_tenants(router_id=None, auth_key=None, router_name=None):
             continue
     
     return found_router, found_tenant
+
+# ────────────────────────────────────────────────────────────────
+# CERTIFICATE DOWNLOAD VIEW 
+# ────────────────────────────────────────────────────────────────
+def download_router_cert(request, router_id, cert_type):
+    """
+    Serves the certificate file for a router just like LipaNet API.
+    Used by the router's /tool fetch command.
+    """
+    # 1. Find Router (Handle Multi-tenancy)
+    router, tenant = find_router_across_tenants(router_id=router_id)
+    
+    if not router:
+        raise Http404("Router not found")
+
+    # 2. Switch to Tenant Context
+    from django.db import connection
+    connection.set_tenant(tenant)
+
+    try:
+        # 3. Select Data
+        content = ""
+        filename = ""
+        label = ""
+
+        if cert_type == 'ca.crt':
+            content = router.ca_certificate
+            filename = "netily-ca.crt"
+            label = "CERTIFICATE"
+        elif cert_type == 'client.crt':
+            content = router.client_certificate
+            filename = "netily-client.crt"
+            label = "CERTIFICATE"
+        elif cert_type == 'client.key':
+            content = router.client_key
+            filename = "netily-client.key"
+            label = "PRIVATE KEY"
+        
+        if not content:
+            raise Http404(f"Certificate {cert_type} is empty")
+
+        # 4. Clean & Format (Strict PEM for RouterOS)
+        # Strip existing headers to get raw base64
+        clean = content.replace(f'-----BEGIN {label}-----', '')
+        clean = clean.replace(f'-----END {label}-----', '')
+        # Remove whitespace/newlines
+        clean = clean.replace(' ', '').replace('\r', '').replace('\n', '').replace('\t', '').strip()
+        
+        # Chunk into 64-char lines
+        chunked = textwrap.fill(clean, 64)
+        
+        # Rebuild
+        final_pem = f"-----BEGIN {label}-----\n{chunked}\n-----END {label}-----\n"
+        
+        # 5. Return File
+        response = HttpResponse(final_pem, content_type='text/plain')
+        response['Content-Disposition'] = f'attachment; filename="{filename}"'
+        return response
+
+    finally:
+        # 6. Safety: Switch back to public schema
+        connection.set_schema_to_public()
 
 class RouterViewSet(viewsets.ModelViewSet):
     serializer_class = RouterSerializer
@@ -1593,18 +1656,20 @@ mute 20
         response['Content-Disposition'] = f'attachment; filename="netily-{router.id}.rsc"'
         return response
    
-    @action(detail=True, methods=['get'], url_path='config', permission_classes=[AllowAny])
+ # CHANGE: detail=False (Allows access without ID in URL)
+    @action(detail=False, methods=['get'], url_path='config', permission_classes=[AllowAny])
     def config_script(self, request, pk=None):
         """Public endpoint for router to download configuration script"""
-        router, tenant = find_router_across_tenants(router_id=pk)
+        # CHANGE: Get auth_key first
+        auth_key = request.query_params.get('auth_key')
+        if not auth_key:
+            return Response({"error": "Auth key required"}, status=400)
+
+        # CHANGE: Find router using the auth_key, not the pk
+        router, tenant = find_router_across_tenants(auth_key=auth_key)
         
         if not router:
             return Response({"error": "Router not found or access denied"}, status=404)
-        
-        # Verify auth_key
-        auth_key = request.query_params.get('auth_key')
-        if not auth_key or auth_key != router.auth_key:
-            return Response({"error": "Invalid auth key"}, status=401)
         
         # Switch to tenant schema
         from django.db import connection
