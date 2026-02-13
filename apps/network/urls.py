@@ -14,6 +14,15 @@ from apps.network.views.router_views import (
     RouterHotspotDisableView,
 )
 
+# ===== PROVISIONING (Public — for MikroTik /tool fetch) =====
+from apps.network.views.provision_views import (
+    ProvisionBaseScriptView,
+    ProvisionConfigView,
+    ProvisionCertView,
+    ProvisionHotspotHTMLView,
+    LegacyScriptDownloadView,
+)
+
 # ===== IPAM =====
 from apps.network.views.ipam_views import (
     SubnetViewSet,
@@ -76,6 +85,26 @@ urlpatterns = [
     path('routers/<int:pk>/hotspot/config/', RouterHotspotConfigView.as_view(), name='router-hotspot-config'),
     path('routers/<int:pk>/hotspot/configure/', RouterHotspotConfigureView.as_view(), name='router-hotspot-configure'),
     path('routers/<int:pk>/hotspot/disable/', RouterHotspotDisableView.as_view(), name='router-hotspot-disable'),
+
+    # ─── Provisioning Endpoints (PUBLIC — for MikroTik /tool fetch) ───
+    # Stage 1: Base script download (the "Magic Link" destination)
+    path('network/provision/<str:auth_key>/<slug:slug>/script.rsc',
+         ProvisionBaseScriptView.as_view(), name='provision-base-script'),
+    
+    # Stage 2: Version-specific config download
+    path('network/provision/<str:auth_key>/config',
+         ProvisionConfigView.as_view(), name='provision-config'),
+    
+    # Certificate downloads
+    path('network/provision/<str:auth_key>/certs/<str:cert_type>',
+         ProvisionCertView.as_view(), name='provision-cert'),
+    
+    # Hotspot HTML downloads
+    path('network/provision/<str:auth_key>/hotspot/<str:page>',
+         ProvisionHotspotHTMLView.as_view(), name='provision-hotspot-html'),
+    
+    # Legacy: Single-script download (backward compat)
+    path('network/routers/config/', LegacyScriptDownloadView.as_view(), name='legacy-script-download'),
 
     
     path('', include(router.urls)),

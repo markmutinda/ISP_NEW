@@ -31,6 +31,7 @@ class RouterSerializer(serializers.ModelSerializer):
     status_display = serializers.CharField(source='get_status_display', read_only=True)
     auth_status = serializers.SerializerMethodField()
     is_editable = serializers.SerializerMethodField()
+    magic_link = serializers.SerializerMethodField()
 
     class Meta:
         model = Router
@@ -41,10 +42,17 @@ class RouterSerializer(serializers.ModelSerializer):
             'status', 'status_display', 'total_users', 'active_users', 'uptime',
             'uptime_percentage', 'sla_target', 'last_seen', 'tags', 'notes',
             'is_active', 'auth_key', 'is_authenticated', 'authenticated_at',
-            'auth_status', 'shared_secret', 'is_editable',
+            'auth_status', 'shared_secret', 'is_editable', 'magic_link',
             # Cloud Controller / VPN fields
             'vpn_provisioned', 'vpn_provisioned_at', 'vpn_ip_address', 'vpn_last_seen',
             'ca_certificate', 'client_certificate', 'client_key',
+            # Provisioning fields
+            'provision_slug', 'last_provisioned_at', 'routeros_version',
+            'enable_openvpn', 'openvpn_server', 'openvpn_port',
+            'enable_hotspot', 'enable_pppoe',
+            'gateway_cidr', 'dns_name', 'wan_interface', 'hotspot_interfaces',
+            'pppoe_pool', 'pppoe_local_address',
+            'config_type',
             'created_at', 'updated_at',
         ]
         extra_kwargs = {
@@ -69,6 +77,9 @@ class RouterSerializer(serializers.ModelSerializer):
             'is_authenticated': {'read_only': True},
             'authenticated_at': {'read_only': True},
             'shared_secret': {'read_only': True},
+            'provision_slug': {'read_only': True},
+            'last_provisioned_at': {'read_only': True},
+            'routeros_version': {'read_only': True},
             # VPN fields are managed by provisioning service, not API
             'vpn_provisioned': {'read_only': True},
             'vpn_provisioned_at': {'read_only': True},
@@ -85,6 +96,15 @@ class RouterSerializer(serializers.ModelSerializer):
         elif obj.auth_key:
             return "Pending Authentication"
         return "Not Configured"
+    
+    def get_magic_link(self, obj):
+        """Generate the one-liner command for MikroTik terminal."""
+        try:
+            from apps.network.services.mikrotik_script_generator import MikrotikScriptGenerator
+            gen = MikrotikScriptGenerator(obj)
+            return gen.get_magic_link()
+        except Exception:
+            return None
     
     def get_is_editable(self, obj):
         request = self.context.get('request')

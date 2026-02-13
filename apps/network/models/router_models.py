@@ -178,7 +178,40 @@ class Router(AuditMixin):
     enable_pppoe = models.BooleanField(default=True)
     
     pppoe_pool = models.CharField(max_length=50, default='192.40.2.10-192.40.2.254')
-    
+    pppoe_local_address = models.GenericIPAddressField(
+        protocol='IPv4', null=True, blank=True, default='192.40.2.1',
+        help_text="PPPoE server local address (service-name gateway)"
+    )
+
+    # ────────────────────────────────────────────────────────────────
+    # HOTSPOT SSL CERTIFICATES (for HTTPS captive portal redirect)
+    # ────────────────────────────────────────────────────────────────
+    ssl_certificate = models.TextField(
+        blank=True, null=True,
+        help_text="PEM content of SSL cert for hotspot HTTPS (e.g. *.yourisp.com)"
+    )
+    ssl_private_key = models.TextField(
+        blank=True, null=True,
+        help_text="PEM content of SSL private key"
+    )
+    ssl_passphrase = models.CharField(
+        max_length=255, blank=True, default='',
+        help_text="Passphrase for the SSL key (if encrypted)"
+    )
+
+    # ────────────────────────────────────────────────────────────────
+    # PROVISIONING STATE
+    # ────────────────────────────────────────────────────────────────
+    provision_slug = models.SlugField(
+        max_length=20, unique=True, blank=True, null=True,
+        help_text="Short URL-safe slug for magic-link downloads (auto-generated)"
+    )
+    last_provisioned_at = models.DateTimeField(null=True, blank=True)
+    routeros_version = models.CharField(
+        max_length=10, blank=True, null=True,
+        help_text="Detected RouterOS major version (6 or 7)"
+    )
+
     # Real-time Stats
     mac_address = models.CharField(max_length=17, null=True, blank=True)
     model = models.CharField(max_length=100, null=True, blank=True)
@@ -243,8 +276,12 @@ class Router(AuditMixin):
         # 3. API Credentials
         if not self.api_password:
             self.api_password = secrets.token_urlsafe(12)
-            
-        # 4. Radius Defaults
+
+        # 4. Provision Slug (short URL-safe identifier)
+        if not self.provision_slug:
+            self.provision_slug = secrets.token_hex(4).lower()
+
+        # 5. Radius Defaults
         if self.enable_openvpn and not self.radius_server:
             self.radius_server = "10.8.0.1" 
 
