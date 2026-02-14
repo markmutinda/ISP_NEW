@@ -12,6 +12,9 @@ from apps.network.views.router_views import (
     RouterHotspotConfigView,
     RouterHotspotConfigureView,
     RouterHotspotDisableView,
+    RouterHotspotEnableView,
+    RouterHotspotUpdateView,
+    RouterBridgePortView,
     download_router_cert,
 )
 
@@ -88,6 +91,9 @@ urlpatterns = [
     path('routers/<int:router_id>/cert/<str:cert_type>/', download_router_cert, name='router-cert-download'),
     
     path('routers/<int:pk>/hotspot/disable/', RouterHotspotDisableView.as_view(), name='router-hotspot-disable'),
+    path('routers/<int:pk>/hotspot/enable/', RouterHotspotEnableView.as_view(), name='router-hotspot-enable'),
+    path('routers/<int:pk>/hotspot/update/', RouterHotspotUpdateView.as_view(), name='router-hotspot-update'),
+    path('routers/<int:pk>/bridge/port/', RouterBridgePortView.as_view(), name='router-bridge-port'),
 
     # ─── Provisioning Endpoints (PUBLIC — for MikroTik /tool fetch) ───
     # Stage 1: Base script download (the "Magic Link" destination)

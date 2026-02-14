@@ -353,87 +353,24 @@ class RouterViewSet(viewsets.ModelViewSet):
         from django.db import connection
         connection.set_tenant(tenant)
         
-        # --------------------------------------------------------------------
-        # HARDCODED LOCAL DOCKER CERTIFICATES - Replace with dynamic in production
-        # --------------------------------------------------------------------
-        ca_cert = """-----BEGIN CERTIFICATE-----
-MIIDQjCCAiqgAwIBAgIUG+pKzrUh9ylnNATiwosCQZW7h/gwDQYJKoZIhvcNAQEL
-BQAwEzERMA8GA1UEAwwITG9jYWxJU1AwHhcNMjYwMTI0MTUzOTIzWhcNMzYwMTIy
-MTUzOTIzWjATMREwDwYDVQQDDAhMb2NhbElTUDCCASIwDQYJKoZIhvcNAQEBBQAD
-ggEPADCCAQoCggEBAMyqR7oKxG6zxpYe3GFDa3ydvlFQESWKYS9oj5z/OWEhom08
-ElFnoW3r1QvFqxgDgkRX5j8XHok+TRYctehxN0DUWhN/HpPKr0fs1XEOTSD+VzkI
-RfX5BIehzqUbHsPHjj5NFiKK7/J6GO7rv/z/XhdTjVENZ6YZR1n1aYpPmHWyHFyG
-ERL8A8YMqGESLneCZuaLWcHj/UyeFV761VXIy89CW47l6Y7xeoGWRbjW7VGVqzgn
-5ZzkRfiv6hQo7QiLi3s7leWxeJw6Ix7TIuI4NOHT+B543jY6hBUKehXEpxzq4DAO
-uYLecvy/ZRp7dViYFdK9sHoHUsqvooWH8zKrS6cCAwEAAaOBjTCBijAdBgNVHQ4E
-FgQUNzH/gt65jvm8f6opezxHWTzSaYIwTgYDVR0jBEcwRYAUNzH/gt65jvm8f6op
-ezxHWTzSaYKhF6QVMBMxETAPBgNVBAMMCExvY2FsSVNQghQb6krOtSH3KWc0BOLC
-iwJBlbuH+DAMBgNVHRMEBTADAQH/MAsGA1UdDwQEAwIBBjANBgkqhkiG9w0BAQsF
-AAOCAQEAuho4U9gkoeabjG3MCnIB7SWoGgH/b7Pypiuyv4Fs+G+9Yz47DLv8/uaL
-/9FP9LUtv56kRgcUDHbQ7rsH2CVy3HqSt3WkRYvWEzWtIpoxw8jhVHdikohdZURm
-7Rry4kJtN0QJ5RTO/bF8M8V9CPz3lrm31Va6Fm2juej/ZK8h+aRZwQ2Nw0iQZTjL
-mkIbKW/Z3w7s34rARss+6bSu+zJOPFLVm0CpurFbfSvI5SJFR5jo9OY4srMPakW5
-JTpCpDqIPtvxqZggIiwtc8IHKLSEoy1P6CH3NSEJJC0iMQ7GiaK1wUTwwS42Gyfn
-9cda76eCstmytHj65QFKp8vWpbj4Pw==
------END CERTIFICATE-----"""
-        client_cert = """-----BEGIN CERTIFICATE-----
-MIIDWDCCAkCgAwIBAgIRAOGK7Zh6Fnc1MwhybvY7w7owDQYJKoZIhvcNAQELBQAw
-EzERMA8GA1UEAwwITG9jYWxJU1AwHhcNMjYwMTI0MTU0MDE1WhcNMjgwNDI4MTU0
-MDE1WjAaMRgwFgYDVQQDDA9taWtyb3Rpa19jbGllbnQwggEiMA0GCSqGSIb3DQEB
-AQUAA4IBDwAwggEKAoIBAQC9Fb+sWMUdl+7xlIbixcdkIDErO4r27DAsbsTPiRyN
-1jOxUgE+99GDAzkfDn4HRCH0jP1iuqoNhJdKogiPIYKV7HqvN1X77IfdrnZ5vSSq
-m1TRcIdDfwJNCLi91KC4G+Fg0DDYkOjP+9BsteCA0lh2Q/30WKdhvrtWRUrXIKHK
-SHsdySj9sAwd9afpDwpUPuzYanGMgdyC84By7Tg1eFAl1RAwaMiNcB0fM/W5odE7
-D8WrvAi6cE9vMT0HrL8Fe3zs+jWW74EXNgl5QwPfzV8OSgWaWn8JKsTBobLaZo4V
-RKBZBKVbu06ocO098diTwrsR9Qg0+p0lgNCfRkT1OV8LAgMBAAGjgZ8wgZwwCQYD
-VR0TBAIwADAdBgNVHQ4EFgQUKASLEv9568cxULzLE5Uz9yXchj4wTgYDVR0jBEcw
-RYAUNzH/gt65jvm8f6opezxHWTzSaYKhF6QVMBMxETAPBgNVBAMMCExvY2FsSVNQ
-ghQb6krOtSH3KWc0BOLCiwJBlbuH+DATBgNVHSUEDDAKBggrBgEFBQcDAjALBgNV
-HQ8EBAMCB4AwDQYJKoZIhvcNAQELBQADggEBALq/mIn2XpHNcQAubPk8qTXM36o/
-1YLLBu6pvt3lVsAiuBaxKZIC/zs8/d3W+lCjsyznioLxOWalAD6emDA64Opx213D
-T5eKfiXOljWAHi54uhWijiqznFh9RrhjAwDZw+8HlHWZD162/i1MPx5o4359tTEJ
-7bIghyGlELtJTI17Kb5o+kCCPs105ztnLjJ8LtwSkjjr+FlHoCJ3xVrQ3KrhT3C0
-U3SZKrrCUtO+7J9UoTFG7TE3hhJ8wCQe5Hmzw0tI/AeVnk1oL/36266BX8R3A9L1
-dzDWl8CJZ7znE5K4epfb/qY/WUclwOur4ZMiHJfA8IhK1MVUQrkdyUEuF+U=
------END CERTIFICATE-----"""
-        client_key = """-----BEGIN PRIVATE KEY-----
-MIIEvwIBADANBgkqhkiG9w0BAQEFAASCBKkwggSlAgEAAoIBAQC9Fb+sWMUdl+7x
-lIbixcdkIDErO4r27DAsbsTPiRyN1jOxUgE+99GDAzkfDn4HRCH0jP1iuqoNhJdK
-ogiPIYKV7HqvN1X77IfdrnZ5vSSqm1TRcIdDfwJNCLi91KC4G+Fg0DDYkOjP+9Bs
-teCA0lh2Q/30WKdhvrtWRUrXIKHKSHsdySj9sAwd9afpDwpUPuzYanGMgdyC84By
-7Tg1eFAl1RAwaMiNcB0fM/W5odE7D8WrvAi6cE9vMT0HrL8Fe3zs+jWW74EXNgl5
-QwPfzV8OSgWaWn8JKsTBobLaZo4VRKBZBKVbu06ocO098diTwrsR9Qg0+p0lgNCf
-RkT1OV8LAgMBAAECggEBAKYaC+W3mXkUtbeMdS2S9kRzrx2+UaX195+gss1pMic7
-Cu/zDNsm0eqYEz6/+WAirv1oOVLYjXgQiOLsEj7B/jf7pA51utfygavwjW0GBcbF
-ay4M/xYA5aGMTtWbipARFdx5Jt+n9Ix4NjC5WP1xSnqh4d4bXvaTmXgAqOzwYpAR
-t1s0EfjV66nWdnV9Q7+nrMCu1uithJPuK6DarktaoxXduZWbJnGQUmy8bXt2P+PZ
-/16z5rJ07IPi0+Nc5Wskr/yqjDNYXzbsA6KhlRKqYgG4ltXuuX7YiMox9euXa9lB
-+KwQO85zaJziwkXmOK0WloRKaW+QbiSxIyeLCsV4B8kCgYEA3oF5YBj0n5+h0j1t
-YfJ4UJq8DmMrzBsBMexD47J9FIBSK9bzpa6j9vMDQD2RaF/cOmIpzBkEu46cQCe7
-cQEMQauJN48CpC/fX8f52CA7wL64NJe4Uo0NGS0NXLr+hbSsitYJRERHPsPWcFA5
-AVRkToImAu0b299rj8nVyc5vj78CgYEA2YxdLES0kt1uvX544W7o0RxEJQIER5Ct
-4zkWclXcduV23t/FU9WBQzfVFGCZHw3gUajietsYa5vkfbUqnVUnmEYzjrn8VbpG
-Wrm3PIv588+pnNShS74Sy5a8uH6D1NicYT0O6ydU3kn2xhUfNJGWO1C15ww/5gVG
-m5C3C0i2g7UCgYEAyE747Mkql/UGohVIvo+hPrc+KxmeWR3Kgp33NCoALo+i6fKV
-34cL9woo2BFVMQhzY1/xztqLBypIgf0C4qWV2hzJ5+ln8FVkm36U7rt973QCst4P
-QsnWi96iE+QHtGjFmCs9pmZtWRTGnM+rsgW+U2sZOzMoDFXjKEwEmauthVMCgYEA
-kGgzJQKKVv7z1oeQWBxWIRDBT0uSaarpMm6frs+945KYIIOrqeWMw4DZSYiBu/Jr
-F+miROkQwcWem69ZlUyEVvkqmjBtBr76mpiywFcuWSBct4UReIS4Vzo9Fb6tZelP
-jOCJ+aCHHnM8gupcZ3nInqEJzk/8ToTsBLHAP5ZJyQ0CgYAsiZRP4aJ3TfXg6yem
-NdR1A6De7nMUF+1CGH4B6ba6wELL6pC5rUYAui1ZzkUnj+Gh4KYhLGF2GjFlBzk7
-c8knx/w0qjRAZy9IGUWyFR6zXmXOPnRoEfYWfeaC4D6IkPmLBo0x33ZhTA4HFn+L
-PTRtPWR6UvOJvPDQ7/hpe9GEuw==
------END PRIVATE KEY-----"""
-        tls_auth = """-----BEGIN OpenVPN Static key V1-----
-b737207acc166503f4cdbd99567eb12a
-6b3dc734900ee892549d242943c9b90f
-a4ef540dddd6b7aca5dc6718dcfd9881
-55d7028a6c758af1c76d6cc235b3fffe
-cee53e3cfd515b1cd8cca8a0e9849adf
-438badcb20f85be1e440a0bc0eb239f5
------END OpenVPN Static key V1-----"""
-        # Generate OpenVPN config
-        # NOTE: Configured for local docker (UDP/1194) and TLS Auth
+        # ────────────────────────────────────────────────────────────
+        # DYNAMIC CERTIFICATES — pulled from Router model fields
+        # For user/pass VPN (v4 architecture) this .ovpn is primarily
+        # for external troubleshooting / diagnostic connections.
+        # ────────────────────────────────────────────────────────────
+        ca_cert = (router.ca_certificate or '').strip()
+        client_cert = (router.client_certificate or '').strip()
+        client_key = (router.client_key or '').strip()
+
+        if not ca_cert:
+            connection.set_schema_to_public()
+            return Response(
+                {"error": "No CA certificate configured for this router. "
+                 "Upload certificates in the router admin panel first."},
+                status=400
+            )
+
+        # Build the .ovpn config — user/pass auth with optional certs
         openvpn_config = f"""# Netily OpenVPN Configuration
 # Generated for {router.name} at {timezone.now()}
 client
@@ -446,22 +383,23 @@ persist-key
 persist-tun
 cipher AES-256-CBC
 auth SHA256
-key-direction 1
+auth-user-pass
 verb 3
 mute 20
-# Authentication
 <ca>
 {ca_cert}
 </ca>
-<cert>
+"""
+        # Only include client cert/key if they exist (cert-based auth)
+        if client_cert:
+            openvpn_config += f"""<cert>
 {client_cert}
 </cert>
-<key>
+"""
+        if client_key:
+            openvpn_config += f"""<key>
 {client_key}
 </key>
-<tls-auth>
-{tls_auth}
-</tls-auth>
 """
         
         # Switch back to public
@@ -2016,7 +1954,7 @@ class RouterHotspotDisableView(APIView):
             mikrotik = mikrotik_api_module.MikrotikAPI(router)
             result = mikrotik.disable_hotspot(server_name)
            
-            if result.get('success'):
+            if result:
                 # Log the event
                 RouterEvent.objects.create(
                     router=router,
@@ -2030,14 +1968,13 @@ class RouterHotspotDisableView(APIView):
                
                 return Response({
                     'success': True,
-                    'message': result.get('message', 'Hotspot disabled'),
+                    'message': 'Hotspot disabled',
                 })
             else:
                 return Response({
                     'success': False,
-                    'message': 'Failed to disable hotspot',
-                    'error': result.get('error'),
-                }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+                    'message': 'Failed to disable hotspot — server not found',
+                }, status=status.HTTP_404_NOT_FOUND)
        
         except Exception as e:
             logger.error(f"Failed to disable hotspot for router {pk}: {e}")
@@ -2045,6 +1982,216 @@ class RouterHotspotDisableView(APIView):
                 'error': 'Failed to disable hotspot',
                 'message': str(e)
             }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+class RouterHotspotEnableView(APIView):
+    """
+    POST /api/v1/network/routers/{id}/hotspot/enable/
+    
+    Re-enable a previously disabled hotspot server on the router.
+    """
+    permission_classes = [IsAuthenticated, HasCompanyAccess]
+    
+    def post(self, request, pk):
+        try:
+            router = Router.objects.get(pk=pk)
+        except Router.DoesNotExist:
+            return Response({'error': 'Router not found'}, status=status.HTTP_404_NOT_FOUND)
+        
+        if router.status != 'online':
+            return Response({
+                'error': 'Router is offline',
+                'message': 'Cannot enable hotspot on an offline router'
+            }, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+        
+        server_name = request.data.get('server_name', 'netily-hotspot')
+        
+        try:
+            mikrotik = mikrotik_api_module.MikrotikAPI(router)
+            result = mikrotik.enable_hotspot(server_name)
+            
+            if result:
+                RouterEvent.objects.create(
+                    router=router,
+                    event_type='config_change',
+                    message=f"Hotspot enabled ({server_name})",
+                    details={
+                        'server_name': server_name,
+                        'enabled_by': request.user.email,
+                    }
+                )
+                return Response({
+                    'success': True,
+                    'message': f'Hotspot {server_name} enabled',
+                })
+            else:
+                return Response({
+                    'success': False,
+                    'message': 'Failed to enable hotspot — server not found',
+                }, status=status.HTTP_404_NOT_FOUND)
+        
+        except Exception as e:
+            logger.error(f"Failed to enable hotspot for router {pk}: {e}")
+            return Response({
+                'error': 'Failed to enable hotspot',
+                'message': str(e)
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+class RouterBridgePortView(APIView):
+    """
+    POST /api/v1/network/routers/{id}/bridge/add-port/
+    POST /api/v1/network/routers/{id}/bridge/remove-port/
+    
+    Assign or remove a physical interface to/from the hotspot bridge.
+    This is the LipaNet "post-connection" workflow — once the VPN tunnel
+    is up, the admin assigns ports from the dashboard.
+    """
+    permission_classes = [IsAuthenticated, HasCompanyAccess]
+    
+    def post(self, request, pk):
+        try:
+            router = Router.objects.get(pk=pk)
+        except Router.DoesNotExist:
+            return Response({'error': 'Router not found'}, status=status.HTTP_404_NOT_FOUND)
+        
+        if router.status != 'online':
+            return Response({
+                'error': 'Router is offline',
+                'message': 'Cannot manage bridge ports on an offline router'
+            }, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+        
+        interface_name = request.data.get('interface')
+        action = request.data.get('action', 'add')  # 'add' or 'remove'
+        bridge_name = request.data.get('bridge', 'netily-bridge')
+        
+        if not interface_name:
+            return Response({
+                'error': 'interface is required'
+            }, status=status.HTTP_400_BAD_REQUEST)
+        
+        try:
+            mikrotik = mikrotik_api_module.MikrotikAPI(router)
+            
+            if action == 'remove':
+                result = mikrotik.remove_port_from_bridge(interface_name)
+                verb = 'removed from'
+            else:
+                result = mikrotik.add_port_to_bridge(interface_name, bridge_name)
+                verb = 'added to'
+            
+            if result:
+                # Update the hotspot_interfaces field on the Router model
+                current_interfaces = set(router.hotspot_interfaces or [])
+                if action == 'remove':
+                    current_interfaces.discard(interface_name)
+                else:
+                    current_interfaces.add(interface_name)
+                router.hotspot_interfaces = sorted(current_interfaces)
+                router.save(update_fields=['hotspot_interfaces'])
+                
+                RouterEvent.objects.create(
+                    router=router,
+                    event_type='config_change',
+                    message=f"Port {interface_name} {verb} {bridge_name}",
+                    details={
+                        'interface': interface_name,
+                        'bridge': bridge_name,
+                        'action': action,
+                        'changed_by': request.user.email,
+                    }
+                )
+                return Response({
+                    'success': True,
+                    'message': f'{interface_name} {verb} {bridge_name}',
+                    'hotspot_interfaces': router.hotspot_interfaces,
+                })
+            else:
+                return Response({
+                    'success': False,
+                    'message': f'Failed to {action} {interface_name}',
+                }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        
+        except Exception as e:
+            logger.error(f"Bridge port operation failed for router {pk}: {e}")
+            return Response({
+                'error': f'Failed to {action} port',
+                'message': str(e)
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+class RouterHotspotUpdateView(APIView):
+    """
+    PATCH /api/v1/network/routers/{id}/hotspot/update/
+    
+    Update hotspot DNS name and/or IP pool range on a live router.
+    """
+    permission_classes = [IsAuthenticated, HasCompanyAccess]
+    
+    def patch(self, request, pk):
+        try:
+            router = Router.objects.get(pk=pk)
+        except Router.DoesNotExist:
+            return Response({'error': 'Router not found'}, status=status.HTTP_404_NOT_FOUND)
+        
+        if router.status != 'online':
+            return Response({
+                'error': 'Router is offline',
+                'message': 'Cannot update hotspot on an offline router'
+            }, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+        
+        dns_name = request.data.get('dns_name')
+        pool_range = request.data.get('pool_range')
+        
+        if not dns_name and not pool_range:
+            return Response({
+                'error': 'Provide at least one of: dns_name, pool_range'
+            }, status=status.HTTP_400_BAD_REQUEST)
+        
+        config_data = {}
+        if dns_name:
+            config_data['dns_name'] = dns_name
+        if pool_range:
+            config_data['pool_range'] = pool_range
+        
+        try:
+            mikrotik = mikrotik_api_module.MikrotikAPI(router)
+            result = mikrotik.configure_hotspot(config_data)
+            
+            if result.get('success'):
+                # Update the Router model to keep in sync
+                if dns_name:
+                    router.dns_name = dns_name
+                    router.save(update_fields=['dns_name'])
+                
+                RouterEvent.objects.create(
+                    router=router,
+                    event_type='config_change',
+                    message=f"Hotspot settings updated: {', '.join(config_data.keys())}",
+                    details={
+                        **config_data,
+                        'updated_by': request.user.email,
+                    }
+                )
+                return Response({
+                    'success': True,
+                    'message': 'Hotspot settings updated',
+                    'updated': config_data,
+                })
+            else:
+                return Response({
+                    'success': False,
+                    'message': 'Failed to update hotspot settings',
+                    'error': result.get('error'),
+                }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        
+        except Exception as e:
+            logger.error(f"Failed to update hotspot for router {pk}: {e}")
+            return Response({
+                'error': 'Failed to update hotspot settings',
+                'message': str(e)
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
 
 class RouterAuthenticateView(APIView):
     """Public endpoint for routers to authenticate"""

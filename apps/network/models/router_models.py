@@ -260,6 +260,7 @@ class Router(AuditMixin):
 
     def save(self, *args, **kwargs):
             """Auto-generate credentials and schema links."""
+            from django.utils.text import slugify
             
             # ────────────────────────────────────────────────────────────────
             # SAFETY CHECK: Protect the MikroTik 'admin' account!
@@ -272,23 +273,28 @@ class Router(AuditMixin):
                 clean_sub = self.tenant_subdomain.lower().replace('-', '_')
                 self.schema_name = f"tenant_{clean_sub}"
             
-            # 2. VPN Credentials
+            # 2. VPN Credentials — unique per router (tenant_router_vpn format)
             if self.enable_openvpn and not self.openvpn_username:
-                prefix = (self.tenant_subdomain or 'public')[:5]
-                clean_name = self.name.lower().replace(' ', '')[:8]
+                tenant_prefix = slugify(self.tenant_subdomain or 'public').replace('-', '')[:10]
+                router_prefix = slugify(self.name or 'router').replace('-', '')[:12]
                 suffix = secrets.token_hex(2)
-                self.openvpn_username = f"{prefix}_{clean_name}_{suffix}"
-                self.openvpn_password = secrets.token_urlsafe(12)
+                self.openvpn_username = f"{tenant_prefix}_{router_prefix}_{suffix}_vpn"[:60]
+            if self.enable_openvpn and not self.openvpn_password:
+                self.openvpn_password = secrets.token_urlsafe(16)
             
-            # 3. API Credentials
+            # 3. API Credentials — always ensure a strong password
             if not self.api_password:
-                self.api_password = secrets.token_urlsafe(12)
+                self.api_password = secrets.token_urlsafe(16)
 
             # 4. Provision Slug (short URL-safe identifier)
             if not self.provision_slug:
                 self.provision_slug = secrets.token_hex(4).lower()
 
-            # 5. Radius Defaults
+            # 5. RADIUS Shared Secret — unique per router
+            if not self.shared_secret:
+                self.shared_secret = secrets.token_hex(16)
+
+            # 6. Radius Server Defaults
             if self.enable_openvpn and not self.radius_server:
                 self.radius_server = "10.8.0.1" 
 

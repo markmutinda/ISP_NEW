@@ -18,20 +18,31 @@ class MikrotikAPI:
         self.api = None
     
     def connect(self) -> bool:
-            """Connect to Mikrotik device"""
+            """Connect to Mikrotik device via VPN tunnel (preferred) or fallback to WAN IP."""
             try:
+                # DYNAMIC IP SELECTION: Always use VPN IP if provisioned,
+                # fallback to public/WAN IP. The VPN tunnel bypasses NAT.
+                target_ip = (
+                    self.device.vpn_ip_address
+                    if (self.device.vpn_provisioned and self.device.vpn_ip_address)
+                    else self.device.ip_address
+                )
+
+                if not target_ip:
+                    logger.error(f"Cannot connect: No valid IP or VPN IP for {self.device.name}")
+                    return False
+
                 self.api = connect(
                     username=self.device.api_username,
                     password=self.device.api_password,
-                    host=self.device.ip_address,
+                    host=target_ip,
                     port=self.device.api_port or 8728,
                     timeout=30,
-                    plain_login=True  # <--- ADD THIS FOR ROS v7
+                    plain_login=True  # Required for ROS v7
                 )
-                logger.info(f"Connected to Mikrotik {self.device.name} ({self.device.ip_address})")
+                logger.info(f"Connected to Mikrotik {self.device.name} ({target_ip})")
                 return True
             except Exception as e:
-                # Let's see the EXACT error (e.g., authentication vs timeout)
                 logger.error(f"Failed to connect to {self.device.name}: {str(e)}")
                 return False
     
@@ -411,6 +422,130 @@ class MikrotikAPI:
             results['pppoe'] = self.remove_pppoe_active_user(username)
         
         return results
+
+    # ────────────────────────────────────────────────────────────────
+    # POST-CONNECTION SETUP (Dashboard → Router via VPN)
+    # ────────────────────────────────────────────────────────────────
+
+    def add_port_to_bridge(self, interface_name: str, bridge_name: str = "netily-bridge") -> bool:
+        """
+        Assigns a physical port (e.g., ether2) to the hotspot bridge.
+        Called from the dashboard after the VPN tunnel is established.
+        Removes the port from any existing bridge first to avoid conflicts.
+        """
+        try:
+            if not self.connect():
+                return False
+            # Remove from any existing bridge first
+            existing = list(self.api.path('/interface/bridge/port'))
+            for port in existing:
+                if port.get('interface') == interface_name:
+                    self.api.path('/interface/bridge/port').remove(**{'.id': port['.id']})
+                    logger.info(f"Removed {interface_name} from bridge {port.get('bridge')}")
+            # Add to our bridge
+            self.api.path('/interface/bridge/port').add(bridge=bridge_name, interface=interface_name)
+            logger.info(f"Added {interface_name} to {bridge_name}")
+            return True
+        except Exception as e:
+            logger.error(f"Failed to add port {interface_name} to bridge {bridge_name}: {e}")
+            return False
+        finally:
+            self.disconnect()
+
+    def remove_port_from_bridge(self, interface_name: str) -> bool:
+        """Removes a physical port from any bridge it belongs to."""
+        try:
+            if not self.connect():
+                return False
+            ports = list(self.api.path('/interface/bridge/port'))
+            for port in ports:
+                if port.get('interface') == interface_name:
+                    self.api.path('/interface/bridge/port').remove(**{'.id': port['.id']})
+                    logger.info(f"Removed {interface_name} from bridge {port.get('bridge')}")
+            return True
+        except Exception as e:
+            logger.error(f"Failed to remove port {interface_name} from bridge: {e}")
+            return False
+        finally:
+            self.disconnect()
+
+    def configure_hotspot(self, config_data: dict) -> dict:
+        """
+        Dynamically update Hotspot IP ranges and DNS names from the dashboard.
+        
+        Args:
+            config_data: Dict with optional keys:
+                - dns_name: New DNS name for the hotspot profile
+                - pool_range: New IP pool range (e.g., '10.0.0.10-10.0.0.250')
+        """
+        try:
+            if not self.connect():
+                return {'success': False, 'error': 'Connection failed'}
+
+            if 'dns_name' in config_data:
+                profiles = list(self.api.path('/ip/hotspot/profile'))
+                for p in profiles:
+                    if p.get('name') == 'netily-profile':
+                        self.api.path('/ip/hotspot/profile').set(
+                            **{'.id': p['.id'], 'dns-name': config_data['dns_name']}
+                        )
+                        logger.info(f"Updated hotspot DNS to {config_data['dns_name']}")
+                        break
+
+            if 'pool_range' in config_data:
+                pools = list(self.api.path('/ip/pool'))
+                for pool in pools:
+                    if pool.get('name') == 'netily-pool':
+                        self.api.path('/ip/pool').set(
+                            **{'.id': pool['.id'], 'ranges': config_data['pool_range']}
+                        )
+                        logger.info(f"Updated pool range to {config_data['pool_range']}")
+                        break
+
+            return {'success': True}
+        except Exception as e:
+            logger.error(f"Failed to configure hotspot: {e}")
+            return {'success': False, 'error': str(e)}
+        finally:
+            self.disconnect()
+
+    def disable_hotspot(self, server_name: str = "netily-hotspot") -> bool:
+        """Disable the hotspot server on the router."""
+        try:
+            if not self.connect():
+                return False
+            servers = list(self.api.path('/ip/hotspot'))
+            for srv in servers:
+                if srv.get('name') == server_name:
+                    self.api.path('/ip/hotspot').set(**{'.id': srv['.id'], 'disabled': 'yes'})
+                    logger.info(f"Disabled hotspot server {server_name}")
+                    return True
+            logger.warning(f"Hotspot server {server_name} not found")
+            return False
+        except Exception as e:
+            logger.error(f"Failed to disable hotspot: {e}")
+            return False
+        finally:
+            self.disconnect()
+
+    def enable_hotspot(self, server_name: str = "netily-hotspot") -> bool:
+        """Enable the hotspot server on the router."""
+        try:
+            if not self.connect():
+                return False
+            servers = list(self.api.path('/ip/hotspot'))
+            for srv in servers:
+                if srv.get('name') == server_name:
+                    self.api.path('/ip/hotspot').set(**{'.id': srv['.id'], 'disabled': 'no'})
+                    logger.info(f"Enabled hotspot server {server_name}")
+                    return True
+            logger.warning(f"Hotspot server {server_name} not found")
+            return False
+        except Exception as e:
+            logger.error(f"Failed to enable hotspot: {e}")
+            return False
+        finally:
+            self.disconnect()
 
     # ────────────────────────────────────────────────────────────────
     # HELPER METHODS

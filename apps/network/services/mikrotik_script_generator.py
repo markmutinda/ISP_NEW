@@ -183,9 +183,10 @@ class MikrotikScriptGenerator:
 
     def _section_identity_cleanup(self, r: Router) -> str:
         return f"""# ─────────────────────────────────────────────────────────────
-# 1. SYSTEM IDENTITY & CLEANUP
+# 1. SYSTEM IDENTITY, CLOCK & CLEANUP
 # ─────────────────────────────────────────────────────────────
 /system identity set name="{self._escape_ros_string(r.name)}"
+/system clock set time-zone-name=Africa/Nairobi
 :put "Cleaning up old Netily configurations..."
 
 :do {{ :foreach i in=[/ip hotspot find name="netily-hotspot"] do={{ /ip hotspot remove $i }} }} on-error={{}}
@@ -221,7 +222,7 @@ class MikrotikScriptGenerator:
     /user set [find name="{self._escape_ros_string(r.api_username)}"] password="{self._escape_ros_string(r.api_password)}" group=full
 }}
 
-/ip service set api disabled=no port={r.api_port} address=10.0.0.0/8,127.0.0.0/8
+/ip service set api disabled=no port={r.api_port} address={self.vpn_server_ip}/32,127.0.0.0/8
 /ip service set api-ssl disabled=yes
 """
 
@@ -231,7 +232,7 @@ class MikrotikScriptGenerator:
             ca_url = f"{self.base_url}/api/v1/network/provision/{r.auth_key}/certs/ca.crt"
             ca_fetch = f"""
 :do {{
-    /tool fetch url="{ca_url}" dst-path="netily-vpn-ca.crt"
+    /tool fetch url="{ca_url}" dst-path="netily-vpn-ca.crt" http-header-field="ngrok-skip-browser-warning: true"
     :delay 1s
     /certificate import file-name="netily-vpn-ca.crt" passphrase=""
     :put "VPN CA certificate imported."
@@ -343,6 +344,9 @@ class MikrotikScriptGenerator:
 :put "Configuring Hotspot..."
 {profile_cmd}
 {server_cmd}
+
+# Anti-sharing: one device per account, quick disconnect on idle
+/ip hotspot user profile set [find name="default"] shared-users=1 keepalive-timeout=2m
 """
 
     def _section_walled_garden(self, r: Router, portal_domain: str) -> str:
@@ -383,7 +387,7 @@ class MikrotikScriptGenerator:
 :do {{ /certificate remove [find name~"netily-ssl"] }} on-error={{}}
 
 :do {{
-    /tool fetch url="{ssl_cert_url}" dst-path="netily-ssl.crt"
+    /tool fetch url="{ssl_cert_url}" dst-path="netily-ssl.crt" http-header-field="ngrok-skip-browser-warning: true"
     :delay 1s
     /certificate import file-name="netily-ssl.crt" passphrase="{passphrase}"
     :put "SSL certificate imported."
@@ -392,7 +396,7 @@ class MikrotikScriptGenerator:
 }}
 
 :do {{
-    /tool fetch url="{ssl_key_url}" dst-path="netily-ssl.key"
+    /tool fetch url="{ssl_key_url}" dst-path="netily-ssl.key" http-header-field="ngrok-skip-browser-warning: true"
     :delay 1s
     /certificate import file-name="netily-ssl.key" passphrase="{passphrase}"
     :put "SSL key imported."
@@ -421,17 +425,22 @@ class MikrotikScriptGenerator:
 # ─────────────────────────────────────────────────────────────
 :put "Downloading hotspot pages..."
 
-:do {{ /file print file="hotspot/." }} on-error={{}}
+# Detect hotspot HTML directory automatically (like LipaNet)
+:local dir [/ip hotspot profile get [find name="netily-profile"] html-directory]
+:if ($dir = "") do={{
+    :log warning "Hotspot html-directory is empty. Using default 'hotspot'"
+    :set dir "hotspot"
+}}
 
 :do {{
-    /tool fetch url="{login_url}" dst-path="hotspot/login.html"
+    /tool fetch url="{login_url}" dst-path=("$dir/login.html") http-header-field="ngrok-skip-browser-warning: true"
     :put "login.html installed."
 }} on-error={{
     :put "WARNING: Could not download login.html"
 }}
 
 :do {{
-    /tool fetch url="{status_url}" dst-path="hotspot/status.html"
+    /tool fetch url="{status_url}" dst-path=("$dir/status.html") http-header-field="ngrok-skip-browser-warning: true"
     :put "status.html installed."
 }} on-error={{
     :put "WARNING: Could not download status.html"
