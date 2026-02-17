@@ -1953,9 +1953,8 @@ class RouterHotspotDisableView(APIView):
         try:
             mikrotik = mikrotik_api_module.MikrotikAPI(router)
             result = mikrotik.disable_hotspot(server_name)
-           
-            if result:
-                # Log the event
+
+            if result:  # disable_hotspot returns bool
                 RouterEvent.objects.create(
                     router=router,
                     event_type='config_change',
@@ -1965,17 +1964,13 @@ class RouterHotspotDisableView(APIView):
                         'disabled_by': request.user.email,
                     }
                 )
-               
-                return Response({
-                    'success': True,
-                    'message': 'Hotspot disabled',
-                })
+                return Response({'success': True, 'message': 'Hotspot disabled'})
             else:
                 return Response({
                     'success': False,
-                    'message': 'Failed to disable hotspot — server not found',
-                }, status=status.HTTP_404_NOT_FOUND)
-       
+                    'message': 'Failed to disable hotspot',
+                }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
         except Exception as e:
             logger.error(f"Failed to disable hotspot for router {pk}: {e}")
             return Response({
@@ -1987,49 +1982,46 @@ class RouterHotspotDisableView(APIView):
 class RouterHotspotEnableView(APIView):
     """
     POST /api/v1/network/routers/{id}/hotspot/enable/
-    
-    Re-enable a previously disabled hotspot server on the router.
+
+    Enable hotspot server on the router.
     """
     permission_classes = [IsAuthenticated, HasCompanyAccess]
-    
+
     def post(self, request, pk):
         try:
             router = Router.objects.get(pk=pk)
         except Router.DoesNotExist:
             return Response({'error': 'Router not found'}, status=status.HTTP_404_NOT_FOUND)
-        
+
         if router.status != 'online':
             return Response({
                 'error': 'Router is offline',
                 'message': 'Cannot enable hotspot on an offline router'
             }, status=status.HTTP_503_SERVICE_UNAVAILABLE)
-        
-        server_name = request.data.get('server_name', 'netily-hotspot')
-        
+
+        server_name = request.data.get('server_name')  # Optional
+
         try:
             mikrotik = mikrotik_api_module.MikrotikAPI(router)
-            result = mikrotik.enable_hotspot(server_name)
-            
-            if result:
+            result = mikrotik.enable_hotspot(server_name) if server_name else mikrotik.enable_hotspot()
+
+            if result:  # enable_hotspot returns bool
                 RouterEvent.objects.create(
                     router=router,
                     event_type='config_change',
-                    message=f"Hotspot enabled ({server_name})",
+                    message=f"Hotspot enabled{' (' + server_name + ')' if server_name else ''}",
                     details={
                         'server_name': server_name,
                         'enabled_by': request.user.email,
                     }
                 )
-                return Response({
-                    'success': True,
-                    'message': f'Hotspot {server_name} enabled',
-                })
+                return Response({'success': True, 'message': 'Hotspot enabled'})
             else:
                 return Response({
                     'success': False,
-                    'message': 'Failed to enable hotspot — server not found',
-                }, status=status.HTTP_404_NOT_FOUND)
-        
+                    'message': 'Failed to enable hotspot',
+                }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
         except Exception as e:
             logger.error(f"Failed to enable hotspot for router {pk}: {e}")
             return Response({
@@ -2038,157 +2030,139 @@ class RouterHotspotEnableView(APIView):
             }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
-class RouterBridgePortView(APIView):
+class RouterHotspotUpdateView(APIView):
     """
-    POST /api/v1/network/routers/{id}/bridge/add-port/
-    POST /api/v1/network/routers/{id}/bridge/remove-port/
-    
-    Assign or remove a physical interface to/from the hotspot bridge.
-    This is the LipaNet "post-connection" workflow — once the VPN tunnel
-    is up, the admin assigns ports from the dashboard.
+    POST /api/v1/network/routers/{id}/hotspot/update/
+
+    Update hotspot configuration (DNS name, IP pool range).
     """
     permission_classes = [IsAuthenticated, HasCompanyAccess]
-    
+
     def post(self, request, pk):
         try:
             router = Router.objects.get(pk=pk)
         except Router.DoesNotExist:
             return Response({'error': 'Router not found'}, status=status.HTTP_404_NOT_FOUND)
-        
-        if router.status != 'online':
-            return Response({
-                'error': 'Router is offline',
-                'message': 'Cannot manage bridge ports on an offline router'
-            }, status=status.HTTP_503_SERVICE_UNAVAILABLE)
-        
-        interface_name = request.data.get('interface')
-        action = request.data.get('action', 'add')  # 'add' or 'remove'
-        bridge_name = request.data.get('bridge', 'netily-bridge')
-        
-        if not interface_name:
-            return Response({
-                'error': 'interface is required'
-            }, status=status.HTTP_400_BAD_REQUEST)
-        
-        try:
-            mikrotik = mikrotik_api_module.MikrotikAPI(router)
-            
-            if action == 'remove':
-                result = mikrotik.remove_port_from_bridge(interface_name)
-                verb = 'removed from'
-            else:
-                result = mikrotik.add_port_to_bridge(interface_name, bridge_name)
-                verb = 'added to'
-            
-            if result:
-                # Update the hotspot_interfaces field on the Router model
-                current_interfaces = set(router.hotspot_interfaces or [])
-                if action == 'remove':
-                    current_interfaces.discard(interface_name)
-                else:
-                    current_interfaces.add(interface_name)
-                router.hotspot_interfaces = sorted(current_interfaces)
-                router.save(update_fields=['hotspot_interfaces'])
-                
-                RouterEvent.objects.create(
-                    router=router,
-                    event_type='config_change',
-                    message=f"Port {interface_name} {verb} {bridge_name}",
-                    details={
-                        'interface': interface_name,
-                        'bridge': bridge_name,
-                        'action': action,
-                        'changed_by': request.user.email,
-                    }
-                )
-                return Response({
-                    'success': True,
-                    'message': f'{interface_name} {verb} {bridge_name}',
-                    'hotspot_interfaces': router.hotspot_interfaces,
-                })
-            else:
-                return Response({
-                    'success': False,
-                    'message': f'Failed to {action} {interface_name}',
-                }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-        
-        except Exception as e:
-            logger.error(f"Bridge port operation failed for router {pk}: {e}")
-            return Response({
-                'error': f'Failed to {action} port',
-                'message': str(e)
-            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
-
-class RouterHotspotUpdateView(APIView):
-    """
-    PATCH /api/v1/network/routers/{id}/hotspot/update/
-    
-    Update hotspot DNS name and/or IP pool range on a live router.
-    """
-    permission_classes = [IsAuthenticated, HasCompanyAccess]
-    
-    def patch(self, request, pk):
-        try:
-            router = Router.objects.get(pk=pk)
-        except Router.DoesNotExist:
-            return Response({'error': 'Router not found'}, status=status.HTTP_404_NOT_FOUND)
-        
         if router.status != 'online':
             return Response({
                 'error': 'Router is offline',
                 'message': 'Cannot update hotspot on an offline router'
             }, status=status.HTTP_503_SERVICE_UNAVAILABLE)
-        
-        dns_name = request.data.get('dns_name')
-        pool_range = request.data.get('pool_range')
-        
-        if not dns_name and not pool_range:
-            return Response({
-                'error': 'Provide at least one of: dns_name, pool_range'
-            }, status=status.HTTP_400_BAD_REQUEST)
-        
+
         config_data = {}
-        if dns_name:
-            config_data['dns_name'] = dns_name
-        if pool_range:
-            config_data['pool_range'] = pool_range
-        
+        if request.data.get('dns_name'):
+            config_data['dns_name'] = request.data['dns_name']
+        if request.data.get('pool_range'):
+            config_data['pool_range'] = request.data['pool_range']
+
+        if not config_data:
+            return Response({
+                'error': 'No update data provided',
+                'message': 'Provide dns_name and/or pool_range'
+            }, status=status.HTTP_400_BAD_REQUEST)
+
         try:
             mikrotik = mikrotik_api_module.MikrotikAPI(router)
             result = mikrotik.configure_hotspot(config_data)
-            
+
             if result.get('success'):
-                # Update the Router model to keep in sync
-                if dns_name:
-                    router.dns_name = dns_name
-                    router.save(update_fields=['dns_name'])
-                
                 RouterEvent.objects.create(
                     router=router,
                     event_type='config_change',
-                    message=f"Hotspot settings updated: {', '.join(config_data.keys())}",
+                    message=f"Hotspot config updated: {', '.join(config_data.keys())}",
                     details={
-                        **config_data,
+                        'config_data': config_data,
                         'updated_by': request.user.email,
+                    }
+                )
+                return Response({'success': True, 'message': 'Hotspot configuration updated'})
+            else:
+                return Response({
+                    'success': False,
+                    'message': 'Failed to update hotspot config',
+                    'error': result.get('error'),
+                }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+        except Exception as e:
+            logger.error(f"Failed to update hotspot for router {pk}: {e}")
+            return Response({
+                'error': 'Failed to update hotspot configuration',
+                'message': str(e)
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+class RouterBridgePortView(APIView):
+    """
+    POST /api/v1/network/routers/{id}/bridge/port/
+
+    Add or remove a port from the hotspot bridge.
+    Body: { "action": "add" | "remove", "interface": "ether2", "bridge": "netily-bridge" }
+    """
+    permission_classes = [IsAuthenticated, HasCompanyAccess]
+
+    def post(self, request, pk):
+        try:
+            router = Router.objects.get(pk=pk)
+        except Router.DoesNotExist:
+            return Response({'error': 'Router not found'}, status=status.HTTP_404_NOT_FOUND)
+
+        if router.status != 'online':
+            return Response({
+                'error': 'Router is offline',
+                'message': 'Cannot modify bridge ports on an offline router'
+            }, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+
+        action = request.data.get('action')  # 'add' or 'remove'
+        interface_name = request.data.get('interface')
+        bridge_name = request.data.get('bridge', 'netily-bridge')
+
+        if action not in ('add', 'remove'):
+            return Response({
+                'error': 'Invalid action',
+                'message': 'action must be "add" or "remove"'
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        if not interface_name:
+            return Response({
+                'error': 'Missing interface',
+                'message': 'interface field is required'
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            mikrotik = mikrotik_api_module.MikrotikAPI(router)
+
+            if action == 'add':
+                result = mikrotik.add_port_to_bridge(interface_name, bridge_name)
+            else:
+                result = mikrotik.remove_port_from_bridge(interface_name)
+
+            if result:  # Both methods return bool
+                RouterEvent.objects.create(
+                    router=router,
+                    event_type='config_change',
+                    message=f"Bridge port {'added' if action == 'add' else 'removed'}: {interface_name}",
+                    details={
+                        'action': action,
+                        'interface': interface_name,
+                        'bridge': bridge_name,
+                        'modified_by': request.user.email,
                     }
                 )
                 return Response({
                     'success': True,
-                    'message': 'Hotspot settings updated',
-                    'updated': config_data,
+                    'message': f"Port {interface_name} {'added to' if action == 'add' else 'removed from'} bridge",
                 })
             else:
                 return Response({
                     'success': False,
-                    'message': 'Failed to update hotspot settings',
-                    'error': result.get('error'),
+                    'message': f"Failed to {action} port {interface_name}",
                 }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-        
+
         except Exception as e:
-            logger.error(f"Failed to update hotspot for router {pk}: {e}")
+            logger.error(f"Failed to {action} bridge port for router {pk}: {e}")
             return Response({
-                'error': 'Failed to update hotspot settings',
+                'error': f'Failed to {action} bridge port',
                 'message': str(e)
             }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
