@@ -240,11 +240,14 @@ class MikrotikScriptGenerator:
     :put "Note: VPN CA cert not available. Using unverified TLS."
 }}
 """
-
+        
+        # --- FIXED SECTION: Added protocol=tcp, cipher=aes256-cbc and auth=sha1 ---
         if is_v6:
-            ovpn_cmd = f'/interface ovpn-client add name="Netily-VPN" connect-to="{self._escape_ros_string(r.openvpn_server)}" port={r.openvpn_port} user="{self._escape_ros_string(r.openvpn_username)}" password="{self._escape_ros_string(r.openvpn_password)}" cipher={cipher} auth={auth} add-default-route=no comment="Netily Cloud Controller Tunnel"'
+            # V6 usually works with defaults, but setting TCP ensures consistency
+            ovpn_cmd = f'/interface ovpn-client add name="Netily-VPN" connect-to="{self._escape_ros_string(r.openvpn_server)}" port={r.openvpn_port} user="{self._escape_ros_string(r.openvpn_username)}" password="{self._escape_ros_string(r.openvpn_password)}" cipher={cipher} auth={auth} protocol=tcp add-default-route=no comment="Netily Cloud Controller Tunnel"'
         else:
-            ovpn_cmd = f'/interface ovpn-client add name="Netily-VPN" connect-to="{self._escape_ros_string(r.openvpn_server)}" port={r.openvpn_port} user="{self._escape_ros_string(r.openvpn_username)}" password="{self._escape_ros_string(r.openvpn_password)}" add-default-route=no comment="Netily Cloud Controller Tunnel"'
+            # V7 requires specific parameters to match server (AES-256-CBC, TCP)
+            ovpn_cmd = f'/interface ovpn-client add name="Netily-VPN" connect-to="{self._escape_ros_string(r.openvpn_server)}" port={r.openvpn_port} user="{self._escape_ros_string(r.openvpn_username)}" password="{self._escape_ros_string(r.openvpn_password)}" cipher=aes256-cbc auth=sha1 protocol=tcp add-default-route=no comment="Netily Cloud Controller Tunnel"'
 
         return f"""# ─────────────────────────────────────────────────────────────
 # 3. OPENVPN TUNNEL (Username/Password Authentication)
@@ -272,7 +275,6 @@ class MikrotikScriptGenerator:
 """
 
     def _section_firewall(self, r: Router) -> str:
-        # Removed place-before – not needed and causes error in v7
         return f"""# ─────────────────────────────────────────────────────────────
 # 4. FIREWALL (VPN & Management)
 # ─────────────────────────────────────────────────────────────
@@ -316,6 +318,11 @@ class MikrotikScriptGenerator:
 # 6. IP POOL & DHCP
 # ─────────────────────────────────────────────────────────────
 :put "Configuring DHCP..."
+
+# --- FIXED: Remove conflicting network if it exists (even if not marked 'Netily') ---
+:do {{ /ip dhcp-server network remove [find address="{dhcp_network}"] }} on-error={{}}
+# -----------------------------------------------------------------------------------
+
 /ip pool add name="netily-pool" ranges="{pool_range}"
 /ip dhcp-server add name="netily-dhcp" interface="netily-bridge" address-pool="netily-pool" lease-time=1h disabled=no
 /ip dhcp-server network add address="{dhcp_network}" gateway="{gateway_ip}" dns-server=8.8.8.8,1.1.1.1 comment="Netily DHCP Network"

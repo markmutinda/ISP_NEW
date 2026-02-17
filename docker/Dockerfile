@@ -12,6 +12,7 @@ RUN apt-get update && apt-get install -y \
     build-essential \
     libpq-dev \
     netcat-openbsd \
+    iproute2 \
     && rm -rf /var/lib/apt/lists/*
 
 # Working directory
@@ -21,8 +22,7 @@ WORKDIR /app
 # Copy the entire requirements folder
 COPY requirements/ /app/requirements/
 
-# Install dependencies from production.txt (which includes base.txt)
-# NOTE: local.txt is for development only; Docker uses production settings
+# Install dependencies from production.txt
 RUN pip install --upgrade pip && \
     pip install -r /app/requirements/production.txt
 

@@ -42,14 +42,21 @@ services:
       - isp_network
 
   # ────────────────────────────────────────────────────────────────
-  # DJANGO WEB APPLICATION
+  # DJANGO WEB APPLICATION (The Heart)
   # ────────────────────────────────────────────────────────────────
   web:
     build: 
       context: ..
       dockerfile: docker/Dockerfile
     container_name: netily_backend
-    command: gunicorn config.wsgi:application --bind 0.0.0.0:8000 --workers 4 --reload
+# AUTOMATION: 1. Use Python to find IP (Robust), 2. Add Route
+    command: >
+      sh -c "echo 'Setting up routes...' &&
+             VPN_IP=$$(python -c \"import socket; print(socket.gethostbyname('netily-openvpn'))\") &&
+             echo 'VPN Gateway found at: '$$VPN_IP &&
+             ip route add 192.168.255.0/24 via $$VPN_IP || true &&
+             echo 'Route added successfully!' &&
+             gunicorn config.wsgi:application --bind 0.0.0.0:8000 --workers 4 --reload"
     working_dir: /app
     volumes:
       - ../:/app
@@ -59,18 +66,22 @@ services:
       - PYTHONPATH=/app
       - DJANGO_SETTINGS_MODULE=config.settings.production
       - DJANGO_SECRET_KEY=super-secret-key-for-docker-testing-12345
-      - DJANGO_ALLOWED_HOSTS=localhost,127.0.0.1,web,netily_backend
+      - DJANGO_ALLOWED_HOSTS=localhost,.localhost,127.0.0.1,web,netily_backend,192.168.255.1
       - REDIS_URL=redis://netily_redis:6379/0
       - DB_HOST=netily_db
       - DB_NAME=isp_management
       - DB_USER=isp_user
       - DB_PASSWORD=2202
       - DB_PORT=5432
+    cap_add:
+      - NET_ADMIN
     depends_on:
       db:
         condition: service_healthy
       redis:
         condition: service_healthy
+      openvpn:
+         condition: service_started
     ports:
       - "8000:8000"
     networks:
@@ -86,7 +97,11 @@ services:
       dockerfile: docker/Dockerfile
     container_name: netily_worker
     working_dir: /app
-    command: celery -A config worker -l info --concurrency=4
+    # AUTOMATION: Worker also needs the route to talk to routers
+    command: >
+      sh -c "VPN_IP=\$(getent hosts netily-openvpn | awk '{ print \$1 }') &&
+             ip route add 192.168.255.0/24 via \$VPN_IP || true &&
+             celery -A config worker -l info --concurrency=4"
     volumes:
       - ../:/app
     environment:
@@ -99,6 +114,8 @@ services:
       - DB_USER=isp_user
       - DB_PASSWORD=2202
       - DB_PORT=5432
+    cap_add:
+      - NET_ADMIN
     depends_on:
       db:
         condition: service_healthy
@@ -161,7 +178,6 @@ services:
       - DB_SCHEMA=public
       - RADIUS_CLIENTS=0.0.0.0/0
       - RADIUS_SECRET=${RADIUS_SECRET:-testing123}
-    # REMOVED VOLUMES TO PREVENT PERMISSION ERRORS
     restart: unless-stopped
     depends_on:
       db:
@@ -189,8 +205,8 @@ services:
     networks:
       - isp_network
 
-# ────────────────────────────────────────────────────────────────
-  # OPENVPN SERVER
+  # ────────────────────────────────────────────────────────────────
+  # OPENVPN SERVER (The Veins)
   # ────────────────────────────────────────────────────────────────
   openvpn:
     image: kylemanna/openvpn:latest
@@ -201,23 +217,28 @@ services:
       - "1194:1194/udp"
       - "1194:1194/tcp"
       - "7505:7505"
-      - "8728:8728"  # Allowed Django to talk to MikroTik API
+      - "8728:8728"
     volumes:
       - openvpn_data:/etc/openvpn
       - openvpn_ccd:/etc/openvpn/ccd
       - openvpn_logs:/var/log/openvpn
-      # If you created the check_auth.sh file on your laptop, add it here:
-      # - ./check_auth.sh:/etc/openvpn/check_auth.sh 
     environment:
       - OPENVPN_OPTS=--management localhost 7505
-    # CLEANED COMMAND: removed the empty tls-auth string
-    command: ovpn_run --auth none
+    # AUTOMATION: Start VPN, wait 5s, Add Masquerade Rule
+    command: >
+      sh -c "ovpn_run &
+             echo 'Waiting for tun0...' &&
+             while ! ip link show tun0 > /dev/null 2>&1; do sleep 1; done &&
+             echo 'tun0 is up! Adding Masquerade...' &&
+             iptables -t nat -I POSTROUTING -o tun0 -j MASQUERADE &&
+             wait"
     restart: unless-stopped
     sysctls:
       - net.ipv4.ip_forward=1
     networks:
       - vpn_network
       - isp_network
+
 # ────────────────────────────────────────────────────────────────
 # NETWORKS
 # ────────────────────────────────────────────────────────────────

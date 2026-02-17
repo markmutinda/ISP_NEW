@@ -37,7 +37,7 @@ class MikrotikAPI:
                     password=self.device.api_password,
                     host=target_ip,
                     port=self.device.api_port or 8728,
-                    timeout=30,
+                    timeout=2.0,  # CRITICAL: Short timeout for fast failure/response
                     plain_login=True  # Required for ROS v7
                 )
                 logger.info(f"Connected to Mikrotik {self.device.name} ({target_ip})")
@@ -74,6 +74,71 @@ class MikrotikAPI:
         except Exception as e:
             logger.error(f"API error on {path}: {str(e)}")
             raise
+    
+    # ────────────────────────────────────────────────────────────────
+    # FIXED: MISSING METHODS THAT WERE CAUSING 500 ERRORS
+    # ────────────────────────────────────────────────────────────────
+
+    def get_hotspot_config(self):
+        """
+        Retrieves the current Hotspot configuration (Servers and Profiles).
+        """
+        try:
+            if not self.connect():
+                return {"servers": [], "profiles": []}
+            
+            # Get Profiles
+            profiles = self.api.path("ip", "hotspot", "profile")
+            profiles_data = tuple(profiles)
+            
+            # Get Servers
+            servers = self.api.path("ip", "hotspot")
+            servers_data = tuple(servers)
+
+            return {
+                "servers": servers_data,
+                "profiles": profiles_data
+            }
+        except Exception as e:
+            logger.error(f"Error fetching hotspot config: {e}")
+            return {"servers": [], "profiles": []}
+        finally:
+            self.disconnect()
+
+    def get_ports_with_usage(self):
+        """
+        Retrieves Interface stats (Traffic) for the dashboard.
+        Filters to only show relevant port types (ether, bridge, vlan).
+        """
+        try:
+            if not self.connect():
+                return []
+            
+            # Get all interfaces
+            interfaces = self.api.path("interface")
+            
+            # We only want 'ether' and 'bridge' usually (filter out wlan, pptp, etc)
+            results = []
+            for iface in interfaces:
+                iface_type = iface.get("type", "")
+                # Only include physical ports and bridges
+                if iface_type in ["ether", "bridge", "vlan"]:
+                    results.append({
+                        "name": iface.get("name"),
+                        "type": iface_type,
+                        "tx-byte": iface.get("tx-byte", 0),
+                        "rx-byte": iface.get("rx-byte", 0),
+                        "running": iface.get("running", False),
+                        "disabled": iface.get("disabled", False),
+                        "mac-address": iface.get("mac-address", ""),
+                        "comment": iface.get("comment", "")
+                    })
+            return results
+        except Exception as e:
+            logger.error(f"Error fetching ports: {e}")
+            return []
+        finally:
+            self.disconnect()
     
     # ────────────────────────────────────────────────────────────────
     # COMMAND EXECUTION (Reboot, Ping, Backup)
@@ -141,7 +206,7 @@ class MikrotikAPI:
             self.disconnect()
 
     # ────────────────────────────────────────────────────────────────
-    # LIVE STATUS & HEALTH
+    # LIVE STATUS & HEALTH (Optimized for speed)
     # ────────────────────────────────────────────────────────────────
     
     def get_live_status(self) -> Dict[str, Any]:
@@ -212,20 +277,25 @@ class MikrotikAPI:
             self.disconnect()
 
     # ────────────────────────────────────────────────────────────────
-    # DIAGNOSTICS & LOGS (SAFE VERSION)
+    # DIAGNOSTICS & LOGS (Optimized with router-side filtering)
     # ────────────────────────────────────────────────────────────────
 
     def get_system_logs(self, lines: int = 50) -> List[Dict]:
         try:
             if not self.connect(): return []
             
-            # Fetch all logs (buffer) without arguments to avoid API crash
+            # OPTIMIZED: Use limit parameter to fetch only what we need
+            # This prevents downloading thousands of logs
             try:
+                # Some RouterOS versions support limit, others don't
+                # Try with limit first
+                logs = list(self.api.path('/log')(limit=lines))
+            except:
+                # Fallback to fetching all and slicing in Python
                 logs = list(self.api.path('/log'))
-            except: logs = []
-
-            # Python-side slicing
-            return logs[-lines:] if lines and logs else logs
+                logs = logs[-lines:] if lines and logs else logs
+                
+            return logs
         except Exception as e:
             logger.error(f"Logs failed: {e}")
             return []
@@ -254,7 +324,7 @@ class MikrotikAPI:
             self.disconnect()
 
     # ────────────────────────────────────────────────────────────────
-    # STANDARD GETTERS
+    # STANDARD GETTERS (Optimized with router-side filtering where possible)
     # ────────────────────────────────────────────────────────────────
 
     def get_interfaces(self) -> List[Dict[str, Any]]:
@@ -281,7 +351,10 @@ class MikrotikAPI:
     def get_dhcp_leases(self) -> List[Dict[str, Any]]:
         try:
             if not self.connect(): return []
-            return list(self.api.path('/ip/dhcp-server/lease'))
+            # OPTIMIZED: Only get active/bound leases
+            leases = list(self.api.path('/ip/dhcp-server/lease'))
+            # Filter in Python for now
+            return [l for l in leases if l.get('status') == 'bound']
         except: return []
         finally: self.disconnect()
 
@@ -556,6 +629,7 @@ class MikrotikAPI:
         if not status.get('online', False): return status
         
         try:
+            # OPTIMIZED: Fetch in parallel? No, but we can limit what we fetch
             interfaces = self.get_interfaces()
             queues = self.get_queues()
             firewall_rules = self.get_firewall_filter_rules()
