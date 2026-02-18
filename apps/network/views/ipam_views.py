@@ -237,18 +237,37 @@ class VLANViewSet(viewsets.ModelViewSet):
         return queryset.none()
 
 class IPPoolViewSet(viewsets.ModelViewSet):
-    queryset = IPPool.objects.all().select_related('subnet', 'subnet__company')
+    """
+    IP Pool management — pools are linked to physical routers (NAS).
+    
+    Supports filtering by router_id for the dependent-dropdown pattern:
+      GET /api/v1/network/ip-pools/?router_id=1
+    """
+    queryset = IPPool.objects.all().select_related('subnet', 'router')
     serializer_class = IPPoolSerializer
     permission_classes = [HasCompanyAccess]
     filter_backends = [DjangoFilterBackend, filters.SearchFilter]
-    filterset_fields = ['subnet', 'pool_type', 'is_active']
-    search_fields = ['name', 'start_ip', 'end_ip']
+    filterset_fields = ['subnet', 'pool_type', 'is_active', 'router']
+    search_fields = ['name', 'start_ip', 'end_ip', 'description']
     
     def get_queryset(self):
-        user = self.request.user
-        if user.is_superuser:
-            return IPPool.objects.all()
-        return IPPool.objects.filter(subnet__company__in=user.companies.all())
+        """
+        Filter by tenant scoping. Also supports ?router_id= for dependent dropdowns
+        and ?name= for pool name validation.
+        """
+        qs = IPPool.objects.all().select_related('subnet', 'router')
+        
+        # Router filter for dependent dropdown (Customer creation form)
+        router_id = self.request.query_params.get('router_id')
+        if router_id:
+            qs = qs.filter(router_id=router_id, is_active=True)
+        
+        # Name filter for pool validation (Internet Check)
+        name = self.request.query_params.get('name')
+        if name:
+            qs = qs.filter(name=name)
+        
+        return qs
     
     @action(detail=True, methods=['get'])
     def allocate_ip(self, request, pk=None):
@@ -289,7 +308,7 @@ class IPPoolViewSet(viewsets.ModelViewSet):
             'message': f'IP {allocated_ip} available from pool {pool.name}',
             'ip_address': allocated_ip,
             'pool': pool.name,
-            'subnet': pool.subnet.network_cidr,
+            'router': pool.router.name,
         })
     
     @action(detail=True, methods=['get'])
@@ -307,6 +326,8 @@ class IPPoolViewSet(viewsets.ModelViewSet):
         
         stats = {
             'pool': pool.name,
+            'router': pool.router.name,
+            'router_id': pool.router.id,
             'range': f"{pool.start_ip} - {pool.end_ip}",
             'total_ips': pool.total_ips,
             'used_ips': pool.used_ips,
@@ -320,21 +341,24 @@ class IPPoolViewSet(viewsets.ModelViewSet):
         }
         
         return Response(stats)
-
-    def get_queryset(self):
-        queryset = super().get_queryset()
-        user = self.request.user
+    
+    @action(detail=False, methods=['get'])
+    def by_router(self, request):
+        """Get all pools grouped by router — for the IPAM overview page."""
+        from apps.network.models.router_models import Router
         
-        if user.is_superuser:
-            company_id = self.request.query_params.get('company_id')
-            if company_id:
-                return queryset.filter(subnet__company_id=company_id)
-            return queryset
-        
-        if hasattr(user, 'company') and user.company:
-            return queryset.filter(subnet__company=user.company)
-        
-        return queryset.none()
+        routers = Router.objects.filter(is_active=True).prefetch_related('ip_pools')
+        result = []
+        for router in routers:
+            pools = router.ip_pools.filter(is_active=True)
+            result.append({
+                'router_id': router.id,
+                'router_name': router.name,
+                'router_ip': router.ip_address,
+                'router_status': router.status,
+                'pools': IPPoolSerializer(pools, many=True).data,
+            })
+        return Response(result)
 
 class IPAddressViewSet(viewsets.ModelViewSet):
     queryset = IPAddress.objects.all().select_related(

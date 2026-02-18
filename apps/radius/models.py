@@ -646,7 +646,16 @@ class CustomerRadiusCredentials(models.Model):
     ip_pool = models.CharField(
         max_length=64,
         blank=True,
-        help_text="IP pool name for dynamic assignment"
+        help_text="IP pool name for dynamic assignment (Framed-Pool)"
+    )
+    # Router (NAS) this customer is assigned to
+    router = models.ForeignKey(
+        'network.Router',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='radius_customers',
+        help_text="The router (NAS) this customer connects through"
     )
     simultaneous_use = models.IntegerField(
         default=1,

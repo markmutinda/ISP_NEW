@@ -3,6 +3,7 @@ from django.core.validators import MaxValueValidator, MinValueValidator
 from netaddr import IPNetwork, IPAddress as NetIPAddress
 from apps.core.models import Company, AuditMixin
 from apps.customers.models import ServiceConnection
+from apps.network.models.router_models import Router
 
 
 class Subnet(AuditMixin):
@@ -82,16 +83,35 @@ class VLAN(AuditMixin):
 
 
 class IPPool(AuditMixin):
-    """IP Pool Model for DHCP"""
+    """IP Pool Model — links to a physical Router (NAS) for PPPoE/DHCP pools.
+    
+    In a multi-router ISP, each pool lives on a specific MikroTik router.
+    The pool name must match the /ip pool name on that router.
+    """
     POOL_TYPE = [
         ('DHCP', 'DHCP Pool'),
         ('STATIC', 'Static Pool'),
         ('RESERVED', 'Reserved Pool'),
+        ('PPPOE', 'PPPoE Pool'),
     ]
     
-    subnet = models.ForeignKey(Subnet, on_delete=models.CASCADE, related_name='pools')
-    name = models.CharField(max_length=100)
-    pool_type = models.CharField(max_length=20, choices=POOL_TYPE, default='DHCP')
+    subnet = models.ForeignKey(Subnet, on_delete=models.CASCADE, related_name='pools',
+                               null=True, blank=True,
+                               help_text='Optional parent subnet (for DHCP/Static pools)')
+    # Router (NAS) this pool belongs to — the critical multi-router link
+    router = models.ForeignKey(
+        Router,
+        on_delete=models.CASCADE,
+        null=True,
+        blank=True,
+        related_name='ip_pools',
+        help_text='The physical router (NAS) this pool exists on'
+    )
+    name = models.CharField(
+        max_length=100,
+        help_text='Pool name — must match the /ip pool name on the MikroTik router'
+    )
+    pool_type = models.CharField(max_length=20, choices=POOL_TYPE, default='PPPOE')
     start_ip = models.GenericIPAddressField(protocol='IPv4')
     end_ip = models.GenericIPAddressField(protocol='IPv4')
     gateway = models.GenericIPAddressField(protocol='IPv4', blank=True, null=True)
@@ -104,19 +124,11 @@ class IPPool(AuditMixin):
     total_ips = models.IntegerField(default=0)
     used_ips = models.IntegerField(default=0)
     
-    # Tenant schema field
-    schema_name = models.SlugField(
-        max_length=63,
-        unique=True,
-        editable=False,
-        default="default_schema"
-    )
-    
     class Meta:
         verbose_name = 'IP Pool'
         verbose_name_plural = 'IP Pools'
-        unique_together = [['subnet', 'name']]
-        ordering = ['name']
+        unique_together = [['router', 'name']]
+        ordering = ['router', 'name']
     
     def save(self, *args, **kwargs):
         # Calculate total IPs in range
@@ -126,8 +138,12 @@ class IPPool(AuditMixin):
             self.total_ips = (end.value - start.value) + 1
         super().save(*args, **kwargs)
     
+    @property
+    def ip_range(self):
+        return f"{self.start_ip} - {self.end_ip}"
+    
     def __str__(self):
-        return f"{self.name} ({self.start_ip} - {self.end_ip})"
+        return f"{self.name} @ {self.router.name} ({self.start_ip} - {self.end_ip})"
 
 
 class IPAddress(AuditMixin):

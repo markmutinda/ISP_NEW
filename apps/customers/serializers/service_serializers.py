@@ -81,6 +81,22 @@ class ServiceCreateSerializer(serializers.ModelSerializer):
         help_text="Password for RADIUS authentication (PPPoE/Hotspot login)"
     )
     
+    # Router (NAS) assignment — passed through to CustomerRadiusCredentials
+    router = serializers.IntegerField(
+        write_only=True,
+        required=False,
+        allow_null=True,
+        help_text="Network Router ID for RADIUS NAS assignment"
+    )
+    
+    # IP Pool name — stored as Framed-Pool RADIUS reply attribute
+    ip_pool = serializers.CharField(
+        write_only=True,
+        required=False,
+        allow_blank=True,
+        help_text="IP Pool name (Framed-Pool) for the router to assign IPs from"
+    )
+    
     # P4: "Activate Later" — when False, creates service as PENDING
     # and does NOT start the expiration timer or sync to RADIUS
     activate_now = serializers.BooleanField(
@@ -104,7 +120,7 @@ class ServiceCreateSerializer(serializers.ModelSerializer):
             'installation_address', 'installation_notes',
             'monthly_price', 'setup_fee', 'prorated_billing',
             'auto_renew', 'contract_period', 'status',
-            'radius_password', 'activate_now',
+            'radius_password', 'router', 'ip_pool', 'activate_now',
         ]
     
     def validate_mac_address(self, value):
@@ -127,6 +143,8 @@ class ServiceCreateSerializer(serializers.ModelSerializer):
         """
         radius_password = validated_data.pop('radius_password', None)
         activate_now = validated_data.pop('activate_now', True)
+        radius_router_id = validated_data.pop('router', None)
+        radius_ip_pool = validated_data.pop('ip_pool', None)
         
         # If activate_now is False, force status to PENDING
         if not activate_now:
@@ -139,12 +157,23 @@ class ServiceCreateSerializer(serializers.ModelSerializer):
         # a password. However, if we want the user-provided password, we need
         # to update the credentials after creation OR trigger a second save.
         
+        # Stash router and ip_pool for the RADIUS signal to pick up
+        if radius_router_id is not None:
+            instance._radius_router_id = radius_router_id
+        if radius_ip_pool:
+            instance._radius_ip_pool = radius_ip_pool
+        
         if activate_now and radius_password:
             # Attach password and trigger save so the signal can pick it up.
             # The signal handles both created=True (first save) and the case
             # where credentials need to be created for an existing service.
             instance._radius_password = radius_password
             instance._force_radius_creation = True  # Signal flag to force creation
+            instance.save()
+        elif radius_router_id is not None or radius_ip_pool:
+            # Even without activate_now, if router/pool were specified,
+            # trigger a save so the signal can update existing credentials
+            instance._force_radius_creation = True
             instance.save()
         
         return instance

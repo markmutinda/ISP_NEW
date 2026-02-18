@@ -801,9 +801,21 @@ class CustomerRadiusCredentialsViewSet(viewsets.ModelViewSet):
     permission_classes = [IsAuthenticated, HasCompanyAccess]
     
     def get_queryset(self):
-        return CustomerRadiusCredentials.objects.select_related(
-            'customer', 'bandwidth_profile'
+        qs = CustomerRadiusCredentials.objects.select_related(
+            'customer', 'bandwidth_profile', 'router'
         ).all()
+        
+        # Filter by customer ID
+        customer_id = self.request.query_params.get('customer')
+        if customer_id:
+            qs = qs.filter(customer_id=customer_id)
+        
+        # Filter by router ID
+        router_id = self.request.query_params.get('router')
+        if router_id:
+            qs = qs.filter(router_id=router_id)
+        
+        return qs
     
     def get_serializer_class(self):
         if self.action == 'retrieve':

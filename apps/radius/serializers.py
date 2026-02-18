@@ -213,12 +213,15 @@ class CustomerRadiusCredentialsSerializer(serializers.ModelSerializer):
     customer_name = serializers.CharField(source='customer.full_name', read_only=True)
     customer_code = serializers.CharField(source='customer.customer_code', read_only=True)
     profile_name = serializers.CharField(source='bandwidth_profile.name', read_only=True, allow_null=True)
+    router_name = serializers.CharField(source='router.name', read_only=True, allow_null=True, default=None)
     
     class Meta:
         model = CustomerRadiusCredentials
         fields = [
             'id', 'customer', 'customer_name', 'customer_code',
-            'username', 'password', 'bandwidth_profile', 'profile_name',
+            'username', 'password',
+            'router', 'router_name',
+            'bandwidth_profile', 'profile_name',
             'connection_type', 'is_enabled', 'disabled_reason',
             'static_ip', 'ip_pool', 'simultaneous_use',
             'expiration_date', 'synced_to_radius', 'last_sync',

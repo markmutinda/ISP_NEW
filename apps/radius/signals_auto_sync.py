@@ -193,6 +193,26 @@ def auto_create_radius_for_service(sender, instance, created, **kwargs):
                     needs_save = True
                     logger.info(f"Updated bandwidth profile for: {credentials.username}")
             
+            # 🎯 Handle ROUTER / IP POOL update from service creation form
+            radius_router_id = getattr(instance, '_radius_router_id', None)
+            radius_ip_pool = getattr(instance, '_radius_ip_pool', None)
+            
+            if radius_router_id is not None:
+                from apps.network.models.router_models import Router
+                try:
+                    new_router = Router.objects.get(pk=radius_router_id)
+                    if credentials.router != new_router:
+                        credentials.router = new_router
+                        needs_save = True
+                        logger.info(f"Updated router for {credentials.username}: {new_router.name}")
+                except Router.DoesNotExist:
+                    logger.warning(f"Router {radius_router_id} not found for update")
+            
+            if radius_ip_pool is not None and credentials.ip_pool != radius_ip_pool:
+                credentials.ip_pool = radius_ip_pool
+                needs_save = True
+                logger.info(f"Updated ip_pool for {credentials.username}: {radius_ip_pool}")
+            
             # Save all changes in one go
             if needs_save:
                 credentials.save()
@@ -245,7 +265,11 @@ def auto_create_radius_for_service(sender, instance, created, **kwargs):
             logger.info(f"RADIUS user {username} has unlimited validity (no expiration)")
         
         # Create the credentials (triggers the sync_credentials_to_radius signal above)
-        CustomerRadiusCredentials.objects.create(
+        # Pick up router and ip_pool if stashed by the service serializer
+        radius_router_id = getattr(instance, '_radius_router_id', None)
+        radius_ip_pool = getattr(instance, '_radius_ip_pool', '') or ''
+        
+        create_kwargs = dict(
             customer=customer,
             username=username,
             password=password,
@@ -256,7 +280,21 @@ def auto_create_radius_for_service(sender, instance, created, **kwargs):
             expiration_date=expiration_date,  # 🎯 CRITICAL: Set expiration
         )
         
-        logger.info(f"Auto-created RADIUS credentials: username={username}")
+        if radius_router_id:
+            from apps.network.models.router_models import Router
+            try:
+                create_kwargs['router'] = Router.objects.get(pk=radius_router_id)
+            except Router.DoesNotExist:
+                logger.warning(f"Router {radius_router_id} not found for RADIUS cred creation")
+        
+        if radius_ip_pool:
+            create_kwargs['ip_pool'] = radius_ip_pool
+        
+        CustomerRadiusCredentials.objects.create(**create_kwargs)
+        
+        logger.info(f"Auto-created RADIUS credentials: username={username}"
+                     f"{f', router_id={radius_router_id}' if radius_router_id else ''}"
+                     f"{f', ip_pool={radius_ip_pool}' if radius_ip_pool else ''}")
         
     except Exception as e:
         logger.error(f"Failed to auto-create RADIUS for service {instance.id}: {e}")
