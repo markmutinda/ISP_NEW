@@ -151,7 +151,7 @@ class MikrotikAPI:
             
             # FIXED: Execute directly, don't list/print
             try:
-                self.api.path('/system/reboot')()
+                self.api.path('system')('reboot')
             except (socket.error, socket.timeout):
                 # Valid outcome: Connection dies immediately on reboot
                 pass
@@ -171,7 +171,7 @@ class MikrotikAPI:
             if not self.connect(): return "Backup failed: Connection failed"
             
             # FIXED: Execute directly
-            self.api.path('/system/backup/save')(name='yourisp-backup')
+            self.api.path('system', 'backup').call('save', name='yourisp-backup')
             return "Backup created successfully"
         except Exception as e:
             logger.error(f"Failed to backup: {str(e)}")
@@ -185,7 +185,7 @@ class MikrotikAPI:
             if not self.connect(): return {"success": False, "error": "Connection failed"}
             
             # FIXED: Ping is a command that returns a generator
-            result = list(self.api.path('/ping')(address=target, count=str(count)))
+            result = list(self.api.path('/')('ping', address=target, count=str(count)))
             return {"success": True, "result": result}
         except Exception as e:
             return {"success": False, "error": str(e)}
@@ -198,7 +198,7 @@ class MikrotikAPI:
             if not self.connect(): return {"success": False, "error": "Connection failed"}
             
             # FIXED: Traceroute is a command
-            result = list(self.api.path('/tool/traceroute')(address=target, count="1"))
+            result = list(self.api.path('tool')('traceroute', address=target, count="1"))
             return {"success": True, "result": result}
         except Exception as e:
             return {"success": False, "error": str(e)}

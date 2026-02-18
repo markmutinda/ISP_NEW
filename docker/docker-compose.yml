@@ -66,7 +66,7 @@ services:
       - PYTHONPATH=/app
       - DJANGO_SETTINGS_MODULE=config.settings.production
       - DJANGO_SECRET_KEY=super-secret-key-for-docker-testing-12345
-      - DJANGO_ALLOWED_HOSTS=localhost,.localhost,127.0.0.1,web,netily_backend,192.168.255.1
+      - DJANGO_ALLOWED_HOSTS=localhost,.localhost,127.0.0.1,web,netily_backend,192.168.255.1,192.168.100.149
       - REDIS_URL=redis://netily_redis:6379/0
       - DB_HOST=netily_db
       - DB_NAME=isp_management
@@ -205,7 +205,7 @@ services:
     networks:
       - isp_network
 
-  # ────────────────────────────────────────────────────────────────
+# ────────────────────────────────────────────────────────────────
   # OPENVPN SERVER (The Veins)
   # ────────────────────────────────────────────────────────────────
   openvpn:
@@ -224,13 +224,26 @@ services:
       - openvpn_logs:/var/log/openvpn
     environment:
       - OPENVPN_OPTS=--management localhost 7505
-    # AUTOMATION: Start VPN, wait 5s, Add Masquerade Rule
+    # -----------------------------------------------------------
+    # UPDATED COMMAND: Forward RADIUS traffic to the Radius Container
+    # -----------------------------------------------------------
     command: >
       sh -c "ovpn_run &
              echo 'Waiting for tun0...' &&
              while ! ip link show tun0 > /dev/null 2>&1; do sleep 1; done &&
-             echo 'tun0 is up! Adding Masquerade...' &&
+             echo 'tun0 is up! Applying Forwarding Rules...' &&
+             # 1. Allow Outbound (Standard)
              iptables -t nat -I POSTROUTING -o tun0 -j MASQUERADE &&
+             # 2. Find Radius IP
+             RADIUS_IP=\$$(getent hosts netily_radius | awk '{ print \$$1 }') &&
+             echo \"Forwarding RADIUS ports to \$$RADIUS_IP...\" &&
+             # 3. Forward Incoming 1812/1813 from Tunnel -> Radius Container
+             iptables -t nat -A PREROUTING -i tun0 -p udp --dport 1812 -j DNAT --to-destination \$$RADIUS_IP:1812 &&
+             iptables -t nat -A PREROUTING -i tun0 -p udp --dport 1813 -j DNAT --to-destination \$$RADIUS_IP:1813 &&
+             # 4. Masquerade the forwarded traffic so Radius knows where to reply
+             iptables -t nat -A POSTROUTING -d \$$RADIUS_IP -p udp --dport 1812 -j MASQUERADE &&
+             iptables -t nat -A POSTROUTING -d \$$RADIUS_IP -p udp --dport 1813 -j MASQUERADE &&
+             echo 'Rules Applied.' &&
              wait"
     restart: unless-stopped
     sysctls:

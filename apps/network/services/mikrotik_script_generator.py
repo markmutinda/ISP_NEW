@@ -15,11 +15,11 @@ Stage 2 — Version-Specific Config (conf.rsc):
     The full RouterOS configuration with v6/v7-aware syntax.
     • OpenVPN tunnel (username/password, NOT certificates)
     • SSL certs downloaded separately via /tool fetch (NOT embedded)
-    • Bridge + Ports + DHCP
+    • Single Bridge + Ports + DHCP
     • RADIUS (pointing to VPN server IP)
     • Hotspot + Walled Garden
-    • PPPoE server + profiles (set after creation, like LipaNet)
-    • Anti-sharing mangle rules (v7: new-ttl=set:1)
+    • PPPoE server (attached to bridge)
+    • Smart anti-sharing mangle rules (whitelists PPPoE users)
     • Cloud portal redirector (login.html)
 """
 
@@ -33,17 +33,25 @@ class MikrotikScriptGenerator:
         self.router = router
         self.request = request
 
-        # ── URLs ──────────────────────────────────────────────────
+        # ── URLs Logic ───────────────────────────────────────────
+        # In Docker, the router sees the server via the VPN Gateway
+        self.vpn_gateway = "192.168.255.1"
         self.base_url = getattr(settings, 'BASE_URL', '').rstrip('/')
-        self.portal_url = getattr(
-            settings, 'CAPTIVE_PORTAL_URL',
-            self.base_url
-        ).rstrip('/')
+        
+        # Determine the best URL for the router to use
+        # If we have a request, we use the IP the router used to call us
+        if request:
+            host = request.get_host().split(':')[0]
+            self.active_url = f"http://{host}:8000"
+        else:
+            self.active_url = self.base_url
+
+        self.portal_url = getattr(settings, 'CAPTIVE_PORTAL_URL', self.active_url).rstrip('/')
+        
+        # ── Provisioning download base ────────────────────────────
+        self.provision_base = f"{self.active_url}/api/v1/network/provision"
         self.vpn_server_ip = getattr(settings, 'VPN_SERVER_IP', '10.8.0.1')
         self.vpn_api_url = getattr(settings, 'VPN_API_URL', f'http://{self.vpn_server_ip}:8000')
-
-        # ── Provisioning download base ────────────────────────────
-        self.provision_base = f"{self.base_url}/api/v1/network/provision"
 
     def _escape_ros_string(self, s: str) -> str:
         """
@@ -59,6 +67,7 @@ class MikrotikScriptGenerator:
 
     def get_magic_link(self) -> str:
         r = self.router
+        # The Magic Link uses whatever IP the Admin is currently using to reach the server
         url = (
             f"{self.provision_base}/{r.auth_key}/{r.provision_slug}/script.rsc"
         )
@@ -211,18 +220,21 @@ class MikrotikScriptGenerator:
 """
 
     def _section_api_user(self, r: Router) -> str:
+        # HARDCODED FIX: Ensure password is 2202 as requested
+        password = "2202"
         return f"""# ─────────────────────────────────────────────────────────────
 # 2. API USER (Cloud Management Access)
 # ─────────────────────────────────────────────────────────────
 :put "Configuring API user..."
 
 :if ([:len [/user find name="{self._escape_ros_string(r.api_username)}"]] = 0) do={{
-    /user add name="{self._escape_ros_string(r.api_username)}" group=full password="{self._escape_ros_string(r.api_password)}" comment="Netily Cloud API"
+    /user add name="{self._escape_ros_string(r.api_username)}" group=full password="{password}" comment="Netily Cloud API"
 }} else={{
-    /user set [find name="{self._escape_ros_string(r.api_username)}"] password="{self._escape_ros_string(r.api_password)}" group=full
+    /user set [find name="{self._escape_ros_string(r.api_username)}"] password="{password}" group=full
 }}
 
-/ip service set api disabled=no port={r.api_port} address={self.vpn_server_ip}/32,127.0.0.0/8
+# Allow access from the VPN Tunnel and the local Docker network
+/ip service set api disabled=no port={r.api_port} address={self.vpn_gateway}/32,127.0.0.0/8,172.18.0.0/16
 /ip service set api-ssl disabled=yes
 """
 
@@ -241,7 +253,6 @@ class MikrotikScriptGenerator:
 }}
 """
         
-        # --- FIXED SECTION: Added protocol=tcp, cipher=aes256-cbc and auth=sha1 ---
         if is_v6:
             # V6 usually works with defaults, but setting TCP ensures consistency
             ovpn_cmd = f'/interface ovpn-client add name="Netily-VPN" connect-to="{self._escape_ros_string(r.openvpn_server)}" port={r.openvpn_port} user="{self._escape_ros_string(r.openvpn_username)}" password="{self._escape_ros_string(r.openvpn_password)}" cipher={cipher} auth={auth} protocol=tcp add-default-route=no comment="Netily Cloud Controller Tunnel"'
@@ -287,35 +298,49 @@ class MikrotikScriptGenerator:
 """
 
     def _section_bridge_ports(self, r: Router) -> str:
+        # ARCHITECTURE CHANGE: Single Bridge Strategy (Like Lipanet)
+        # All services (Hotspot, PPPoE, DHCP) will run on this one bridge.
+        
         port_cmds = []
+        # Get all interfaces selected in the dashboard
         ports = r.hotspot_interfaces or []
+        
         for port in ports:
-            safe = port.strip()
-            if not safe:
-                continue
-            port_cmds.append(f""":do {{
-    /interface bridge port remove [find interface="{safe}" bridge="netily-bridge"]
-}} on-error={{}}
-:do {{
-    /interface bridge port add bridge="netily-bridge" interface="{safe}"
-    :put "Added {safe} to bridge"
-}} on-error={{
-    :put "Could not add {safe} to bridge (may not exist on this hardware)"
-}}""")
-        ports_script = "\n".join(port_cmds) if port_cmds else ':put "No hotspot interfaces configured — add ports manually"'
+            safe_port = port.strip()
+            if not safe_port: continue
+            
+            # Remove from any old bridge first to prevent errors
+            port_cmds.append(f"""
+:do {{ /interface bridge port remove [find interface="{safe_port}"] }} on-error={{}}
+:do {{ 
+    /interface bridge port add bridge="netily-bridge" interface="{safe_port}"
+    :put " + Added {safe_port} to netily-bridge"
+}} on-error={{ :put " ! Error adding {safe_port} (check hardware)" }}
+""")
+
+        ports_script = "\n".join(port_cmds)
 
         return f"""# ─────────────────────────────────────────────────────────────
-# 5. BRIDGE & PORTS
+# 5. SUPER BRIDGE & PORTS
 # ─────────────────────────────────────────────────────────────
-:put "Creating hotspot network bridge..."
-/interface bridge add name="netily-bridge" comment="Netily Hotspot/PPPoE Bridge"
+:put "Configuring Bridge Topology..."
+
+# 1. Create the single master bridge
+:if ([:len [/interface bridge find name="netily-bridge"]] = 0) do={{
+    /interface bridge add name="netily-bridge" comment="Netily Hotspot & PPPoE"
+}}
+
+# 2. Assign Gateway IP to the bridge
+:do {{ /ip address remove [find interface="netily-bridge"] }} on-error={{}}
 /ip address add address="{r.gateway_cidr}" interface="netily-bridge" comment="Netily Gateway"
+
+# 3. Add Ports
 {ports_script}
 """
 
     def _section_dhcp(self, r: Router, gateway_ip: str, pool_range: str, dhcp_network: str) -> str:
         return f"""# ─────────────────────────────────────────────────────────────
-# 6. IP POOL & DHCP
+# 6. IP POOL & DHCP (Bridge Mode)
 # ─────────────────────────────────────────────────────────────
 :put "Configuring DHCP..."
 
@@ -329,16 +354,14 @@ class MikrotikScriptGenerator:
 """
 
     def _section_radius(self, r: Router) -> str:
-        radius_cmd = f'/radius add address={self.vpn_server_ip} secret="{self._escape_ros_string(r.shared_secret)}" service=hotspot,ppp timeout=3000ms comment="Netily-Cloud-RADIUS"'
+        # FIX: Point RADIUS to the VPN Gateway IP
+        radius_cmd = f'/radius add address={self.vpn_gateway} secret="{self._escape_ros_string(r.shared_secret)}" service=hotspot,ppp timeout=3000ms comment="Netily-Cloud-RADIUS"'
         return f"""# ─────────────────────────────────────────────────────────────
 # 7. RADIUS (Cloud RADIUS via VPN Tunnel)
 # ─────────────────────────────────────────────────────────────
 :put "Configuring Cloud RADIUS..."
-
-:do {{ :foreach i in=[/radius find comment~"Netily"] do={{ /radius remove $i }} }} on-error={{}}
-
+:do {{ /radius remove [find comment~"Netily"] }} on-error={{}}
 {radius_cmd}
-
 /radius incoming set accept=yes port=3799
 """
 
@@ -346,7 +369,7 @@ class MikrotikScriptGenerator:
         profile_cmd = f'/ip hotspot profile add name="netily-profile" hotspot-address="{gateway_ip}" dns-name="{self._escape_ros_string(r.dns_name)}" html-directory="hotspot" login-by=http-pap,mac-cookie use-radius=yes radius-accounting=yes http-cookie-lifetime=1d rate-limit=""'
         server_cmd = f'/ip hotspot add name="netily-hotspot" interface="netily-bridge" address-pool="netily-pool" profile="netily-profile" disabled=no'
         return f"""# ─────────────────────────────────────────────────────────────
-# 8. HOTSPOT PROFILE & SERVER
+# 8. HOTSPOT PROFILE & SERVER (Bridge Mode)
 # ─────────────────────────────────────────────────────────────
 :put "Configuring Hotspot..."
 {profile_cmd}
@@ -371,7 +394,7 @@ class MikrotikScriptGenerator:
 /ip hotspot walled-garden add dst-host="*.safaricom.co.ke" comment="Netily-MPesa"
 /ip hotspot walled-garden add dst-host="*.safaricom.com" comment="Netily-Safaricom"
 /ip hotspot walled-garden add dst-host="*.payhero.co.ke" comment="Netily-PayHero"
-/ip hotspot walled-garden ip add dst-address={self.vpn_server_ip}/32 action=accept comment="Netily-VPN-API"
+/ip hotspot walled-garden ip add dst-address={self.vpn_gateway}/32 action=accept comment="Netily-VPN-API"
 /ip hotspot walled-garden ip add dst-address=10.8.0.0/24 action=accept comment="Netily-VPN-Network"
 """
 
@@ -424,13 +447,15 @@ class MikrotikScriptGenerator:
 """
 
     def _section_hotspot_html(self, r: Router) -> str:
-        login_url = f"{self.provision_base}/{r.auth_key}/hotspot/login.html"
-        status_url = f"{self.provision_base}/{r.auth_key}/hotspot/status.html"
+        # FIX: Once VPN is up, use the VPN Gateway to download HTML pages
+        # This solves the 404/Timeout issue during provisioning
+        login_url = f"http://{self.vpn_gateway}:8000/api/v1/network/provision/{r.auth_key}/hotspot/login.html"
+        status_url = f"http://{self.vpn_gateway}:8000/api/v1/network/provision/{r.auth_key}/hotspot/status.html"
 
         return f"""# ─────────────────────────────────────────────────────────────
 # 11. HOTSPOT HTML PAGES (Cloud Portal Redirectors)
 # ─────────────────────────────────────────────────────────────
-:put "Downloading hotspot pages..."
+:put "Downloading hotspot pages via VPN..."
 
 # Detect hotspot HTML directory automatically (like LipaNet)
 :local dir [/ip hotspot profile get [find name="netily-profile"] html-directory]
@@ -440,51 +465,67 @@ class MikrotikScriptGenerator:
 }}
 
 :do {{
-    /tool fetch url="{login_url}" dst-path=("$dir/login.html") http-header-field="ngrok-skip-browser-warning: true"
+    /tool fetch url="{login_url}" dst-path=("$dir/login.html")
     :put "login.html installed."
-}} on-error={{
-    :put "WARNING: Could not download login.html"
-}}
+}} on-error={{ :put "WARNING: Could not download login.html" }}
 
 :do {{
-    /tool fetch url="{status_url}" dst-path=("$dir/status.html") http-header-field="ngrok-skip-browser-warning: true"
+    /tool fetch url="{status_url}" dst-path=("$dir/status.html")
     :put "status.html installed."
-}} on-error={{
-    :put "WARNING: Could not download status.html"
-}}
+}} on-error={{ :put "WARNING: Could not download status.html" }}
 """
 
     def _section_pppoe(self, r: Router, pppoe_local: str) -> str:
-        # LipaNet style: create pool, profile, then minimal server, then set profile/auth
-        pool_cmd = f'/ip pool add name="netily-pppoe-pool" ranges="{r.pppoe_pool}"'
-        profile_cmd = f'/ppp profile add name="netily-pppoe-profile" local-address={pppoe_local} remote-address=netily-pppoe-pool dns-server=8.8.8.8,1.1.1.1 use-encryption=no comment="Netily PPPoE Profile"'
-        # Minimal server add (no name, service-name only, as LipaNet does)
-        server_add = f'/interface pppoe-server server add interface="netily-bridge" service-name="netily-pppoe" disabled=no comment="Netily PPPoE Server"'
-        # After creation, set default-profile and authentication
-        server_config = f'''
-:do {{
-    /interface pppoe-server server set [find service-name="netily-pppoe"] default-profile="netily-pppoe-profile" authentication=pap,chap
-}} on-error={{}}
-'''
+        # ARCHITECTURE CHANGE: 
+        # 1. Attach to 'netily-bridge'
+        # 2. Use 'netily-pppoe-pool' (Radius will override this with static IP usually)
+        # 3. Disable encryption to match Lipanet profile
+        
         return f"""# ─────────────────────────────────────────────────────────────
-# 12. PPPoE SERVER
+# 12. PPPoE SERVER (Bridge Mode)
 # ─────────────────────────────────────────────────────────────
-:put "Configuring PPPoE server..."
+:put "Configuring PPPoE Server..."
 
-{pool_cmd}
-{profile_cmd}
-{server_add}
-{server_config}
+# Create Pool (Fallback if RADIUS doesn't send IP)
+:do {{ /ip pool remove [find name="netily-pppoe-pool"] }} on-error={{}}
+/ip pool add name="netily-pppoe-pool" ranges="{r.pppoe_pool}"
+
+# Create Profile (No Encryption, Change MSS)
+:do {{ /ppp profile remove [find name="netily-pppoe-profile"] }} on-error={{}}
+/ppp profile add name="netily-pppoe-profile" local-address={pppoe_local} remote-address=netily-pppoe-pool dns-server=8.8.8.8,1.1.1.1 use-encryption=no change-tcp-mss=yes only-one=default
+
+# Create Server on the BRIDGE
+:do {{ /interface pppoe-server server remove [find service-name="netily-pppoe"] }} on-error={{}}
+/interface pppoe-server server add service-name="netily-pppoe" interface="netily-bridge" default-profile="netily-pppoe-profile" authentication=pap,chap disabled=no
+
+# Enforce RADIUS
+/ppp aaa set use-radius=yes accounting=yes
 """
 
     def _section_anti_sharing(self, r: Router, is_v6: bool) -> str:
-        # LipaNet uses new-ttl=set:1 for both v6 and v7
-        mangle_cmd = f'/ip firewall mangle add chain=forward action=change-ttl new-ttl=set:1 passthrough=yes comment="Netily-AntiShare-TTL"'
+        # ARCHITECTURE CHANGE: Smart Bypass Logic
+        # 1. Create a VIP list (allowed-ips).
+        # 2. Mark connections from VIPs.
+        # 3. Apply TTL=1 only to traffic that is NOT marked.
+        
         return f"""# ─────────────────────────────────────────────────────────────
-# 13. ANTI-SHARING (TTL Mangle Rules)
+# 13. SMART ANTI-SHARING
 # ─────────────────────────────────────────────────────────────
-:put "Configuring anti-sharing rules..."
-{mangle_cmd}
+:put "Configuring Anti-Sharing Rules..."
+
+# Cleanup old rules
+:do {{ /ip firewall mangle remove [find comment~"Netily"] }} on-error={{}}
+:do {{ /ip firewall address-list remove [find list="allowed-ips"] }} on-error={{}}
+
+# 1. Define VIP Network (The PPPoE Pool Range)
+# (Any user with an IP in this range will NOT be restricted)
+/ip firewall address-list add list=allowed-ips address={r.pppoe_pool} comment="Netily-PPPoE-VIPs"
+
+# 2. Mark VIP Connections
+/ip firewall mangle add chain=prerouting src-address-list=allowed-ips action=mark-connection new-connection-mark=allowed-con passthrough=yes comment="Netily-VIP-Mark"
+
+# 3. Apply Anti-Share (TTL=1) ONLY to Non-VIPs (Hotspot Users)
+/ip firewall mangle add chain=postrouting connection-mark=!allowed-con out-interface="netily-bridge" action=change-ttl new-ttl=set:1 passthrough=no comment="Netily-AntiShare-Enforce"
 """
 
     def _section_nat(self, r: Router) -> str:
@@ -514,7 +555,7 @@ class MikrotikScriptGenerator:
 :put " NETILY CLOUD CONTROLLER — SETUP COMPLETE"
 :put " Router:  {self._escape_ros_string(r.name)}"
 :put " VPN:     {self._escape_ros_string(r.openvpn_server)}:{r.openvpn_port}"
-:put " RADIUS:  {self.vpn_server_ip}"
+:put " RADIUS:  {self.vpn_gateway}"
 :put " Portal:  {self.portal_url}"
 :put "════════════════════════════════════════════════════"
 """
