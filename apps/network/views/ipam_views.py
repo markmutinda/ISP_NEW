@@ -246,9 +246,11 @@ class IPPoolViewSet(viewsets.ModelViewSet):
     queryset = IPPool.objects.all().select_related('subnet', 'router')
     serializer_class = IPPoolSerializer
     permission_classes = [HasCompanyAccess]
-    filter_backends = [DjangoFilterBackend, filters.SearchFilter]
+    filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
     filterset_fields = ['subnet', 'pool_type', 'is_active', 'router']
     search_fields = ['name', 'start_ip', 'end_ip', 'description']
+    ordering_fields = ['name', 'pool_type', 'total_ips', 'used_ips', 'is_active', 'created_at']
+    ordering = ['-created_at']
     
     def get_queryset(self):
         """
