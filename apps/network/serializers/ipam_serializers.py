@@ -4,6 +4,7 @@ from apps.network.models.ipam_models import (
     Subnet, VLAN, IPPool, IPAddress, DHCPRange,
     SUBNET_PREFIX_CHOICES, CIDR_CHOICES, BLOCKED_PREFIXES
 )
+from apps.network.models.router_models import Router
 
 
 class SubnetSerializer(serializers.ModelSerializer):
@@ -41,6 +42,11 @@ class VLANSerializer(serializers.ModelSerializer):
 
 class IPPoolSerializer(serializers.ModelSerializer):
     """Serializer for IP Pools — Cloud-Led IPAM with subnet builder fields."""
+    router = serializers.PrimaryKeyRelatedField(
+        queryset=Router.objects.all(),
+        required=False,
+        allow_null=True
+    )
     subnet_cidr = serializers.SerializerMethodField()
     pool_type_display = serializers.CharField(source='get_pool_type_display', read_only=True)
     ip_range = serializers.SerializerMethodField()

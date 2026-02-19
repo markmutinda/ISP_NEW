@@ -207,8 +207,8 @@ class IPPool(AuditMixin):
     class Meta:
         verbose_name = 'IP Pool'
         verbose_name_plural = 'IP Pools'
-        unique_together = [['router', 'name']]
-        ordering = ['router', 'name']
+        unique_together = [['name']]
+        ordering = ['name']
     
     def clean(self):
         """Validate subnet prefix is not blocked."""
