@@ -359,6 +359,44 @@ class IPPoolViewSet(viewsets.ModelViewSet):
                 'pools': IPPoolSerializer(pools, many=True).data,
             })
         return Response(result)
+    
+    @action(detail=True, methods=['get'], url_path='available-ips')
+    def available_ips_list(self, request, pk=None):
+        """Get all AVAILABLE IPs from a pool — for the 'Long Dropdown' UI.
+        
+        Returns a lightweight list: [{id, ip_address, status}]
+        Used when creating a customer service to pick a specific static IP.
+        Supports ?search= to filter IPs by partial match.
+        """
+        pool = self.get_object()
+        ips = pool.pool_addresses.filter(status='AVAILABLE').order_by('ip_address')
+        
+        # Optional search filter
+        search = request.query_params.get('search', '')
+        if search:
+            ips = ips.filter(ip_address__icontains=search)
+        
+        # Limit to 500 for performance
+        ips = ips[:500]
+        
+        data = [{'id': ip.id, 'ip_address': ip.ip_address} for ip in ips]
+        return Response({
+            'pool_id': pool.id,
+            'pool_name': pool.name,
+            'total_available': pool.pool_addresses.filter(status='AVAILABLE').count(),
+            'results': data
+        })
+    
+    @action(detail=False, methods=['get'], url_path='subnet-prefix-options')
+    def subnet_prefix_options(self, request):
+        """Return the allowed subnet prefix + CIDR choices for the frontend form."""
+        from apps.network.models.ipam_models import SUBNET_PREFIX_CHOICES, CIDR_CHOICES, BLOCKED_PREFIXES
+        return Response({
+            'prefixes': [{'value': v, 'label': l} for v, l in SUBNET_PREFIX_CHOICES],
+            'cidr_options': [{'value': v, 'label': l} for v, l in CIDR_CHOICES],
+            'blocked_prefixes': list(BLOCKED_PREFIXES),
+            'default_prefix': '10.50',
+        })
 
 class IPAddressViewSet(viewsets.ModelViewSet):
     queryset = IPAddress.objects.all().select_related(

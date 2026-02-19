@@ -1,7 +1,8 @@
 # apps/network/serializers/ipam_serializers.py
 from rest_framework import serializers
 from apps.network.models.ipam_models import (
-    Subnet, VLAN, IPPool, IPAddress, DHCPRange
+    Subnet, VLAN, IPPool, IPAddress, DHCPRange,
+    SUBNET_PREFIX_CHOICES, CIDR_CHOICES, BLOCKED_PREFIXES
 )
 
 
@@ -39,13 +40,14 @@ class VLANSerializer(serializers.ModelSerializer):
 
 
 class IPPoolSerializer(serializers.ModelSerializer):
-    """Serializer for IP Pools — includes router (NAS) association for multi-router IPAM."""
+    """Serializer for IP Pools — Cloud-Led IPAM with subnet builder fields."""
     subnet_cidr = serializers.SerializerMethodField()
     pool_type_display = serializers.CharField(source='get_pool_type_display', read_only=True)
     ip_range = serializers.SerializerMethodField()
-    router_name = serializers.CharField(source='router.name', read_only=True)
-    router_ip = serializers.CharField(source='router.ip_address', read_only=True)
-    router_status = serializers.CharField(source='router.status', read_only=True)
+    cidr_notation = serializers.CharField(read_only=True)
+    router_name = serializers.CharField(source='router.name', read_only=True, default=None)
+    router_ip = serializers.CharField(source='router.ip_address', read_only=True, default=None)
+    router_status = serializers.CharField(source='router.status', read_only=True, default=None)
     available_ips = serializers.SerializerMethodField()
     utilization_percentage = serializers.SerializerMethodField()
     
@@ -54,7 +56,12 @@ class IPPoolSerializer(serializers.ModelSerializer):
         fields = [
             'id', 'router', 'router_name', 'router_ip', 'router_status',
             'subnet', 'subnet_cidr', 'name', 'pool_type',
-            'pool_type_display', 'start_ip', 'end_ip', 'ip_range',
+            'pool_type_display',
+            # Cloud-Led subnet builder fields
+            'subnet_prefix', 'subnet_octet', 'cidr_prefix',
+            'network_address', 'broadcast_address', 'cidr_notation',
+            # Computed range
+            'start_ip', 'end_ip', 'ip_range',
             'gateway', 'dns_servers', 'lease_time', 'description',
             'is_active', 'total_ips', 'used_ips', 'available_ips',
             'utilization_percentage', 'created_at', 'updated_at'
@@ -78,9 +85,10 @@ class IPPoolSerializer(serializers.ModelSerializer):
 
 
 class IPAddressSerializer(serializers.ModelSerializer):
-    subnet_cidr = serializers.CharField(source='subnet.network_cidr', read_only=True)
-    pool_name = serializers.CharField(source='ip_pool.name', read_only=True)
-    customer_name = serializers.CharField(source='service_connection.customer.full_name', read_only=True)
+    subnet_cidr = serializers.CharField(source='subnet.network_cidr', read_only=True, default=None)
+    pool_name = serializers.CharField(source='ip_pool.name', read_only=True, default=None)
+    customer_name = serializers.SerializerMethodField()
+    assigned_to_name = serializers.SerializerMethodField()
     assignment_type_display = serializers.CharField(source='get_assignment_type_display', read_only=True)
     status_display = serializers.CharField(source='get_status_display', read_only=True)
     
@@ -91,9 +99,20 @@ class IPAddressSerializer(serializers.ModelSerializer):
             'ip_address', 'assignment_type', 'assignment_type_display',
             'status', 'status_display', 'mac_address', 'hostname',
             'description', 'service_connection', 'customer_name',
+            'assigned_to', 'assigned_to_name',
             'lease_start', 'lease_end', 'last_seen', 'device_type',
             'manufacturer', 'created_at', 'updated_at'
         ]
+    
+    def get_customer_name(self, obj):
+        if obj.service_connection and obj.service_connection.customer:
+            return obj.service_connection.customer.full_name
+        return None
+    
+    def get_assigned_to_name(self, obj):
+        if obj.assigned_to:
+            return obj.assigned_to.full_name
+        return None
 
 
 class DHCPRangeSerializer(serializers.ModelSerializer):

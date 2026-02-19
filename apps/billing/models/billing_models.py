@@ -26,6 +26,7 @@ class Plan(models.Model):
         ('DAYS', 'Days'),
         ('HOURS', 'Hours'),
         ('MINUTES', 'Minutes'),
+        ('MONTHS', 'Months'),
         ('UNLIMITED', 'Unlimited'),
     ]
     
@@ -61,11 +62,33 @@ class Plan(models.Model):
     max_sessions = models.IntegerField(default=1)  # Concurrent devices allowed
     session_timeout = models.IntegerField(null=True, blank=True)  # Idle timeout in minutes
     
+    # Validity in months (for monthly plans — LipaNet parity)
+    validity_months = models.IntegerField(
+        null=True, blank=True,
+        help_text='Duration in months (for MONTHS validity type)'
+    )
+    
+    # MikroTik Queue Priority (1=highest, 8=lowest)
+    priority = models.IntegerField(
+        default=8,
+        help_text='Queue priority (1=highest bandwidth priority, 8=lowest)'
+    )
+    
     # Burst Speed (for MikroTik)
+    burst_enabled = models.BooleanField(default=False, help_text='Enable burst speed')
     burst_download = models.IntegerField(null=True, blank=True)  # Burst download speed
     burst_upload = models.IntegerField(null=True, blank=True)  # Burst upload speed
     burst_threshold = models.IntegerField(null=True, blank=True)  # Burst threshold in KB
     burst_time = models.IntegerField(null=True, blank=True)  # Burst time in seconds
+    
+    # IP Pool linkage (optional — ties plan to a specific router pool)
+    ip_pool = models.ForeignKey(
+        'network.IPPool',
+        on_delete=models.SET_NULL,
+        null=True, blank=True,
+        related_name='plans',
+        help_text='Default IP pool for customers on this plan (Framed-Pool)'
+    )
     
     # Fair Usage Policy
     fup_limit = models.IntegerField(null=True, blank=True)  # GB before throttle
@@ -156,6 +179,8 @@ class Plan(models.Model):
             if hours > 0:
                 return f'{days}d {hours}h'
             return f'{days} day{"s" if days > 1 else ""}'
+        elif self.validity_type == 'MONTHS' and self.validity_months:
+            return f'{self.validity_months} month{"s" if self.validity_months > 1 else ""}'
         else:
             return f'{self.duration_days} day{"s" if self.duration_days > 1 else ""}'
     
@@ -181,6 +206,8 @@ class Plan(models.Model):
             return self.validity_minutes
         elif self.validity_type == 'HOURS':
             return (self.validity_hours or 0) * 60
+        elif self.validity_type == 'MONTHS':
+            return (self.validity_months or 1) * 30 * 24 * 60
         else:  # DAYS
             return (self.duration_days or 30) * 24 * 60
 
@@ -211,6 +238,8 @@ class Plan(models.Model):
             return now + timedelta(minutes=self.validity_minutes)
         elif validity_type == 'HOURS' and self.validity_hours:
             return now + timedelta(hours=self.validity_hours)
+        elif validity_type == 'MONTHS' and self.validity_months:
+            return now + timedelta(days=self.validity_months * 30)
         elif validity_type == 'DAYS':
             days = self.duration_days or 30
             return now + timedelta(days=days)
@@ -240,6 +269,8 @@ class Plan(models.Model):
             return timedelta(minutes=self.validity_minutes)
         elif validity_type == 'HOURS' and self.validity_hours:
             return timedelta(hours=self.validity_hours)
+        elif validity_type == 'MONTHS' and self.validity_months:
+            return timedelta(days=self.validity_months * 30)
         elif validity_type == 'DAYS':
             days = self.duration_days or 30
             return timedelta(days=days)

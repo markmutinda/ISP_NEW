@@ -193,9 +193,10 @@ def auto_create_radius_for_service(sender, instance, created, **kwargs):
                     needs_save = True
                     logger.info(f"Updated bandwidth profile for: {credentials.username}")
             
-            # 🎯 Handle ROUTER / IP POOL update from service creation form
+            # 🎯 Handle ROUTER / IP POOL / ASSIGNED IP update from service creation form
             radius_router_id = getattr(instance, '_radius_router_id', None)
             radius_ip_pool = getattr(instance, '_radius_ip_pool', None)
+            radius_assigned_ip_id = getattr(instance, '_radius_assigned_ip_id', None)
             
             if radius_router_id is not None:
                 from apps.network.models.router_models import Router
@@ -212,6 +213,23 @@ def auto_create_radius_for_service(sender, instance, created, **kwargs):
                 credentials.ip_pool = radius_ip_pool
                 needs_save = True
                 logger.info(f"Updated ip_pool for {credentials.username}: {radius_ip_pool}")
+            
+            # 🎯 Cloud-Led IPAM: Assign a specific IP address
+            if radius_assigned_ip_id is not None:
+                from apps.network.models.ipam_models import IPAddress
+                try:
+                    ip_addr = IPAddress.objects.get(pk=radius_assigned_ip_id)
+                    if credentials.assigned_ip_address != ip_addr:
+                        # Release old IP if any
+                        if credentials.assigned_ip_address:
+                            credentials.assigned_ip_address.release()
+                        credentials.assigned_ip_address = ip_addr
+                        credentials.static_ip = ip_addr.ip_address  # Sync legacy field
+                        ip_addr.assign_to_customer(customer, instance)
+                        needs_save = True
+                        logger.info(f"Assigned IP {ip_addr.ip_address} to {credentials.username} (Cloud-Led)")
+                except IPAddress.DoesNotExist:
+                    logger.warning(f"IPAddress {radius_assigned_ip_id} not found for assignment")
             
             # Save all changes in one go
             if needs_save:
@@ -265,9 +283,10 @@ def auto_create_radius_for_service(sender, instance, created, **kwargs):
             logger.info(f"RADIUS user {username} has unlimited validity (no expiration)")
         
         # Create the credentials (triggers the sync_credentials_to_radius signal above)
-        # Pick up router and ip_pool if stashed by the service serializer
+        # Pick up router, ip_pool, and assigned IP if stashed by the service serializer
         radius_router_id = getattr(instance, '_radius_router_id', None)
         radius_ip_pool = getattr(instance, '_radius_ip_pool', '') or ''
+        radius_assigned_ip_id = getattr(instance, '_radius_assigned_ip_id', None)
         
         create_kwargs = dict(
             customer=customer,
@@ -290,11 +309,28 @@ def auto_create_radius_for_service(sender, instance, created, **kwargs):
         if radius_ip_pool:
             create_kwargs['ip_pool'] = radius_ip_pool
         
-        CustomerRadiusCredentials.objects.create(**create_kwargs)
+        # 🎯 Cloud-Led IPAM: Assign specific IP
+        assigned_ip_obj = None
+        if radius_assigned_ip_id:
+            from apps.network.models.ipam_models import IPAddress
+            try:
+                assigned_ip_obj = IPAddress.objects.get(pk=radius_assigned_ip_id)
+                create_kwargs['assigned_ip_address'] = assigned_ip_obj
+                create_kwargs['static_ip'] = assigned_ip_obj.ip_address  # Sync legacy field
+            except IPAddress.DoesNotExist:
+                logger.warning(f"IPAddress {radius_assigned_ip_id} not found for RADIUS cred creation")
+        
+        creds = CustomerRadiusCredentials.objects.create(**create_kwargs)
+        
+        # Mark the IP as ASSIGNED after credentials are created
+        if assigned_ip_obj:
+            assigned_ip_obj.assign_to_customer(customer, instance)
+            logger.info(f"Cloud-Led: Assigned IP {assigned_ip_obj.ip_address} to {creds.username}")
         
         logger.info(f"Auto-created RADIUS credentials: username={username}"
                      f"{f', router_id={radius_router_id}' if radius_router_id else ''}"
-                     f"{f', ip_pool={radius_ip_pool}' if radius_ip_pool else ''}")
+                     f"{f', ip_pool={radius_ip_pool}' if radius_ip_pool else ''}"
+                     f"{f', assigned_ip={assigned_ip_obj.ip_address}' if assigned_ip_obj else ''}")
         
     except Exception as e:
         logger.error(f"Failed to auto-create RADIUS for service {instance.id}: {e}")
@@ -316,21 +352,55 @@ def _get_or_create_bandwidth_profile(service_connection):
     
     profile_name = f"plan_{plan.id}_{plan.code or 'auto'}"
     
+    # Build defaults including burst and priority from the Plan
+    defaults = {
+        'description': f"Auto-created from plan: {plan.name}",
+        'download_speed': download_kbps,
+        'upload_speed': upload_kbps,
+        'priority': getattr(plan, 'priority', 8) or 8,
+        'is_active': True,
+    }
+    
+    # Propagate burst settings if enabled on the plan
+    if getattr(plan, 'burst_enabled', False) and plan.burst_download and plan.burst_upload:
+        speed_unit = getattr(plan, 'speed_unit', 'MBPS') or 'MBPS'
+        multiplier = 1000 if speed_unit == 'MBPS' else 1
+        defaults['burst_download'] = plan.burst_download * multiplier
+        defaults['burst_upload'] = plan.burst_upload * multiplier
+        defaults['burst_threshold'] = (plan.burst_threshold or 0) * multiplier
+        defaults['burst_time'] = plan.burst_time or 10
+    
     profile, created = RadiusBandwidthProfile.objects.get_or_create(
         name=profile_name,
-        defaults={
-            'description': f"Auto-created from plan: {plan.name}",
-            'download_speed': download_kbps,
-            'upload_speed': upload_kbps,
-            'is_active': True,
-        }
+        defaults=defaults,
     )
     
-    # Update if speeds changed
+    # Update if speeds/burst/priority changed
     if not created:
+        needs_update = False
         if profile.download_speed != download_kbps or profile.upload_speed != upload_kbps:
             profile.download_speed = download_kbps
             profile.upload_speed = upload_kbps
+            needs_update = True
+        
+        plan_priority = getattr(plan, 'priority', 8) or 8
+        if profile.priority != plan_priority:
+            profile.priority = plan_priority
+            needs_update = True
+        
+        if getattr(plan, 'burst_enabled', False) and plan.burst_download and plan.burst_upload:
+            speed_unit = getattr(plan, 'speed_unit', 'MBPS') or 'MBPS'
+            multiplier = 1000 if speed_unit == 'MBPS' else 1
+            new_burst_dl = plan.burst_download * multiplier
+            new_burst_ul = plan.burst_upload * multiplier
+            if profile.burst_download != new_burst_dl or profile.burst_upload != new_burst_ul:
+                profile.burst_download = new_burst_dl
+                profile.burst_upload = new_burst_ul
+                profile.burst_threshold = (plan.burst_threshold or 0) * multiplier
+                profile.burst_time = plan.burst_time or 10
+                needs_update = True
+        
+        if needs_update:
             profile.save()
     
     return profile

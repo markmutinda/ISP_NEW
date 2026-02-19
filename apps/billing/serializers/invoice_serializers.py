@@ -14,6 +14,9 @@ class PlanSerializer(serializers.ModelSerializer):
     subscriber_count = serializers.IntegerField(read_only=True)
     subscribers_count = serializers.IntegerField(source='subscriber_count', read_only=True)
     created_by_name = serializers.CharField(source='created_by.get_full_name', read_only=True)
+    # IP Pool info
+    ip_pool_name = serializers.CharField(source='ip_pool.name', read_only=True, allow_null=True, default=None)
+    ip_pool_range = serializers.CharField(source='ip_pool.ip_range', read_only=True, allow_null=True, default=None)
     # Computed display properties
     validity_display = serializers.CharField(read_only=True)
     speed_display = serializers.CharField(read_only=True)
@@ -28,12 +31,16 @@ class PlanSerializer(serializers.ModelSerializer):
             'download_speed', 'upload_speed', 'speed_unit', 'data_limit',
             # Validity - flexible time-based
             'validity_type', 'duration_days', 'validity_days',
-            'validity_hours', 'validity_minutes',
+            'validity_hours', 'validity_minutes', 'validity_months',
             'validity_display', 'speed_display', 'total_validity_minutes',
             # Session/Connection limits
             'max_sessions', 'session_timeout',
+            # MikroTik QoS
+            'priority',
             # Burst Speed (MikroTik)
-            'burst_download', 'burst_upload', 'burst_threshold', 'burst_time',
+            'burst_enabled', 'burst_download', 'burst_upload', 'burst_threshold', 'burst_time',
+            # IP Pool linkage
+            'ip_pool', 'ip_pool_name', 'ip_pool_range',
             # Fair Usage Policy
             'fup_limit', 'fup_speed',
             # Status & Visibility
@@ -75,10 +82,15 @@ class PlanCreateSerializer(serializers.ModelSerializer):
             'download_speed', 'upload_speed', 'speed_unit', 'data_limit',
             # Validity - flexible time-based
             'validity_type', 'duration_days', 'validity_hours', 'validity_minutes',
+            'validity_months',
             # Session/Connection limits
             'max_sessions', 'session_timeout',
+            # MikroTik QoS
+            'priority',
             # Burst Speed (MikroTik)
-            'burst_download', 'burst_upload', 'burst_threshold', 'burst_time',
+            'burst_enabled', 'burst_download', 'burst_upload', 'burst_threshold', 'burst_time',
+            # IP Pool linkage
+            'ip_pool',
             # Fair Usage Policy
             'fup_limit', 'fup_speed',
             # Status & Visibility

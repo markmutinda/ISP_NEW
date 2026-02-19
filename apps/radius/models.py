@@ -641,12 +641,21 @@ class CustomerRadiusCredentials(models.Model):
     static_ip = models.GenericIPAddressField(
         null=True,
         blank=True,
-        help_text="Static IP to assign (optional)"
+        help_text="Static IP to assign (optional — legacy field, prefer assigned_ip_address)"
     )
     ip_pool = models.CharField(
         max_length=64,
         blank=True,
-        help_text="IP pool name for dynamic assignment (Framed-Pool)"
+        help_text="IP pool name for dynamic assignment (Framed-Pool) — legacy, kept for backward compat"
+    )
+    # Cloud-Led IPAM: FK to the specific IPAddress record
+    assigned_ip_address = models.ForeignKey(
+        'network.IPAddress',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='radius_credentials',
+        help_text="The specific IP address assigned from the pool (Cloud-Led IPAM)"
     )
     # Router (NAS) this customer is assigned to
     router = models.ForeignKey(
@@ -711,10 +720,25 @@ class CustomerRadiusCredentials(models.Model):
         if self.expiration_date:
             check_attrs['Expiration'] = self.expiration_date.strftime('%b %d %Y %H:%M:%S')
         
-        if self.static_ip:
+        # ── Cloud-Led IPAM: Prefer assigned_ip_address (Framed-IP-Address) ──
+        # Priority: assigned_ip_address FK > static_ip field > ip_pool (legacy Framed-Pool)
+        if self.assigned_ip_address:
+            # Cloud-Led: Send the specific static IP — router obeys, no local pool needed
+            reply_attrs['Framed-IP-Address'] = str(self.assigned_ip_address.ip_address)
+            # Also send the netmask derived from the pool's CIDR
+            if self.assigned_ip_address.ip_pool and self.assigned_ip_address.ip_pool.cidr_prefix:
+                import ipaddress as _ipa
+                cidr = self.assigned_ip_address.ip_pool.cidr_prefix
+                netmask = str(_ipa.IPv4Network(f'0.0.0.0/{cidr}', strict=False).netmask)
+                reply_attrs['Framed-IP-Netmask'] = netmask
+            else:
+                reply_attrs['Framed-IP-Netmask'] = '255.255.255.0'
+        elif self.static_ip:
+            # Legacy static IP (manually entered)
             reply_attrs['Framed-IP-Address'] = str(self.static_ip)
-        
-        if self.ip_pool:
+            reply_attrs['Framed-IP-Netmask'] = '255.255.255.0'
+        elif self.ip_pool:
+            # Legacy fallback: Framed-Pool (router-led assignment)
             reply_attrs['Framed-Pool'] = self.ip_pool
         
         # Create or update RADIUS user

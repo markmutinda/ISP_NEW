@@ -220,8 +220,8 @@ class MikrotikScriptGenerator:
 """
 
     def _section_api_user(self, r: Router) -> str:
-        # HARDCODED FIX: Ensure password is 2202 as requested
-        password = "2202"
+        # Use the unique auto-generated password from the Router model (secrets.token_urlsafe)
+        password = self._escape_ros_string(r.api_password)
         return f"""# ─────────────────────────────────────────────────────────────
 # 2. API USER (Cloud Management Access)
 # ─────────────────────────────────────────────────────────────
