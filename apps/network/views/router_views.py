@@ -127,9 +127,47 @@ class RouterViewSet(viewsets.ModelViewSet):
     search_fields = ['name', 'ip_address', 'model', 'location', 'tags']
     ordering_fields = ['name', 'last_seen', 'created_at', 'status']
     queryset = Router.objects.all()
-   
-    def get_queryset(self):
+
+    def _ensure_tenant_context(self):
+        """
+        If the middleware hasn't set a tenant (e.g. request came via plain
+        localhost), try to resolve it from the authenticated user's company.
+        This lets the standard get_queryset() work without cross-tenant scans.
+        """
+        from django.db import connection as db_conn
+
+        if hasattr(self.request, 'tenant') and self.request.tenant:
+            return  # Already resolved by middleware
+
         user = self.request.user
+        if not user or not user.is_authenticated:
+            return
+
+        try:
+            company = getattr(user, 'company', None)
+            if company:
+                tenant = getattr(company, 'tenant', None)
+                if tenant:
+                    db_conn.set_tenant(tenant)
+                    self.request.tenant = tenant
+                    self.request.company = company
+                    return
+
+            # Superuser without company — pick the first active tenant
+            if user.is_superuser:
+                from apps.core.models import Tenant
+                db_conn.set_schema_to_public()
+                first_tenant = Tenant.objects.filter(is_active=True).exclude(
+                    schema_name='public'
+                ).first()
+                if first_tenant:
+                    db_conn.set_tenant(first_tenant)
+                    self.request.tenant = first_tenant
+        except Exception:
+            pass
+
+    def get_queryset(self):
+        self._ensure_tenant_context()
        
         # All users in a tenant see only their tenant's routers
         qs = Router.objects.all()
@@ -139,6 +177,62 @@ class RouterViewSet(viewsets.ModelViewSet):
             qs = qs.filter(tenant_subdomain=self.request.tenant.subdomain)
        
         return qs
+
+    def retrieve(self, request, *args, **kwargs):
+        """
+        GET /routers/{pk}/  — find router across all tenants so the detail
+        page works even when the request comes in without tenant context
+        (e.g. plain localhost from the Next.js frontend).
+        """
+        from django.db import connection as db_conn
+
+        pk = kwargs.get('pk') or args[0]
+
+        # Always use cross-tenant search (proven pattern)
+        router, tenant = find_router_across_tenants(router_id=pk)
+        if not router:
+            return Response({'error': 'Router not found'}, status=status.HTTP_404_NOT_FOUND)
+        db_conn.set_tenant(tenant)
+        request.tenant = tenant
+
+        serializer = self.get_serializer(router)
+        return Response(serializer.data)
+
+    def list(self, request, *args, **kwargs):
+        """
+        GET /routers/  — if no tenant context, aggregate routers from all tenants.
+        """
+        from django.db import connection as db_conn
+        logger.info(f"[RouterViewSet.list] tenant={getattr(request, 'tenant', None)}")
+
+        # If tenant was already resolved by middleware, standard list works
+        if hasattr(request, 'tenant') and request.tenant:
+            return super().list(request, *args, **kwargs)
+
+        # Fallback: aggregate routers across all tenants
+        try:
+            from apps.core.models import Tenant
+            db_conn.set_schema_to_public()
+            tenants = list(Tenant.objects.filter(is_active=True).exclude(schema_name='public'))
+            logger.info(f"[RouterViewSet.list] Found {len(tenants)} tenants")
+            all_routers = []
+            for tenant in tenants:
+                try:
+                    db_conn.set_tenant(tenant)
+                    for router in Router.objects.all():
+                        data = RouterSerializer(router).data
+                        all_routers.append(data)
+                except Exception as e:
+                    logger.debug(f"Skipping tenant {tenant.subdomain}: {e}")
+                    continue
+
+            return Response({
+                'count': len(all_routers),
+                'results': all_routers,
+            })
+        except Exception as e:
+            logger.error(f"Failed to list routers across tenants: {e}", exc_info=True)
+            return Response({'count': 0, 'results': []})
     
     def perform_create(self, serializer):
         # The serializer will handle adding company_name and tenant_subdomain
