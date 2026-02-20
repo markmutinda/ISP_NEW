@@ -15,6 +15,8 @@ from apps.network.views.router_views import (
     RouterHotspotEnableView,
     RouterHotspotUpdateView,
     RouterBridgePortView,
+    RouterHotspotIPAMView,
+    RouterHotspotIPAMApplyView,
     download_router_cert,
 )
 
@@ -94,6 +96,10 @@ urlpatterns = [
     path('routers/<int:pk>/hotspot/enable/', RouterHotspotEnableView.as_view(), name='router-hotspot-enable'),
     path('routers/<int:pk>/hotspot/update/', RouterHotspotUpdateView.as_view(), name='router-hotspot-update'),
     path('routers/<int:pk>/bridge/port/', RouterBridgePortView.as_view(), name='router-bridge-port'),
+    
+    # Hotspot IPAM (IP Address + Subnet Configuration)
+    path('routers/<int:pk>/hotspot/ipam/', RouterHotspotIPAMView.as_view(), name='router-hotspot-ipam'),
+    path('routers/<int:pk>/hotspot/ipam/apply/', RouterHotspotIPAMApplyView.as_view(), name='router-hotspot-ipam-apply'),
 
     # ─── Provisioning Endpoints (PUBLIC — for MikroTik /tool fetch) ───
     # Stage 1: Base script download (the "Magic Link" destination)

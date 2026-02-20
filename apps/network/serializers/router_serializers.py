@@ -51,6 +51,7 @@ class RouterSerializer(serializers.ModelSerializer):
             'enable_openvpn', 'openvpn_server', 'openvpn_port',
             'enable_hotspot', 'enable_pppoe',
             'gateway_cidr', 'dns_name', 'wan_interface', 'hotspot_interfaces',
+            'hotspot_base_ip', 'hotspot_subnet_cidr',
             'pppoe_pool', 'pppoe_local_address',
             'config_type',
             'created_at', 'updated_at',

@@ -2308,3 +2308,219 @@ class RouterHeartbeatView(APIView):
             except:
                 pass
             return Response({"error": str(e)}, status=400)
+
+
+# ════════════════════════════════════════════════════════════════
+# HOTSPOT IPAM CONFIGURATION (IP Address + Subnet)
+# ════════════════════════════════════════════════════════════════
+
+class RouterHotspotIPAMView(APIView):
+    """
+    GET  /api/v1/routers/{id}/hotspot/ipam/  → Current IPAM config + calculated network
+    POST /api/v1/routers/{id}/hotspot/ipam/  → Preview only (dry run)
+    """
+    permission_classes = [IsAuthenticated, HasCompanyAccess]
+
+    def get(self, request, pk):
+        """Return current hotspot IPAM config and calculated network boundaries."""
+        from django.db import connection
+        from apps.network.services.ipam_calculator import (
+            calculate_mikrotik_hotspot_network,
+            VALID_BASE_IPS,
+            VALID_CIDRS,
+            CIDR_HOST_COUNTS,
+        )
+
+        router, tenant = find_router_across_tenants(router_id=pk)
+        if not router:
+            return Response({'error': 'Router not found'}, status=status.HTTP_404_NOT_FOUND)
+        connection.set_tenant(tenant)
+
+        # Calculate current network boundaries
+        calculated = calculate_mikrotik_hotspot_network(
+            router.hotspot_base_ip,
+            router.hotspot_subnet_cidr,
+        )
+
+        return Response({
+            'base_ip': router.hotspot_base_ip,
+            'subnet_cidr': router.hotspot_subnet_cidr,
+            'calculated': calculated,
+            'options': {
+                'base_ips': [
+                    {'value': '172.12.0.1',    'label': '172.12.0.1 (Recommended for Hotspot)'},
+                    {'value': '192.168.88.1',  'label': '192.168.88.1 (MikroTik Default)'},
+                    {'value': '192.168.0.1',   'label': '192.168.0.1 (Common Home Router)'},
+                    {'value': '10.0.0.1',      'label': '10.0.0.1 (Enterprise Network)'},
+                    {'value': '172.16.0.1',    'label': '172.16.0.1 (Private Network)'},
+                    {'value': '192.168.100.1', 'label': '192.168.100.1 (Alternative)'},
+                ],
+                'cidrs': [
+                    {'value': 8,  'label': '/8 (16,777,214 Hosts)'},
+                    {'value': 12, 'label': '/12 (1,048,574 Hosts)'},
+                    {'value': 16, 'label': '/16 (65,534 Hosts - Default)'},
+                    {'value': 20, 'label': '/20 (4,094 Hosts)'},
+                    {'value': 24, 'label': '/24 (254 Hosts)'},
+                    {'value': 28, 'label': '/28 (14 Hosts)'},
+                ],
+            },
+        })
+
+    def post(self, request, pk):
+        """Preview the calculated network for given base_ip + cidr (dry run, no apply)."""
+        from django.db import connection
+        from apps.network.services.ipam_calculator import (
+            calculate_mikrotik_hotspot_network,
+            validate_hotspot_ipam_input,
+        )
+
+        router, tenant = find_router_across_tenants(router_id=pk)
+        if not router:
+            return Response({'error': 'Router not found'}, status=status.HTTP_404_NOT_FOUND)
+        connection.set_tenant(tenant)
+
+        base_ip = request.data.get('base_ip', '172.12.0.1')
+        subnet_cidr = request.data.get('subnet_cidr', 16)
+
+        try:
+            subnet_cidr = int(subnet_cidr)
+        except (ValueError, TypeError):
+            return Response(
+                {'error': 'subnet_cidr must be an integer'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        # Validate inputs
+        validation_errors = validate_hotspot_ipam_input(base_ip, subnet_cidr)
+        if validation_errors:
+            return Response(
+                {'error': 'Invalid input', 'details': validation_errors},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        # Calculate preview
+        calculated = calculate_mikrotik_hotspot_network(base_ip, subnet_cidr)
+
+        return Response({
+            'preview': True,
+            'base_ip': base_ip,
+            'subnet_cidr': subnet_cidr,
+            'calculated': calculated,
+        })
+
+
+class RouterHotspotIPAMApplyView(APIView):
+    """
+    POST /api/v1/routers/{id}/hotspot/ipam/apply/
+
+    Saves the new IPAM config to the database AND applies it to the
+    live MikroTik router in the strict 5-step sequence.
+
+    Body: { "base_ip": "172.12.0.1", "subnet_cidr": 16 }
+    """
+    permission_classes = [IsAuthenticated, HasCompanyAccess]
+
+    def post(self, request, pk):
+        from django.db import connection
+        from apps.network.services.ipam_calculator import (
+            calculate_mikrotik_hotspot_network,
+            validate_hotspot_ipam_input,
+        )
+        from apps.network.services.mikrotik_ipam_sync import sync_hotspot_ipam_to_router
+
+        router, tenant = find_router_across_tenants(router_id=pk)
+        if not router:
+            return Response({'error': 'Router not found'}, status=status.HTTP_404_NOT_FOUND)
+        connection.set_tenant(tenant)
+
+        # Parse & validate inputs
+        base_ip = request.data.get('base_ip', '172.12.0.1')
+        subnet_cidr = request.data.get('subnet_cidr', 16)
+
+        try:
+            subnet_cidr = int(subnet_cidr)
+        except (ValueError, TypeError):
+            return Response(
+                {'error': 'subnet_cidr must be an integer'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        validation_errors = validate_hotspot_ipam_input(base_ip, subnet_cidr)
+        if validation_errors:
+            return Response(
+                {'error': 'Invalid input', 'details': validation_errors},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        # Check router is online
+        if router.status != 'online':
+            # Save to DB only (will apply on next reconnect)
+            old_ip = router.hotspot_base_ip
+            old_cidr = router.hotspot_subnet_cidr
+            router.hotspot_base_ip = base_ip
+            router.hotspot_subnet_cidr = subnet_cidr
+            # Also sync gateway_cidr for backward compatibility
+            router.gateway_cidr = f"{base_ip}/{subnet_cidr}"
+            router.save(update_fields=['hotspot_base_ip', 'hotspot_subnet_cidr', 'gateway_cidr'])
+
+            calculated = calculate_mikrotik_hotspot_network(base_ip, subnet_cidr)
+
+            RouterEvent.objects.create(
+                router=router,
+                event_type='config_change',
+                message=f"Hotspot IPAM saved (offline): {base_ip}/{subnet_cidr}",
+                details={
+                    'old_ip': old_ip, 'old_cidr': old_cidr,
+                    'new_ip': base_ip, 'new_cidr': subnet_cidr,
+                    'applied_to_router': False,
+                    'saved_by': request.user.email if hasattr(request.user, 'email') else str(request.user),
+                }
+            )
+
+            return Response({
+                'success': True,
+                'applied': False,
+                'message': 'Configuration saved. Will be applied when router comes online.',
+                'calculated': calculated,
+            })
+
+        # Router is online — apply to live MikroTik
+        old_ip = router.hotspot_base_ip
+        old_cidr = router.hotspot_subnet_cidr
+
+        result = sync_hotspot_ipam_to_router(router, base_ip, subnet_cidr)
+
+        if result['success']:
+            # Save to DB after successful sync
+            router.hotspot_base_ip = base_ip
+            router.hotspot_subnet_cidr = subnet_cidr
+            router.gateway_cidr = f"{base_ip}/{subnet_cidr}"
+            router.save(update_fields=['hotspot_base_ip', 'hotspot_subnet_cidr', 'gateway_cidr'])
+
+            RouterEvent.objects.create(
+                router=router,
+                event_type='config_change',
+                message=f"Hotspot IPAM applied: {base_ip}/{subnet_cidr}",
+                details={
+                    'old_ip': old_ip, 'old_cidr': old_cidr,
+                    'new_ip': base_ip, 'new_cidr': subnet_cidr,
+                    'applied_to_router': True,
+                    'sync_details': result.get('details', {}),
+                    'applied_by': request.user.email if hasattr(request.user, 'email') else str(request.user),
+                }
+            )
+
+            return Response({
+                'success': True,
+                'applied': True,
+                'message': result['message'],
+                'details': result.get('details', {}),
+            })
+        else:
+            return Response({
+                'success': False,
+                'applied': False,
+                'message': result['message'],
+                'error': result.get('error'),
+                'steps_completed': result.get('steps_completed', []),
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)

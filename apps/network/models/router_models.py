@@ -90,6 +90,17 @@ class Router(AuditMixin):
         help_text="The main Gateway IP/Subnet (e.g., 172.18.0.1/16). Pool is calculated from this."
     )
     
+    # Hotspot IPAM Configuration (user-selectable via dropdowns)
+    hotspot_base_ip = models.GenericIPAddressField(
+        default='172.12.0.1',
+        help_text="Gateway IP for the hotspot network (e.g., 172.12.0.1)"
+    )
+    hotspot_subnet_cidr = models.IntegerField(
+        default=16,
+        validators=[MinValueValidator(8), MaxValueValidator(30)],
+        help_text="CIDR prefix length for hotspot subnet (e.g., 16 = /16 = 65,534 hosts)"
+    )
+    
     dns_name = models.CharField(
         max_length=100, 
         default='captive.netily.io',
