@@ -78,7 +78,14 @@ class MikrotikAPI:
                     # Catch old 'set' commands from other parts of your app and redirect them to update
                     return path_obj.update(**kwargs['set'])
                 elif 'remove' in kwargs:
-                    return path_obj.remove(**kwargs['remove'])
+                    # --- FIX: librouteros requires ID as a positional argument, not a dict keyword ---
+                    remove_data = kwargs['remove']
+                    if isinstance(remove_data, dict) and '.id' in remove_data:
+                        return path_obj.remove(remove_data['.id'])
+                    elif isinstance(remove_data, (list, tuple)):
+                        return path_obj.remove(*remove_data)
+                    else:
+                        return path_obj.remove(remove_data)
                 else:
                     return list(path_obj)
             except Exception as e:

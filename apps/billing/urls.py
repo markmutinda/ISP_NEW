@@ -2,8 +2,11 @@ from django.urls import path, include
 from rest_framework.routers import DefaultRouter
 from .views.InvoiceViews import PlanViewSet, BillingCycleViewSet, InvoiceViewSet, InvoiceItemViewSet
 from .views.PaymentViews import PaymentViewSet
-from .views.VoucherViews import VoucherBatchViewSet, VoucherViewSet  # Removed VoucherUsageViewSet
-from .views.hotspot_views import HotspotPlansView, HotspotPurchaseView, HotspotPurchaseStatusView
+from .views.VoucherViews import VoucherBatchViewSet, VoucherViewSet
+
+# --- FIX: We updated these imports to match the new hotspot views ---
+from .views.hotspot_views import CaptivePortalConfigView, HotspotPurchaseView, HotspotPurchaseStatusView
+
 from .views.cloud_portal_views import (
     HotspotLoginPageView,
     HotspotAutoLoginView,
@@ -37,13 +40,11 @@ router.register(r'invoices', InvoiceViewSet, basename='invoice')
 router.register(r'invoice-items', InvoiceItemViewSet, basename='invoice-item')
 
 # Payment URLs
-# router.register(r'payment-methods', PaymentMethodViewSet, basename='payment-method')  # Disabled
 router.register(r'payments', PaymentViewSet, basename='payment')
 
 # Voucher URLs
 router.register(r'voucher-batches', VoucherBatchViewSet, basename='voucher-batch')
 router.register(r'vouchers', VoucherViewSet, basename='voucher')
-# Removed voucher-usages registration
 
 urlpatterns = [
     path('', include(router.urls)),
@@ -58,7 +59,6 @@ urlpatterns = [
 
     # Customer endpoints
     path('customer/outstanding/', InvoiceViewSet.as_view({'get': 'customer_outstanding'}), name='customer-outstanding'),
-    # Removed voucher-history endpoint
 
     # Utility endpoints
     path('vouchers/validate/', VoucherViewSet.as_view({'post': 'validate_code'}), name='voucher-validate'),
@@ -76,9 +76,10 @@ urlpatterns = [
 # These are accessed from captive portal
 # ─────────────────────────────────────────────────────────────
 hotspot_urlpatterns = [
-    path('routers/<int:router_id>/plans/', HotspotPlansView.as_view(), name='hotspot-plans'),
+    # --- FIX: We updated these paths to match the new Captive Portal design ---
+    path('captive-portal/', CaptivePortalConfigView.as_view(), name='captive-portal-config'),
     path('purchase/', HotspotPurchaseView.as_view(), name='hotspot-purchase'),
-    path('purchase/<str:session_id>/status/', HotspotPurchaseStatusView.as_view(), name='hotspot-status'),
+    path('purchase/status/', HotspotPurchaseStatusView.as_view(), name='hotspot-status'),
     
     # ── Cloud Controller Portal Endpoints ──
     path('login-page/<int:router_id>/', HotspotLoginPageView.as_view(), name='hotspot-login-page'),
@@ -142,4 +143,3 @@ webhook_urlpatterns = [
 ]
 
 app_name = 'billing'
-

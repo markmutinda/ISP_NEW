@@ -9,7 +9,7 @@ import logging
 from decimal import Decimal
 
 from django.conf import settings
-from django.db import transaction
+from django.db import transaction, connection
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
 
@@ -18,91 +18,82 @@ from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from django_tenants.utils import schema_context
-
-from apps.billing.models.hotspot_models import HotspotPlan, HotspotSession, HotspotBranding
+from apps.core.models import Tenant
+from apps.billing.models.hotspot_models import HotspotPlan, HotspotSession
 from apps.billing.services.payhero import PayHeroClient, PayHeroError
 from apps.network.models.router_models import Router
-from apps.subscriptions.models import CommissionLedger
 
 logger = logging.getLogger(__name__)
 
 
-class HotspotPlansView(APIView):
+class CaptivePortalConfigView(APIView):
     """
-    Get hotspot plans for a specific router.
+    Get hotspot portal settings and plans for a specific router.
     
     PUBLIC ENDPOINT - No authentication required.
-    
-    GET /api/v1/hotspot/routers/{router_id}/plans/
+    GET /api/v1/hotspot/captive-portal/?router={router_id}&tenant={tenant}
     """
-    
     permission_classes = [AllowAny]
-    authentication_classes = []  # No auth required
+    authentication_classes = []
     
-    def get(self, request, router_id):
+    def get(self, request):
+        router_id = request.query_params.get('router')
+        tenant_subdomain = request.query_params.get('tenant')
+
+        if not router_id or not tenant_subdomain:
+            return Response({'status': 'error', 'message': 'Missing router or tenant parameters'}, status=400)
+
+        # 1. Switch to the correct ISP's database schema
+        try:
+            tenant = Tenant.objects.get(subdomain=tenant_subdomain)
+            connection.set_tenant(tenant)
+        except Tenant.DoesNotExist:
+            return Response({'status': 'error', 'message': 'Invalid ISP tenant'}, status=404)
+
+        # 2. Fetch the router to get its UI settings
         try:
             router = Router.objects.get(id=router_id, is_active=True)
         except Router.DoesNotExist:
-            return Response(
-                {'error': 'Router not found'},
-                status=status.HTTP_404_NOT_FOUND
-            )
-        
-        # Get active plans for this router
+            return Response({'status': 'error', 'message': 'Router not found'}, status=404)
+
+        # 3. Get active plans for this router
         plans = HotspotPlan.objects.filter(
             router=router,
             is_active=True
-        ).order_by('sort_order', 'price')
+        ).order_by('price')
         
-        # Get branding
-        try:
-            branding = router.hotspot_branding
-        except HotspotBranding.DoesNotExist:
-            # Try to get default branding
-            branding = HotspotBranding.objects.filter(
-                is_default=True
-            ).first()
-        
-        plans_data = [
-            {
+        plans_data = []
+        for plan in plans:
+            plans_data.append({
                 'id': str(plan.id),
                 'name': plan.name,
                 'price': float(plan.price),
-                'currency': plan.currency,
-                'duration_minutes': plan.duration_minutes,
-                'duration_display': plan.duration_display,
-                'data_limit_mb': plan.data_limit_mb,
-                'data_limit_display': plan.data_limit_display,
-                'speed_limit': f"{plan.speed_limit_mbps}Mbps",
+                'download_speed': str(plan.speed_limit_mbps),
+                'download_unit': 'Mbps',
+                'validity': str(plan.duration_minutes),
+                'validity_unit': 'Minutes',
                 'description': plan.description,
-                'is_popular': plan.is_popular,
-            }
-            for plan in plans
-        ]
-        
-        branding_data = None
-        if branding:
-            branding_data = {
-                'company_name': branding.company_name,
-                'logo_url': branding.logo.url if branding.logo else None,
-                'background_image_url': branding.background_image.url if branding.background_image else None,
-                'primary_color': branding.primary_color,
-                'secondary_color': branding.secondary_color,
-                'welcome_title': branding.welcome_title,
-                'welcome_message': branding.welcome_message,
-                'support_phone': branding.support_phone,
-                'support_email': branding.support_email,
-            }
-        
+            })
+            
+        # Safely get a fallback name if the Company record is missing
+        try:
+            fallback_name = tenant.company.name
+        except Exception:
+            fallback_name = str(tenant.subdomain).capitalize()
+
+        # 4. Construct the UI Configuration payload
+        portal_config = {
+            'template_id': getattr(router, 'template_id', 1),
+            'hotspot_name': getattr(router, 'hotspot_name', None) or fallback_name,
+            'support_phone': getattr(router, 'support_phone', ''),
+            'announcement_text': getattr(router, 'announcement_text', ''),
+            'gateway_ip': getattr(router, 'gateway_ip', '')
+        }
+
         return Response({
-            'router': {
-                'id': router.id,
-                'name': router.name,
-                'location': router.location,
-            },
-            'plans': plans_data,
-            'branding': branding_data,
+            'status': 'success',
+            'portal_config': portal_config,
+            'plans': plans_data
         })
 
 
@@ -111,56 +102,41 @@ class HotspotPurchaseView(APIView):
     Initiate hotspot purchase via PayHero.
     
     PUBLIC ENDPOINT - No authentication required.
-    
-    POST /api/v1/hotspot/purchase/
-    {
-        "router_id": 5,
-        "plan_id": "uuid",
-        "phone_number": "254712345678",
-        "mac_address": "AA:BB:CC:DD:EE:FF"
-    }
+    POST /api/v1/hotspot/pay/
     """
-    
     permission_classes = [AllowAny]
-    authentication_classes = []  # No auth required
+    authentication_classes = []
     
     @transaction.atomic
     def post(self, request):
         router_id = request.data.get('router_id')
         plan_id = request.data.get('plan_id')
-        phone_number = request.data.get('phone_number')
+        phone_number = request.data.get('phone')
         mac_address = request.data.get('mac_address', '')
+        tenant_subdomain = request.data.get('tenant')
         
-        # Validate required fields
-        if not all([router_id, plan_id, phone_number]):
+        if not all([router_id, plan_id, phone_number, tenant_subdomain]):
             return Response({
-                'error': 'Missing required fields: router_id, plan_id, phone_number'
+                'status': 'error',
+                'message': 'Missing required fields'
             }, status=status.HTTP_400_BAD_REQUEST)
+            
+        # Switch Schema
+        try:
+            tenant = Tenant.objects.get(subdomain=tenant_subdomain)
+            connection.set_tenant(tenant)
+        except Tenant.DoesNotExist:
+            return Response({'status': 'error', 'message': 'Invalid ISP'}, status=404)
         
-        # Get router and plan
         try:
             router = Router.objects.get(id=router_id, is_active=True)
-        except Router.DoesNotExist:
-            return Response(
-                {'error': 'Router not found'},
-                status=status.HTTP_404_NOT_FOUND
-            )
-        
-        try:
             plan = HotspotPlan.objects.get(id=plan_id, router=router, is_active=True)
-        except HotspotPlan.DoesNotExist:
-            return Response(
-                {'error': 'Plan not found for this router'},
-                status=status.HTTP_404_NOT_FOUND
-            )
+        except (Router.DoesNotExist, HotspotPlan.DoesNotExist):
+            return Response({'status': 'error', 'message': 'Router or Plan not found'}, status=404)
         
-        # Normalize MAC address
         mac_address = mac_address.upper().replace('-', ':')
-        
-        # Generate unique session ID
         session_id = HotspotSession.generate_session_id()
         
-        # Create pending session
         session = HotspotSession.objects.create(
             session_id=session_id,
             router=router,
@@ -171,10 +147,8 @@ class HotspotPurchaseView(APIView):
             status='pending',
         )
         
-        # Initiate PayHero STK Push
         try:
             client = PayHeroClient()
-            
             response = client.stk_push(
                 phone_number=phone_number,
                 amount=int(plan.price),
@@ -186,33 +160,18 @@ class HotspotPurchaseView(APIView):
             if response.success:
                 session.payhero_checkout_id = response.checkout_request_id
                 session.save()
-                
-                # Mask phone number for display
-                masked_phone = phone_number[:4] + '***' + phone_number[-3:]
-                
                 return Response({
                     'status': 'pending',
-                    'session_id': session_id,
-                    'checkout_request_id': response.checkout_request_id,
-                    'message': f'STK Push sent to {masked_phone}. Enter your M-Pesa PIN.',
-                    'expires_in': 120,  # STK expires in 2 minutes
+                    'transaction_id': response.checkout_request_id,
+                    'message': f'M-Pesa prompt sent to {phone_number}. Please enter your PIN.'
                 })
             else:
                 session.mark_failed(response.message)
+                return Response({'status': 'failed', 'message': response.message}, status=400)
                 
-                return Response({
-                    'status': 'error',
-                    'message': response.message or 'Failed to initiate payment',
-                }, status=status.HTTP_400_BAD_REQUEST)
-        
         except PayHeroError as e:
-            logger.error(f"Hotspot PayHero error: {e.message}")
             session.mark_failed(str(e))
-            
-            return Response({
-                'status': 'error',
-                'message': 'Payment service unavailable. Please try again.',
-            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+            return Response({'status': 'error', 'message': 'Payment service unavailable.'}, status=500)
 
 
 class HotspotPurchaseStatusView(APIView):
@@ -220,138 +179,67 @@ class HotspotPurchaseStatusView(APIView):
     Poll hotspot purchase status.
     
     PUBLIC ENDPOINT - No authentication required.
-    
-    GET /api/v1/hotspot/purchase/{session_id}/status/
+    GET /api/v1/hotspot/pay/status/?transaction_id={id}&tenant={tenant}
     """
-    
     permission_classes = [AllowAny]
-    authentication_classes = []  # No auth required
+    authentication_classes = []
     
-    def get(self, request, session_id):
+    def get(self, request):
+        transaction_id = request.query_params.get('transaction_id')
+        tenant_subdomain = request.query_params.get('tenant')
+        
+        if not transaction_id or not tenant_subdomain:
+            return Response({'status': 'error', 'message': 'Missing parameters'}, status=400)
+            
+        # Switch Schema
         try:
-            session = HotspotSession.objects.get(session_id=session_id)
+            tenant = Tenant.objects.get(subdomain=tenant_subdomain)
+            connection.set_tenant(tenant)
+        except Tenant.DoesNotExist:
+            return Response({'status': 'error', 'message': 'Invalid ISP'}, status=404)
+            
+        try:
+            session = HotspotSession.objects.get(payhero_checkout_id=transaction_id)
         except HotspotSession.DoesNotExist:
-            return Response(
-                {'error': 'Session not found'},
-                status=status.HTTP_404_NOT_FOUND
-            )
-        
-        # Return current status
+            return Response({'status': 'error', 'message': 'Session not found'}, status=404)
+            
         if session.status == 'active':
-            return Response({
-                'status': 'success',
-                'message': 'Payment received! You are now connected.',
-                'access_code': session.access_code,
-                'expires_at': session.expires_at,
-                'duration_display': session.plan.duration_display,
-                'data_remaining_mb': session.data_remaining_mb,
-                'speed': f"{session.plan.speed_limit_mbps}Mbps",
-                'login_url': request.query_params.get('login_url', ''),
-            })
-        
+            return Response({'status': 'success', 'message': 'Payment received! Connecting...'})
         elif session.status == 'failed':
-            return Response({
-                'status': 'failed',
-                'message': session.failure_reason or 'Payment failed. Please try again.',
-            })
+            return Response({'status': 'failed', 'message': session.failure_reason or 'Payment failed.'})
         
-        elif session.status == 'expired':
-            return Response({
-                'status': 'expired',
-                'message': 'Session has expired.',
-            })
-        
-        elif session.status == 'paid':
-            # Payment received but not yet activated — activate now
-            session.activate()
+        # If still pending in our DB, ask PayHero for real-time status
+        try:
+            from apps.billing.services.payhero import PayHeroClient, PaymentStatus
+            client = PayHeroClient()
+            status_response = client.get_payment_status(session.payhero_checkout_id)
             
-            # Create RADIUS credentials
-            try:
-                from apps.billing.services.hotspot_radius_service import HotspotRadiusService
+            if status_response.status == PaymentStatus.SUCCESS:
+                session.mark_paid(status_response.mpesa_receipt)
+                session.activate()
                 
-                radius_service = HotspotRadiusService()
-                radius_service.create_hotspot_credentials(
-                    username=session.access_code,
-                    password=session.access_code,
-                    router=session.router,
-                    plan=session.plan,
-                    expires_at=session.expires_at,
-                    mac_address=session.mac_address or '',
-                )
-            except Exception as e:
-                logger.error(f"RADIUS activation failed for paid session {session.session_id}: {e}")
+                # Create RADIUS credentials for MikroTik
+                try:
+                    from apps.billing.services.hotspot_radius_service import HotspotRadiusService
+                    radius_service = HotspotRadiusService()
+                    radius_service.create_hotspot_credentials(
+                        username=session.mac_address, # Use MAC as username for seamless login
+                        password=session.mac_address,
+                        router=session.router,
+                        plan=session.plan,
+                        expires_at=session.expires_at,
+                        mac_address=session.mac_address,
+                    )
+                except Exception as e:
+                    logger.error(f"RADIUS activation failed: {e}")
+                    
+                return Response({'status': 'success', 'message': 'Payment received! Connecting...'})
+                
+            elif status_response.status == PaymentStatus.FAILED:
+                session.mark_failed(status_response.failure_reason)
+                return Response({'status': 'failed', 'message': status_response.failure_reason})
+                
+        except PayHeroError:
+            pass
             
-            return Response({
-                'status': 'success',
-                'message': 'Payment received! You are now connected.',
-                'access_code': session.access_code,
-                'expires_at': session.expires_at,
-                'duration_display': session.plan.duration_display,
-                'data_remaining_mb': session.data_remaining_mb,
-                'speed': f"{session.plan.speed_limit_mbps}Mbps",
-                'login_url': request.query_params.get('login_url', ''),
-            })
-        
-        # Still pending - check with PayHero
-        if session.payhero_checkout_id:
-            try:
-                from apps.billing.services.payhero import PayHeroClient, PaymentStatus
-                
-                client = PayHeroClient()
-                status_response = client.get_payment_status(session.payhero_checkout_id)
-                
-                if status_response.status == PaymentStatus.SUCCESS:
-                    # Payment successful - activate session
-                    session.mark_paid(status_response.mpesa_receipt)
-                    
-                    # Activate session (generates access code + expiry)
-                    session.activate()
-                    
-                    # ── CLOUD CONTROLLER: Create RADIUS credentials ──
-                    # This is the critical step that closes the payment→access loop.
-                    # Without this, the user pays but can't authenticate on MikroTik.
-                    try:
-                        from apps.billing.services.hotspot_radius_service import HotspotRadiusService
-                        
-                        radius_service = HotspotRadiusService()
-                        radius_service.create_hotspot_credentials(
-                            username=session.access_code,
-                            password=session.access_code,
-                            router=session.router,
-                            plan=session.plan,
-                            expires_at=session.expires_at,
-                            mac_address=session.mac_address or '',
-                        )
-                    except Exception as e:
-                        logger.error(
-                            f"Failed to create RADIUS credentials for session "
-                            f"{session.session_id}: {e}",
-                            exc_info=True
-                        )
-                    # ── END CLOUD CONTROLLER ──
-                    
-                    return Response({
-                        'status': 'success',
-                        'message': 'Payment received! You are now connected.',
-                        'access_code': session.access_code,
-                        'expires_at': session.expires_at,
-                        'duration_display': session.plan.duration_display,
-                        'data_remaining_mb': session.data_remaining_mb,
-                        'speed': f"{session.plan.speed_limit_mbps}Mbps",
-                    })
-                
-                elif status_response.status == PaymentStatus.FAILED:
-                    session.mark_failed(status_response.failure_reason)
-                    return Response({
-                        'status': 'failed',
-                        'message': status_response.failure_reason or 'Payment failed. Please try again.',
-                    })
-            
-            except PayHeroError as e:
-                logger.error(f"Error checking hotspot payment status: {e.message}")
-        
-        # Still pending
-        return Response({
-            'status': 'pending',
-            'message': 'Waiting for payment confirmation...',
-        })
+        return Response({'status': 'pending', 'message': 'Waiting for payment confirmation...'})

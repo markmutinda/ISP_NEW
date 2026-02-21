@@ -53,6 +53,10 @@ class RouterSerializer(serializers.ModelSerializer):
             'gateway_cidr', 'dns_name', 'wan_interface', 'hotspot_interfaces',
             'hotspot_base_ip', 'hotspot_subnet_cidr',
             'pppoe_pool', 'pppoe_local_address',
+            
+            # --- NEW CAPTIVE PORTAL UI FIELDS ---
+            'template_id', 'hotspot_name', 'support_phone', 'announcement_text',
+            
             'config_type',
             'created_at', 'updated_at',
         ]
@@ -89,6 +93,12 @@ class RouterSerializer(serializers.ModelSerializer):
             'ca_certificate': {'read_only': True},
             'client_certificate': {'read_only': True},
             'client_key': {'read_only': True},
+            
+            # New captive portal UI fields - allow read/write
+            'template_id': {'required': False},
+            'hotspot_name': {'required': False, 'allow_blank': True, 'allow_null': True},
+            'support_phone': {'required': False, 'allow_blank': True, 'allow_null': True},
+            'announcement_text': {'required': False, 'allow_blank': True, 'allow_null': True},
         }
 
     def get_auth_status(self, obj):
@@ -110,11 +120,11 @@ class RouterSerializer(serializers.ModelSerializer):
     def get_is_editable(self, obj):
         request = self.context.get('request')
         if request and request.user:
-           if request.user.is_superuser:
-             return True
-          # Check if user is in the same tenant
-           if hasattr(request, 'tenant') and request.tenant and obj.tenant_subdomain:
-             return request.tenant.subdomain == obj.tenant_subdomain
+            if request.user.is_superuser:
+                return True
+            # Check if user is in the same tenant
+            if hasattr(request, 'tenant') and request.tenant and obj.tenant_subdomain:
+                return request.tenant.subdomain == obj.tenant_subdomain
         return False
     
     def create(self, validated_data):

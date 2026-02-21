@@ -25,6 +25,7 @@ Stage 2 — Version-Specific Config (conf.rsc):
 from django.conf import settings
 from apps.network.models.router_models import Router
 from django.utils import timezone
+import re
 
 
 class MikrotikScriptGenerator:
@@ -37,15 +38,9 @@ class MikrotikScriptGenerator:
         self.vpn_gateway = "192.168.255.1"
         self.base_url = getattr(settings, 'BASE_URL', '').rstrip('/')
         
-        # Determine the best URL for the router to use
-        # If we have a request, we use the IP the router used to call us
-        if request:
-            host = request.get_host().split(':')[0]
-            self.active_url = f"http://{host}:8000"
-        else:
-            self.active_url = self.base_url
-
-        self.portal_url = getattr(settings, 'CAPTIVE_PORTAL_URL', self.active_url).rstrip('/')
+        # --- FIX: HARDCODE BOTH URLS FOR LOCAL TESTING ---
+        self.active_url = "http://192.168.100.149:8000"
+        self.portal_url = "http://192.168.100.149:3000"
         
         # ── Provisioning download base ────────────────────────────
         self.provision_base = f"{self.active_url}/api/v1/network/provision"
@@ -377,8 +372,10 @@ class MikrotikScriptGenerator:
 """
 
     def _section_hotspot(self, r: Router, gateway_ip: str) -> str:
+        # FIX: Reverted to html-directory="hotspot" so the folder is created safely
         profile_cmd = f'/ip hotspot profile add name="netily-profile" hotspot-address="{gateway_ip}" dns-name="{self._escape_ros_string(r.dns_name)}" html-directory="hotspot" login-by=http-pap,mac-cookie use-radius=yes radius-accounting=yes http-cookie-lifetime=1d rate-limit=""'
         server_cmd = f'/ip hotspot add name="netily-hotspot" interface="netily-bridge" address-pool="netily-pool" profile="netily-profile" disabled=no'
+        
         return f"""# ─────────────────────────────────────────────────────────────
 # 8. HOTSPOT PROFILE & SERVER (Bridge Mode)
 # ─────────────────────────────────────────────────────────────
@@ -391,6 +388,14 @@ class MikrotikScriptGenerator:
 """
 
     def _section_walled_garden(self, r: Router, portal_domain: str) -> str:
+        # Extract IP if the portal is a local IP address (e.g. 192.168.100.149:3000)
+        local_ip_match = re.search(r'(\d+\.\d+\.\d+\.\d+)', self.portal_url)
+        local_ip_rule = ""
+        
+        if local_ip_match:
+            local_ip = local_ip_match.group(1)
+            local_ip_rule = f'/ip hotspot walled-garden ip add dst-address={local_ip} action=accept comment="Netily-Local-Frontend"'
+
         return f"""# ─────────────────────────────────────────────────────────────
 # 9. WALLED GARDEN (Pre-Auth Access)
 # ─────────────────────────────────────────────────────────────
@@ -401,10 +406,7 @@ class MikrotikScriptGenerator:
 
 /ip hotspot walled-garden add dst-host="*{portal_domain}*" comment="Netily-Portal"
 /ip hotspot walled-garden add dst-host="*netily.co.ke*" comment="Netily-Backend"
-/ip hotspot walled-garden add dst-host="*netily.io*" comment="Netily-Alt"
-/ip hotspot walled-garden add dst-host="*.safaricom.co.ke" comment="Netily-MPesa"
-/ip hotspot walled-garden add dst-host="*.safaricom.com" comment="Netily-Safaricom"
-/ip hotspot walled-garden add dst-host="*.payhero.co.ke" comment="Netily-PayHero"
+{local_ip_rule}
 /ip hotspot walled-garden ip add dst-address={self.vpn_gateway}/32 action=accept comment="Netily-VPN-API"
 /ip hotspot walled-garden ip add dst-address=10.8.0.0/24 action=accept comment="Netily-VPN-Network"
 """
@@ -458,32 +460,28 @@ class MikrotikScriptGenerator:
 """
 
     def _section_hotspot_html(self, r: Router) -> str:
-        # FIX: Once VPN is up, use the VPN Gateway to download HTML pages
-        # This solves the 404/Timeout issue during provisioning
-        login_url = f"http://{self.vpn_gateway}:8000/api/v1/network/provision/{r.auth_key}/hotspot/login.html"
-        status_url = f"http://{self.vpn_gateway}:8000/api/v1/network/provision/{r.auth_key}/hotspot/status.html"
+        login_url = f"{self.active_url}/api/v1/network/provision/{r.auth_key}/hotspot/login.html"
+        status_url = f"{self.active_url}/api/v1/network/provision/{r.auth_key}/hotspot/status.html"
 
         return f"""# ─────────────────────────────────────────────────────────────
 # 11. HOTSPOT HTML PAGES (Cloud Portal Redirectors)
 # ─────────────────────────────────────────────────────────────
-:put "Downloading hotspot pages via VPN..."
+:put "Downloading hotspot pages..."
 
-# Detect hotspot HTML directory automatically (like LipaNet)
+# Detect directory like LipaNet does
 :local dir [/ip hotspot profile get [find name="netily-profile"] html-directory]
-:if ($dir = "") do={{
-    :log warning "Hotspot html-directory is empty. Using default 'hotspot'"
-    :set dir "hotspot"
-}}
+:if ($dir = "") do={{ :set dir "hotspot" }}
 
+:put (" -> Downloading from: {login_url}")
 :do {{
     /tool fetch url="{login_url}" dst-path=("$dir/login.html")
-    :put "login.html installed."
-}} on-error={{ :put "WARNING: Could not download login.html" }}
+    :put " -> login.html installed successfully!"
+}} on-error={{ :put ">>> ERROR: Failed to download login.html. Check Django console!" }}
 
 :do {{
     /tool fetch url="{status_url}" dst-path=("$dir/status.html")
-    :put "status.html installed."
-}} on-error={{ :put "WARNING: Could not download status.html" }}
+    :put " -> status.html installed successfully!"
+}} on-error={{ :put ">>> ERROR: Failed to download status.html. Check Django console!" }}
 """
 
     def _section_pppoe(self, r: Router, pppoe_local: str) -> str:
@@ -574,98 +572,67 @@ class MikrotikScriptGenerator:
     def generate_login_html(self) -> str:
         r = self.router
         portal = self.portal_url
+        subdomain = self._escape_ros_string(r.tenant_subdomain or "public")
+        
+        # We use LipaNet's hyper-fast meta refresh strategy
         return f"""<!DOCTYPE html>
-<html lang="en">
+<html>
 <head>
-    <meta charset="utf-8">
-    <meta http-equiv="pragma" content="no-cache">
-    <meta http-equiv="cache-control" content="no-cache, no-store, must-revalidate">
-    <meta http-equiv="expires" content="0">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Connecting to WiFi...</title>
+    <meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+    <meta http-equiv="refresh" content="0;url={portal}/portal/login?router={r.id}&mac=$(mac-esc)&ip=$(ip)&tenant={subdomain}">
+    <title>Connecting...</title>
     <style>
-        * {{ margin: 0; padding: 0; box-sizing: border-box; }}
         body {{
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            min-height: 100vh;
+            font-family: Arial, sans-serif;
+            background-color: #f5f5f5;
             display: flex;
-            align-items: center;
             justify-content: center;
+            align-items: center;
+            height: 100vh;
+            margin: 0;
             color: #333;
         }}
-        .container {{
-            background: white;
-            border-radius: 16px;
-            padding: 40px 32px;
-            text-align: center;
-            max-width: 400px;
-            width: 90%;
-            box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+        .container {{ text-align: center; }}
+        .loader {{
+            display: inline-block;
+            position: relative;
+            width: 80px;
+            height: 80px;
+            margin-bottom: 20px;
         }}
-        .spinner {{
-            width: 48px;
-            height: 48px;
-            border: 4px solid #e0e0e0;
-            border-top-color: #667eea;
+        .loader div {{
+            position: absolute;
+            width: 16px;
+            height: 16px;
             border-radius: 50%;
-            animation: spin 0.8s linear infinite;
-            margin: 0 auto 24px;
+            background: #3498db;
+            animation: loader 1.2s linear infinite;
         }}
-        @keyframes spin {{ to {{ transform: rotate(360deg); }} }}
-        h2 {{ font-size: 20px; margin-bottom: 8px; color: #1a1a2e; }}
-        p {{ font-size: 14px; color: #666; margin-top: 8px; }}
-        a {{ color: #667eea; text-decoration: none; font-weight: 500; }}
-        a:hover {{ text-decoration: underline; }}
-        .hidden {{ display: none; }}
+        .loader div:nth-child(1) {{ top: 8px; left: 8px; animation-delay: 0s; }}
+        .loader div:nth-child(2) {{ top: 8px; left: 32px; animation-delay: -0.4s; }}
+        .loader div:nth-child(3) {{ top: 8px; left: 56px; animation-delay: -0.8s; }}
+        .loader div:nth-child(4) {{ top: 32px; left: 8px; animation-delay: -0.4s; }}
+        .loader div:nth-child(5) {{ top: 32px; left: 32px; animation-delay: -0.8s; }}
+        .loader div:nth-child(6) {{ top: 32px; left: 56px; animation-delay: -1.2s; }}
+        .loader div:nth-child(7) {{ top: 56px; left: 8px; animation-delay: -0.8s; }}
+        .loader div:nth-child(8) {{ top: 56px; left: 32px; animation-delay: -1.2s; }}
+        .loader div:nth-child(9) {{ top: 56px; left: 56px; animation-delay: -1.6s; }}
+        @keyframes loader {{
+            0%, 100% {{ opacity: 1; transform: scale(1); }}
+            50% {{ opacity: 0.5; transform: scale(0.5); }}
+        }}
+        h4 {{ margin-top: 20px; color: #2c3e50; font-size: 1.2em; }}
     </style>
 </head>
 <body>
-    <div class="container" id="main">
-        <div class="spinner"></div>
-        <h2>Connecting to WiFi...</h2>
-        <p>You'll be redirected to the login portal shortly.</p>
-        <p style="margin-top: 16px; font-size: 12px;">
-            Not redirected? <a id="manual-link" href="#">Click here</a>
-        </p>
+    <div class="container">
+        <div class="loader">
+            <div></div><div></div><div></div>
+            <div></div><div></div><div></div>
+            <div></div><div></div><div></div>
+        </div>
+        <h4>Redirecting to Portal...</h4>
     </div>
-    <div class="container hidden" id="tv-auth">
-        <h2>Smart TV Detected</h2>
-        <p>Attempting automatic connection...</p>
-    </div>
-    <script>
-        var mac      = '$(mac)';
-        var ip       = '$(ip)';
-        var identity = '$(identity)';
-        var loginUrl = '$(link-login-only)';
-        var origUrl  = '$(link-orig)';
-        var error    = '$(error)';
-        var portalBase = '{portal}/portal/login';
-        var params = new URLSearchParams({{
-            mac: mac,
-            ip: ip,
-            router: identity,
-            router_id: '{r.id}',
-            login_url: loginUrl,
-            orig_url: origUrl,
-            error: error,
-            tenant: '{self._escape_ros_string(r.tenant_subdomain or "")}'
-        }});
-        var portalUrl = portalBase + '?' + params.toString();
-        var ua = navigator.userAgent.toLowerCase();
-        var isTv = /smart-tv|smarttv|googletv|appletv|hbbtv|pov_tv|netcast|viera|nettv|roku|dlnadoc|ce-html|lg-|samsung|tizen|webos|bravia|philips|panasonic|vestel/.test(ua);
-        var isIot = /cros|playstation|xbox|nintendo|kindle|fire/.test(ua);
-        if (isTv || isIot) {{
-            document.getElementById('main').classList.add('hidden');
-            document.getElementById('tv-auth').classList.remove('hidden');
-            window.location.href = loginUrl + '?username=T-' + mac + '&password=' + mac;
-        }} else {{
-            document.getElementById('manual-link').href = portalUrl;
-            setTimeout(function() {{
-                window.location.href = portalUrl;
-            }}, 1500);
-        }}
-    </script>
 </body>
 </html>"""
 

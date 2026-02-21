@@ -180,6 +180,26 @@ class Router(AuditMixin):
     )
 
     # ────────────────────────────────────────────────────────────────
+    # CAPTIVE PORTAL UI SETTINGS
+    # ────────────────────────────────────────────────────────────────
+    template_id = models.IntegerField(
+        default=1, 
+        help_text="ID of the selected UI template (1-7)"
+    )
+    hotspot_name = models.CharField(
+        max_length=100, blank=True, null=True, 
+        help_text="Name shown on the portal (e.g. Mjengo Fast Wi-Fi)"
+    )
+    support_phone = models.CharField(
+        max_length=20, blank=True, null=True, 
+        help_text="Support phone number"
+    )
+    announcement_text = models.TextField(
+        blank=True, null=True, 
+        help_text="Notice or scrolling marquee text"
+    )
+
+    # ────────────────────────────────────────────────────────────────
     # SERVICE FLAGS & LEGACY COMPATIBILITY
     # ────────────────────────────────────────────────────────────────
     router_type = models.CharField(max_length=50, choices=ROUTER_TYPES, default='mikrotik')
