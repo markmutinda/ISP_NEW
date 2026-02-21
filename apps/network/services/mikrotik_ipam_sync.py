@@ -8,7 +8,7 @@ Applies hotspot IP/subnet changes to a live MikroTik router via the RouterOS API
 
 CRITICAL EXECUTION ORDER:
   1. Update IP Pool         → so DHCP doesn't break
-  2. Update Bridge IP       → hotspot-bridge gets new address
+  2. Update Bridge IP       → netily-bridge gets new address
   3. Update DHCP Network    → DHCP server gets new gateway/subnet
   4. Update Hotspot Profile → captive portal uses new gateway
   5. Clear DHCP Leases      → kick connected devices to get new IPs
@@ -64,22 +64,23 @@ def sync_hotspot_ipam_to_router(router, new_base_ip: str, new_cidr: int) -> dict
             pools = list(mikrotik._execute('/ip/pool'))
             pool_id = None
             for pool in pools:
-                if pool.get('name', '') in ('hotspot-pool', 'hs-pool-1', 'netily-hotspot-pool'):
+                if pool.get('name', '') in ('hotspot-pool', 'hs-pool-1', 'netily-pool', 'netily-hotspot-pool'):
                     pool_id = pool['.id']
                     break
             
             if pool_id:
-                mikrotik._execute('/ip/pool', set={'.id': pool_id, 'ranges': math['pool_range']})
+                # FIX: Changed 'set=' to 'update='
+                mikrotik._execute('/ip/pool', update={'.id': pool_id, 'ranges': math['pool_range']})
                 steps_completed.append('ip_pool_updated')
                 logger.info(f"  [STEP 1] IP Pool updated: {math['pool_range']}")
             else:
                 # No existing pool found — create one
                 mikrotik._execute('/ip/pool', add={
-                    'name': 'hotspot-pool',
+                    'name': 'netily-pool',
                     'ranges': math['pool_range'],
                 })
                 steps_completed.append('ip_pool_created')
-                logger.info(f"  [STEP 1] IP Pool created: hotspot-pool = {math['pool_range']}")
+                logger.info(f"  [STEP 1] IP Pool created: netily-pool = {math['pool_range']}")
 
         except Exception as e:
             logger.error(f"  [STEP 1] IP Pool update failed: {e}")
@@ -98,7 +99,8 @@ def sync_hotspot_ipam_to_router(router, new_base_ip: str, new_cidr: int) -> dict
                     break
 
             if addr_id:
-                mikrotik._execute('/ip/address', set={
+                # FIX: Changed 'set=' to 'update='
+                mikrotik._execute('/ip/address', update={
                     '.id': addr_id,
                     'address': math['interface_address'],
                     'network': math['network'],
@@ -126,7 +128,8 @@ def sync_hotspot_ipam_to_router(router, new_base_ip: str, new_cidr: int) -> dict
             dhcp_networks = list(mikrotik._execute('/ip/dhcp-server/network'))
             if dhcp_networks:
                 old_net_id = dhcp_networks[0]['.id']
-                mikrotik._execute('/ip/dhcp-server/network', set={
+                # FIX: Changed 'set=' to 'update='
+                mikrotik._execute('/ip/dhcp-server/network', update={
                     '.id': old_net_id,
                     'address': f"{math['network']}/{new_cidr}",
                     'gateway': math['gateway'],
@@ -154,12 +157,13 @@ def sync_hotspot_ipam_to_router(router, new_base_ip: str, new_cidr: int) -> dict
             profiles = list(mikrotik._execute('/ip/hotspot/profile'))
             prof_id = None
             for prof in profiles:
-                if prof.get('name', '') in ('hotspot-profile', 'hsprof1', 'default'):
+                if prof.get('name', '') in ('hotspot-profile', 'hsprof1', 'netily-profile', 'default'):
                     prof_id = prof['.id']
                     break
 
             if prof_id:
-                mikrotik._execute('/ip/hotspot/profile', set={
+                # FIX: Changed 'set=' to 'update='
+                mikrotik._execute('/ip/hotspot/profile', update={
                     '.id': prof_id,
                     'hotspot-address': math['gateway'],
                 })

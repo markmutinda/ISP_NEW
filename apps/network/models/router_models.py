@@ -311,27 +311,35 @@ class Router(AuditMixin):
 
             super().save(*args, **kwargs)
 
-    # ────────────────────────────────────────────────────────────────
+   # ────────────────────────────────────────────────────────────────
     # SMART PROPERTIES (The "Brains" for the Script Generator)
     # ────────────────────────────────────────────────────────────────
 
     @property
     def gateway_ip(self):
-        """Extracts just the IP from the CIDR (e.g., '172.18.0.1')"""
+        """Extracts the base IP from the new IPAM fields"""
+        # 1. Prioritize the new dynamic field
+        if self.hotspot_base_ip:
+            return self.hotspot_base_ip
+            
+        # 2. Fallback to the old cidr field if missing
         if self.gateway_cidr and '/' in self.gateway_cidr:
             return self.gateway_cidr.split('/')[0]
-        return '172.18.0.1'
+            
+        # 3. Ultimate default
+        return '172.12.0.1'
 
     @property
     def pool_range(self):
-        """Calculates IP Pool: e.g. 172.18.2.10 - 172.18.255.254"""
-        ip = self.gateway_ip
-        try:
-            parts = ip.split('.')
-            base = f"{parts[0]}.{parts[1]}"
-            return f"{base}.2.10-{base}.255.254"
-        except:
-            return "172.18.2.10-172.18.255.254"
+        """Calculates IP Pool dynamically using the IPAM Calculator"""
+        if self.hotspot_base_ip and self.hotspot_subnet_cidr:
+            # Use our brilliant new calculator to get the perfect pool math
+            from apps.network.services.ipam_calculator import calculate_mikrotik_hotspot_network
+            math = calculate_mikrotik_hotspot_network(self.hotspot_base_ip, self.hotspot_subnet_cidr)
+            return math['pool_range']
+            
+        # Fallback for legacy routers
+        return "172.12.0.10-172.12.255.254"
 
     # Compatibility methods
     def get_lan_ip(self): return self.gateway_ip

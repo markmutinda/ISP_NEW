@@ -56,24 +56,34 @@ class MikrotikAPI:
             self.api = None
     
     def _execute(self, path: str, **kwargs) -> Any:
-        """Unified execute method for standard resources (Interfaces, Users, etc)"""
-        if not self.api and not self.connect():
-            raise Exception(f"Cannot connect to {self.device.name}")
-        try:
-            path_obj = self.api.path(path)
-            if 'get' in kwargs:
-                return list(path_obj(**kwargs['get']))
-            elif 'add' in kwargs:
-                return path_obj.add(**kwargs['add'])
-            elif 'set' in kwargs:
-                return path_obj.set(**kwargs['set'])
-            elif 'remove' in kwargs:
-                return path_obj.remove(**kwargs['remove'])
-            else:
-                return list(path_obj)
-        except Exception as e:
-            logger.error(f"API error on {path}: {str(e)}")
-            raise
+            """Unified execute method for standard resources (Interfaces, Users, etc)"""
+            if not self.api and not self.connect():
+                raise Exception(f"Cannot connect to {self.device.name}")
+            try:
+                # Safely unpack paths like '/ip/pool' into ('ip', 'pool') for librouteros
+                if isinstance(path, str) and '/' in path:
+                    path_parts = [p for p in path.split('/') if p]
+                    path_obj = self.api.path(*path_parts)
+                else:
+                    path_obj = self.api.path(path)
+
+                if 'get' in kwargs:
+                    return list(path_obj(**kwargs['get']))
+                elif 'add' in kwargs:
+                    return path_obj.add(**kwargs['add'])
+                elif 'update' in kwargs:
+                    # Handle the new 'update' commands we added to IPAM sync
+                    return path_obj.update(**kwargs['update'])
+                elif 'set' in kwargs:
+                    # Catch old 'set' commands from other parts of your app and redirect them to update
+                    return path_obj.update(**kwargs['set'])
+                elif 'remove' in kwargs:
+                    return path_obj.remove(**kwargs['remove'])
+                else:
+                    return list(path_obj)
+            except Exception as e:
+                logger.error(f"API error on {path}: {str(e)}")
+                raise
     
     # ────────────────────────────────────────────────────────────────
     # FIXED: MISSING METHODS THAT WERE CAUSING 500 ERRORS

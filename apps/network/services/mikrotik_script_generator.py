@@ -1,4 +1,3 @@
-# apps/network/services/mikrotik_script_generator.py
 """
 Lipanet-Style Cloud Controller Script Generator (v4.5)
 
@@ -147,10 +146,22 @@ class MikrotikScriptGenerator:
         is_v6 = v.startswith("6")
 
         portal_domain = self.portal_url.split('://')[-1]
-        gateway_ip = r.gateway_ip
-        pool_range = r.pool_range
-        gateway_parts = gateway_ip.split('.')
-        dhcp_network = f"{gateway_parts[0]}.{gateway_parts[1]}.0.0/16"
+        
+        # --- FIX: Dynamically calculate the exact network math ---
+        from apps.network.services.ipam_calculator import calculate_mikrotik_hotspot_network
+        
+        # Fallback to 172.12.0.1/16 if the database is completely empty
+        base_ip = getattr(r, 'hotspot_base_ip', None) or '172.12.0.1'
+        cidr = getattr(r, 'hotspot_subnet_cidr', None) or 16
+        
+        math = calculate_mikrotik_hotspot_network(base_ip, cidr)
+        
+        gateway_ip = math['gateway']
+        pool_range = math['pool_range']
+        dhcp_network = f"{math['network']}/{cidr}"
+        r_gateway_cidr = math['interface_address']
+        # --- END FIX ---
+
         pppoe_local = getattr(r, 'pppoe_local_address', None) or r.get_pppoe_local_ip()
 
         ovpn_cipher = "aes256"
@@ -162,7 +173,7 @@ class MikrotikScriptGenerator:
             self._section_api_user(r),
             self._section_openvpn(r, ovpn_cipher, ovpn_auth, is_v6),
             self._section_firewall(r),
-            self._section_bridge_ports(r),
+            self._section_bridge_ports(r, r_gateway_cidr),  # Pass the calculated gateway CIDR
             self._section_dhcp(r, gateway_ip, pool_range, dhcp_network),
             self._section_radius(r),
             self._section_hotspot(r, gateway_ip),
@@ -297,7 +308,7 @@ class MikrotikScriptGenerator:
 /ip firewall filter add chain=input action=accept connection-state=established,related comment="Netily-Established"
 """
 
-    def _section_bridge_ports(self, r: Router) -> str:
+    def _section_bridge_ports(self, r: Router, gateway_cidr: str) -> str:
         # ARCHITECTURE CHANGE: Single Bridge Strategy (Like Lipanet)
         # All services (Hotspot, PPPoE, DHCP) will run on this one bridge.
         
@@ -330,9 +341,9 @@ class MikrotikScriptGenerator:
     /interface bridge add name="netily-bridge" comment="Netily Hotspot & PPPoE"
 }}
 
-# 2. Assign Gateway IP to the bridge
+# 2. Assign Gateway IP to the bridge (using calculated CIDR)
 :do {{ /ip address remove [find interface="netily-bridge"] }} on-error={{}}
-/ip address add address="{r.gateway_cidr}" interface="netily-bridge" comment="Netily Gateway"
+/ip address add address="{gateway_cidr}" interface="netily-bridge" comment="Netily Gateway"
 
 # 3. Add Ports
 {ports_script}

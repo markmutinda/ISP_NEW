@@ -18,6 +18,7 @@ from apps.network.views.router_views import (
     RouterBridgePortView,
     RouterHotspotIPAMView,
     RouterHotspotIPAMApplyView,
+    RouterPortManagerView,
     download_router_cert,
 )
 
@@ -98,6 +99,9 @@ urlpatterns = [
     path('routers/<int:pk>/hotspot/enable/', RouterHotspotEnableView.as_view(), name='router-hotspot-enable'),
     path('routers/<int:pk>/hotspot/update/', RouterHotspotUpdateView.as_view(), name='router-hotspot-update'),
     path('routers/<int:pk>/bridge/port/', RouterBridgePortView.as_view(), name='router-bridge-port'),
+
+    # --- NEW: ROUTER PORT MANAGER ---
+    path('routers/<int:pk>/port-manager/', RouterPortManagerView.as_view(), name='router-port-manager'),
     
     # Hotspot IPAM (IP Address + Subnet Configuration)
     path('routers/<int:pk>/hotspot/ipam/', RouterHotspotIPAMView.as_view(), name='router-hotspot-ipam'),
