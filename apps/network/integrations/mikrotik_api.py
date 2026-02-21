@@ -497,6 +497,325 @@ class MikrotikAPI:
         return results
 
     # ────────────────────────────────────────────────────────────────
+    # PORT SCANNING (Pre-configuration health check)
+    # ────────────────────────────────────────────────────────────────
+
+    def scan_ports(self, ports: Optional[List[int]] = None, timeout: float = 1.5) -> Dict:
+        """
+        TCP port scan against the router's IP. Used to verify reachability
+        of common MikroTik services before attempting configuration.
+
+        Args:
+            ports: List of TCP ports to probe. Defaults to standard MikroTik ports.
+            timeout: Socket timeout per port in seconds.
+
+        Returns:
+            Dict with 'target_ip', 'results' list, 'api_reachable' bool,
+            'winbox_reachable' bool, 'web_reachable' bool.
+        """
+        DEFAULT_PORTS = [
+            (8728, "API",       "MikroTik API (plain)"),
+            (8729, "API-SSL",   "MikroTik API (SSL)"),
+            (80,   "HTTP",      "Web management (HTTP)"),
+            (443,  "HTTPS",     "Web management (HTTPS)"),
+            (22,   "SSH",       "Secure Shell"),
+            (8291, "Winbox",    "Winbox management"),
+            (21,   "FTP",       "File Transfer"),
+            (23,   "Telnet",    "Telnet access"),
+            (8080, "HTTP-Alt",  "HTTP proxy / alt web"),
+            (53,   "DNS",       "DNS service"),
+        ]
+
+        target_ip = (
+            self.device.vpn_ip_address
+            if (self.device.vpn_provisioned and self.device.vpn_ip_address)
+            else self.device.ip_address
+        )
+
+        if not target_ip:
+            return {
+                'target_ip': None,
+                'results': [],
+                'error': 'No IP address configured on this router',
+                'api_reachable': False,
+                'winbox_reachable': False,
+                'web_reachable': False,
+            }
+
+        scan_list = []
+        if ports:
+            # Build scan list from custom ports
+            port_map = {p[0]: p for p in DEFAULT_PORTS}
+            for port_num in ports:
+                if port_num in port_map:
+                    scan_list.append(port_map[port_num])
+                else:
+                    scan_list.append((port_num, f"Port-{port_num}", f"Custom port {port_num}"))
+        else:
+            scan_list = DEFAULT_PORTS
+
+        results = []
+        for port_num, service_name, description in scan_list:
+            entry = {
+                'port': port_num,
+                'service': service_name,
+                'description': description,
+                'status': 'closed',
+                'latency_ms': None,
+            }
+            try:
+                start = time.time()
+                sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                sock.settimeout(timeout)
+                result = sock.connect_ex((target_ip, port_num))
+                elapsed = (time.time() - start) * 1000
+                sock.close()
+                if result == 0:
+                    entry['status'] = 'open'
+                    entry['latency_ms'] = round(elapsed, 1)
+                else:
+                    entry['status'] = 'closed'
+            except socket.timeout:
+                entry['status'] = 'filtered'
+            except OSError:
+                entry['status'] = 'error'
+
+            results.append(entry)
+
+        api_open = any(r['port'] in (8728, 8729) and r['status'] == 'open' for r in results)
+        winbox_open = any(r['port'] == 8291 and r['status'] == 'open' for r in results)
+        web_open = any(r['port'] in (80, 443) and r['status'] == 'open' for r in results)
+
+        return {
+            'target_ip': target_ip,
+            'results': results,
+            'api_reachable': api_open,
+            'winbox_reachable': winbox_open,
+            'web_reachable': web_open,
+            'open_count': sum(1 for r in results if r['status'] == 'open'),
+            'total_scanned': len(results),
+        }
+
+    def get_full_interface_detail(self) -> List[Dict]:
+        """
+        Retrieve ALL interfaces (ethernet, wireless, bridge, vlan) with enriched
+        information about current usage — which bridge each port belongs to, whether
+        an IP address is assigned, and traffic stats.  Used by the Hotspot Setup
+        Wizard to let users pick the right interface.
+        """
+        try:
+            if not self.connect():
+                return []
+
+            # 1. All interfaces
+            interfaces = list(self.api.path('interface'))
+
+            # 2. Bridge port membership
+            try:
+                bridge_ports = {
+                    bp.get('interface'): bp.get('bridge')
+                    for bp in self.api.path('interface', 'bridge', 'port')
+                }
+            except Exception:
+                bridge_ports = {}
+
+            # 3. IP addresses → map interface → address
+            try:
+                ip_addrs = {}
+                for addr in self.api.path('ip', 'address'):
+                    ip_addrs[addr.get('interface', '')] = addr.get('address', '')
+            except Exception:
+                ip_addrs = {}
+
+            # 4. Hotspot servers → which interface is already a hotspot
+            try:
+                hotspot_ifaces = {
+                    srv.get('interface'): srv.get('name')
+                    for srv in self.api.path('ip', 'hotspot')
+                }
+            except Exception:
+                hotspot_ifaces = {}
+
+            enriched = []
+            for iface in interfaces:
+                name = iface.get('name', '')
+                itype = iface.get('type', '')
+
+                # Determine current use
+                current_use = 'unused'
+                if name in hotspot_ifaces:
+                    current_use = 'hotspot'
+                elif name in ip_addrs:
+                    addr = ip_addrs[name]
+                    # WAN heuristic: if it has a public-ish IP or is ether1
+                    if name == 'ether1' or (addr and not addr.startswith(('10.', '172.', '192.168.'))):
+                        current_use = 'wan'
+                    else:
+                        current_use = 'lan'
+                elif name in bridge_ports:
+                    current_use = 'bridge-member'
+
+                enriched.append({
+                    'name': name,
+                    'type': itype,
+                    'mac_address': iface.get('mac-address', ''),
+                    'running': iface.get('running', 'false') == 'true' if isinstance(iface.get('running'), str) else bool(iface.get('running', False)),
+                    'disabled': iface.get('disabled', 'false') == 'true' if isinstance(iface.get('disabled'), str) else bool(iface.get('disabled', False)),
+                    'default_name': iface.get('default-name', ''),
+                    'comment': iface.get('comment', ''),
+                    'speed': iface.get('link-speed', '') if itype == 'ether' else None,
+                    'bridge': bridge_ports.get(name),
+                    'ip_address': ip_addrs.get(name),
+                    'current_use': current_use,
+                    'hotspot_server': hotspot_ifaces.get(name),
+                    'tx_bytes': int(iface.get('tx-byte', 0)),
+                    'rx_bytes': int(iface.get('rx-byte', 0)),
+                })
+
+            return enriched
+        except Exception as e:
+            logger.error(f"Error fetching full interface detail: {e}")
+            return []
+        finally:
+            self.disconnect()
+
+    def full_hotspot_setup(self, config: dict) -> dict:
+        """
+        Complete hotspot setup on the router from scratch.  Creates:
+          1. IP pool
+          2. DHCP server
+          3. Hotspot profile
+          4. Hotspot server
+          5. IP address on interface
+
+        Args:
+            config: {
+                'interface':       'ether2',
+                'gateway':         '10.5.50.1',
+                'network_mask':    '24',
+                'pool_name':       'hs-pool-1',
+                'pool_range':      '10.5.50.10-10.5.50.254',
+                'dns_server':      '8.8.8.8',
+                'server_name':     'hotspot1',
+                'profile_name':    'hs-profile-1',
+                'idle_timeout':    '5m',
+                'keepalive_timeout': '2m',
+                'login_by':        'mac,http-chap',
+                'dns_name':        'hotspot.local',
+            }
+
+        Returns:
+            { 'success': bool, 'steps': [...], 'error': str|None }
+        """
+        steps = []
+        try:
+            if not self.connect():
+                return {'success': False, 'steps': steps, 'error': 'Connection failed'}
+
+            iface       = config['interface']
+            gateway     = config.get('gateway', '10.5.50.1')
+            mask        = config.get('network_mask', '24')
+            pool_name   = config.get('pool_name', 'hs-pool-1')
+            pool_range  = config.get('pool_range', '10.5.50.10-10.5.50.254')
+            dns         = config.get('dns_server', '8.8.8.8')
+            srv_name    = config.get('server_name', 'hotspot1')
+            prof_name   = config.get('profile_name', f'{srv_name}-profile')
+            idle        = config.get('idle_timeout', '5m')
+            keepalive   = config.get('keepalive_timeout', '2m')
+            login_by    = config.get('login_by', 'mac,http-chap')
+            dns_name    = config.get('dns_name', '')
+
+            # ── Step 1: Assign IP to interface ──
+            try:
+                # Remove existing IP on this interface first
+                for addr in self.api.path('ip', 'address'):
+                    if addr.get('interface') == iface:
+                        self.api.path('ip', 'address').remove(**{'.id': addr['.id']})
+                self.api.path('ip', 'address').add(
+                    address=f'{gateway}/{mask}',
+                    interface=iface,
+                )
+                steps.append({'step': 'ip_address', 'status': 'ok', 'detail': f'{gateway}/{mask} on {iface}'})
+            except Exception as e:
+                steps.append({'step': 'ip_address', 'status': 'error', 'detail': str(e)})
+                return {'success': False, 'steps': steps, 'error': f'IP assignment failed: {e}'}
+
+            # ── Step 2: Create IP Pool ──
+            try:
+                # Remove existing pool if same name
+                for pool in self.api.path('ip', 'pool'):
+                    if pool.get('name') == pool_name:
+                        self.api.path('ip', 'pool').remove(**{'.id': pool['.id']})
+                self.api.path('ip', 'pool').add(
+                    name=pool_name,
+                    ranges=pool_range,
+                )
+                steps.append({'step': 'ip_pool', 'status': 'ok', 'detail': f'{pool_name}: {pool_range}'})
+            except Exception as e:
+                steps.append({'step': 'ip_pool', 'status': 'error', 'detail': str(e)})
+                return {'success': False, 'steps': steps, 'error': f'Pool creation failed: {e}'}
+
+            # ── Step 3: Create Hotspot Profile ──
+            try:
+                for p in self.api.path('ip', 'hotspot', 'profile'):
+                    if p.get('name') == prof_name:
+                        self.api.path('ip', 'hotspot', 'profile').remove(**{'.id': p['.id']})
+                add_args = {
+                    'name': prof_name,
+                    'hotspot-address': gateway,
+                    'rate-limit': '',
+                }
+                if dns_name:
+                    add_args['dns-name'] = dns_name
+                if login_by:
+                    add_args['login-by'] = login_by
+                self.api.path('ip', 'hotspot', 'profile').add(**add_args)
+                steps.append({'step': 'hotspot_profile', 'status': 'ok', 'detail': prof_name})
+            except Exception as e:
+                steps.append({'step': 'hotspot_profile', 'status': 'error', 'detail': str(e)})
+                return {'success': False, 'steps': steps, 'error': f'Profile creation failed: {e}'}
+
+            # ── Step 4: Create Hotspot Server ──
+            try:
+                for srv in self.api.path('ip', 'hotspot'):
+                    if srv.get('name') == srv_name:
+                        self.api.path('ip', 'hotspot').remove(**{'.id': srv['.id']})
+                self.api.path('ip', 'hotspot').add(
+                    name=srv_name,
+                    interface=iface,
+                    **{'address-pool': pool_name},
+                    profile=prof_name,
+                    **{'idle-timeout': idle},
+                    **{'keepalive-timeout': keepalive},
+                    disabled='no',
+                )
+                steps.append({'step': 'hotspot_server', 'status': 'ok', 'detail': srv_name})
+            except Exception as e:
+                steps.append({'step': 'hotspot_server', 'status': 'error', 'detail': str(e)})
+                return {'success': False, 'steps': steps, 'error': f'Server creation failed: {e}'}
+
+            # ── Step 5: Set DNS ──
+            try:
+                self.api.path('ip', 'dns').set(servers=dns)
+                steps.append({'step': 'dns', 'status': 'ok', 'detail': dns})
+            except Exception as e:
+                steps.append({'step': 'dns', 'status': 'warning', 'detail': f'DNS set failed (non-fatal): {e}'})
+
+            return {
+                'success': True,
+                'steps': steps,
+                'server_name': srv_name,
+                'profile_name': prof_name,
+                'pool_name': pool_name,
+            }
+
+        except Exception as e:
+            logger.error(f"Full hotspot setup failed: {e}")
+            return {'success': False, 'steps': steps, 'error': str(e)}
+        finally:
+            self.disconnect()
+
+    # ────────────────────────────────────────────────────────────────
     # POST-CONNECTION SETUP (Dashboard → Router via VPN)
     # ────────────────────────────────────────────────────────────────
 

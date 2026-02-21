@@ -1862,8 +1862,42 @@ mute 20
             return Response({'error': str(e)}, status=400)
 
 # ────────────────────────────────────────────────────────────────
-# ROUTER PORTS & HOTSPOT CONFIGURATION VIEWS
+# ROUTER PORT SCAN, PORTS & HOTSPOT CONFIGURATION VIEWS
 # ────────────────────────────────────────────────────────────────
+
+class RouterPortScanView(APIView):
+    """
+    GET /api/v1/network/routers/{id}/scan/
+
+    TCP port scan against the router IP to verify which management
+    services are reachable before attempting configuration.
+    """
+    permission_classes = [IsAuthenticated, HasCompanyAccess]
+
+    def get(self, request, pk):
+        from django.db import connection
+        router, tenant = find_router_across_tenants(router_id=pk)
+        if not router:
+            return Response({'error': 'Router not found'}, status=status.HTTP_404_NOT_FOUND)
+        connection.set_tenant(tenant)
+
+        try:
+            mikrotik = mikrotik_api_module.MikrotikAPI(router)
+            result = mikrotik.scan_ports()
+
+            return Response({
+                'router_id': router.id,
+                'router_name': router.name,
+                'router_status': router.status,
+                **result,
+            })
+        except Exception as e:
+            logger.error(f"Port scan failed for router {pk}: {e}")
+            return Response({
+                'error': 'Port scan failed',
+                'message': str(e)
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
 class RouterPortsView(APIView):
     """
     GET /api/v1/network/routers/{id}/ports/
@@ -1873,10 +1907,11 @@ class RouterPortsView(APIView):
     permission_classes = [IsAuthenticated, HasCompanyAccess]
    
     def get(self, request, pk):
-        try:
-            router = Router.objects.get(pk=pk)
-        except Router.DoesNotExist:
+        from django.db import connection
+        router, tenant = find_router_across_tenants(router_id=pk)
+        if not router:
             return Response({'error': 'Router not found'}, status=status.HTTP_404_NOT_FOUND)
+        connection.set_tenant(tenant)
        
         # Check if router is reachable
         if router.status != 'online':
@@ -1887,7 +1922,7 @@ class RouterPortsView(APIView):
        
         try:
             mikrotik = mikrotik_api_module.MikrotikAPI(router)
-            ports = mikrotik.get_ports_with_usage()
+            ports = mikrotik.get_full_interface_detail()
            
             return Response({
                 'router_id': router.id,
@@ -1911,10 +1946,11 @@ class RouterHotspotConfigView(APIView):
     permission_classes = [IsAuthenticated, HasCompanyAccess]
    
     def get(self, request, pk):
-        try:
-            router = Router.objects.get(pk=pk)
-        except Router.DoesNotExist:
+        from django.db import connection
+        router, tenant = find_router_across_tenants(router_id=pk)
+        if not router:
             return Response({'error': 'Router not found'}, status=status.HTTP_404_NOT_FOUND)
+        connection.set_tenant(tenant)
        
         # Check if router is reachable
         if router.status != 'online':
@@ -1925,13 +1961,61 @@ class RouterHotspotConfigView(APIView):
        
         try:
             mikrotik = mikrotik_api_module.MikrotikAPI(router)
-            config = mikrotik.get_hotspot_config()
+            raw = mikrotik.get_hotspot_config()
            
-            # Add router info
-            config['router_id'] = router.id
-            config['router_name'] = router.name
-           
-            return Response(config)
+            servers = raw.get('servers', [])
+            profiles = raw.get('profiles', [])
+            is_configured = len(servers) > 0
+
+            # Build structured response the frontend expects
+            server_data = None
+            profile_data = None
+            if servers:
+                srv = servers[0]  # primary server
+                server_data = {
+                    'name': srv.get('name', ''),
+                    'interface': srv.get('interface', ''),
+                    'address_pool': srv.get('address-pool', ''),
+                    'profile': srv.get('profile', ''),
+                    'idle_timeout': srv.get('idle-timeout', ''),
+                    'keepalive_timeout': srv.get('keepalive-timeout', ''),
+                    'login_by': srv.get('login-by', '').split(',') if srv.get('login-by') else [],
+                    'disabled': srv.get('disabled', 'false') == 'true' if isinstance(srv.get('disabled'), str) else bool(srv.get('disabled', False)),
+                    'addresses_per_mac': srv.get('addresses-per-mac', 2),
+                }
+            if profiles:
+                prof = profiles[0]
+                profile_data = {
+                    'name': prof.get('name', ''),
+                    'rate_limit': prof.get('rate-limit', ''),
+                    'session_timeout': prof.get('session-timeout', ''),
+                    'shared_users': prof.get('shared-users', 1),
+                    'login_by': prof.get('login-by', ''),
+                    'dns_name': prof.get('dns-name', ''),
+                    'html_directory': prof.get('html-directory', ''),
+                }
+
+            # Try to get active sessions count
+            active_sessions = 0
+            try:
+                mikrotik2 = mikrotik_api_module.MikrotikAPI(router)
+                users = mikrotik2.get_active_hotspot_users()
+                active_sessions = len(users) if users else 0
+            except Exception:
+                pass
+
+            return Response({
+                'router_id': router.id,
+                'router_name': router.name,
+                'is_configured': is_configured,
+                'server': server_data,
+                'profile': profile_data,
+                'plans': [],  # Plans are managed in Django DB
+                'active_sessions': active_sessions,
+                'portal_url': f"http://{profile_data.get('dns_name', '')}" if profile_data and profile_data.get('dns_name') else None,
+                'total_servers': len(servers),
+                'total_profiles': len(profiles),
+            })
        
         except Exception as e:
             logger.error(f"Failed to get hotspot config for router {pk}: {e}")
@@ -1949,10 +2033,11 @@ class RouterHotspotConfigureView(APIView):
     permission_classes = [IsAuthenticated, HasCompanyAccess]
    
     def post(self, request, pk):
-        try:
-            router = Router.objects.get(pk=pk)
-        except Router.DoesNotExist:
+        from django.db import connection
+        router, tenant = find_router_across_tenants(router_id=pk)
+        if not router:
             return Response({'error': 'Router not found'}, status=status.HTTP_404_NOT_FOUND)
+        connection.set_tenant(tenant)
        
         # Check if router is reachable
         if router.status != 'online':
@@ -1981,7 +2066,27 @@ class RouterHotspotConfigureView(APIView):
        
         try:
             mikrotik = mikrotik_api_module.MikrotikAPI(router)
-            result = mikrotik.configure_hotspot(config)
+
+            # Build flat config dict for full_hotspot_setup
+            network = config.get('network', {})
+            server = config.get('server', {})
+            branding = config.get('branding', {})
+
+            setup_config = {
+                'interface':         config['interface'],
+                'gateway':           network.get('network_address', '10.5.50.1'),
+                'network_mask':      network.get('network_mask', '24'),
+                'pool_name':         network.get('pool_name', 'hs-pool-1'),
+                'pool_range':        network.get('pool_range', '10.5.50.10-10.5.50.254'),
+                'dns_server':        network.get('dns_server', '8.8.8.8'),
+                'server_name':       server.get('name', 'hotspot1'),
+                'idle_timeout':      server.get('idle_timeout', '5m'),
+                'keepalive_timeout': server.get('keepalive_timeout', '2m'),
+                'login_by':          ','.join(server.get('login_by', ['mac', 'http-chap'])),
+                'dns_name':          branding.get('dns_name', ''),
+            }
+
+            result = mikrotik.full_hotspot_setup(setup_config)
            
             if result.get('success'):
                 # Log the configuration event
@@ -1993,6 +2098,7 @@ class RouterHotspotConfigureView(APIView):
                         'interface': config.get('interface'),
                         'server_name': result.get('server_name'),
                         'network': config.get('network'),
+                        'steps': result.get('steps', []),
                         'configured_by': request.user.email,
                     }
                 )
@@ -2010,8 +2116,8 @@ class RouterHotspotConfigureView(APIView):
             else:
                 return Response({
                     'success': False,
-                    'message': 'Hotspot configuration failed',
-                    'result': result,
+                    'message': result.get('error', 'Hotspot configuration failed'),
+                    'steps': result.get('steps', []),
                 }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
        
         except Exception as e:
@@ -2030,10 +2136,11 @@ class RouterHotspotDisableView(APIView):
     permission_classes = [IsAuthenticated, HasCompanyAccess]
    
     def post(self, request, pk):
-        try:
-            router = Router.objects.get(pk=pk)
-        except Router.DoesNotExist:
+        from django.db import connection
+        router, tenant = find_router_across_tenants(router_id=pk)
+        if not router:
             return Response({'error': 'Router not found'}, status=status.HTTP_404_NOT_FOUND)
+        connection.set_tenant(tenant)
        
         # Check if router is reachable
         if router.status != 'online':
@@ -2082,10 +2189,11 @@ class RouterHotspotEnableView(APIView):
     permission_classes = [IsAuthenticated, HasCompanyAccess]
 
     def post(self, request, pk):
-        try:
-            router = Router.objects.get(pk=pk)
-        except Router.DoesNotExist:
+        from django.db import connection
+        router, tenant = find_router_across_tenants(router_id=pk)
+        if not router:
             return Response({'error': 'Router not found'}, status=status.HTTP_404_NOT_FOUND)
+        connection.set_tenant(tenant)
 
         if router.status != 'online':
             return Response({
@@ -2133,10 +2241,11 @@ class RouterHotspotUpdateView(APIView):
     permission_classes = [IsAuthenticated, HasCompanyAccess]
 
     def post(self, request, pk):
-        try:
-            router = Router.objects.get(pk=pk)
-        except Router.DoesNotExist:
+        from django.db import connection
+        router, tenant = find_router_across_tenants(router_id=pk)
+        if not router:
             return Response({'error': 'Router not found'}, status=status.HTTP_404_NOT_FOUND)
+        connection.set_tenant(tenant)
 
         if router.status != 'online':
             return Response({
@@ -2196,10 +2305,11 @@ class RouterBridgePortView(APIView):
     permission_classes = [IsAuthenticated, HasCompanyAccess]
 
     def post(self, request, pk):
-        try:
-            router = Router.objects.get(pk=pk)
-        except Router.DoesNotExist:
+        from django.db import connection
+        router, tenant = find_router_across_tenants(router_id=pk)
+        if not router:
             return Response({'error': 'Router not found'}, status=status.HTTP_404_NOT_FOUND)
+        connection.set_tenant(tenant)
 
         if router.status != 'online':
             return Response({

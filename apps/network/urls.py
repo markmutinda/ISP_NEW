@@ -8,6 +8,7 @@ from apps.network.views.router_views import (
     RouterViewSet,
     RouterAuthenticateView,
     RouterHeartbeatView,
+    RouterPortScanView,
     RouterPortsView,
     RouterHotspotConfigView,
     RouterHotspotConfigureView,
@@ -84,7 +85,8 @@ urlpatterns = [
     path('network/routers/auth/', RouterAuthenticateView.as_view(), name='router-auth'),
     path('routers/heartbeat/', RouterHeartbeatView.as_view(), name='router-heartbeat'),
     
-    # Router Hotspot Configuration Endpoints
+    # Router Port Scan & Hotspot Configuration Endpoints
+    path('routers/<int:pk>/scan/', RouterPortScanView.as_view(), name='router-port-scan'),
     path('routers/<int:pk>/ports/', RouterPortsView.as_view(), name='router-ports'),
     path('routers/<int:pk>/hotspot/config/', RouterHotspotConfigView.as_view(), name='router-hotspot-config'),
     path('routers/<int:pk>/hotspot/configure/', RouterHotspotConfigureView.as_view(), name='router-hotspot-configure'),
