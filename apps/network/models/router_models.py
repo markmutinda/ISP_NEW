@@ -208,6 +208,24 @@ class Router(AuditMixin):
     enable_hotspot = models.BooleanField(default=True)
     enable_pppoe = models.BooleanField(default=True)
     
+    # ── Captive Portal Customisation (per-router) ──
+    template_id = models.IntegerField(
+        default=1,
+        help_text="UI template for captive portal (1-7)"
+    )
+    hotspot_name = models.CharField(
+        max_length=100, blank=True, default='',
+        help_text="Display name on the captive portal (e.g. 'Mjengo Fast Wi-Fi')"
+    )
+    support_phone = models.CharField(
+        max_length=20, blank=True, default='',
+        help_text="Customer-care phone shown on captive portal"
+    )
+    announcement_text = models.CharField(
+        max_length=255, blank=True, default='',
+        help_text="Short banner message on the captive portal (e.g. 'Buy 24h for KES 50!')"
+    )
+
     pppoe_pool = models.CharField(max_length=50, default='192.40.2.10-192.40.2.254')
     pppoe_local_address = models.GenericIPAddressField(
         protocol='IPv4', null=True, blank=True, default='192.40.2.1',

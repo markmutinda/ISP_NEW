@@ -4,8 +4,7 @@ from .views.InvoiceViews import PlanViewSet, BillingCycleViewSet, InvoiceViewSet
 from .views.PaymentViews import PaymentViewSet
 from .views.VoucherViews import VoucherBatchViewSet, VoucherViewSet
 
-# --- FIX: We updated these imports to match the new hotspot views ---
-from .views.hotspot_views import CaptivePortalConfigView, HotspotPurchaseView, HotspotPurchaseStatusView
+from .views.hotspot_views import HotspotPlansView, HotspotPurchaseView, HotspotPurchaseStatusView
 
 from .views.cloud_portal_views import (
     HotspotLoginPageView,
@@ -76,10 +75,9 @@ urlpatterns = [
 # These are accessed from captive portal
 # ─────────────────────────────────────────────────────────────
 hotspot_urlpatterns = [
-    # --- FIX: We updated these paths to match the new Captive Portal design ---
-    path('captive-portal/', CaptivePortalConfigView.as_view(), name='captive-portal-config'),
+    path('routers/<int:router_id>/plans/', HotspotPlansView.as_view(), name='hotspot-plans'),
     path('purchase/', HotspotPurchaseView.as_view(), name='hotspot-purchase'),
-    path('purchase/status/', HotspotPurchaseStatusView.as_view(), name='hotspot-status'),
+    path('purchase/<str:session_id>/status/', HotspotPurchaseStatusView.as_view(), name='hotspot-status'),
     
     # ── Cloud Controller Portal Endpoints ──
     path('login-page/<int:router_id>/', HotspotLoginPageView.as_view(), name='hotspot-login-page'),

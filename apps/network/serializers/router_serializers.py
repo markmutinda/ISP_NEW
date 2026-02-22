@@ -53,11 +53,9 @@ class RouterSerializer(serializers.ModelSerializer):
             'gateway_cidr', 'dns_name', 'wan_interface', 'hotspot_interfaces',
             'hotspot_base_ip', 'hotspot_subnet_cidr',
             'pppoe_pool', 'pppoe_local_address',
-            
-            # --- NEW CAPTIVE PORTAL UI FIELDS ---
-            'template_id', 'hotspot_name', 'support_phone', 'announcement_text',
-            
             'config_type',
+            # Captive Portal Customisation
+            'template_id', 'hotspot_name', 'support_phone', 'announcement_text',
             'created_at', 'updated_at',
         ]
         extra_kwargs = {
@@ -93,12 +91,12 @@ class RouterSerializer(serializers.ModelSerializer):
             'ca_certificate': {'read_only': True},
             'client_certificate': {'read_only': True},
             'client_key': {'read_only': True},
-            
-            # New captive portal UI fields - allow read/write
+
+            # Captive portal UI fields - allow read/write
             'template_id': {'required': False},
-            'hotspot_name': {'required': False, 'allow_blank': True, 'allow_null': True},
-            'support_phone': {'required': False, 'allow_blank': True, 'allow_null': True},
-            'announcement_text': {'required': False, 'allow_blank': True, 'allow_null': True},
+            'hotspot_name': {'required': False, 'allow_blank': True},
+            'support_phone': {'required': False, 'allow_blank': True},
+            'announcement_text': {'required': False, 'allow_blank': True},
         }
 
     def get_auth_status(self, obj):
