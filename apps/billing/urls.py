@@ -4,7 +4,7 @@ from .views.InvoiceViews import PlanViewSet, BillingCycleViewSet, InvoiceViewSet
 from .views.PaymentViews import PaymentViewSet
 from .views.VoucherViews import VoucherBatchViewSet, VoucherViewSet
 
-from .views.hotspot_views import HotspotPlansView, HotspotPurchaseView, HotspotPurchaseStatusView
+from .views.hotspot_views import CaptivePortalView, HotspotPlansView, HotspotPurchaseView, HotspotPurchaseStatusView
 
 from .views.cloud_portal_views import (
     HotspotLoginPageView,
@@ -75,6 +75,7 @@ urlpatterns = [
 # These are accessed from captive portal
 # ─────────────────────────────────────────────────────────────
 hotspot_urlpatterns = [
+    path('captive-portal/', CaptivePortalView.as_view(), name='hotspot-captive-portal'),
     path('routers/<int:router_id>/plans/', HotspotPlansView.as_view(), name='hotspot-plans'),
     path('purchase/', HotspotPurchaseView.as_view(), name='hotspot-purchase'),
     path('purchase/<str:session_id>/status/', HotspotPurchaseStatusView.as_view(), name='hotspot-status'),

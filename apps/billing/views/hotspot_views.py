@@ -18,7 +18,7 @@ from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from django_tenants.utils import schema_context
+from django_tenants.utils import schema_context, get_public_schema_name
 
 from apps.billing.models.hotspot_models import HotspotPlan, HotspotSession, HotspotBranding
 from apps.billing.services.payhero import PayHeroClient, PayHeroError
@@ -26,6 +26,93 @@ from apps.network.models.router_models import Router
 from apps.subscriptions.models import CommissionLedger
 
 logger = logging.getLogger(__name__)
+
+
+class CaptivePortalView(APIView):
+    """
+    Public captive-portal endpoint — returns portal config + plans for a
+    given router, resolving the tenant explicitly via query parameters.
+
+    GET /api/v1/hotspot/captive-portal/?router={router_id}&tenant={tenant}
+
+    This is the canonical endpoint for the public WiFi captive portal pages.
+    It does NOT require authentication.
+    """
+
+    permission_classes = [AllowAny]
+    authentication_classes = []
+
+    def get(self, request):
+        router_id = request.query_params.get('router')
+        tenant_subdomain = request.query_params.get('tenant')
+
+        if not router_id or not tenant_subdomain:
+            return Response(
+                {'status': 'error', 'message': 'Missing required params: router, tenant'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        # ── Resolve the tenant from the public schema ──
+        try:
+            from apps.core.models import Tenant
+            with schema_context(get_public_schema_name()):
+                tenant = Tenant.objects.get(subdomain=tenant_subdomain, is_active=True)
+        except Exception:
+            return Response(
+                {'status': 'error', 'message': 'Tenant not found'},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        # ── Query router + plans inside the tenant schema ──
+        try:
+            with schema_context(tenant.schema_name):
+                try:
+                    router = Router.objects.get(id=router_id, is_active=True)
+                except Router.DoesNotExist:
+                    return Response(
+                        {'status': 'error', 'message': 'Router not found'},
+                        status=status.HTTP_404_NOT_FOUND,
+                    )
+
+                plans = HotspotPlan.objects.filter(
+                    router=router,
+                    is_active=True,
+                ).order_by('sort_order', 'price')
+
+                plans_data = [
+                    {
+                        'id': str(plan.id),
+                        'name': plan.name,
+                        'price': float(plan.price),
+                        'download_speed': str(plan.download_speed),
+                        'download_unit': plan.get_speed_unit_display(),
+                        'validity': str(plan.validity_value),
+                        'validity_unit': plan.get_validity_type_display(),
+                        'description': plan.description or '',
+                    }
+                    for plan in plans
+                ]
+
+                portal_config = {
+                    'template_id': router.template_id or 1,
+                    'hotspot_name': router.hotspot_name or router.name,
+                    'support_phone': router.support_phone or '',
+                    'announcement_text': router.announcement_text or '',
+                    'gateway_ip': router.gateway_ip,
+                }
+
+        except Exception as exc:
+            logger.exception('CaptivePortalView error: %s', exc)
+            return Response(
+                {'status': 'error', 'message': 'Internal server error'},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+
+        return Response({
+            'status': 'success',
+            'portal_config': portal_config,
+            'plans': plans_data,
+        })
 
 
 class HotspotPlansView(APIView):
