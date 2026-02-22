@@ -105,11 +105,11 @@ urlpatterns = [
     # API URLs (versioned)
     path('api/v1/', include(api_urlpatterns)),
     
+    # Hotspot API (PUBLIC - for captive portal) — MUST be before admin so public endpoints match first
+    path('api/v1/', include(hotspot_api_urlpatterns)),
+    
     # Hotspot Admin API (AUTHENTICATED - for admin management page)
     path('api/v1/', include(hotspot_admin_api_urlpatterns)),
-    
-    # Hotspot API (PUBLIC - for captive portal)
-    path('api/v1/', include(hotspot_api_urlpatterns)),
     
     # PayHero Webhooks (PUBLIC - callbacks)
     path('api/v1/', include(webhook_api_urlpatterns)),

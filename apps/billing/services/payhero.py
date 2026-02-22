@@ -232,27 +232,40 @@ class PayHeroClient:
             logger.info(f"PayHero API Response: {response.status_code}")
             logger.debug(f"Response body: {response.text[:500]}")
             
+            # Try to parse the response body for error details
+            try:
+                response_data = response.json() if response.text else {}
+            except (ValueError, json.JSONDecodeError):
+                response_data = {'raw_text': response.text[:500]}
+            
             # Handle different response codes
             if response.status_code == 401:
                 raise PayHeroAuthError(
                     message="Invalid PayHero credentials",
                     code="AUTH_ERROR",
-                    response=response.json() if response.text else {}
+                    response=response_data
                 )
             
             if response.status_code == 400:
-                error_data = response.json() if response.text else {}
+                error_msg = response_data.get('message') or response_data.get('error_message', 'Validation error')
+                logger.error(f"PayHero 400 error: {error_msg} | Full response: {response_data}")
                 raise PayHeroValidationError(
-                    message=error_data.get('message', 'Validation error'),
+                    message=error_msg,
                     code="VALIDATION_ERROR",
-                    response=error_data
+                    response=response_data
                 )
             
             if response.status_code >= 500:
+                error_msg = response_data.get('error_message') or response_data.get('message', 'PayHero server error')
+                logger.error(
+                    f"PayHero {response.status_code} error: {error_msg} | "
+                    f"Request payload: {json.dumps(data, default=str)} | "
+                    f"Full response: {response_data}"
+                )
                 raise PayHeroError(
-                    message="PayHero server error",
+                    message=f"PayHero server error: {error_msg}",
                     code="SERVER_ERROR",
-                    response=response.json() if response.text else {}
+                    response={**response_data, 'status_code': response.status_code}
                 )
             
             # Parse successful response
@@ -311,6 +324,20 @@ class PayHeroClient:
         # Normalize phone number
         phone = self._normalize_phone_number(phone_number)
         
+        # Resolve callback URL — use provided callback, then instance default, then settings default
+        resolved_callback = callback_url or self.callback_base_url or getattr(
+            settings, 'PAYHERO_HOTSPOT_CALLBACK',
+            'https://api.netily.io/api/v1/webhooks/payhero/hotspot/'
+        )
+        
+        # Warn if callback URL is localhost (PayHero rejects these)
+        if 'localhost' in resolved_callback or '127.0.0.1' in resolved_callback:
+            logger.warning(
+                f"PayHero callback URL contains localhost ({resolved_callback}). "
+                f"PayHero cannot reach localhost — STK Push will fail. "
+                f"Use a public URL or ngrok tunnel."
+            )
+        
         # Build request payload
         payload = {
             'amount': int(amount),
@@ -318,11 +345,13 @@ class PayHeroClient:
             'channel_id': channel_id or getattr(settings, 'PAYHERO_CHANNEL_ID', 1180),
             'provider': 'm-pesa',
             'external_reference': reference,
-            'callback_url': callback_url or self.callback_base_url,
+            'callback_url': resolved_callback,
         }
         
         if description:
             payload['description'] = description
+        
+        logger.info(f"Initiating STK Push: phone={phone}, amount={amount}, ref={reference}, channel={payload['channel_id']}")
         
         try:
             response = self._make_request(
@@ -333,10 +362,13 @@ class PayHeroClient:
             
             # Parse PayHero response
             success = response.get('success', False) or response.get('status') == 'QUEUED'
+            checkout_id = response.get('reference') or response.get('CheckoutRequestID') or response.get('id')
+            
+            logger.info(f"STK Push {'succeeded' if success else 'failed'}: checkout_id={checkout_id}, response={response}")
             
             return STKPushResponse(
                 success=success,
-                checkout_request_id=response.get('reference') or response.get('id'),
+                checkout_request_id=checkout_id,
                 reference=reference,
                 message=response.get('message', 'STK Push initiated'),
                 status=PaymentStatus.QUEUED if success else PaymentStatus.FAILED,
@@ -344,7 +376,7 @@ class PayHeroClient:
             )
             
         except PayHeroError as e:
-            logger.error(f"STK Push failed: {e.message}")
+            logger.error(f"STK Push failed: {e.message} | code={e.code} | response={e.response}")
             return STKPushResponse(
                 success=False,
                 checkout_request_id=None,

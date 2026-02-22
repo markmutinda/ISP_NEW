@@ -36,15 +36,16 @@ class HotspotPlanViewSet(viewsets.ModelViewSet):
     Plans are scoped to routers.
     
     Endpoints:
-    - GET    /api/v1/hotspot/routers/{router_id}/plans/
-    - POST   /api/v1/hotspot/routers/{router_id}/plans/
-    - GET    /api/v1/hotspot/routers/{router_id}/plans/{id}/
-    - PATCH  /api/v1/hotspot/routers/{router_id}/plans/{id}/
-    - DELETE /api/v1/hotspot/routers/{router_id}/plans/{id}/
+    - GET    /api/v1/hotspot/admin/routers/{router_id}/plans/
+    - POST   /api/v1/hotspot/admin/routers/{router_id}/plans/
+    - GET    /api/v1/hotspot/admin/routers/{router_id}/plans/{id}/
+    - PATCH  /api/v1/hotspot/admin/routers/{router_id}/plans/{id}/
+    - DELETE /api/v1/hotspot/admin/routers/{router_id}/plans/{id}/
     """
     
     serializer_class = HotspotPlanSerializer
     permission_classes = [IsAuthenticated, IsAdminOrStaff]
+    pagination_class = None  # Plans are few per router, return flat array
     filter_backends = [DjangoFilterBackend, filters.OrderingFilter]
     ordering_fields = ['sort_order', 'price', 'name', 'created_at']
     ordering = ['sort_order', 'price']
