@@ -83,12 +83,25 @@ class CaptivePortalView(APIView):
                     {
                         'id': str(plan.id),
                         'name': plan.name,
-                        'price': float(plan.price),
-                        'download_speed': str(plan.download_speed),
-                        'download_unit': plan.get_speed_unit_display(),
-                        'validity': str(plan.validity_value),
-                        'validity_unit': plan.get_validity_type_display(),
                         'description': plan.description or '',
+                        'price': float(plan.price),
+                        'currency': plan.currency,
+                        # Validity
+                        'validity_type': plan.validity_type,
+                        'validity_value': plan.validity_value,
+                        'duration_display': plan.duration_display,
+                        # Speed
+                        'download_speed': plan.download_speed,
+                        'upload_speed': plan.upload_speed,
+                        'speed_unit': plan.speed_unit,
+                        'speed_display': plan.speed_display,
+                        # Data limits
+                        'limitation_type': plan.limitation_type,
+                        'data_limit_value': plan.data_limit_value,
+                        'data_limit_unit': plan.data_limit_unit,
+                        'data_limit_display': plan.data_limit_display,
+                        # Display flags
+                        'is_popular': plan.is_popular,
                     }
                     for plan in plans
                 ]
