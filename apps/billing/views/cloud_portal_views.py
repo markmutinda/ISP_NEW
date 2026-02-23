@@ -12,6 +12,10 @@ All endpoints are PUBLIC (no auth required — used from captive portal).
 
 import logging
 
+from django.db import connection
+from django.db.models import Q
+from apps.core.models import Tenant
+
 from django.conf import settings
 from django.http import HttpResponse
 from django.shortcuts import get_object_or_404
@@ -30,44 +34,30 @@ logger = logging.getLogger(__name__)
 
 
 class HotspotLoginPageView(APIView):
-    """
-    Serves the dynamic login.html for MikroTik's /tool fetch.
-    
-    The MikroTik script generator includes a fallback: if it cannot
-    write login.html directly, it fetches from this endpoint.
-    
-    GET /api/v1/hotspot/login-page/{router_id}/
-    
-    Returns: text/html (the Cloud Redirector page)
-    """
-    
     permission_classes = [AllowAny]
     authentication_classes = []
     
     def get(self, request, router_id):
+        # 1. Switch to the correct ISP Database
+        tenant_subdomain = request.query_params.get('tenant')
+        if tenant_subdomain:
+            try:
+                tenant = Tenant.objects.get(Q(subdomain=tenant_subdomain) | Q(schema_name=tenant_subdomain))
+                connection.set_tenant(tenant)
+            except Tenant.DoesNotExist:
+                return HttpResponse('Invalid tenant', status=400)
+
         try:
             router = Router.objects.get(id=router_id, is_active=True)
         except Router.DoesNotExist:
-            return HttpResponse(
-                '<html><body><h1>Router not found</h1></body></html>',
-                content_type='text/html',
-                status=404
-            )
+            return HttpResponse('<html><body><h1>Router not found</h1></body></html>', content_type='text/html', status=404)
         
-        portal_url = getattr(
-            settings, 'CAPTIVE_PORTAL_URL', settings.BASE_URL
-        ).rstrip('/')
-        
-        # Generate the login.html with portal URL baked in
+        portal_url = getattr(settings, 'CAPTIVE_PORTAL_URL', settings.BASE_URL).rstrip('/')
         html = self._generate_login_html(router, portal_url)
-        
         return HttpResponse(html, content_type='text/html')
     
     def _generate_login_html(self, router, portal_url: str) -> str:
-        """
-        Generates the Cloud Redirector HTML with the portal URL embedded.
-        MikroTik will replace $(variables) at serve time.
-        """
+        tenant_str = self._escape_ros_string(router.tenant_subdomain or 'yellow1')
         return f"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -118,6 +108,7 @@ class HotspotLoginPageView(APIView):
                 '&router=' + encodeURIComponent(identity) +
                 '&login_url=' + encodeURIComponent(loginUrl) +
                 '&error=' + encodeURIComponent(error) +
+                '&tenant={tenant_str}' +
                 '&smart_tv=' + smartTV;
         
         var url = '{portal_url}/hotspot/{router.id}?' + p;
@@ -128,47 +119,44 @@ class HotspotLoginPageView(APIView):
 </body>
 </html>"""
 
+    def _escape_ros_string(self, s: str) -> str:
+        if s is None:
+            return ""
+        return s.replace('\\', '\\\\').replace('"', '\\"').replace('$', '\\$')
+
 
 class HotspotAutoLoginView(APIView):
-    """
-    Check if a MAC address has an active session (for auto-login).
-    
-    When a returning user connects, the portal checks this endpoint.
-    If they have a valid (non-expired) session, we can skip payment.
-    
-    POST /api/v1/hotspot/auto-login/
-    {
-        "router_id": 5,
-        "mac_address": "AA:BB:CC:DD:EE:FF"
-    }
-    
-    Returns:
-      - If active session exists: { "has_session": true, "login_url": "...", "credentials": {...} }
-      - If no session: { "has_session": false }
-    """
-    
     permission_classes = [AllowAny]
     authentication_classes = []
     
     def post(self, request):
+        tenant_subdomain = request.data.get('tenant') or request.query_params.get('tenant')
         router_id = request.data.get('router_id')
-        mac_address = request.data.get('mac_address', '').upper().replace('-', ':')
+        mac_address = request.data.get('mac_address')
         
-        if not router_id or not mac_address:
+        # DEBUG FIX: Print exactly what arrived from the frontend!
+        if not tenant_subdomain or not router_id or not mac_address:
             return Response(
-                {'error': 'router_id and mac_address are required'},
+                {'error': f'AUTO-LOGIN CRASH -> Tenant: "{tenant_subdomain}", Router: "{router_id}", MAC: "{mac_address}"'}, 
                 status=status.HTTP_400_BAD_REQUEST
             )
-        
+            
+        try:
+            tenant = Tenant.objects.get(Q(subdomain=tenant_subdomain) | Q(schema_name=tenant_subdomain))
+            connection.set_tenant(tenant)
+        except Tenant.DoesNotExist:
+            return Response({'error': f'Invalid tenant: {tenant_subdomain}'}, status=status.HTTP_400_BAD_REQUEST)
+
+        # BULLETPROOF ROUTER LOOKUP
         try:
             router = Router.objects.get(id=router_id, is_active=True)
-        except Router.DoesNotExist:
-            return Response(
-                {'error': 'Router not found'},
-                status=status.HTTP_404_NOT_FOUND
-            )
-        
-        # Find active session for this MAC on this router
+        except (Router.DoesNotExist, ValueError):
+            try:
+                router = Router.objects.get(name=router_id, is_active=True)
+            except Router.DoesNotExist:
+                return Response({'error': f'Router not found: {router_id}'}, status=status.HTTP_404_NOT_FOUND)
+
+        # ... (Keep the rest of your active_session logic exactly the same)
         active_session = HotspotSession.objects.filter(
             router=router,
             mac_address=mac_address,
@@ -177,10 +165,7 @@ class HotspotAutoLoginView(APIView):
         ).order_by('-activated_at').first()
         
         if active_session:
-            remaining_minutes = int(
-                (active_session.expires_at - timezone.now()).total_seconds() / 60
-            )
-            
+            remaining_minutes = int((active_session.expires_at - timezone.now()).total_seconds() / 60)
             return Response({
                 'has_session': True,
                 'session_id': active_session.session_id,
@@ -200,39 +185,23 @@ class HotspotAutoLoginView(APIView):
 
 
 class HotspotReturnTripView(APIView):
-    """
-    The "Return Trip" — after payment succeeds on the Next.js portal,
-    the user must be sent back to the MikroTik login URL to actually
-    authenticate and get internet access.
-    
-    This endpoint provides the RADIUS credentials and MikroTik login URL
-    that the frontend uses to complete the authentication loop.
-    
-    GET /api/v1/hotspot/return-trip/{session_id}/
-    
-    Returns:
-    {
-        "status": "ready",
-        "login_url": "http://10.0.0.1/login?...",  // MikroTik login URL
-        "username": "HS-XXXXXX",
-        "password": "HS-XXXXXX",
-        "method": "auto_submit"  // or "redirect"
-    }
-    """
-    
     permission_classes = [AllowAny]
     authentication_classes = []
     
     def get(self, request, session_id):
+        # 1. Switch to the correct ISP Database
+        tenant_subdomain = request.query_params.get('tenant')
+        if tenant_subdomain:
+            try:
+                tenant = Tenant.objects.get(Q(subdomain=tenant_subdomain) | Q(schema_name=tenant_subdomain))
+                connection.set_tenant(tenant)
+            except Tenant.DoesNotExist:
+                return Response({'error': 'Invalid tenant provided'}, status=400)
+
         try:
-            session = HotspotSession.objects.select_related('plan', 'router').get(
-                session_id=session_id
-            )
+            session = HotspotSession.objects.select_related('plan', 'router').get(session_id=session_id)
         except HotspotSession.DoesNotExist:
-            return Response(
-                {'error': 'Session not found'},
-                status=status.HTTP_404_NOT_FOUND
-            )
+            return Response({'error': 'Session not found'}, status=status.HTTP_404_NOT_FOUND)
         
         if session.status not in ('active', 'paid'):
             return Response({
@@ -240,13 +209,8 @@ class HotspotReturnTripView(APIView):
                 'message': 'Session is not ready for authentication.',
             })
         
-        # The login_url is the MikroTik $(link-login-only) that was captured
-        # when the user was first redirected. It's stored on the session
-        # or passed back via the frontend query params.
         login_url = request.query_params.get('login_url', '')
-        
         if not login_url:
-            # Try to construct it from the router's gateway
             login_url = f"http://{session.router.gateway_ip}/login"
         
         return Response({
@@ -265,35 +229,19 @@ class HotspotReturnTripView(APIView):
 
 
 class HotspotDeviceAuthView(APIView):
-    """
-    Device Authorization for Smart TVs and limited browsers.
-    
-    Smart TVs can't do M-Pesa STK push. Instead:
-    1. Smart TV gets a 6-digit pairing code
-    2. User enters code on their phone (which has internet)
-    3. Phone authorizes the TV's MAC address
-    4. TV gets internet access via the same session
-    
-    POST /api/v1/hotspot/device-auth/request/
-    {
-        "router_id": 5,
-        "mac_address": "AA:BB:CC:DD:EE:FF",
-        "device_type": "smart_tv"
-    }
-    → Returns: { "pairing_code": "482916", "expires_in": 300 }
-    
-    POST /api/v1/hotspot/device-auth/authorize/
-    {
-        "pairing_code": "482916",
-        "session_id": "HS-XXXXXX"  // Active session from the phone
-    }
-    → Returns: { "status": "authorized" }
-    """
-    
     permission_classes = [AllowAny]
     authentication_classes = []
     
     def post(self, request):
+        # 1. Switch to the correct ISP Database
+        tenant_subdomain = request.data.get('tenant') or request.query_params.get('tenant')
+        if tenant_subdomain:
+            try:
+                tenant = Tenant.objects.get(Q(subdomain=tenant_subdomain) | Q(schema_name=tenant_subdomain))
+                connection.set_tenant(tenant)
+            except Tenant.DoesNotExist:
+                return Response({'error': 'Invalid tenant provided'}, status=400)
+
         action = request.path.rstrip('/').split('/')[-1]
         
         if action == 'request':
@@ -301,13 +249,9 @@ class HotspotDeviceAuthView(APIView):
         elif action == 'authorize':
             return self._authorize_device(request)
         
-        return Response(
-            {'error': 'Invalid action'},
-            status=status.HTTP_400_BAD_REQUEST
-        )
+        return Response({'error': 'Invalid action'}, status=status.HTTP_400_BAD_REQUEST)
     
     def _request_pairing(self, request):
-        """Generate a pairing code for a Smart TV."""
         from django.core.cache import cache
         import random
         
@@ -316,23 +260,14 @@ class HotspotDeviceAuthView(APIView):
         device_type = request.data.get('device_type', 'unknown')
         
         if not router_id or not mac_address:
-            return Response(
-                {'error': 'router_id and mac_address are required'},
-                status=status.HTTP_400_BAD_REQUEST
-            )
+            return Response({'error': 'router_id and mac_address are required'}, status=status.HTTP_400_BAD_REQUEST)
         
         try:
             router = Router.objects.get(id=router_id, is_active=True)
         except Router.DoesNotExist:
-            return Response(
-                {'error': 'Router not found'},
-                status=status.HTTP_404_NOT_FOUND
-            )
+            return Response({'error': 'Router not found'}, status=status.HTTP_404_NOT_FOUND)
         
-        # Generate 6-digit pairing code
         pairing_code = str(random.randint(100000, 999999))
-        
-        # Store in cache with 5-minute expiry
         cache_key = f'device_pairing:{pairing_code}'
         cache.set(cache_key, {
             'router_id': router_id,
@@ -341,7 +276,6 @@ class HotspotDeviceAuthView(APIView):
             'created_at': timezone.now().isoformat(),
         }, timeout=300)
         
-        # Also store reverse mapping (MAC → code) for status checks
         mac_cache_key = f'device_pairing_mac:{router_id}:{mac_address}'
         cache.set(mac_cache_key, pairing_code, timeout=300)
         
@@ -352,29 +286,20 @@ class HotspotDeviceAuthView(APIView):
         })
     
     def _authorize_device(self, request):
-        """Authorize a device using a pairing code + active session."""
         from django.core.cache import cache
         
         pairing_code = request.data.get('pairing_code', '')
         session_id = request.data.get('session_id', '')
         
         if not pairing_code or not session_id:
-            return Response(
-                {'error': 'pairing_code and session_id are required'},
-                status=status.HTTP_400_BAD_REQUEST
-            )
+            return Response({'error': 'pairing_code and session_id are required'}, status=status.HTTP_400_BAD_REQUEST)
         
-        # Look up pairing request
         cache_key = f'device_pairing:{pairing_code}'
         pairing_data = cache.get(cache_key)
         
         if not pairing_data:
-            return Response(
-                {'error': 'Invalid or expired pairing code'},
-                status=status.HTTP_404_NOT_FOUND
-            )
+            return Response({'error': 'Invalid or expired pairing code'}, status=status.HTTP_404_NOT_FOUND)
         
-        # Look up the authorizing session
         try:
             session = HotspotSession.objects.get(
                 session_id=session_id,
@@ -382,24 +307,15 @@ class HotspotDeviceAuthView(APIView):
                 expires_at__gt=timezone.now()
             )
         except HotspotSession.DoesNotExist:
-            return Response(
-                {'error': 'Invalid or expired session'},
-                status=status.HTTP_400_BAD_REQUEST
-            )
+            return Response({'error': 'Invalid or expired session'}, status=status.HTTP_400_BAD_REQUEST)
         
-        # Verify same router
         if str(session.router_id) != str(pairing_data['router_id']):
-            return Response(
-                {'error': 'Session and device must be on the same router'},
-                status=status.HTTP_400_BAD_REQUEST
-            )
+            return Response({'error': 'Session and device must be on the same router'}, status=status.HTTP_400_BAD_REQUEST)
         
         device_mac = pairing_data['mac_address']
         
-        # Create RADIUS credentials for the device MAC
         try:
             from apps.billing.services.hotspot_radius_service import HotspotRadiusService
-            
             radius_service = HotspotRadiusService()
             radius_service.create_mac_auth_entry(
                 mac_address=device_mac,
@@ -407,19 +323,11 @@ class HotspotDeviceAuthView(APIView):
                 plan=session.plan,
                 expires_at=session.expires_at,
             )
-            
-            logger.info(
-                f"Device authorized: MAC={device_mac} via session={session_id} "
-                f"on router={session.router.name}"
-            )
+            logger.info(f"Device authorized: MAC={device_mac} via session={session_id} on router={session.router.name}")
         except Exception as e:
             logger.error(f"Failed to create device RADIUS entry: {e}")
-            return Response(
-                {'error': 'Failed to authorize device. Please try again.'},
-                status=status.HTTP_500_INTERNAL_SERVER_ERROR
-            )
+            return Response({'error': 'Failed to authorize device. Please try again.'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
         
-        # Clean up pairing code
         cache.delete(cache_key)
         mac_cache_key = f'device_pairing_mac:{pairing_data["router_id"]}:{device_mac}'
         cache.delete(mac_cache_key)
@@ -434,29 +342,27 @@ class HotspotDeviceAuthView(APIView):
 
 
 class HotspotDeviceAuthStatusView(APIView):
-    """
-    Check if a device's pairing request has been authorized.
-    Smart TVs poll this endpoint after showing the pairing code.
-    
-    GET /api/v1/hotspot/device-auth/status/?router_id=5&mac=AA:BB:CC:DD:EE:FF
-    """
-    
     permission_classes = [AllowAny]
     authentication_classes = []
     
     def get(self, request):
+        # 1. Switch to the correct ISP Database
+        tenant_subdomain = request.query_params.get('tenant')
+        if tenant_subdomain:
+            try:
+                tenant = Tenant.objects.get(Q(subdomain=tenant_subdomain) | Q(schema_name=tenant_subdomain))
+                connection.set_tenant(tenant)
+            except Tenant.DoesNotExist:
+                return Response({'error': 'Invalid tenant provided'}, status=400)
+
         from django.core.cache import cache
         
         router_id = request.query_params.get('router_id')
         mac_address = request.query_params.get('mac', '').upper().replace('-', ':')
         
         if not router_id or not mac_address:
-            return Response(
-                {'error': 'router_id and mac are required'},
-                status=status.HTTP_400_BAD_REQUEST
-            )
+            return Response({'error': 'router_id and mac are required'}, status=status.HTTP_400_BAD_REQUEST)
         
-        # Check if pairing code still exists (not yet authorized)
         mac_cache_key = f'device_pairing_mac:{router_id}:{mac_address}'
         pairing_code = cache.get(mac_cache_key)
         
@@ -467,7 +373,6 @@ class HotspotDeviceAuthStatusView(APIView):
                 'message': 'Waiting for authorization...',
             })
         
-        # Check if device now has an active session (was authorized)
         active_session = HotspotSession.objects.filter(
             router_id=router_id,
             mac_address=mac_address,
