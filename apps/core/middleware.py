@@ -1,4 +1,4 @@
-""""
+"""
 Middleware for core functionality: audit logging, tenant switching, company context
 """
 
@@ -62,6 +62,14 @@ class TenantMainMiddleware(MiddlewareMixin):
     """
     
     def process_request(self, request):
+        # Skip ONLY if it is one of the specific public machine endpoints defined at the top
+        if any(request.path.startswith(path) for path in PUBLIC_ROUTER_PATHS):
+            # For public endpoints, set to public schema and return None to continue processing
+            connection.set_schema_to_public()
+            request.tenant = None
+            request.company = None
+            return None
+        
         # Get the host from the request
         host = request.get_host().split(':')[0]  # Remove port
         
