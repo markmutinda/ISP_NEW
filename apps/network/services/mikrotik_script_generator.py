@@ -45,7 +45,9 @@ class MikrotikScriptGenerator:
         else:
             self.active_url = self.base_url
 
-        self.portal_url = getattr(settings, 'CAPTIVE_PORTAL_URL', self.active_url).rstrip('/')
+        # --- RESTORE OUR LOCAL TESTING FIX ---
+        self.active_url = "http://192.168.100.149:8000"
+        self.portal_url = "http://192.168.100.149:3000"
         
         # ── Provisioning download base ────────────────────────────
         self.provision_base = f"{self.active_url}/api/v1/network/provision"
@@ -377,8 +379,9 @@ class MikrotikScriptGenerator:
 """
 
     def _section_hotspot(self, r: Router, gateway_ip: str) -> str:
-        profile_cmd = f'/ip hotspot profile add name="netily-profile" hotspot-address="{gateway_ip}" dns-name="{self._escape_ros_string(r.dns_name)}" html-directory="hotspot" login-by=http-pap,mac-cookie use-radius=yes radius-accounting=yes http-cookie-lifetime=1d rate-limit=""'
+        profile_cmd = f'/ip hotspot profile add name="netily-profile" hotspot-address="{gateway_ip}" dns-name="{self._escape_ros_string(r.dns_name)}" login-by=http-pap,mac-cookie use-radius=yes radius-accounting=yes http-cookie-lifetime=1d rate-limit=""'
         server_cmd = f'/ip hotspot add name="netily-hotspot" interface="netily-bridge" address-pool="netily-pool" profile="netily-profile" disabled=no'
+        
         return f"""# ─────────────────────────────────────────────────────────────
 # 8. HOTSPOT PROFILE & SERVER (Bridge Mode)
 # ─────────────────────────────────────────────────────────────
@@ -458,32 +461,28 @@ class MikrotikScriptGenerator:
 """
 
     def _section_hotspot_html(self, r: Router) -> str:
-        # FIX: Once VPN is up, use the VPN Gateway to download HTML pages
-        # This solves the 404/Timeout issue during provisioning
-        login_url = f"http://{self.vpn_gateway}:8000/api/v1/network/provision/{r.auth_key}/hotspot/login.html"
-        status_url = f"http://{self.vpn_gateway}:8000/api/v1/network/provision/{r.auth_key}/hotspot/status.html"
+        login_url = f"{self.active_url}/api/v1/network/provision/{r.auth_key}/hotspot/login.html"
+        status_url = f"{self.active_url}/api/v1/network/provision/{r.auth_key}/hotspot/status.html"
 
         return f"""# ─────────────────────────────────────────────────────────────
 # 11. HOTSPOT HTML PAGES (Cloud Portal Redirectors)
 # ─────────────────────────────────────────────────────────────
-:put "Downloading hotspot pages via VPN..."
+:put "Downloading hotspot pages..."
 
-# Detect hotspot HTML directory automatically (like LipaNet)
+# Detect the directory MikroTik just assigned
 :local dir [/ip hotspot profile get [find name="netily-profile"] html-directory]
-:if ($dir = "") do={{
-    :log warning "Hotspot html-directory is empty. Using default 'hotspot'"
-    :set dir "hotspot"
-}}
+:if ($dir = "") do={{ :set dir "hotspot" }}
+
+# Overwrite the default login and status pages with our Cloud Redirectors
+:do {{
+    /tool fetch url="{login_url}" dst-path=($dir . "/login.html")
+    :put " -> login.html installed successfully!"
+}} on-error={{ :put ">>> ERROR: Failed to download login.html" }}
 
 :do {{
-    /tool fetch url="{login_url}" dst-path=("$dir/login.html")
-    :put "login.html installed."
-}} on-error={{ :put "WARNING: Could not download login.html" }}
-
-:do {{
-    /tool fetch url="{status_url}" dst-path=("$dir/status.html")
-    :put "status.html installed."
-}} on-error={{ :put "WARNING: Could not download status.html" }}
+    /tool fetch url="{status_url}" dst-path=($dir . "/status.html")
+    :put " -> status.html installed successfully!"
+}} on-error={{ :put ">>> ERROR: Failed to download status.html" }}
 """
 
     def _section_pppoe(self, r: Router, pppoe_local: str) -> str:
@@ -574,6 +573,7 @@ class MikrotikScriptGenerator:
     def generate_login_html(self) -> str:
         r = self.router
         portal = self.portal_url
+        tenant_name = self._escape_ros_string(r.tenant_subdomain or 'yellow1')
         return f"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -640,18 +640,21 @@ class MikrotikScriptGenerator:
         var loginUrl = '$(link-login-only)';
         var origUrl  = '$(link-orig)';
         var error    = '$(error)';
-        var portalBase = '{portal}/portal/login';
+        
+        // FIX: Match frontend dev's new path /hotspot/1
+        var portalBase = '{portal}/hotspot/{r.id}';
+        
         var params = new URLSearchParams({{
             mac: mac,
             ip: ip,
             router: identity,
-            router_id: '{r.id}',
             login_url: loginUrl,
             orig_url: origUrl,
             error: error,
-            tenant: '{self._escape_ros_string(r.tenant_subdomain or "")}'
+            tenant: '{tenant_name}'
         }});
         var portalUrl = portalBase + '?' + params.toString();
+        
         var ua = navigator.userAgent.toLowerCase();
         var isTv = /smart-tv|smarttv|googletv|appletv|hbbtv|pov_tv|netcast|viera|nettv|roku|dlnadoc|ce-html|lg-|samsung|tizen|webos|bravia|philips|panasonic|vestel/.test(ua);
         var isIot = /cros|playstation|xbox|nintendo|kindle|fire/.test(ua);
@@ -672,6 +675,7 @@ class MikrotikScriptGenerator:
     def generate_status_html(self) -> str:
         r = self.router
         portal = self.portal_url
+        tenant_name = self._escape_ros_string(r.tenant_subdomain or 'yellow1')
         return f"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -735,7 +739,7 @@ class MikrotikScriptGenerator:
             <div>Data Used: <span>$(bytes-in-nice) / $(bytes-out-nice)</span></div>
         </div>
         <a class="btn" href="$(link-logout)">Disconnect</a>
-        <a class="portal-link" href="{portal}/portal/status?mac=$(mac)&ip=$(ip)&router_id={r.id}&tenant={self._escape_ros_string(r.tenant_subdomain or '')}">
+        <a class="portal-link" href="{portal}/hotspot/{r.id}/status?mac=$(mac)&ip=$(ip)&tenant={tenant_name}">
             Manage Account &rarr;
         </a>
     </div>
