@@ -10,6 +10,7 @@ from decimal import Decimal
 
 from django.conf import settings
 from django.db import transaction
+from django.db.models import Q
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
 
@@ -43,26 +44,30 @@ class CaptivePortalView(APIView):
     authentication_classes = []
 
     def get(self, request):
+        print("\n" + "═"*60)
+        print("🚨 CAPTIVE PORTAL DIAGNOSTIC TRIGGERED 🚨")
+        
         router_id = request.query_params.get('router')
         tenant_subdomain = request.query_params.get('tenant')
+        
+        print(f"1. Frontend sent Router: '{router_id}'")
+        print(f"2. Frontend sent Tenant: '{tenant_subdomain}'")
 
-        # DEBUG FIX: Print exactly what arrived from the frontend!
         if not router_id or not tenant_subdomain:
-            return Response(
-                {'message': f'PORTAL CRASH -> Router: "{router_id}", Tenant: "{tenant_subdomain}"'},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
+            print("❌ CRASH: The frontend is missing the router or tenant variable!")
+            print("═"*60 + "\n")
+            return Response({'status': 'error', 'message': 'Missing required params'}, status=status.HTTP_400_BAD_REQUEST)
 
         # ── Resolve the tenant from the public schema ──
         try:
             from apps.core.models import Tenant
             with schema_context(get_public_schema_name()):
-                tenant = Tenant.objects.get(subdomain=tenant_subdomain, is_active=True)
-        except Exception:
-            return Response(
-                {'message': f'Tenant not found: {tenant_subdomain}'},
-                status=status.HTTP_404_NOT_FOUND,
-            )
+                tenant = Tenant.objects.get(Q(subdomain=tenant_subdomain) | Q(schema_name=tenant_subdomain), is_active=True)
+                print(f"3. Found Tenant in DB: '{tenant.name}' (Schema: {tenant.schema_name})")
+        except Exception as e:
+            print(f"❌ CRASH: Tenant '{tenant_subdomain}' DOES NOT EXIST in the database! Error: {e}")
+            print("═"*60 + "\n")
+            return Response({'status': 'error', 'message': 'Tenant not found'}, status=status.HTTP_400_BAD_REQUEST)
 
         # ── Query router + plans inside the tenant schema ──
         try:
@@ -70,44 +75,33 @@ class CaptivePortalView(APIView):
                 # BULLETPROOF: Try by ID, fallback to Name
                 try:
                     router = Router.objects.get(id=router_id, is_active=True)
+                    print(f"4. Found Router by ID: '{router.name}'")
                 except (Router.DoesNotExist, ValueError):
                     try:
                         router = Router.objects.get(name=router_id, is_active=True)
-                        logger.info(f"Router found by name in CaptivePortalView: {router_id} -> {router.id}")
+                        print(f"4. Found Router by Name: '{router.name}'")
                     except Router.DoesNotExist:
-                        return Response(
-                            {'message': f'Router not found: {router_id}'},
-                            status=status.HTTP_404_NOT_FOUND,
-                        )
+                        print(f"❌ CRASH: Router '{router_id}' DOES NOT EXIST in this tenant's database!")
+                        print("═"*60 + "\n")
+                        return Response({'status': 'error', 'message': 'Router not found'}, status=status.HTTP_400_BAD_REQUEST)
 
                 plans = HotspotPlan.objects.filter(
                     router=router,
                     is_active=True,
                 ).order_by('sort_order', 'price')
+                
+                print(f"5. Found {plans.count()} active plans for this router!")
 
                 plans_data = [
                     {
                         'id': str(plan.id),
                         'name': plan.name,
-                        'description': plan.description or '',
                         'price': float(plan.price),
-                        'currency': plan.currency,
-                        # Validity
-                        'validity_type': plan.validity_type,
-                        'validity_value': plan.validity_value,
-                        'duration_display': plan.duration_display,
-                        # Speed
-                        'download_speed': plan.download_speed,
-                        'upload_speed': plan.upload_speed,
-                        'speed_unit': plan.speed_unit,
-                        'speed_display': plan.speed_display,
-                        # Data limits
-                        'limitation_type': plan.limitation_type,
-                        'data_limit_value': plan.data_limit_value,
-                        'data_limit_unit': plan.data_limit_unit,
-                        'data_limit_display': plan.data_limit_display,
-                        # Display flags
-                        'is_popular': plan.is_popular,
+                        'download_speed': str(plan.download_speed),
+                        'download_unit': plan.get_speed_unit_display(),
+                        'validity': str(plan.validity_value),
+                        'validity_unit': plan.get_validity_type_display(),
+                        'description': plan.description or '',
                     }
                     for plan in plans
                 ]
@@ -121,12 +115,13 @@ class CaptivePortalView(APIView):
                 }
 
         except Exception as exc:
-            logger.exception('CaptivePortalView error: %s', exc)
-            return Response(
-                {'message': 'Internal server error'},
-                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            )
+            print(f"❌ CRASH: Internal Code Error: {exc}")
+            print("═"*60 + "\n")
+            return Response({'status': 'error', 'message': 'Internal server error'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
+        print("✅ SUCCESS: Sending plans back to the phone!")
+        print("═"*60 + "\n")
+        
         return Response({
             'status': 'success',
             'portal_config': portal_config,
