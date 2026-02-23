@@ -127,18 +127,10 @@ class CaptivePortalView(APIView):
     authentication_classes = []
 
     def get(self, request):
-        print("\n" + "═"*60)
-        print("🚨 CAPTIVE PORTAL DIAGNOSTIC TRIGGERED 🚨")
-        
         router_id = request.query_params.get('router')
         tenant_subdomain = request.query_params.get('tenant')
-        
-        print(f"1. Frontend sent Router: '{router_id}'")
-        print(f"2. Frontend sent Tenant: '{tenant_subdomain}'")
 
         if not router_id or not tenant_subdomain:
-            print("❌ CRASH: The frontend is missing the router or tenant variable!")
-            print("═"*60 + "\n")
             return Response(
                 {
                     'message': 'Both "router" and "tenant" query parameters are required.',
@@ -153,10 +145,8 @@ class CaptivePortalView(APIView):
             from apps.core.models import Tenant
             with schema_context(get_public_schema_name()):
                 tenant = Tenant.objects.get(Q(subdomain=tenant_subdomain) | Q(schema_name=tenant_subdomain), is_active=True)
-                print(f"3. Found Tenant in DB! (Schema: {tenant.schema_name})")
         except Exception as e:
-            print(f"❌ CRASH: Tenant '{tenant_subdomain}' DOES NOT EXIST in the database! Error: {e}")
-            print("═"*60 + "\n")
+            logger.error(f"Tenant '{tenant_subdomain}' not found: {e}")
             return Response({'status': 'error', 'message': 'Tenant not found'}, status=status.HTTP_400_BAD_REQUEST)
 
         # ── Query router + plans inside the tenant schema ──
@@ -166,15 +156,12 @@ class CaptivePortalView(APIView):
                 router = None
                 try:
                     router = Router.objects.get(id=router_id, is_active=True)
-                    print(f"4. Found Router by ID: '{router.name}'")
                 except (Router.DoesNotExist, ValueError):
                     try:
                         router = Router.objects.get(name=router_id, is_active=True)
-                        print(f"4. Found Router by Name: '{router.name}'")
                         logger.info("CaptivePortal: router found by name '%s' -> id=%s", router_id, router.id)
                     except Router.DoesNotExist:
-                        print(f"❌ CRASH: Router '{router_id}' DOES NOT EXIST in this tenant's database!")
-                        print("═"*60 + "\n")
+                        logger.warning(f"Router '{router_id}' does not exist in tenant {tenant_subdomain}")
                 except ProgrammingError:
                     # Table doesn't exist yet — tenant schema not fully migrated
                     logger.warning("CaptivePortal: network_router table missing for tenant %s", tenant_subdomain)
@@ -191,7 +178,6 @@ class CaptivePortalView(APIView):
                     }
                     branding_data = None
                 else:
-                    print(f"5. Building portal_config for router '{router.name}'")
                     portal_config = {
                         'template_id': router.template_id or 1,
                         'hotspot_name': router.hotspot_name or router.name,
@@ -256,12 +242,8 @@ class CaptivePortalView(APIView):
                         logger.warning("CaptivePortal: billing_plan table missing for tenant %s", tenant_subdomain)
 
         except Exception as exc:
-            print(f"❌ CRASH: Internal Code Error: {exc}")
-            print("═"*60 + "\n")
+            logger.error(f"CaptivePortal internal error for tenant {tenant_subdomain}: {exc}")
             return Response({'status': 'error', 'message': 'Internal server error'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-
-        print("✅ SUCCESS: Sending plans back to the phone!")
-        print("═"*60 + "\n")
         
         return Response({
             'status': 'success',

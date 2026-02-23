@@ -130,49 +130,35 @@ class HotspotAutoLoginView(APIView):
     authentication_classes = []
     
     def post(self, request):
-        print("\n" + "─"*60)
-        print("🔍 AUTO-LOGIN DIAGNOSTIC TRIGGERED 🔍")
         tenant_subdomain = request.data.get('tenant') or request.query_params.get('tenant')
         router_id = request.data.get('router_id')
         mac_address = request.data.get('mac_address')
         
-        print(f"1. Received Tenant: '{tenant_subdomain}'")
-        print(f"2. Received Router: '{router_id}'")
-        print(f"3. Received MAC: '{mac_address}'")
-        
         if not tenant_subdomain:
-            print("❌ CRASH: Tenant is missing from the Auto-Login request!")
-            print("─"*60 + "\n")
+            logger.warning("Auto-login missing tenant parameter")
             return Response({'error': 'Tenant is missing.'}, status=status.HTTP_400_BAD_REQUEST)
             
         try:
             tenant = Tenant.objects.get(Q(subdomain=tenant_subdomain) | Q(schema_name=tenant_subdomain))
             connection.set_tenant(tenant)
         except Tenant.DoesNotExist:
-            print(f"❌ CRASH: Tenant '{tenant_subdomain}' does not exist!")
-            print("─"*60 + "\n")
+            logger.warning(f"Auto-login: tenant '{tenant_subdomain}' does not exist")
             return Response({'error': f'Invalid tenant.'}, status=status.HTTP_400_BAD_REQUEST)
 
         if not router_id or not mac_address:
-            print("❌ CRASH: Missing Router ID or MAC address!")
-            print("─"*60 + "\n")
+            logger.warning(f"Auto-login missing router_id or mac_address: router={router_id}, mac={mac_address}")
             return Response({'error': 'Missing router/mac'}, status=status.HTTP_400_BAD_REQUEST)
         
         # BULLETPROOF ROUTER LOOKUP
         try:
             router = Router.objects.get(id=router_id, is_active=True)
-            print(f"4. Found Router by ID: '{router.name}'")
         except (Router.DoesNotExist, ValueError):
             try:
                 router = Router.objects.get(name=router_id, is_active=True)
-                print(f"4. Found Router by Name: '{router.name}'")
+                logger.info(f"Auto-login: router found by name: {router_id} -> {router.id}")
             except Router.DoesNotExist:
-                print(f"❌ CRASH: Router '{router_id}' not found in database!")
-                print("─"*60 + "\n")
+                logger.warning(f"Auto-login: router '{router_id}' not found in database")
                 return Response({'error': 'Router not found'}, status=status.HTTP_400_BAD_REQUEST)
-        
-        print(f"✅ SUCCESS: Auto-login check completed for {mac_address}.")
-        print("─"*60 + "\n")
         
         active_session = HotspotSession.objects.filter(
             router=router,
