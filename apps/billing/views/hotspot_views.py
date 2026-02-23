@@ -63,7 +63,7 @@ class CaptivePortalView(APIView):
             from apps.core.models import Tenant
             with schema_context(get_public_schema_name()):
                 tenant = Tenant.objects.get(Q(subdomain=tenant_subdomain) | Q(schema_name=tenant_subdomain), is_active=True)
-                print(f"3. Found Tenant in DB: '{tenant.name}' (Schema: {tenant.schema_name})")
+                print(f"3. Found Tenant in DB! (Schema: {tenant.schema_name})")
         except Exception as e:
             print(f"❌ CRASH: Tenant '{tenant_subdomain}' DOES NOT EXIST in the database! Error: {e}")
             print("═"*60 + "\n")
