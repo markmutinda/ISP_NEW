@@ -100,3 +100,12 @@ docs/
 docs/VPN_RADIUS_TESTING_GUIDE.md
 
 docs/VPN_RADIUS_TESTING_GUIDE.md
+docker/.env.radius.tenant_huey
+docker/.env.radius.tenant_indigo3
+docker/.env.radius.tenant_orange1
+docker/.env.radius.tenant_purple2
+radius_config/tenants/tenant_huey/queries.conf
+radius_config/tenants/tenant_indigo3/queries.conf
+radius_config/tenants/tenant_orange1/queries.conf
+radius_config/tenants/tenant_purple2/queries.conf
+sim_output.txt

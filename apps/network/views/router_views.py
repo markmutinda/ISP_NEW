@@ -7,6 +7,7 @@ from django_filters.rest_framework import DjangoFilterBackend
 from django.utils import timezone
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from django.db.models import Sum, Avg, F, Count
+from django.db import ProgrammingError
 from django.http import HttpResponse, Http404
 import textwrap  # <--- Add this
 from apps.network.services.mikrotik_script_generator import MikrotikScriptGenerator
@@ -228,21 +229,31 @@ class RouterViewSet(viewsets.ModelViewSet):
 
     def list(self, request, *args, **kwargs):
         """
-        GET /routers/  — if no tenant context, aggregate routers from all tenants.
+        GET /routers/  — always scoped to the resolved tenant.
+        Superusers without a tenant see all tenants (admin overview).
+        Regular users without a tenant get an empty list (data isolation).
         """
         from django.db import connection as db_conn
         logger.info(f"[RouterViewSet.list] tenant={getattr(request, 'tenant', None)}")
 
-        # If tenant was already resolved by middleware, standard list works
+        # If tenant was resolved (by middleware or _ensure_tenant_context), use it
         if hasattr(request, 'tenant') and request.tenant:
             return super().list(request, *args, **kwargs)
 
-        # Fallback: aggregate routers across all tenants
+        # No tenant context — only allow superusers to aggregate across tenants
+        if not request.user.is_superuser:
+            logger.warning(
+                "[RouterViewSet.list] No tenant context for user %s — returning empty",
+                request.user,
+            )
+            return Response({'count': 0, 'results': []})
+
+        # Superuser: aggregate routers across all tenants (admin overview)
         try:
             from apps.core.models import Tenant
             db_conn.set_schema_to_public()
             tenants = list(Tenant.objects.filter(is_active=True).exclude(schema_name='public'))
-            logger.info(f"[RouterViewSet.list] Found {len(tenants)} tenants")
+            logger.info(f"[RouterViewSet.list] Superuser aggregating {len(tenants)} tenants")
             all_routers = []
             for tenant in tenants:
                 try:
@@ -1480,38 +1491,50 @@ mute 20
     # ────────────────────────────────────────────────────────────────
     @action(detail=False, methods=['get'])
     def dashboard_stats(self, request):
-        qs = self.get_queryset()
-        stats = {
-            "total_routers": qs.count(),
-            "online_routers": qs.filter(status='online').count(),
-            "offline_routers": qs.filter(status='offline').count(),
-            "warning_routers": qs.filter(status='warning').count(),
-            "maintenance_routers": qs.filter(status='maintenance').count(),
-            "total_connected_users": qs.aggregate(total=Sum('active_users'))['total'] or 0,
-            "average_uptime": round(qs.aggregate(avg=Avg('uptime_percentage'))['avg'] or 0, 2),
-            # Configuration type stats
-            "basic_routers": qs.filter(config_type='basic').count(),
-            "hotspot_routers": qs.filter(config_type='hotspot').count(),
-            "pppoe_routers": qs.filter(config_type='pppoe').count(),
-            "isp_routers": qs.filter(config_type='isp').count(),
-            "full_isp_routers": qs.filter(config_type='full_isp').count(),
-        }
-        
-        # Add SLA stats if field exists
-        if hasattr(Router, 'sla_target'):
-            below_sla = qs.filter(
-                uptime_percentage__lt=F('sla_target'),
-                uptime_percentage__gt=0
-            ).count()
-            stats["below_sla_count"] = below_sla
-        
-        # Add authentication stats
-        stats.update({
-            "authenticated_routers": qs.filter(is_authenticated=True).count(),
-            "pending_authentication": qs.filter(is_authenticated=False, auth_key__isnull=False).count(),
-        })
-        
-        return Response(stats)
+        try:
+            qs = self.get_queryset()
+            stats = {
+                "total_routers": qs.count(),
+                "online_routers": qs.filter(status='online').count(),
+                "offline_routers": qs.filter(status='offline').count(),
+                "warning_routers": qs.filter(status='warning').count(),
+                "maintenance_routers": qs.filter(status='maintenance').count(),
+                "total_connected_users": qs.aggregate(total=Sum('active_users'))['total'] or 0,
+                "average_uptime": round(qs.aggregate(avg=Avg('uptime_percentage'))['avg'] or 0, 2),
+                # Configuration type stats
+                "basic_routers": qs.filter(config_type='basic').count(),
+                "hotspot_routers": qs.filter(config_type='hotspot').count(),
+                "pppoe_routers": qs.filter(config_type='pppoe').count(),
+                "isp_routers": qs.filter(config_type='isp').count(),
+                "full_isp_routers": qs.filter(config_type='full_isp').count(),
+            }
+            
+            # Add SLA stats if field exists
+            if hasattr(Router, 'sla_target'):
+                below_sla = qs.filter(
+                    uptime_percentage__lt=F('sla_target'),
+                    uptime_percentage__gt=0
+                ).count()
+                stats["below_sla_count"] = below_sla
+            
+            # Add authentication stats
+            stats.update({
+                "authenticated_routers": qs.filter(is_authenticated=True).count(),
+                "pending_authentication": qs.filter(is_authenticated=False, auth_key__isnull=False).count(),
+            })
+            
+            return Response(stats)
+        except ProgrammingError:
+            # Tenant schema not fully migrated — return empty stats gracefully
+            logger.warning("dashboard_stats: network_router table missing for current tenant")
+            return Response({
+                "total_routers": 0, "online_routers": 0, "offline_routers": 0,
+                "warning_routers": 0, "maintenance_routers": 0,
+                "total_connected_users": 0, "average_uptime": 0,
+                "basic_routers": 0, "hotspot_routers": 0, "pppoe_routers": 0,
+                "isp_routers": 0, "full_isp_routers": 0,
+                "authenticated_routers": 0, "pending_authentication": 0,
+            })
     
     @action(detail=True, methods=['get'])
     def events(self, request, pk=None):

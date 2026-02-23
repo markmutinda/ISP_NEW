@@ -9,7 +9,7 @@ import logging
 from decimal import Decimal
 
 from django.conf import settings
-from django.db import transaction
+from django.db import transaction, ProgrammingError
 from django.db.models import Q
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
@@ -22,11 +22,90 @@ from rest_framework.views import APIView
 from django_tenants.utils import schema_context, get_public_schema_name
 
 from apps.billing.models.hotspot_models import HotspotPlan, HotspotSession, HotspotBranding
+from apps.billing.models.billing_models import Plan
 from apps.billing.services.payhero import PayHeroClient, PayHeroError
 from apps.network.models.router_models import Router
 from apps.subscriptions.models import CommissionLedger
 
 logger = logging.getLogger(__name__)
+
+
+def _plan_data_limit_display(plan):
+    """Human-readable data limit string for a Plan model object."""
+    if plan.data_limit is None:
+        return 'Unlimited'
+    if plan.data_limit >= 1024:
+        tb = plan.data_limit / 1024
+        return f'{tb:g} TB'
+    return f'{plan.data_limit} GB'
+
+
+def _plan_validity_value(plan):
+    """Extract the raw validity value from a Plan model object."""
+    vtype = (plan.validity_type or 'DAYS').upper()
+    if vtype == 'MINUTES':
+        return plan.validity_minutes or 0
+    elif vtype == 'HOURS':
+        return plan.validity_hours or 0
+    elif vtype == 'MONTHS':
+        return plan.validity_months or 0
+    elif vtype == 'UNLIMITED':
+        return 0
+    return plan.duration_days or 30
+
+
+def _serialize_plan(plan):
+    """Serialize a Plan (billing_models.Plan) to the captive-portal response format."""
+    return {
+        'id': str(plan.id),
+        'name': plan.name,
+        'description': plan.description or '',
+        'price': float(plan.base_price),
+        'currency': 'KES',
+        # Validity
+        'validity_type': plan.validity_type or 'DAYS',
+        'validity_value': _plan_validity_value(plan),
+        'duration_display': plan.validity_display,
+        # Speed
+        'download_speed': plan.download_speed or 0,
+        'upload_speed': plan.upload_speed or 0,
+        'speed_unit': plan.speed_unit or 'MBPS',
+        'speed_display': plan.speed_display,
+        # Data limits
+        'limitation_type': 'UNLIMITED' if plan.data_limit is None else 'DATA',
+        'data_limit_value': plan.data_limit,
+        'data_limit_unit': 'GB',
+        'data_limit_display': _plan_data_limit_display(plan),
+        # Display flags
+        'is_popular': plan.is_popular,
+    }
+
+
+def _serialize_hotspot_plan(plan):
+    """Serialize a HotspotPlan to the captive-portal response format."""
+    return {
+        'id': str(plan.id),
+        'name': plan.name,
+        'description': plan.description or '',
+        'price': float(plan.price),
+        'currency': plan.currency,
+        # Validity
+        'validity_type': plan.validity_type,
+        'validity_value': plan.validity_value,
+        'duration_display': plan.duration_display,
+        # Speed
+        'download_speed': plan.download_speed,
+        'upload_speed': plan.upload_speed,
+        'speed_unit': plan.speed_unit,
+        'speed_display': plan.speed_display,
+        # Data limits
+        'limitation_type': plan.limitation_type,
+        'data_limit_value': plan.data_limit_value,
+        'data_limit_unit': plan.data_limit_unit,
+        'data_limit_display': plan.data_limit_display,
+        # Display flags
+        'is_popular': plan.is_popular,
+    }
 
 
 class CaptivePortalView(APIView):
@@ -35,6 +114,10 @@ class CaptivePortalView(APIView):
     given router, resolving the tenant explicitly via query parameters.
 
     GET /api/v1/hotspot/captive-portal/?router={router_id}&tenant={tenant}
+
+    Plan resolution order:
+      1. HotspotPlan records linked to this specific router (primary)
+      2. Fallback: Plan records with plan_type='HOTSPOT' (tenant-wide)
 
     This is the canonical endpoint for the public WiFi captive portal pages.
     It does NOT require authentication.
@@ -56,7 +139,14 @@ class CaptivePortalView(APIView):
         if not router_id or not tenant_subdomain:
             print("❌ CRASH: The frontend is missing the router or tenant variable!")
             print("═"*60 + "\n")
-            return Response({'status': 'error', 'message': 'Missing required params'}, status=status.HTTP_400_BAD_REQUEST)
+            return Response(
+                {
+                    'message': 'Both "router" and "tenant" query parameters are required.',
+                    'received_router': router_id,
+                    'received_tenant': tenant_subdomain,
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
 
         # ── Resolve the tenant from the public schema ──
         try:
@@ -72,7 +162,8 @@ class CaptivePortalView(APIView):
         # ── Query router + plans inside the tenant schema ──
         try:
             with schema_context(tenant.schema_name):
-                # BULLETPROOF: Try by ID, fallback to Name
+                # ── Find the Router ──
+                router = None
                 try:
                     router = Router.objects.get(id=router_id, is_active=True)
                     print(f"4. Found Router by ID: '{router.name}'")
@@ -80,39 +171,89 @@ class CaptivePortalView(APIView):
                     try:
                         router = Router.objects.get(name=router_id, is_active=True)
                         print(f"4. Found Router by Name: '{router.name}'")
+                        logger.info("CaptivePortal: router found by name '%s' -> id=%s", router_id, router.id)
                     except Router.DoesNotExist:
                         print(f"❌ CRASH: Router '{router_id}' DOES NOT EXIST in this tenant's database!")
                         print("═"*60 + "\n")
-                        return Response({'status': 'error', 'message': 'Router not found'}, status=status.HTTP_400_BAD_REQUEST)
+                except ProgrammingError:
+                    # Table doesn't exist yet — tenant schema not fully migrated
+                    logger.warning("CaptivePortal: network_router table missing for tenant %s", tenant_subdomain)
 
-                plans = HotspotPlan.objects.filter(
-                    router=router,
-                    is_active=True,
-                ).order_by('sort_order', 'price')
-                
-                print(f"5. Found {plans.count()} active plans for this router!")
-
-                plans_data = [
-                    {
-                        'id': str(plan.id),
-                        'name': plan.name,
-                        'price': float(plan.price),
-                        'download_speed': str(plan.download_speed),
-                        'download_unit': plan.get_speed_unit_display(),
-                        'validity': str(plan.validity_value),
-                        'validity_unit': plan.get_validity_type_display(),
-                        'description': plan.description or '',
+                if router is None:
+                    # Even without a router, we can still serve tenant-wide
+                    # Plan records so the portal shows *something*.
+                    portal_config = {
+                        'template_id': 1,
+                        'hotspot_name': tenant_subdomain,
+                        'support_phone': '',
+                        'announcement_text': '',
+                        'gateway_ip': '',
                     }
-                    for plan in plans
-                ]
+                    branding_data = None
+                else:
+                    print(f"5. Building portal_config for router '{router.name}'")
+                    portal_config = {
+                        'template_id': router.template_id or 1,
+                        'hotspot_name': router.hotspot_name or router.name,
+                        'support_phone': router.support_phone or '',
+                        'announcement_text': router.announcement_text or '',
+                        'gateway_ip': router.gateway_ip,
+                    }
 
-                portal_config = {
-                    'template_id': router.template_id or 1,
-                    'hotspot_name': router.hotspot_name or router.name,
-                    'support_phone': router.support_phone or '',
-                    'announcement_text': router.announcement_text or '',
-                    'gateway_ip': router.gateway_ip,
-                }
+                    # ── Load branding for this router ──
+                    branding_data = None
+                    try:
+                        branding = getattr(router, 'hotspot_branding', None)
+                        if branding is None:
+                            branding = HotspotBranding.objects.filter(is_default=True).first()
+                        if branding:
+                            branding_data = {
+                                'company_name': branding.company_name,
+                                'logo_url': branding.logo.url if branding.logo else None,
+                                'background_image_url': branding.background_image.url if branding.background_image else None,
+                                'primary_color': branding.primary_color,
+                                'secondary_color': branding.secondary_color,
+                                'text_color': branding.text_color,
+                                'background_color': branding.background_color,
+                                'welcome_title': branding.welcome_title,
+                                'welcome_message': branding.welcome_message,
+                                'support_phone': branding.support_phone,
+                                'support_email': branding.support_email,
+                            }
+                            # Merge branding support_phone into portal_config if not set on router
+                            if not portal_config['support_phone'] and branding.support_phone:
+                                portal_config['support_phone'] = branding.support_phone
+                    except Exception:
+                        logger.debug("CaptivePortal: no branding found for router %s", router_id)
+
+                # ── Resolve Plans ──
+                # Priority 1: HotspotPlan records for this router
+                plans_data = []
+                if router is not None:
+                    try:
+                        hotspot_plans = HotspotPlan.objects.filter(
+                            router=router,
+                            is_active=True,
+                        ).order_by('sort_order', 'price')
+                        plans_data = [_serialize_hotspot_plan(p) for p in hotspot_plans]
+                    except ProgrammingError:
+                        logger.warning("CaptivePortal: billing_hotspotplan table missing for tenant %s", tenant_subdomain)
+
+                # Priority 2: Fallback to Plan(plan_type='HOTSPOT') — tenant-wide
+                if not plans_data:
+                    try:
+                        generic_plans = Plan.objects.filter(
+                            plan_type='HOTSPOT',
+                            is_active=True,
+                        ).order_by('is_popular', 'base_price')
+                        plans_data = [_serialize_plan(p) for p in generic_plans]
+                        if plans_data:
+                            logger.info(
+                                "CaptivePortal: using %d Plan(plan_type=HOTSPOT) fallback for tenant %s",
+                                len(plans_data), tenant_subdomain,
+                            )
+                    except ProgrammingError:
+                        logger.warning("CaptivePortal: billing_plan table missing for tenant %s", tenant_subdomain)
 
         except Exception as exc:
             print(f"❌ CRASH: Internal Code Error: {exc}")
@@ -125,6 +266,7 @@ class CaptivePortalView(APIView):
         return Response({
             'status': 'success',
             'portal_config': portal_config,
+            'branding': branding_data,
             'plans': plans_data,
         })
 

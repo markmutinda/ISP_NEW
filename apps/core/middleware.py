@@ -22,6 +22,9 @@ PUBLIC_ROUTER_PATHS = (
     '/api/v1/network/routers/heartbeat/',
     '/api/v1/network/routers/script/',
     '/api/v1/network/routers/config/',
+    '/api/v1/hotspot/captive-portal/',
+    '/api/v1/hotspot/login-page/',
+    '/api/v1/hotspot/purchase/',
 )
 
 
@@ -61,10 +64,6 @@ class TenantMainMiddleware(MiddlewareMixin):
     def process_request(self, request):
         # Get the host from the request
         host = request.get_host().split(':')[0]  # Remove port
-        
-        # Skip if it's a public router endpoint or API endpoint
-        if request.path.startswith('/api/v1/network/routers/'):
-            return None
         
         # Check for subdomain.localhost pattern
         if host.endswith('.localhost') and host != 'localhost':
@@ -136,10 +135,6 @@ class CompanyContextMiddleware(MiddlewareMixin):
     Attaches request.company and request.tenant for authenticated users
     """
     def process_request(self, request):
-        # Skip for public router endpoints
-        if request.path.startswith('/api/v1/network/routers/'):
-            return None
-        
         # If tenant is already set by TenantMainMiddleware, use it
         if hasattr(request, 'tenant') and request.tenant:
             # Company is already set by TenantMainMiddleware
