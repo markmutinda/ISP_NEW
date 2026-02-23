@@ -27,9 +27,20 @@ class HasCompanyAccess(permissions.BasePermission):
             return False
         
         # Check object's company ownership using various patterns
-        # 1. Direct company field
-        if hasattr(obj, 'company'):
+        # 1a. Direct company ForeignKey field
+        if hasattr(obj, 'company') and hasattr(obj.company, 'pk'):
             return obj.company == request.user.company
+        
+        # 1b. Denormalised company_name CharField (e.g. Router model)
+        if hasattr(obj, 'company_name') and isinstance(getattr(type(obj), 'company_name', None), property) is False:
+            user_company_name = getattr(request.user.company, 'name', None)
+            if user_company_name and obj.company_name == user_company_name:
+                return True
+        
+        # 1c. Tenant-subdomain ownership (multi-tenant Router pattern)
+        if hasattr(obj, 'tenant_subdomain') and hasattr(request, 'tenant'):
+            if obj.tenant_subdomain and obj.tenant_subdomain == getattr(request.tenant, 'schema_name', None):
+                return True
         
         # 2. Through customer
         if hasattr(obj, 'customer') and hasattr(obj.customer, 'company'):

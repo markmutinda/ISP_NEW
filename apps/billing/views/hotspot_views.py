@@ -103,6 +103,8 @@ def _serialize_hotspot_plan(plan):
         'data_limit_value': plan.data_limit_value,
         'data_limit_unit': plan.data_limit_unit,
         'data_limit_display': plan.data_limit_display,
+        # Device limits
+        'simultaneous_devices': plan.simultaneous_devices,
         # Display flags
         'is_popular': plan.is_popular,
     }
