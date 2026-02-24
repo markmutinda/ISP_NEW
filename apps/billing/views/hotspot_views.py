@@ -439,7 +439,8 @@ class HotspotPurchaseView(APIView):
 
             # 5. Activate & Create Radius Credentials Instantly
             try:
-                session.activate() # Sets expiry date based on plan duration
+                # Pass the friendly_username to activate method
+                session.activate(friendly_username) # <--- Pass the code here!
                 
                 from apps.billing.services.hotspot_radius_service import HotspotRadiusService
                 radius_service = HotspotRadiusService()
@@ -535,7 +536,8 @@ class HotspotPurchaseStatusView(APIView):
             
             elif session.status == 'paid':
                 # Payment received but not yet activated — activate now
-                session.activate()
+                # Ensure we don't generate a NEW code if one exists
+                session.activate(session.access_code) # <--- Pass current code!
                 
                 # Create RADIUS credentials
                 try:
@@ -543,7 +545,7 @@ class HotspotPurchaseStatusView(APIView):
                     
                     radius_service = HotspotRadiusService()
                     radius_service.create_hotspot_credentials(
-                        username=session.access_code,
+                        username=session.access_code, # <--- Use session.access_code
                         password=session.access_code,
                         router=session.router,
                         plan=session.plan,
@@ -577,7 +579,7 @@ class HotspotPurchaseStatusView(APIView):
                         session.mark_paid(status_response.mpesa_receipt)
                         
                         # Activate session (generates access code + expiry)
-                        session.activate()
+                        session.activate(session.access_code) # <--- Pass current code!
                         
                         # ── CLOUD CONTROLLER: Create RADIUS credentials ──
                         try:
