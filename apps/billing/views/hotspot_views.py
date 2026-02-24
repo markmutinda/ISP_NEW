@@ -6,6 +6,8 @@ End users access these when connecting to WiFi hotspots.
 """
 
 import logging
+import random
+import string
 from decimal import Decimal
 
 from django.conf import settings
@@ -349,16 +351,29 @@ class HotspotPlansView(APIView):
 
 class HotspotPurchaseView(APIView):
     """
-    Initiate hotspot purchase via PayHero.
-    
-    PUBLIC ENDPOINT - No authentication required.
-    
-    POST /api/v1/hotspot/purchase/
+    Initiate hotspot purchase (SIMULATION MODE).
+    Generates a unique short code (e.g., MXTV-827S) and binds it to the device's MAC.
     """
     
     permission_classes = [AllowAny]
     authentication_classes = []  # No auth required
     
+    def generate_unique_code(self):
+        """
+        Generates a 9-character code like 'MXTV-827S'
+        4 random chars + hyphen + 4 random chars
+        """
+        chars = string.ascii_uppercase + string.digits
+        
+        while True:
+            part1 = ''.join(random.choices(chars, k=4))
+            part2 = ''.join(random.choices(chars, k=4))
+            code = f"{part1}-{part2}"
+            
+            # Ensure strictly unique in this tenant's database
+            if not HotspotSession.objects.filter(access_code=code).exists():
+                return code
+
     @transaction.atomic
     def post(self, request):
         tenant_subdomain = request.data.get('tenant') or request.query_params.get('tenant')
@@ -372,7 +387,7 @@ class HotspotPurchaseView(APIView):
         except Exception:
             return Response({'error': 'Invalid tenant'}, status=status.HTTP_400_BAD_REQUEST)
 
-        # Run the entire purchase block inside the specific ISP's database context
+        # Run inside the tenant's schema
         with schema_context(tenant.schema_name):
             router_id = request.data.get('router_id')
             plan_id = request.data.get('plan_id')
@@ -385,34 +400,30 @@ class HotspotPurchaseView(APIView):
                     'error': 'Missing required fields: router_id, plan_id, phone_number'
                 }, status=status.HTTP_400_BAD_REQUEST)
             
-            # BULLETPROOF: Get router by ID or name
+            # 1. Find Router & Plan
             try:
                 router = Router.objects.get(id=router_id, is_active=True)
             except (Router.DoesNotExist, ValueError):
                 try:
                     router = Router.objects.get(name=router_id, is_active=True)
-                    logger.info(f"Router found by name in HotspotPurchaseView: {router_id} -> {router.id}")
                 except Router.DoesNotExist:
-                    return Response(
-                        {'error': 'Router not found'},
-                        status=status.HTTP_404_NOT_FOUND
-                    )
+                    return Response({'error': 'Router not found'}, status=status.HTTP_404_NOT_FOUND)
             
             try:
                 plan = HotspotPlan.objects.get(id=plan_id, router=router, is_active=True)
             except HotspotPlan.DoesNotExist:
-                return Response(
-                    {'error': 'Plan not found for this router'},
-                    status=status.HTTP_404_NOT_FOUND
-                )
+                return Response({'error': 'Plan not found'}, status=status.HTTP_404_NOT_FOUND)
             
-            # Normalize MAC address
+            # 2. Normalize MAC (Format: AA:BB:CC:DD:EE:FF)
+            # This logic is critical for device locking
             mac_address = mac_address.upper().replace('-', ':')
             
-            # Generate unique session ID
+            # 3. Generate the Friendly Username (MXTV-827S)
+            friendly_username = self.generate_unique_code()
+
+            # 4. Create Session (Instantly PAID)
             session_id = HotspotSession.generate_session_id()
             
-            # Create pending session
             session = HotspotSession.objects.create(
                 session_id=session_id,
                 router=router,
@@ -420,51 +431,47 @@ class HotspotPurchaseView(APIView):
                 phone_number=phone_number,
                 mac_address=mac_address,
                 amount=plan.price,
-                status='pending',
+                status='paid',          # <--- SIMULATION: Marked as paid instantly
+                access_code=friendly_username,
+                payhero_checkout_id='SIMULATED_' + friendly_username,
+                # start_time=timezone.now()  <--- DELETED: This caused the error
             )
-            
-            # Initiate PayHero STK Push
+
+            # 5. Activate & Create Radius Credentials Instantly
             try:
-                client = PayHeroClient()
+                session.activate() # Sets expiry date based on plan duration
                 
-                response = client.stk_push(
-                    phone_number=phone_number,
-                    amount=int(plan.price),
-                    reference=session_id,
-                    description=f"WiFi Access - {plan.name}",
-                    callback_url=settings.PAYHERO_HOTSPOT_CALLBACK,
+                from apps.billing.services.hotspot_radius_service import HotspotRadiusService
+                radius_service = HotspotRadiusService()
+                
+                # Create RADIUS entry: 
+                # Username = MXTV-827S
+                # Password = MXTV-827S
+                # MAC Address = Locked to user's device
+                radius_service.create_hotspot_credentials(
+                    username=friendly_username,
+                    password=friendly_username,
+                    router=session.router,
+                    plan=session.plan,
+                    expires_at=session.expires_at,
+                    mac_address=mac_address  # <--- LOCKS CODE TO THIS DEVICE
                 )
+                logger.info(f"✅ SIMULATION: Created RADIUS user {friendly_username} locked to {mac_address}")
                 
-                if response.success:
-                    session.payhero_checkout_id = response.checkout_request_id
-                    session.save()
-                    
-                    # Mask phone number for display
-                    masked_phone = phone_number[:4] + '***' + phone_number[-3:]
-                    
-                    return Response({
-                        'status': 'pending',
-                        'session_id': session_id,
-                        'checkout_request_id': response.checkout_request_id,
-                        'message': f'STK Push sent to {masked_phone}. Enter your M-Pesa PIN.',
-                        'expires_in': 120,  # STK expires in 2 minutes
-                    })
-                else:
-                    session.mark_failed(response.message)
-                    
-                    return Response({
-                        'status': 'error',
-                        'message': response.message or 'Failed to initiate payment',
-                    }, status=status.HTTP_400_BAD_REQUEST)
-            
-            except PayHeroError as e:
-                logger.error(f"Hotspot PayHero error: {e.message}")
-                session.mark_failed(str(e))
-                
-                return Response({
-                    'status': 'error',
-                    'message': 'Payment service unavailable. Please try again.',
-                }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+            except Exception as e:
+                logger.error(f"RADIUS activation failed: {e}")
+                return Response({'error': 'Activation failed'}, status=500)
+
+            # 6. Return Success (Frontend should auto-login)
+            return Response({
+                'status': 'success',
+                'message': 'Payment Simulated! You are connected.',
+                'access_code': friendly_username,
+                'redirect_url': request.data.get('login_url', 'http://google.com'),
+                'username': friendly_username,
+                'password': friendly_username,
+                'expires_at': session.expires_at
+            })
 
 
 class HotspotPurchaseStatusView(APIView):

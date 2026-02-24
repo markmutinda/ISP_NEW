@@ -572,8 +572,10 @@ class MikrotikScriptGenerator:
 
     def generate_login_html(self) -> str:
         r = self.router
-        portal = self.portal_url
+        # Ensure portal URL doesn't end with a slash for cleaner concatenation
+        portal_base = self.portal_url.rstrip('/')
         tenant_name = self._escape_ros_string(r.tenant_subdomain or 'yellow1')
+        
         return f"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -582,92 +584,101 @@ class MikrotikScriptGenerator:
     <meta http-equiv="cache-control" content="no-cache, no-store, must-revalidate">
     <meta http-equiv="expires" content="0">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Connecting to WiFi...</title>
+    <title>Connecting...</title>
     <style>
         * {{ margin: 0; padding: 0; box-sizing: border-box; }}
         body {{
             font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            background: #f0f2f5;
             min-height: 100vh;
             display: flex;
             align-items: center;
             justify-content: center;
-            color: #333;
         }}
-        .container {{
+        .card {{
             background: white;
-            border-radius: 16px;
-            padding: 40px 32px;
+            padding: 2rem;
+            border-radius: 1rem;
             text-align: center;
-            max-width: 400px;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.1);
             width: 90%;
-            box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+            max-width: 400px;
         }}
         .spinner {{
-            width: 48px;
-            height: 48px;
-            border: 4px solid #e0e0e0;
-            border-top-color: #667eea;
+            border: 4px solid #f3f3f3;
+            border-top: 4px solid #3498db;
             border-radius: 50%;
-            animation: spin 0.8s linear infinite;
-            margin: 0 auto 24px;
+            width: 40px;
+            height: 40px;
+            animation: spin 1s linear infinite;
+            margin: 0 auto 1rem;
         }}
-        @keyframes spin {{ to {{ transform: rotate(360deg); }} }}
-        h2 {{ font-size: 20px; margin-bottom: 8px; color: #1a1a2e; }}
-        p {{ font-size: 14px; color: #666; margin-top: 8px; }}
-        a {{ color: #667eea; text-decoration: none; font-weight: 500; }}
-        a:hover {{ text-decoration: underline; }}
-        .hidden {{ display: none; }}
+        @keyframes spin {{ 0% {{ transform: rotate(0deg); }} 100% {{ transform: rotate(360deg); }} }}
     </style>
 </head>
 <body>
-    <div class="container" id="main">
+    <div class="card">
         <div class="spinner"></div>
-        <h2>Connecting to WiFi...</h2>
-        <p>You'll be redirected to the login portal shortly.</p>
-        <p style="margin-top: 16px; font-size: 12px;">
-            Not redirected? <a id="manual-link" href="#">Click here</a>
-        </p>
+        <h2 id="status-text">Connecting to WiFi...</h2>
+        <p id="sub-text">Please wait...</p>
+        
+        <form id="login-form" action="$(link-login-only)" method="post" style="display:none">
+            <input type="hidden" name="username" id="usr">
+            <input type="hidden" name="password" id="pwd">
+            <input type="hidden" name="dst" value="$(link-orig)">
+        </form>
     </div>
-    <div class="container hidden" id="tv-auth">
-        <h2>Smart TV Detected</h2>
-        <p>Attempting automatic connection...</p>
-    </div>
+
     <script>
-        var mac      = '$(mac)';
-        var ip       = '$(ip)';
-        var identity = '$(identity)';
-        var loginUrl = '$(link-login-only)';
-        var origUrl  = '$(link-orig)';
-        var error    = '$(error)';
+    (function() {{
+        // MikroTik variables
+        var mac       = '$(mac)';
+        var ip        = '$(ip)';
+        var identity  = '$(identity)';
+        var loginUrl  = '$(link-login-only)'; 
+        var error     = '$(error)';
         
-        // FIX: Match frontend dev's new path /hotspot/1
-        var portalBase = '{portal}/hotspot/{r.id}';
-        
-        var params = new URLSearchParams({{
-            mac: mac,
-            ip: ip,
-            router: identity,
-            login_url: loginUrl,
-            orig_url: origUrl,
-            error: error,
-            tenant: '{tenant_name}'
-        }});
-        var portalUrl = portalBase + '?' + params.toString();
-        
-        var ua = navigator.userAgent.toLowerCase();
-        var isTv = /smart-tv|smarttv|googletv|appletv|hbbtv|pov_tv|netcast|viera|nettv|roku|dlnadoc|ce-html|lg-|samsung|tizen|webos|bravia|philips|panasonic|vestel/.test(ua);
-        var isIot = /cros|playstation|xbox|nintendo|kindle|fire/.test(ua);
-        if (isTv || isIot) {{
-            document.getElementById('main').classList.add('hidden');
-            document.getElementById('tv-auth').classList.remove('hidden');
-            window.location.href = loginUrl + '?username=T-' + mac + '&password=' + mac;
-        }} else {{
-            document.getElementById('manual-link').href = portalUrl;
-            setTimeout(function() {{
-                window.location.href = portalUrl;
-            }}, 1500);
+        // 1. CHECK FOR RETURN TRIP (Auto-Login Logic)
+        // Check if the URL has ?username=... from the Payment Page
+        var urlParams = new URLSearchParams(window.location.search);
+        var inboundUser = urlParams.get('username');
+        var inboundPass = urlParams.get('password');
+
+        if (inboundUser && inboundPass) {{
+            // == LOG IN MODE ==
+            // The user just paid and was sent back here with credentials.
+            // Submit the hidden form to MikroTik immediately.
+            document.getElementById('status-text').innerText = "Authenticating...";
+            document.getElementById('sub-text').innerText = "Finalizing your connection";
+            
+            document.getElementById('usr').value = inboundUser;
+            document.getElementById('pwd').value = inboundPass;
+            document.getElementById('login-form').submit();
+            return; // Stop here, do not redirect to portal
         }}
+
+        // 2. REDIRECT MODE (Standard)
+        // No username found? This is a new user. Send them to the Cloud Portal.
+        
+        // Construct Portal URL: http://portal.netily.com/hotspot/ROUTER_ID
+        var portalUrl = '{portal_base}/hotspot/{r.id}';
+        
+        var params = [
+            'mac=' + encodeURIComponent(mac),
+            'ip=' + encodeURIComponent(ip),
+            'router=' + encodeURIComponent(identity),
+            'login_url=' + encodeURIComponent(loginUrl),
+            'error=' + encodeURIComponent(error),
+            'tenant=' + '{tenant_name}'
+        ];
+
+        var redirectUrl = portalUrl + '?' + params.join('&');
+
+        // Redirect after short delay
+        setTimeout(function() {{
+            window.location.href = redirectUrl;
+        }}, 800);
+    }})();
     </script>
 </body>
 </html>"""

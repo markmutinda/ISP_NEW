@@ -66,6 +66,13 @@ class HotspotRadiusService:
                 'Cleartext-Password': password,
             }
             
+            # 1. LOCK TO MAC ADDRESS
+            if mac_address:
+                # Normalize MAC just in case (e.g., AA-BB-CC or AA:BB:CC)
+                # FreeRADIUS usually expects whatever the router sends. 
+                # MikroTik sends AA:BB:CC:DD:EE:FF.
+                check_attributes['Calling-Station-Id'] = mac_address  # <--- THE LOCK
+            
             # Simultaneous-Use: limit to 1 device per access code
             # (unless it's a MAC-auth entry which inherits from parent session)
             check_attributes['Simultaneous-Use'] = '1'
@@ -74,20 +81,33 @@ class HotspotRadiusService:
             reply_attributes = {}
             
             # Bandwidth limit (MikroTik format: rx/tx)
+            # FIX: Force conversion to float to prevent string repetition crash
             if plan.speed_limit_mbps:
-                speed_kbps = int(plan.speed_limit_mbps * 1024)
-                # MikroTik-Rate-Limit format: rx-rate[/tx-rate] [rx-burst-rate/tx-burst-rate] [rx-burst-threshold/tx-burst-threshold] [rx-burst-time/tx-burst-time] [priority] [min-rx-rate/min-tx-rate]
-                reply_attributes['Mikrotik-Rate-Limit'] = f'{speed_kbps}k/{speed_kbps}k'
+                try:
+                    # Convert "5" (string) to 5.0 (float)
+                    limit = float(plan.speed_limit_mbps)
+                    speed_kbps = int(limit * 1024)
+                    
+                    # Safety check: Ensure we don't send massive strings
+                    val = f'{speed_kbps}k/{speed_kbps}k'
+                    if len(val) < 250:
+                        reply_attributes['Mikrotik-Rate-Limit'] = val
+                except (ValueError, TypeError):
+                    logger.warning(f"Invalid speed limit for plan {plan.name}: {plan.speed_limit_mbps}")
             
             # Session timeout (duration in seconds)
             if plan.duration_minutes:
                 reply_attributes['Session-Timeout'] = str(plan.duration_minutes * 60)
             
             # Data limit (if applicable)
+            # FIX: Force conversion here too
             if plan.data_limit_mb and plan.data_limit_mb > 0:
-                # Mikrotik-Total-Limit in bytes
-                data_bytes = plan.data_limit_mb * 1024 * 1024
-                reply_attributes['Mikrotik-Total-Limit'] = str(int(data_bytes))
+                try:
+                    limit_mb = float(plan.data_limit_mb)
+                    data_bytes = int(limit_mb * 1024 * 1024)
+                    reply_attributes['Mikrotik-Total-Limit'] = str(data_bytes)
+                except (ValueError, TypeError):
+                    logger.warning(f"Invalid data limit for plan {plan.name}: {plan.data_limit_mb}")
             
             # Idle timeout (disconnect after 5 min idle)
             reply_attributes['Idle-Timeout'] = '300'
