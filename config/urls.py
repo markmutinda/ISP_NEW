@@ -78,6 +78,9 @@ api_urlpatterns = [
     
     # ISP Payout Configuration (under core/)
     # These use urls from subscriptions.urls.payout_urlpatterns
+
+    # Superadmin (platform-owner) endpoints — PUBLIC schema only
+    path('superadmin/', include('apps.superadmin.urls')),
 ]
 
 # Hotspot URLs (PUBLIC - no auth required for captive portal)

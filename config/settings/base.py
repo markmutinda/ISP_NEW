@@ -69,6 +69,7 @@ SHARED_APPS = (
     'django.contrib.admin',           # SHOULD be in both
     'apps.core',                       # Tenant & Domain models go here - MUST be in BOTH
     'apps.subscriptions',              # Netily platform subscriptions (public schema only)
+    'apps.superadmin',                 # Platform owner dashboard (public schema only, no models)
 )
 
 TENANT_APPS = (
