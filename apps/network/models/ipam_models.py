@@ -337,7 +337,7 @@ class IPPool(AuditMixin):
     
     def refresh_usage(self):
         """Recalculate used_ips from the IPAddress ledger."""
-        self.used_ips = self.pool_addresses.filter(status='ASSIGNED').count()
+        self.used_ips = self.ip_addresses.filter(status='ASSIGNED').count()  # ← CHANGED from pool_addresses to ip_addresses
         self.save(update_fields=['used_ips'])
     
     @property
@@ -394,7 +394,7 @@ class IPAddress(AuditMixin):
     
     subnet = models.ForeignKey(Subnet, on_delete=models.CASCADE, related_name='ip_addresses',
                                null=True, blank=True)
-    ip_pool = models.ForeignKey(IPPool, on_delete=models.SET_NULL, null=True, blank=True, related_name='pool_addresses')
+    ip_pool = models.ForeignKey(IPPool, on_delete=models.SET_NULL, null=True, blank=True, related_name='ip_addresses')  # ← CHANGED from 'pool_addresses' to 'ip_addresses'
     
     # Address details
     ip_address = models.GenericIPAddressField(protocol='IPv4', unique=True)
@@ -552,7 +552,7 @@ def protect_active_ip_pools(sender, instance, **kwargs):
         )
 
     # 2. Check if any IP in this pool is currently assigned to a customer
-    assigned_ips = instance.pool_addresses.filter(status='ASSIGNED').count()
+    assigned_ips = instance.ip_addresses.filter(status='ASSIGNED').count()  # ← CHANGED from pool_addresses to ip_addresses
     
     if assigned_ips > 0:
         raise ValidationError(
