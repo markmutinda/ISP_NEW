@@ -1,3 +1,4 @@
+#apps/customers/views/service_views.py
 from rest_framework import viewsets, status
 from rest_framework.decorators import action
 from rest_framework.response import Response
@@ -16,6 +17,7 @@ from apps.customers.serializers import (
 )
 from apps.customers.permissions import CustomerAccessPermission
 from apps.core.permissions import IsAdminOrStaff, IsTechnician
+from apps.network.models import IPAddress, IPPool  # Added for IP assignment
 from utils.pagination import StandardResultsSetPagination
 
 logger = logging.getLogger(__name__)
@@ -96,6 +98,45 @@ class ServiceConnectionViewSet(viewsets.ModelViewSet):
         else:
             # Fallback - should not happen if using nested router
             serializer.save()
+    
+    def _assign_ip_from_pool(self, service, customer):
+        """
+        Helper method to assign an IP from the plan's pool to the service.
+        Returns the assigned IP address or None if no pool/available IP.
+        """
+        if not service.plan or not service.plan.ip_pool:
+            logger.warning(f"No IP pool assigned to plan for service {service.id}")
+            return None
+        
+        pool = service.plan.ip_pool
+        
+        # Find an available IP in the pool
+        available_ip = IPAddress.objects.filter(
+            ip_pool=pool,
+            status='AVAILABLE'
+        ).first()
+        
+        if available_ip:
+            # Mark the IP as ASSIGNED in the ledger
+            available_ip.assign_to_customer(customer, service_connection=service)
+            
+            # SYNC THE IP STRING TO THE SERVICE RECORD - THIS FIXES THE GHOST IP ISSUE
+            service.ip_address = available_ip.ip_address
+            service.save(update_fields=['ip_address'])
+            
+            logger.info(
+                f"Assigned IP {available_ip.ip_address} from pool '{pool.name}' "
+                f"to service {service.id} for customer {customer.customer_code}"
+            )
+            
+            return available_ip.ip_address
+        else:
+            logger.error(
+                f"No available IPs in pool '{pool.name}' for service {service.id}. "
+                f"Pool stats: total={pool.total_ips}, used={pool.used_ips}"
+            )
+            return None
+
     @action(detail=True, methods=['post'])
     def activate(self, request, customer_pk=None, pk=None):
         """
@@ -107,6 +148,7 @@ class ServiceConnectionViewSet(viewsets.ModelViewSet):
         - Calculates expiration from NOW (not from create time)
         - Creates RADIUS credentials if they don't exist
         - Syncs to FreeRADIUS
+        - Assigns IP from plan's pool if applicable
         
         POST /customers/{customer_pk}/services/{pk}/activate/
         """
@@ -135,6 +177,18 @@ class ServiceConnectionViewSet(viewsets.ModelViewSet):
                 service.plan, start_time=timezone.now()
             )
         
+        # ===== IP ASSIGNMENT =====
+        # Assign an IP from the plan's pool if applicable
+        assigned_ip = None
+        if service.plan and service.plan.ip_pool:
+            assigned_ip = self._assign_ip_from_pool(service, customer)
+            if not assigned_ip and service.auth_connection_type in ('PPPOE', 'STATIC'):
+                # Return error if we need an IP but none are available
+                return Response(
+                    {'error': f'No available IPs in pool "{service.plan.ip_pool.name}". Please add more IPs or contact administrator.'},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+        
         # Check if RADIUS credentials exist
         has_credentials = False
         try:
@@ -148,6 +202,11 @@ class ServiceConnectionViewSet(viewsets.ModelViewSet):
             credentials.expiration_date = new_expiration
             credentials.is_enabled = True
             credentials.disabled_reason = ''
+            
+            # Update framed_ip_address if this is a STATIC IP service
+            if assigned_ip and service.auth_connection_type == 'STATIC':
+                credentials.framed_ip_address = assigned_ip
+            
             credentials.save()  # Triggers sync_credentials_to_radius signal
             
             logger.info(
@@ -155,32 +214,40 @@ class ServiceConnectionViewSet(viewsets.ModelViewSet):
                 f"Updated existing RADIUS credentials. "
                 f"Plan={service.plan.name if service.plan else 'None'}, "
                 f"Expiration={new_expiration.isoformat() if new_expiration else 'Unlimited'}"
+                f"{f', Static IP={assigned_ip}' if assigned_ip and service.auth_connection_type == 'STATIC' else ''}"
             )
         else:
             # Create RADIUS credentials — this is the key fix for "Activate Later"
             auth_type = (service.auth_connection_type or '').upper()
-            if auth_type in ['PPPOE', 'HOTSPOT']:
+            if auth_type in ['PPPOE', 'HOTSPOT', 'STATIC']:
                 username = generate_pppoe_username(customer)
                 password = generate_password(8)
-                conn_type = 'PPPOE' if auth_type == 'PPPOE' else 'HOTSPOT'
+                conn_type = 'PPPOE' if auth_type == 'PPPOE' else ('HOTSPOT' if auth_type == 'HOTSPOT' else 'STATIC')
                 profile = _get_or_create_bandwidth_profile(service) if service.plan else None
                 
-                credentials = CustomerRadiusCredentials.objects.create(
-                    customer=customer,
-                    username=username,
-                    password=password,
-                    bandwidth_profile=profile,
-                    connection_type=conn_type,
-                    is_enabled=True,
-                    simultaneous_use=1,
-                    expiration_date=new_expiration,
-                )
+                credentials_data = {
+                    'customer': customer,
+                    'username': username,
+                    'password': password,
+                    'bandwidth_profile': profile,
+                    'connection_type': conn_type,
+                    'is_enabled': True,
+                    'simultaneous_use': 1,
+                    'expiration_date': new_expiration,
+                }
+                
+                # Add framed_ip_address for STATIC IP services
+                if assigned_ip and auth_type == 'STATIC':
+                    credentials_data['framed_ip_address'] = assigned_ip
+                
+                credentials = CustomerRadiusCredentials.objects.create(**credentials_data)
                 
                 logger.info(
                     f"Activated service {service.id} for {customer.customer_code}: "
                     f"Created RADIUS credentials username={username}. "
                     f"Plan={service.plan.name if service.plan else 'None'}, "
                     f"Expiration={new_expiration.isoformat() if new_expiration else 'Unlimited'}"
+                    f"{f', Static IP={assigned_ip}' if assigned_ip and auth_type == 'STATIC' else ''}"
                 )
             else:
                 logger.info(
@@ -202,19 +269,28 @@ class ServiceConnectionViewSet(viewsets.ModelViewSet):
             creds = customer.radius_credentials
             creds_data = {
                 'username': creds.username,
-                'password': creds.password,
+                'password': creds.password if hasattr(creds, 'password') else None,
                 'expiration': creds.expiration_date.isoformat() if creds.expiration_date else None,
                 'is_enabled': creds.is_enabled,
             }
+            if hasattr(creds, 'framed_ip_address'):
+                creds_data['framed_ip_address'] = creds.framed_ip_address
         except Exception:
             creds_data = None
         
-        return Response({
+        response_data = {
             'status': 'success',
             'message': f'Service activated for {customer.customer_code}',
             'activation_date': service.activation_date.isoformat() if service.activation_date else None,
             'radius_credentials': creds_data,
-        })
+        }
+        
+        # Include assigned IP in response
+        if assigned_ip:
+            response_data['assigned_ip'] = assigned_ip
+            response_data['ip_pool'] = service.plan.ip_pool.name if service.plan and service.plan.ip_pool else None
+        
+        return Response(response_data)
     
     @action(detail=True, methods=['post'])
     def suspend(self, request, customer_pk=None, pk=None):
@@ -393,20 +469,27 @@ class ServiceConnectionViewSet(viewsets.ModelViewSet):
         
         if not hasattr(customer, 'radius_credentials'):
             # Auto-create RADIUS credentials so extend works for PENDING services too
-            if service.auth_connection_type in ('PPPOE', 'HOTSPOT'):
+            if service.auth_connection_type in ('PPPOE', 'HOTSPOT', 'STATIC'):
                 phone = customer.user.phone_number or ''
                 username = generate_pppoe_username(phone, customer.customer_code)
                 password = generate_password()
                 profile = _get_or_create_bandwidth_profile(service)
                 
-                credentials = CustomerRadiusCredentials.objects.create(
-                    customer=customer,
-                    username=username,
-                    password=password,
-                    connection_type=service.auth_connection_type,
-                    bandwidth_profile=profile,
-                    is_enabled=True,
-                )
+                credentials_data = {
+                    'customer': customer,
+                    'username': username,
+                    'password': password,
+                    'connection_type': service.auth_connection_type,
+                    'bandwidth_profile': profile,
+                    'is_enabled': True,
+                }
+                
+                # Add framed_ip_address for STATIC IP services
+                if service.ip_address and service.auth_connection_type == 'STATIC':
+                    credentials_data['framed_ip_address'] = service.ip_address
+                
+                credentials = CustomerRadiusCredentials.objects.create(**credentials_data)
+                
                 # Refresh from DB so hasattr works below
                 customer.refresh_from_db()
                 logger.info(f"Auto-created RADIUS credentials for extend: {username}")

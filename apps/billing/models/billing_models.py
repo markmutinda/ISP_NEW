@@ -6,6 +6,9 @@ from django.db.models import Sum, Q
 from decimal import Decimal
 import uuid
 from django.utils.text import slugify
+from django.db.models.signals import pre_delete
+from django.dispatch import receiver
+from rest_framework.exceptions import ValidationError  # CHANGED: Using DRF ValidationError
 from apps.core.models import Company
 
 from utils.constants import KENYAN_COUNTIES, TAX_RATES, TAX_TYPES
@@ -86,7 +89,7 @@ class Plan(models.Model):
         'network.IPPool',
         on_delete=models.SET_NULL,
         null=True, blank=True,
-        related_name='plans',
+        related_name='plans',  # This creates the reverse relation 'plans' on IPPool
         help_text='Default IP pool for customers on this plan (Framed-Pool)'
     )
     
@@ -565,3 +568,22 @@ class InvoiceItem(models.Model):
         
         # Update invoice totals
         self.invoice.calculate_totals()
+
+
+# ========== SIGNAL HANDLERS ==========
+
+@receiver(pre_delete, sender=Plan)
+def protect_active_plans(sender, instance, **kwargs):
+    """
+    Prevent deletion of a Plan if it is assigned to any active ServiceConnection.
+    """
+    # Check for linked services using the 'related_name' from ServiceConnection model
+    # Ensure checking against 'active' statuses (or whatever your logic requires)
+    active_users = instance.service_connections.exclude(status='TERMINATED').count()
+    
+    if active_users > 0:
+        # This will now return HTTP 400 with the message payload
+        raise ValidationError(
+            f"Cannot delete Plan '{instance.name}'. It is currently assigned to {active_users} active customer(s). "
+            "Please migrate these customers to a different plan first."
+        )

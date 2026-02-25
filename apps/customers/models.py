@@ -4,13 +4,13 @@ Customer Management Models for ISP System
 from django.db import models
 from django.contrib.auth import get_user_model
 from django.core.validators import MinValueValidator, MinLengthValidator
+from django.core.exceptions import ValidationError
 from django.utils import timezone
 from django.utils.translation import gettext_lazy as _
 from django.conf import settings
- 
- # ← Add this import
 
 from apps.core.models import Company
+# REMOVED: from apps.network.models.ipam_models import IPAddress  # ← DELETED THIS LINE
 
 # Use Django's settings.AUTH_USER_MODEL for foreign keys
 User = get_user_model()
@@ -767,7 +767,7 @@ class ServiceConnection(models.Model):
         ]
 
     def __str__(self):
-        plan_name = self.plan.name if self.plan else self.service_plan or "No Plan"
+        plan_name = self.plan.name if self.plan else self.service_type or "No Plan"
         return f"{self.customer.customer_code} - {self.service_type} ({plan_name})"
 
     @property
@@ -780,10 +780,48 @@ class ServiceConnection(models.Model):
             return (timezone.now() - self.activation_date).days
         return 0
 
+    def clean(self):
+        """Validate the service connection data."""
+        super().clean()
+        
+        # === LAZY IMPORT HERE ===
+        # This prevents the circular error because it only imports when saving, not at startup.
+        from apps.network.models.ipam_models import IPAddress
+        
+        # Prevent double-booking of IP addresses
+        if self.ip_address:
+            # Check if this IP is already ASSIGNED to someone else in the ledger
+            conflicting_ip = IPAddress.objects.filter(
+                ip_address=self.ip_address, 
+                status='ASSIGNED'
+            ).exclude(service_connection=self).exists()
+            
+            if conflicting_ip:
+                raise ValidationError({
+                    'ip_address': f"The IP {self.ip_address} is already assigned to another customer in the IPAM ledger."
+                })
+        
+        # Optional: Validate that IP is available in the pool if being assigned
+        if self.ip_address and self.status == 'ACTIVE':
+            # Check if the IP exists in the ledger at all
+            ip_record = IPAddress.objects.filter(ip_address=self.ip_address).first()
+            if not ip_record:
+                raise ValidationError({
+                    'ip_address': f"The IP {self.ip_address} does not exist in the IPAM ledger. Please provision it first."
+                })
+            
+            # If the IP is available, we might want to auto-assign it
+            if ip_record.status == 'AVAILABLE' and self.pk:  # Only for existing records
+                # This could be handled automatically, but we'll just warn
+                pass
+
     def save(self, *args, **kwargs):
         """
         Auto-populate auth_connection_type from plan if not set
         """
+        # Run full validation before saving
+        self.full_clean()
+        
         if self.plan and not self.auth_connection_type:
             mapping = {
                 'HOTSPOT': 'HOTSPOT',

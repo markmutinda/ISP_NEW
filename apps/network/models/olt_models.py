@@ -2,8 +2,7 @@ from django.db import models
 from django.conf import settings
 from django.core.validators import MinValueValidator, MaxValueValidator
 from apps.core.models import Company, AuditMixin
-from apps.customers.models import ServiceConnection
-
+# REMOVED: from apps.customers.models import ServiceConnection  # ← DELETED THIS LINE
 
 
 class OLTDevice(AuditMixin):
@@ -160,7 +159,7 @@ class ONUDevice(AuditMixin):
     
     pon_port = models.ForeignKey(PONPort, on_delete=models.CASCADE, related_name='onus')
     service_connection = models.OneToOneField(
-        ServiceConnection, 
+        'customers.ServiceConnection',  # ← CHANGED to string reference
         on_delete=models.SET_NULL, 
         null=True, 
         blank=True,

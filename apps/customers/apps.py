@@ -5,8 +5,9 @@ class CustomersConfig(AppConfig):
     name = 'apps.customers'
 
     def ready(self):
-        """Import signals for RADIUS cleanup on customer deletion."""
+        """Import signals for RADIUS cleanup, IP release, and user cleanup."""
         try:
+            # Import signals to register handlers
             from . import signals  # noqa: F401
         except ImportError as e:
             import logging

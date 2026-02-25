@@ -2,11 +2,14 @@ import ipaddress
 import logging
 
 from django.db import models
-from django.core.exceptions import ValidationError
+from django.core.exceptions import ValidationError as DjangoValidationError
 from django.core.validators import MaxValueValidator, MinValueValidator
+from django.db.models.signals import pre_delete
+from django.dispatch import receiver
+from rest_framework.exceptions import ValidationError  # CHANGED: Using DRF ValidationError
 from netaddr import IPNetwork, IPAddress as NetIPAddress
 from apps.core.models import Company, AuditMixin
-from apps.customers.models import ServiceConnection
+# REMOVED: from apps.customers.models import ServiceConnection  # ← DELETED THIS LINE
 from apps.network.models.router_models import Router
 
 logger = logging.getLogger(__name__)
@@ -211,13 +214,41 @@ class IPPool(AuditMixin):
         ordering = ['name']
     
     def clean(self):
-        """Validate subnet prefix is not blocked."""
+        """Validate subnet prefix is not blocked and prevent overlapping pools."""
         super().clean()
+        
+        # Existing validation: Check blocked prefixes
         if self.subnet_prefix and self.subnet_prefix in BLOCKED_PREFIXES:
-            raise ValidationError({
+            raise DjangoValidationError({
                 'subnet_prefix': f'{self.subnet_prefix}.x.x is reserved/blocked '
                                   f'(VPN/System). Choose a different prefix.'
             })
+        
+        # NEW: Prevent overlapping octets on the same prefix
+        if self.subnet_prefix and self.subnet_octet is not None:
+            overlapping = IPPool.objects.filter(
+                subnet_prefix=self.subnet_prefix,
+                subnet_octet=self.subnet_octet
+            ).exclude(pk=self.pk)
+            
+            if overlapping.exists():
+                raise DjangoValidationError({
+                    'subnet_octet': f"Octet {self.subnet_octet} on prefix {self.subnet_prefix} is already used by pool '{overlapping.first().name}'."
+                })
+        
+        # Optional: Validate that start_ip < end_ip if both are provided
+        if self.start_ip and self.end_ip:
+            try:
+                start = ipaddress.IPv4Address(self.start_ip)
+                end = ipaddress.IPv4Address(self.end_ip)
+                if start >= end:
+                    raise DjangoValidationError({
+                        'start_ip': 'Start IP must be less than End IP',
+                        'end_ip': 'End IP must be greater than Start IP'
+                    })
+            except ValueError:
+                # IP validation will be caught by the field itself
+                pass
     
     def _compute_from_subnet_builder(self):
         """Compute start_ip, end_ip, gateway, network/broadcast from subnet builder fields."""
@@ -254,6 +285,9 @@ class IPPool(AuditMixin):
         self.total_ips = len(hosts) - 1    # Exclude gateway
     
     def save(self, *args, **kwargs):
+        # Run validation before saving
+        self.full_clean()
+        
         # If subnet builder fields are set, compute the range
         self._compute_from_subnet_builder()
         
@@ -374,7 +408,7 @@ class IPAddress(AuditMixin):
     
     # Relationships
     service_connection = models.ForeignKey(
-        ServiceConnection,
+        'customers.ServiceConnection',  # ← CHANGED to string reference
         on_delete=models.SET_NULL,
         null=True,
         blank=True,
@@ -416,8 +450,11 @@ class IPAddress(AuditMixin):
         self.status = 'ASSIGNED'
         self.assigned_to = customer
         self.assignment_type = 'STATIC'
+        
+        # Logic remains the same, Python handles the object passing fine
         if service_connection:
             self.service_connection = service_connection
+            
         self.save(update_fields=['status', 'assigned_to', 'assignment_type', 'service_connection', 'updated_at'])
         # Refresh the pool's usage count
         if self.ip_pool:
@@ -466,3 +503,59 @@ class DHCPRange(AuditMixin):
     
     def __str__(self):
         return f"{self.name} ({self.start_ip} - {self.end_ip})"
+
+
+# ========== SIGNAL HANDLERS ==========
+
+@receiver(pre_delete, sender=Subnet)
+def protect_subnets_in_use(sender, instance, **kwargs):
+    """
+    Prevent deletion of subnets that have active pools or VLANs.
+    This prevents accidental cascade deletion of all associated IP pools
+    and potentially customer-assigned IPs.
+    """
+    # Check if this subnet has any IP pools
+    if instance.pools.exists():
+        pool_count = instance.pools.count()
+        raise ValidationError(
+            f"Cannot delete Subnet '{instance.name}'. It contains {pool_count} active IP Pool(s). "
+            "Please delete or reassign the pools first."
+        )
+    
+    # Check if this subnet is linked to any VLANs
+    if instance.assigned_vlans.exists():
+        vlan_count = instance.assigned_vlans.count()
+        raise ValidationError(
+            f"Cannot delete Subnet '{instance.name}'. It is linked to {vlan_count} active VLAN(s). "
+            "Please remove the VLAN associations first."
+        )
+
+
+@receiver(pre_delete, sender=IPPool)
+def protect_active_ip_pools(sender, instance, **kwargs):
+    """
+    Prevent deletion of an IP Pool if:
+    1. It is linked to any Billing Plan.
+    2. It has any IP addresses currently ASSIGNED to users.
+    """
+    
+    # 1. Check if any Plan is using this pool
+    # We rely on the 'related_name="plans"' defined in Billing Plan model.
+    linked_plans = 0
+    if hasattr(instance, 'plans'):
+        linked_plans = instance.plans.count()
+    
+    if linked_plans > 0:
+        raise ValidationError(
+            f"Cannot delete IP Pool '{instance.name}'. It is linked to {linked_plans} Plan(s). "
+            "Please detach this pool from the plans first."
+        )
+
+    # 2. Check if any IP in this pool is currently assigned to a customer
+    assigned_ips = instance.pool_addresses.filter(status='ASSIGNED').count()
+    
+    if assigned_ips > 0:
+        raise ValidationError(
+            f"Cannot delete IP Pool '{instance.name}'. It has {assigned_ips} IP address(es) currently assigned to active users. "
+            "Please release these IPs first."
+        )
