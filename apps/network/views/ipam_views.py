@@ -288,7 +288,7 @@ class IPPoolViewSet(viewsets.ModelViewSet):
         
         # Get allocated IPs in this pool
         allocated_ips = set(
-            pool.pool_addresses.values_list('ip_address', flat=True)
+            pool.ip_addresses.values_list('ip_address', flat=True)
         )
         
         # Find first available IP
@@ -319,7 +319,7 @@ class IPPoolViewSet(viewsets.ModelViewSet):
         pool = self.get_object()
         
         # Get IP address statistics
-        ip_stats = pool.pool_addresses.aggregate(
+        ip_stats = pool.ip_addresses.aggregate(
             total=Count('id'),
             active=Count('id', filter=Q(status='ACTIVE')),
             reserved=Count('id', filter=Q(status='RESERVED')),
@@ -371,7 +371,7 @@ class IPPoolViewSet(viewsets.ModelViewSet):
         Supports ?search= to filter IPs by partial match.
         """
         pool = self.get_object()
-        ips = pool.pool_addresses.filter(status='AVAILABLE').order_by('ip_address')
+        ips = pool.ip_addresses.filter(status='AVAILABLE').order_by('ip_address')
         
         # Optional search filter
         search = request.query_params.get('search', '')
@@ -385,7 +385,7 @@ class IPPoolViewSet(viewsets.ModelViewSet):
         return Response({
             'pool_id': pool.id,
             'pool_name': pool.name,
-            'total_available': pool.pool_addresses.filter(status='AVAILABLE').count(),
+            'total_available': pool.ip_addresses.filter(status='AVAILABLE').count(),
             'results': data
         })
     

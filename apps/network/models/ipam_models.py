@@ -305,13 +305,38 @@ class IPPool(AuditMixin):
             self._populate_ip_addresses()
     
     def _populate_ip_addresses(self):
-        """Generate IPAddress records for every usable IP in this pool."""
+        """Generate IPAddress records or adopt orphans."""
         if not self.start_ip or not self.end_ip:
             return
         
         start = int(NetIPAddress(self.start_ip))
         end = int(NetIPAddress(self.end_ip))
         
+        # 1. First, ADOPT any "Orphan" IPs in this range (Fixes the Empty Dropdown issue)
+        # Orphans are IPs that exist but have ip_pool=None
+        orphans = IPAddress.objects.filter(
+            ip_pool__isnull=True
+        )
+        
+        # We can't filter by range easily in SQL with strings, so we do a quick check
+        # This is safe because orphans are usually few
+        count_adopted = 0
+        for orphan in orphans:
+            try:
+                ip_val = int(NetIPAddress(orphan.ip_address))
+                if start <= ip_val <= end:
+                    orphan.ip_pool = self
+                    orphan.subnet = self.subnet
+                    orphan.status = 'AVAILABLE'  # Reset status to be safe
+                    orphan.save(update_fields=['ip_pool', 'subnet', 'status'])
+                    count_adopted += 1
+            except ValueError:
+                continue
+                
+        if count_adopted > 0:
+            logger.info(f"Pool '{self.name}': Adopted {count_adopted} orphaned IPs.")
+
+        # 2. Now generate NEW IPs for gaps
         existing = set(
             IPAddress.objects.filter(ip_pool=self)
             .values_list('ip_address', flat=True)
@@ -320,19 +345,22 @@ class IPPool(AuditMixin):
         new_addresses = []
         for ip_int in range(start, end + 1):
             ip_str = str(NetIPAddress(ip_int))
+            # Check if it exists in THIS pool (or was just adopted)
             if ip_str not in existing:
-                new_addresses.append(IPAddress(
-                    ip_pool=self,
-                    ip_address=ip_str,
-                    assignment_type='STATIC',
-                    status='AVAILABLE',
-                    description=f'Auto-generated for {self.name}',
-                ))
+                # Double check it doesn't exist in another pool (avoid duplicates)
+                if not IPAddress.objects.filter(ip_address=ip_str).exists():
+                    new_addresses.append(IPAddress(
+                        ip_pool=self,
+                        subnet=self.subnet,
+                        ip_address=ip_str,
+                        assignment_type='STATIC',
+                        status='AVAILABLE',
+                        description=f'Auto-generated for {self.name}',
+                    ))
         
         if new_addresses:
-            # bulk_create with ignore_conflicts in case IPs already exist (unique)
             IPAddress.objects.bulk_create(new_addresses, ignore_conflicts=True)
-            logger.info(f"IPPool '{self.name}': generated {len(new_addresses)} IP addresses "
+            logger.info(f"IPPool '{self.name}': generated {len(new_addresses)} new IP addresses "
                         f"({self.start_ip} → {self.end_ip})")
     
     def refresh_usage(self):
