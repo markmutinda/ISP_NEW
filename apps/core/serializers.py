@@ -457,6 +457,7 @@ class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
                 'last_name': user.last_name,
                 'role': user.role,
                 'is_verified': user.is_verified,
+                'is_superuser': user.is_superuser,
             }
             
             print(f"DEBUG: Login successful for {user.email}")
