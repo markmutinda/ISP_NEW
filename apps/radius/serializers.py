@@ -1,6 +1,7 @@
 """
 RADIUS Serializers
 """
+from django.utils import timezone
 from rest_framework import serializers
 from .models import (
     RadCheck,
@@ -70,6 +71,67 @@ class RadAcctSerializer(serializers.ModelSerializer):
             'customer', 'customer_name', 'router', 'router_name'
         ]
         read_only_fields = fields
+
+
+class OnlineUserSerializer(serializers.ModelSerializer):
+    """Specific serializer for the Online Users frontend dashboard"""
+    full_name = serializers.SerializerMethodField()
+    phone_number = serializers.SerializerMethodField()
+    mac_address = serializers.CharField(source='callingstationid', read_only=True)
+    ip_address = serializers.CharField(source='framedipaddress', read_only=True)
+    uptime = serializers.SerializerMethodField()
+    usage = serializers.SerializerMethodField()
+    router = serializers.CharField(source='router.name', read_only=True, allow_null=True)
+    service_type = serializers.SerializerMethodField()
+
+    class Meta:
+        model = RadAcct
+        fields = [
+            'radacctid', 'acctsessionid', 'username', 'full_name', 
+            'phone_number', 'mac_address', 'ip_address', 
+            'uptime', 'usage', 'router', 'service_type'
+        ]
+
+    def get_full_name(self, obj):
+        # PPPoE: Get name from customer profile
+        if obj.customer:
+            return obj.customer.full_name
+        # Hotspot: Fallback to Hotspot-{username}
+        return f"Hotspot-{obj.username}"
+
+    def get_phone_number(self, obj):
+        # Fetch phone number if customer and user exist
+        if obj.customer and hasattr(obj.customer, 'user') and obj.customer.user:
+            return obj.customer.user.phone_number or "N/A"
+        return "N/A"
+
+    def get_uptime(self, obj):
+        # Calculate live uptime based on when session started
+        if not obj.acctstarttime:
+            return "0s"
+        delta = timezone.now() - obj.acctstarttime
+        total_seconds = int(delta.total_seconds())
+        hours, remainder = divmod(total_seconds, 3600)
+        minutes, seconds = divmod(remainder, 60)
+        
+        if hours > 0:
+            return f"{hours}h {minutes}m"
+        return f"{minutes}m {seconds}s"
+
+    def get_usage(self, obj):
+        # Calculate total usage (Download + Upload) in MB/GB
+        total_bytes = (obj.acctinputoctets or 0) + (obj.acctoutputoctets or 0)
+        mb = total_bytes / (1024 * 1024)
+        if mb > 1024:
+            gb = mb / 1024
+            return f"{gb:.2f} GB"
+        return f"{mb:.2f} MB"
+
+    def get_service_type(self, obj):
+        # Heuristic based on framing protocol (Mikrotik standard)
+        if obj.framedprotocol == 'PPP':
+            return 'PPPOE'
+        return 'HOTSPOT'
 
 
 class RadAcctSummarySerializer(serializers.Serializer):

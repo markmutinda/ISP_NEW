@@ -32,6 +32,7 @@ from .serializers import (
     RadGroupCheckSerializer,
     RadGroupReplySerializer,
     RadAcctSerializer,
+    OnlineUserSerializer,
     RadAcctSummarySerializer,
     NasSerializer,
     NasDetailSerializer,
@@ -132,9 +133,10 @@ class RadiusActiveSessionsView(APIView):
     permission_classes = [IsAuthenticated, HasCompanyAccess]
     
     def get(self, request):
+        # Added 'customer__user' to select_related so it fetches phone numbers efficiently
         sessions = RadAcct.objects.filter(
             acctstoptime__isnull=True
-        ).select_related('customer', 'router').order_by('-acctstarttime')
+        ).select_related('customer', 'customer__user', 'router').order_by('-acctstarttime')
         
         # Filter by NAS
         nas_ip = request.query_params.get('nas')
@@ -146,7 +148,8 @@ class RadiusActiveSessionsView(APIView):
         if username:
             sessions = sessions.filter(username__icontains=username)
         
-        serializer = RadAcctSerializer(sessions[:100], many=True)
+        # CHANGED: Use the new OnlineUserSerializer here
+        serializer = OnlineUserSerializer(sessions[:100], many=True)
         return Response({
             'count': sessions.count(),
             'sessions': serializer.data
