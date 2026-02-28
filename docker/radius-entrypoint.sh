@@ -20,6 +20,7 @@ export DB_USER="${DB_USER:-isp_user}"
 export DB_PASS="${DB_PASS:-2202}"
 export DB_PASSWORD="${DB_PASSWORD:-2202}" # Safety net
 export DB_NAME="${DB_NAME:-isp_management}"
+export DB_SCHEMA="${DB_SCHEMA:-public}"  # Default schema is public
 export RADIUS_SECRET="${RADIUS_SECRET:-testing123}"
 export RADIUS_LOCAL_SECRET="${RADIUS_LOCAL_SECRET:-testing123}"
 export RADIUS_DOCKER_SECRET="${RADIUS_DOCKER_SECRET:-docker_testing}"
@@ -28,7 +29,7 @@ echo "Configuring SQL module..."
 # Process sql.template and output to mods-available/sql
 # NOTE: Uses /etc/freeradius (Debian/Ubuntu) not /etc/raddb (RedHat/CentOS)
 # We instruct envsubst to ONLY replace specific variables to avoid breaking other config syntax
-envsubst '$DB_HOST $DB_PORT $DB_USER $DB_PASSWORD $DB_NAME' < /etc/freeradius/sql.template > /etc/freeradius/mods-available/sql
+envsubst '$DB_HOST $DB_PORT $DB_USER $DB_PASS $DB_PASSWORD $DB_NAME $DB_SCHEMA' < /etc/freeradius/sql.template > /etc/freeradius/mods-available/sql
 
 echo "Configuring Clients..."
 # Process clients.conf

@@ -25,6 +25,7 @@ Stage 2 — Version-Specific Config (conf.rsc):
 from django.conf import settings
 from apps.network.models.router_models import Router
 from django.utils import timezone
+from django_tenants.utils import schema_context  # Import for cross-schema queries
 
 
 class MikrotikScriptGenerator:
@@ -367,12 +368,40 @@ class MikrotikScriptGenerator:
 """
 
     def _section_radius(self, r: Router) -> str:
-        # FIX: Point RADIUS to the VPN Gateway IP
-        radius_cmd = f'/radius add address={self.vpn_gateway} secret="{self._escape_ros_string(r.shared_secret)}" service=hotspot,ppp timeout=3000ms comment="Netily-Cloud-RADIUS"'
+        """
+        Generate RADIUS configuration with tenant-specific ports.
+        
+        This method determines the tenant schema from the router's subdomain
+        and fetches the correct authentication and accounting ports from the
+        RadiusTenantConfig model (which lives in the public schema).
+        """
+        # 1. Determine the schema name
+        schema = f"tenant_{r.tenant_subdomain}" if r.tenant_subdomain else 'public'
+        
+        # 2. IMPORTANT: Switch to 'public' context to read the port registry
+        # RadiusTenantConfig is stored in the public schema, not in tenant schemas
+        from apps.radius.models import RadiusTenantConfig
+        with schema_context('public'):
+            try:
+                tenant_config = RadiusTenantConfig.objects.get(schema_name=schema)
+                auth_port = tenant_config.auth_port
+                acct_port = tenant_config.acct_port
+            except RadiusTenantConfig.DoesNotExist:
+                # Fallback for base/public
+                auth_port = 1812
+                acct_port = 1813
+
+        # 3. Use the ports in the MikroTik command
+        radius_cmd = (
+            f'/radius add address={self.vpn_gateway} secret="{self._escape_ros_string(r.shared_secret)}" '
+            f'authentication-port={auth_port} accounting-port={acct_port} '
+            f'service=hotspot,ppp timeout=3000ms comment="Netily-Cloud-RADIUS"'
+        )
+        
         return f"""# ─────────────────────────────────────────────────────────────
 # 7. RADIUS (Cloud RADIUS via VPN Tunnel)
 # ─────────────────────────────────────────────────────────────
-:put "Configuring Cloud RADIUS..."
+:put "Configuring Cloud RADIUS for {schema} (Auth:{auth_port}, Acct:{acct_port})..."
 :do {{ /radius remove [find comment~"Netily"] }} on-error={{}}
 {radius_cmd}
 /radius incoming set accept=yes port=3799

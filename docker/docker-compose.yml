@@ -56,12 +56,15 @@ services:
              echo 'VPN Gateway found at: '$$VPN_IP &&
              ip route add 192.168.255.0/24 via $$VPN_IP || true &&
              echo 'Route added successfully!' &&
-             gunicorn config.wsgi:application --bind 0.0.0.0:8000 --workers 4 --reload"
+             # --- ADDED --timeout 120 FOR LONG-RUNNING REQUESTS ---
+             gunicorn config.wsgi:application --bind 0.0.0.0:8000 --workers 4 --timeout 240 --reload"
     working_dir: /app
     volumes:
       - ../:/app
       - static_volume:/app/static
       - media_volume:/app/media
+      # --- ADDED DOCKER SOCKET FOR DOCKER API ACCESS ---
+      - /var/run/docker.sock:/var/run/docker.sock
     environment:
       - PYTHONPATH=/app
       - DJANGO_SETTINGS_MODULE=config.settings.production
@@ -104,6 +107,8 @@ services:
              celery -A config worker -l info --concurrency=4"
     volumes:
       - ../:/app
+      # --- ADDED DOCKER SOCKET FOR DOCKER API ACCESS ---
+      - /var/run/docker.sock:/var/run/docker.sock
     environment:
       - PYTHONPATH=/app
       - DJANGO_SETTINGS_MODULE=config.settings.production
@@ -155,19 +160,14 @@ services:
     networks:
       - isp_network
 
-  # ────────────────────────────────────────────────────────────────
-  # FREERADIUS SERVER
+# ────────────────────────────────────────────────────────────────
+  # FREERADIUS SERVER (BASE TEMPLATE)
   # ────────────────────────────────────────────────────────────────
   radius:
     build:
       context: ..
       dockerfile: docker/Dockerfile.radius
-    container_name: netily_radius
-    ports:
-      - "1812:1812/udp"
-      - "1813:1813/udp"
-      - "3799:3799/udp"
-      - "18120:18120/tcp"
+    container_name: netily_radius_base
     environment:
       - DB_HOST=netily_db
       - DB_PORT=5432
@@ -176,6 +176,33 @@ services:
       - DB_PASS=2202
       - DB_PASSWORD=2202
       - DB_SCHEMA=public
+      - RADIUS_CLIENTS=0.0.0.0/0
+      - RADIUS_SECRET=testing123
+      - RADIUS_DOCKER_SECRET=testing123
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    networks:
+      - isp_network
+      - vpn_network
+
+  # ────────────────────────────────────────────────────────────────
+  # FREERADIUS SERVER (YELLOW1 TENANT)
+  # ────────────────────────────────────────────────────────────────
+  radius_yellow1:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.radius
+    container_name: netily_radius_yellow1
+    environment:
+      - DB_HOST=netily_db
+      - DB_PORT=5432
+      - DB_NAME=isp_management
+      - DB_USER=isp_user
+      - DB_PASS=2202
+      - DB_PASSWORD=2202
+      - DB_SCHEMA=tenant_yellow1
       - RADIUS_CLIENTS=0.0.0.0/0
       - RADIUS_SECRET=testing123
       - RADIUS_DOCKER_SECRET=testing123
@@ -226,25 +253,40 @@ services:
     environment:
       - OPENVPN_OPTS=--management localhost 7505
     # -----------------------------------------------------------
-    # UPDATED COMMAND: Forward RADIUS traffic to the Radius Container
+    # TENANT-AWARE VPN: Forward RADIUS traffic to appropriate containers
     # -----------------------------------------------------------
     command: >
       sh -c "ovpn_run &
              echo 'Waiting for tun0...' &&
              while ! ip link show tun0 > /dev/null 2>&1; do sleep 1; done &&
              echo 'tun0 is up! Applying Forwarding Rules...' &&
+             
              # 1. Allow Outbound (Standard)
              iptables -t nat -I POSTROUTING -o tun0 -j MASQUERADE &&
-             # 2. Find Radius IP
-             RADIUS_IP=\$$(getent hosts netily_radius | awk '{ print \$$1 }') &&
-             echo \"Forwarding RADIUS ports to \$$RADIUS_IP...\" &&
-             # 3. Forward Incoming 1812/1813 from Tunnel -> Radius Container
-             iptables -t nat -A PREROUTING -i tun0 -p udp --dport 1812 -j DNAT --to-destination \$$RADIUS_IP:1812 &&
-             iptables -t nat -A PREROUTING -i tun0 -p udp --dport 1813 -j DNAT --to-destination \$$RADIUS_IP:1813 &&
-             # 4. Masquerade the forwarded traffic so Radius knows where to reply
-             iptables -t nat -A POSTROUTING -d \$$RADIUS_IP -p udp --dport 1812 -j MASQUERADE &&
-             iptables -t nat -A POSTROUTING -d \$$RADIUS_IP -p udp --dport 1813 -j MASQUERADE &&
-             echo 'Rules Applied.' &&
+             
+             # --- BASE RADIUS (Port 1812/1813) ---
+             BASE_IP=\$$(getent hosts netily_radius_base | awk '{ print \$$1 }') &&
+             if [ ! -z \"\$$BASE_IP\" ]; then
+               echo \"Forwarding 1812/1813 to Base Radius (\$$BASE_IP)\" &&
+               iptables -t nat -A PREROUTING -i tun0 -p udp --dport 1812 -j DNAT --to-destination \$$BASE_IP:1812 &&
+               iptables -t nat -A PREROUTING -i tun0 -p udp --dport 1813 -j DNAT --to-destination \$$BASE_IP:1813 &&
+               iptables -t nat -A POSTROUTING -d \$$BASE_IP -p udp -j MASQUERADE;
+             else
+               echo \"Warning: Base RADIUS container not found\";
+             fi &&
+
+             # --- YELLOW1 RADIUS (Port 1814/1815) ---
+             YELLOW_IP=\$$(getent hosts netily_radius_yellow1 | awk '{ print \$$1 }') &&
+             if [ ! -z \"\$$YELLOW_IP\" ]; then
+               echo \"Forwarding 1814/1815 to Yellow1 Radius (\$$YELLOW_IP)\" &&
+               iptables -t nat -A PREROUTING -i tun0 -p udp --dport 1814 -j DNAT --to-destination \$$YELLOW_IP:1812 &&
+               iptables -t nat -A PREROUTING -i tun0 -p udp --dport 1815 -j DNAT --to-destination \$$YELLOW_IP:1813 &&
+               iptables -t nat -A POSTROUTING -d \$$YELLOW_IP -p udp -j MASQUERADE;
+             else
+               echo \"Info: Yellow1 RADIUS container not found (this is fine if not deployed)\";
+             fi &&
+             
+             echo 'All Rules Applied.' &&
              wait"
     restart: unless-stopped
     sysctls:

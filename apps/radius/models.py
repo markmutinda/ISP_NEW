@@ -11,6 +11,7 @@ Reference: https://wiki.freeradius.org/guide/SQL-HOWTO
 """
 
 from django.db import models
+from django.db.models import Max
 from django.utils import timezone
 import uuid
 
@@ -504,13 +505,19 @@ class RadiusTenantConfig(models.Model):
         blank=True,
         help_text="RADIUS shared secret for this tenant"
     )
-    radius_port_auth = models.IntegerField(
-        default=1812,
-        help_text="Authentication port (for isolated mode)"
+    
+    # --- PORT FIELDS (for isolated mode) ---
+    auth_port = models.IntegerField(
+        unique=True,
+        null=True,
+        blank=True,
+        help_text="Authentication port for this tenant (e.g., 1814, 1816, etc.)"
     )
-    radius_port_acct = models.IntegerField(
-        default=1813,
-        help_text="Accounting port (for isolated mode)"
+    acct_port = models.IntegerField(
+        unique=True,
+        null=True,
+        blank=True,
+        help_text="Accounting port for this tenant (e.g., 1815, 1817, etc.)"
     )
     
     # Deployment Mode
@@ -557,7 +564,7 @@ class RadiusTenantConfig(models.Model):
         # managed = True
     
     def __str__(self):
-        return f"RADIUS Config: {self.tenant_name} ({self.schema_name})"
+        return f"RADIUS Config: {self.tenant_name} ({self.schema_name}) [Auth:{self.auth_port}]"
     
     def generate_secret(self):
         """Generate a secure RADIUS secret."""
@@ -565,10 +572,32 @@ class RadiusTenantConfig(models.Model):
         self.radius_secret = secrets.token_urlsafe(32)
         return self.radius_secret
     
+    def assign_ports(self):
+        """
+        Assign unique ports for this tenant.
+        Base starts at 1812/1813 for the main RADIUS.
+        First tenant gets 1814/1815, second gets 1816/1817, etc.
+        """
+        # Find the highest currently used auth port
+        max_auth = RadiusTenantConfig.objects.aggregate(Max('auth_port'))['auth_port__max']
+        
+        if max_auth:
+            # Increment by 2 to get next available pair
+            self.auth_port = max_auth + 2
+            self.acct_port = max_auth + 3
+        else:
+            # First tenant gets 1814/1815 (since 1812/1813 are for base)
+            self.auth_port = 1814
+            self.acct_port = 1815
+    
     def save(self, *args, **kwargs):
         # Auto-generate secret if not set
         if not self.radius_secret:
             self.generate_secret()
+        
+        # Auto-assign ports for isolated mode if not already assigned
+        if self.deployment_mode == 'ISOLATED' and (not self.auth_port or not self.acct_port):
+            self.assign_ports()
         
         # Auto-set container name for isolated mode
         if self.deployment_mode == 'ISOLATED' and not self.container_name:
@@ -773,4 +802,3 @@ class CustomerRadiusCredentials(models.Model):
         
         self.synced_to_radius = False
         self.save(update_fields=['synced_to_radius'])
-
