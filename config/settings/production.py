@@ -1,5 +1,5 @@
 """
-Production settings — Railway + Vercel deployment.
+Production settings — DigitalOcean / Railway / any Docker host.
 """
 import dj_database_url
 from .base import *
@@ -16,8 +16,11 @@ ALLOWED_HOSTS = os.environ.get(
 ).split(',')
 
 # ────────────────────────────────────────────────────────────────
-#  DATABASE — Railway provides DATABASE_URL automatically
-#  Uses django-tenants backend for multi-tenant support
+#  DATABASE
+#  • Railway / Render → provides DATABASE_URL (auto-parsed)
+#  • DigitalOcean Docker → uses DB_HOST / DB_NAME env vars
+#    which are already read by base.py, so we only override
+#    when DATABASE_URL is explicitly set.
 # ────────────────────────────────────────────────────────────────
 DATABASE_URL = os.environ.get('DATABASE_URL')
 if DATABASE_URL:
@@ -53,12 +56,15 @@ else:
     MIDDLEWARE.insert(0, 'whitenoise.middleware.WhiteNoiseMiddleware')
 
 # ────────────────────────────────────────────────────────────────
-#  CORS — Allow Vercel frontend
+#  CORS — driven by CORS_ALLOWED_ORIGINS env var + safe defaults
 # ────────────────────────────────────────────────────────────────
+_extra_origins = os.environ.get('CORS_ALLOWED_ORIGINS', '')
 CORS_ALLOWED_ORIGINS = [
     'https://netily.vercel.app',
     'https://www.netily.vercel.app',
 ]
+if _extra_origins:
+    CORS_ALLOWED_ORIGINS += [o.strip() for o in _extra_origins.split(',') if o.strip()]
 
 # Also allow any *.vercel.app preview deployments
 CORS_ALLOWED_ORIGIN_REGEXES = [
@@ -74,12 +80,21 @@ CSRF_TRUSTED_ORIGINS = [
     'https://*.vercel.app',
     'https://*.railway.app',
 ]
+# Add the DO domain if set
+_domain = os.environ.get('DOMAIN', '')
+if _domain:
+    CSRF_TRUSTED_ORIGINS += [f'https://{_domain}', f'https://*.{_domain}', f'http://{_domain}']
+
+# Also trust the raw droplet IP for initial setup before DNS
+_droplet_ip = os.environ.get('DROPLET_IP', '')
+if _droplet_ip:
+    CSRF_TRUSTED_ORIGINS.append(f'http://{_droplet_ip}')
 
 # ────────────────────────────────────────────────────────────────
-#  SECURITY
+#  SECURITY — relax SSL redirect when behind nginx on plain HTTP
 # ────────────────────────────────────────────────────────────────
 SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
-SECURE_SSL_REDIRECT = os.environ.get('SECURE_SSL_REDIRECT', 'True') == 'True'
+SECURE_SSL_REDIRECT = os.environ.get('SECURE_SSL_REDIRECT', 'False') == 'True'
 SESSION_COOKIE_SECURE = True
 CSRF_COOKIE_SECURE = True
 SECURE_BROWSER_XSS_FILTER = True
@@ -95,6 +110,10 @@ SECURE_HSTS_PRELOAD = True
 RAILWAY_PUBLIC_DOMAIN = os.environ.get('RAILWAY_PUBLIC_DOMAIN', '')
 if RAILWAY_PUBLIC_DOMAIN:
     BASE_URL = f"https://{RAILWAY_PUBLIC_DOMAIN}"
+elif _domain:
+    BASE_URL = f"https://{_domain}"
+elif _droplet_ip:
+    BASE_URL = f"http://{_droplet_ip}"
 
 # ────────────────────────────────────────────────────────────────
 #  LOGGING — structured for Railway log drain

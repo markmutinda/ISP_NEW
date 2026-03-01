@@ -1,5 +1,9 @@
 version: '3.8'
 
+# ────────────────────────────────────────────────────────────────
+# ALL secrets come from ../.env  (env_file on each service)
+# ────────────────────────────────────────────────────────────────
+
 services:
   # ────────────────────────────────────────────────────────────────
   # DATABASE
@@ -9,17 +13,21 @@ services:
     container_name: netily_db
     volumes:
       - postgres_data:/var/lib/postgresql/data
+    env_file: ../.env
     environment:
-      - POSTGRES_DB=isp_management
-      - POSTGRES_USER=isp_user
-      - POSTGRES_PASSWORD=2202
-    ports:
-      - "5433:5432"
+      - POSTGRES_DB=${DB_NAME}
+      - POSTGRES_USER=${DB_USER}
+      - POSTGRES_PASSWORD=${DB_PASSWORD}
+    # Do NOT expose to the internet — only internal
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U isp_user -d isp_management"]
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-isp_user} -d ${DB_NAME:-isp_management}"]
       interval: 10s
       timeout: 5s
       retries: 5
+    deploy:
+      resources:
+        limits:
+          memory: 200M
     networks:
       - isp_network
 
@@ -29,8 +37,7 @@ services:
   redis:
     image: redis:7-alpine
     container_name: netily_redis
-    ports:
-      - "6379:6379"
+    command: redis-server --maxmemory 50mb --maxmemory-policy allkeys-lru
     volumes:
       - redis_data:/data
     healthcheck:
@@ -38,6 +45,10 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
+    deploy:
+      resources:
+        limits:
+          memory: 60M
     networks:
       - isp_network
 
@@ -49,32 +60,25 @@ services:
       context: ..
       dockerfile: docker/Dockerfile
     container_name: netily_backend
-# AUTOMATION: 1. Use Python to find IP (Robust), 2. Add Route
+    restart: unless-stopped
     command: >
       sh -c "echo 'Setting up routes...' &&
              VPN_IP=$$(python -c \"import socket; print(socket.gethostbyname('netily-openvpn'))\") &&
              echo 'VPN Gateway found at: '$$VPN_IP &&
              ip route add 192.168.255.0/24 via $$VPN_IP || true &&
              echo 'Route added successfully!' &&
-             # --- ADDED --timeout 120 FOR LONG-RUNNING REQUESTS ---
-             gunicorn config.wsgi:application --bind 0.0.0.0:8000 --workers 4 --timeout 240 --reload"
+             gunicorn config.wsgi:application --bind 0.0.0.0:8000 --workers 2 --threads 2 --timeout 240 --max-requests 500 --max-requests-jitter 50"
     working_dir: /app
     volumes:
       - ../:/app
-      - static_volume:/app/static
+      - static_volume:/app/staticfiles
       - media_volume:/app/media
-      # --- ADDED DOCKER SOCKET FOR DOCKER API ACCESS ---
       - /var/run/docker.sock:/var/run/docker.sock
+    env_file: ../.env
     environment:
       - PYTHONPATH=/app
-      - DJANGO_SETTINGS_MODULE=config.settings.production
-      - DJANGO_SECRET_KEY=super-secret-key-for-docker-testing-12345
-      - DJANGO_ALLOWED_HOSTS=localhost,.localhost,127.0.0.1,web,netily_backend,192.168.255.1,192.168.100.149
       - REDIS_URL=redis://netily_redis:6379/0
       - DB_HOST=netily_db
-      - DB_NAME=isp_management
-      - DB_USER=isp_user
-      - DB_PASSWORD=2202
       - DB_PORT=5432
     cap_add:
       - NET_ADMIN
@@ -85,8 +89,10 @@ services:
         condition: service_healthy
       openvpn:
          condition: service_started
-    ports:
-      - "8000:8000"
+    deploy:
+      resources:
+        limits:
+          memory: 250M
     networks:
       - isp_network
       - vpn_network
@@ -99,25 +105,20 @@ services:
       context: ..
       dockerfile: docker/Dockerfile
     container_name: netily_worker
+    restart: unless-stopped
     working_dir: /app
-    # AUTOMATION: Worker also needs the route to talk to routers
     command: >
-      sh -c "VPN_IP=\$(getent hosts netily-openvpn | awk '{ print \$1 }') &&
-             ip route add 192.168.255.0/24 via \$VPN_IP || true &&
-             celery -A config worker -l info --concurrency=4"
+      sh -c "VPN_IP=$$(getent hosts netily-openvpn | awk '{ print $$1 }') &&
+             ip route add 192.168.255.0/24 via $$VPN_IP || true &&
+             celery -A config worker -l info --concurrency=2 --max-memory-per-child=150000"
     volumes:
       - ../:/app
-      # --- ADDED DOCKER SOCKET FOR DOCKER API ACCESS ---
       - /var/run/docker.sock:/var/run/docker.sock
+    env_file: ../.env
     environment:
       - PYTHONPATH=/app
-      - DJANGO_SETTINGS_MODULE=config.settings.production
-      - DJANGO_SECRET_KEY=super-secret-key-for-docker-testing-12345
       - REDIS_URL=redis://netily_redis:6379/0
       - DB_HOST=netily_db
-      - DB_NAME=isp_management
-      - DB_USER=isp_user
-      - DB_PASSWORD=2202
       - DB_PORT=5432
     cap_add:
       - NET_ADMIN
@@ -126,6 +127,10 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          memory: 200M
     networks:
       - isp_network
       - vpn_network
@@ -138,29 +143,30 @@ services:
       context: ..
       dockerfile: docker/Dockerfile
     container_name: netily_beat
+    restart: unless-stopped
     working_dir: /app
     command: celery -A config beat -l info --scheduler django_celery_beat.schedulers:DatabaseScheduler
     volumes:
       - ../:/app
+    env_file: ../.env
     environment:
       - PYTHONPATH=/app
-      - DJANGO_SETTINGS_MODULE=config.settings.production
-      - DJANGO_SECRET_KEY=super-secret-key-for-docker-testing-12345
       - REDIS_URL=redis://netily_redis:6379/0
       - DB_HOST=netily_db
-      - DB_NAME=isp_management
-      - DB_USER=isp_user
-      - DB_PASSWORD=2202
       - DB_PORT=5432
     depends_on:
       db:
         condition: service_healthy
       redis:
         condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          memory: 80M
     networks:
       - isp_network
 
-# ────────────────────────────────────────────────────────────────
+  # ────────────────────────────────────────────────────────────────
   # FREERADIUS SERVER (BASE TEMPLATE)
   # ────────────────────────────────────────────────────────────────
   radius:
@@ -168,77 +174,70 @@ services:
       context: ..
       dockerfile: docker/Dockerfile.radius
     container_name: netily_radius_base
+    restart: unless-stopped
+    env_file: ../.env
     environment:
       - DB_HOST=netily_db
       - DB_PORT=5432
-      - DB_NAME=isp_management
-      - DB_USER=isp_user
-      - DB_PASS=2202
-      - DB_PASSWORD=2202
       - DB_SCHEMA=public
       - RADIUS_CLIENTS=0.0.0.0/0
-      - RADIUS_SECRET=testing123
-      - RADIUS_DOCKER_SECRET=testing123
-    restart: unless-stopped
     depends_on:
       db:
         condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          memory: 60M
     networks:
       - isp_network
       - vpn_network
 
   # ────────────────────────────────────────────────────────────────
-  # FREERADIUS SERVER (YELLOW1 TENANT)
-  # ────────────────────────────────────────────────────────────────
-  radius_yellow1:
-    build:
-      context: ..
-      dockerfile: docker/Dockerfile.radius
-    container_name: netily_radius_yellow1
-    environment:
-      - DB_HOST=netily_db
-      - DB_PORT=5432
-      - DB_NAME=isp_management
-      - DB_USER=isp_user
-      - DB_PASS=2202
-      - DB_PASSWORD=2202
-      - DB_SCHEMA=tenant_yellow1
-      - RADIUS_CLIENTS=0.0.0.0/0
-      - RADIUS_SECRET=testing123
-      - RADIUS_DOCKER_SECRET=testing123
-    restart: unless-stopped
-    depends_on:
-      db:
-        condition: service_healthy
-    networks:
-      - isp_network
-      - vpn_network
-
-  # ────────────────────────────────────────────────────────────────
-  # NGINX REVERSE PROXY
+  # NGINX REVERSE PROXY + SSL TERMINATION
   # ────────────────────────────────────────────────────────────────
   nginx:
     image: nginx:alpine
     container_name: netily_nginx
+    restart: unless-stopped
     ports:
       - "80:80"
       - "443:443"
     volumes:
       - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
-      - static_volume:/app/static:ro
+      - static_volume:/app/staticfiles:ro
       - media_volume:/app/media:ro
-      - ./nginx/certs:/etc/nginx/certs:ro
+      - certbot_www:/var/www/certbot:ro
+      - certbot_certs:/etc/letsencrypt:ro
     depends_on:
       - web
+    deploy:
+      resources:
+        limits:
+          memory: 30M
     networks:
       - isp_network
 
-# ────────────────────────────────────────────────────────────────
+  # ────────────────────────────────────────────────────────────────
+  # CERTBOT (SSL via Let's Encrypt)
+  # ────────────────────────────────────────────────────────────────
+  certbot:
+    image: certbot/certbot
+    container_name: netily_certbot
+    volumes:
+      - certbot_www:/var/www/certbot
+      - certbot_certs:/etc/letsencrypt
+    # Runs once then exits — renew via cron on host
+    entrypoint: "/bin/sh -c 'trap exit TERM; while :; do sleep 6h & wait $${!}; certbot renew; done;'"
+    networks:
+      - isp_network
+
+  # ────────────────────────────────────────────────────────────────
   # OPENVPN SERVER (The Veins)
   # ────────────────────────────────────────────────────────────────
   openvpn:
     image: kylemanna/openvpn:latest
     container_name: netily-openvpn
+    restart: unless-stopped
     cap_add:
       - NET_ADMIN
     ports:
@@ -252,19 +251,14 @@ services:
       - openvpn_logs:/var/log/openvpn
     environment:
       - OPENVPN_OPTS=--management localhost 7505
-    # -----------------------------------------------------------
-    # TENANT-AWARE VPN: Forward RADIUS traffic to appropriate containers
-    # -----------------------------------------------------------
     command: >
       sh -c "ovpn_run &
              echo 'Waiting for tun0...' &&
              while ! ip link show tun0 > /dev/null 2>&1; do sleep 1; done &&
              echo 'tun0 is up! Applying Forwarding Rules...' &&
              
-             # 1. Allow Outbound (Standard)
              iptables -t nat -I POSTROUTING -o tun0 -j MASQUERADE &&
              
-             # --- BASE RADIUS (Port 1812/1813) ---
              BASE_IP=\$$(getent hosts netily_radius_base | awk '{ print \$$1 }') &&
              if [ ! -z \"\$$BASE_IP\" ]; then
                echo \"Forwarding 1812/1813 to Base Radius (\$$BASE_IP)\" &&
@@ -274,23 +268,15 @@ services:
              else
                echo \"Warning: Base RADIUS container not found\";
              fi &&
-
-             # --- YELLOW1 RADIUS (Port 1814/1815) ---
-             YELLOW_IP=\$$(getent hosts netily_radius_yellow1 | awk '{ print \$$1 }') &&
-             if [ ! -z \"\$$YELLOW_IP\" ]; then
-               echo \"Forwarding 1814/1815 to Yellow1 Radius (\$$YELLOW_IP)\" &&
-               iptables -t nat -A PREROUTING -i tun0 -p udp --dport 1814 -j DNAT --to-destination \$$YELLOW_IP:1812 &&
-               iptables -t nat -A PREROUTING -i tun0 -p udp --dport 1815 -j DNAT --to-destination \$$YELLOW_IP:1813 &&
-               iptables -t nat -A POSTROUTING -d \$$YELLOW_IP -p udp -j MASQUERADE;
-             else
-               echo \"Info: Yellow1 RADIUS container not found (this is fine if not deployed)\";
-             fi &&
              
              echo 'All Rules Applied.' &&
              wait"
-    restart: unless-stopped
     sysctls:
       - net.ipv4.ip_forward=1
+    deploy:
+      resources:
+        limits:
+          memory: 50M
     networks:
       - vpn_network
       - isp_network
@@ -320,3 +306,5 @@ volumes:
   openvpn_logs:
   freeradius_data:
   freeradius_logs:
+  certbot_www:
+  certbot_certs:
