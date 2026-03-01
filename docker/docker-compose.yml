@@ -15,12 +15,12 @@ services:
       - postgres_data:/var/lib/postgresql/data
     env_file: ../.env
     environment:
-      - POSTGRES_DB=${DB_NAME}
-      - POSTGRES_USER=${DB_USER}
-      - POSTGRES_PASSWORD=${DB_PASSWORD}
+      - POSTGRES_DB=${DB_NAME:-isp_management}
+      - POSTGRES_USER=${DB_USER:-isp_user}
+      - POSTGRES_PASSWORD=${DB_PASSWORD:-changeme}
     # Do NOT expose to the internet — only internal
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-isp_user} -d ${DB_NAME:-isp_management}"]
+      test: ["CMD-SHELL", "pg_isready -U isp_user -d isp_management"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -77,6 +77,9 @@ services:
     env_file: ../.env
     environment:
       - PYTHONPATH=/app
+      - DJANGO_SETTINGS_MODULE=config.settings.production
+      - DJANGO_SECRET_KEY=${SECRET_KEY:-changeme-generate-a-real-key}
+      - DJANGO_ALLOWED_HOSTS=${DJANGO_ALLOWED_HOSTS:-localhost}
       - REDIS_URL=redis://netily_redis:6379/0
       - DB_HOST=netily_db
       - DB_PORT=5432
@@ -89,6 +92,8 @@ services:
         condition: service_healthy
       openvpn:
          condition: service_started
+    ports:
+      - "8000:8000"
     deploy:
       resources:
         limits:
@@ -117,6 +122,8 @@ services:
     env_file: ../.env
     environment:
       - PYTHONPATH=/app
+      - DJANGO_SETTINGS_MODULE=config.settings.production
+      - DJANGO_SECRET_KEY=${SECRET_KEY:-changeme-generate-a-real-key}
       - REDIS_URL=redis://netily_redis:6379/0
       - DB_HOST=netily_db
       - DB_PORT=5432
@@ -151,6 +158,8 @@ services:
     env_file: ../.env
     environment:
       - PYTHONPATH=/app
+      - DJANGO_SETTINGS_MODULE=config.settings.production
+      - DJANGO_SECRET_KEY=${SECRET_KEY:-changeme-generate-a-real-key}
       - REDIS_URL=redis://netily_redis:6379/0
       - DB_HOST=netily_db
       - DB_PORT=5432

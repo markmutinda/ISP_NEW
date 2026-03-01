@@ -44,6 +44,9 @@ else
     DC="docker-compose"
 fi
 
+# env-file flag so docker compose can interpolate ${DB_NAME} etc.
+ENV_FLAG="--env-file ../.env"
+
 # ── Step 1: Swap Space (critical for 1GB droplet) ─────────────
 echo -e "\n${YELLOW}[1/7] Setting up swap space...${NC}"
 if [ ! -f /swapfile ]; then
@@ -75,27 +78,27 @@ echo -e "${GREEN}  ✓ Docker socket ready${NC}"
 echo -e "\n${YELLOW}[4/7] Building and starting containers...${NC}"
 echo -e "  This will take 3-8 minutes on first run..."
 cd docker
-$DC down --remove-orphans 2>/dev/null || true
-$DC up -d --build
+$DC $ENV_FLAG down --remove-orphans 2>/dev/null || true
+$DC $ENV_FLAG up -d --build
 
 echo -e "\n${YELLOW}  Waiting for database to be ready...${NC}"
 sleep 15  # Give postgres time to initialise
 
 # Verify containers are up
 echo ""
-$DC ps
+$DC $ENV_FLAG ps
 echo ""
 
 # ── Step 5: Collect static files ──────────────────────────────
 echo -e "\n${YELLOW}[5/7] Collecting static files...${NC}"
-$DC exec -T web python manage.py collectstatic --noinput || true
+$DC $ENV_FLAG exec -T web python manage.py collectstatic --noinput || true
 echo -e "${GREEN}  ✓ Static files collected${NC}"
 
 # ── Step 6: Run migrations ────────────────────────────────────
 echo -e "\n${YELLOW}[6/7] Running multi-tenant migrations...${NC}"
-$DC exec -T web python manage.py migrate_schemas --shared
+$DC $ENV_FLAG exec -T web python manage.py migrate_schemas --shared
 echo -e "${GREEN}  ✓ Shared schema migrated${NC}"
-$DC exec -T web python manage.py migrate_schemas --tenant || true
+$DC $ENV_FLAG exec -T web python manage.py migrate_schemas --tenant || true
 echo -e "${GREEN}  ✓ Tenant schemas migrated${NC}"
 
 # ── Step 7: Summary ───────────────────────────────────────────
