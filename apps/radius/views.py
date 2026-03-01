@@ -7,6 +7,7 @@ from django.db.models import Sum, Count, Avg, Q
 from django.utils import timezone
 from rest_framework import viewsets, status
 from rest_framework.decorators import action
+from apps.network.models import Router
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework.permissions import IsAuthenticated
@@ -128,33 +129,77 @@ class RadiusActiveSessionsView(APIView):
     """
     GET /api/v1/radius/sessions/active/
     
-    List all active RADIUS sessions.
+    List all active RADIUS sessions with robust router identification.
     """
     permission_classes = [IsAuthenticated, HasCompanyAccess]
     
     def get(self, request):
-        # Added 'customer__user' to select_related so it fetches phone numbers efficiently
+        # 1. Fetch active sessions
         sessions = RadAcct.objects.filter(
             acctstoptime__isnull=True
-        ).select_related('customer', 'customer__user', 'router').order_by('-acctstarttime')
+        ).select_related('customer', 'customer__user').order_by('-acctstarttime')
         
-        # Filter by NAS
+        # 2. Filter by parameters if provided
         nas_ip = request.query_params.get('nas')
         if nas_ip:
             sessions = sessions.filter(nasipaddress=nas_ip)
         
-        # Filter by username
         username = request.query_params.get('username')
         if username:
             sessions = sessions.filter(username__icontains=username)
+
+        # 3. OPTIMIZATION: Match by IP Address instead of Name
+        routers_map = {
+            r.ip_address: r 
+            for r in Router.objects.filter(is_active=True).only('id', 'name', 'ip_address')
+            if r.ip_address
+        }
         
-        # CHANGED: Use the new OnlineUserSerializer here
-        serializer = OnlineUserSerializer(sessions[:100], many=True)
+        # 4. Create a map of Usernames to Customers for quick lookup
+        customer_map = {
+            cred.username: cred.customer 
+            for cred in CustomerRadiusCredentials.objects.select_related('customer').all()
+        }
+
+        session_list = []
+        # Process the most recent 100 sessions
+        for session in sessions[:100]:
+            # 5. Lookup the Router using FreeRADIUS's native NAS-IP-Address
+            router = routers_map.get(session.nasipaddress)
+            
+            # 6. Link the customer dynamically using the Username (e.g., 'paul')
+            customer = session.customer or customer_map.get(session.username)
+            
+            # 7. Resolve the name correctly
+            # Check the user object first, then fallback to Hotspot-User
+            display_name = "Hotspot-User"
+            if customer:
+                if hasattr(customer, 'full_name') and customer.full_name:
+                    display_name = customer.full_name
+                elif customer.user:
+                    display_name = f"{customer.user.first_name} {customer.user.last_name}".strip() or customer.user.username
+
+            session_data = {
+                'radacctid': session.radacctid,
+                'acctsessionid': session.acctsessionid,
+                'username': session.username,
+                'full_name': display_name,  # <--- Now correctly resolved!
+                'phone_number': customer.user.phone_number if customer and customer.user else "N/A",
+                'mac_address': session.callingstationid,
+                'ip_address': session.framedipaddress,
+                'uptime': session.duration_formatted,
+                'usage': f"{session.total_bytes / (1024*1024):.2f} MB",
+                # 8. Output the matched Router Name!
+                'router': router.name if router else (session.nasipaddress or 'Unknown'),
+                'router_id': router.id if router else None,
+                'service_type': session.framedprotocol or 'PPP'
+            }
+            session_list.append(session_data)
+        
         return Response({
             'count': sessions.count(),
-            'sessions': serializer.data
+            'sessions': session_list
         })
-
 
 # ────────────────────────────────────────────────────────────────
 # RADIUS USER MANAGEMENT

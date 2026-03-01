@@ -570,3 +570,55 @@ def notify_expiring_soon(hours_before: int = 24):
     except Exception as e:
         logger.error(f"[EXPIRY NOTICE] Task failed: {e}")
         return stats
+
+
+# ============================================================================
+# INFRASTRUCTURE PROVISIONING TASKS (Zero-Downtime Multi-Tenant)
+# ============================================================================
+
+import subprocess
+from apps.radius.services.tenant_radius_service import TenantRadiusConfigService
+
+@shared_task(name="apps.radius.tasks.provision_tenant_infrastructure")
+def provision_tenant_infrastructure_task(schema_name):
+    """
+    Background task to build RADIUS container and inject VPN routes.
+    Prevents the web server from freezing during account creation.
+    """
+    logger.info(f"🚀 [INFRA TASK] Starting background RADIUS provisioning for {schema_name}...")
+    
+    try:
+        service = TenantRadiusConfigService()
+        # 1. Build and Start the Docker Container
+        service.deploy_tenant_radius(schema_name)
+        
+        # 2. Live-inject the new routing rules into OpenVPN
+        # We use the sync_routes.sh script we created earlier
+        subprocess.run(['docker', 'exec', 'netily-openvpn', 'sh', '/etc/openvpn/ports/sync_routes.sh'], check=False)
+        
+        logger.info(f"✅ [INFRA TASK] Finished infrastructure provisioning for {schema_name}!")
+        return True
+    except Exception as e:
+        logger.error(f"❌ [INFRA TASK] Failed to provision infrastructure for {schema_name}: {str(e)}")
+        return False
+
+@shared_task(name="apps.radius.tasks.teardown_tenant_infrastructure")
+def teardown_tenant_infrastructure_task(schema_name):
+    """
+    Background task to destroy RADIUS container and clean up VPN routes.
+    """
+    logger.info(f"🗑️ [INFRA TASK] Starting background teardown for {schema_name}...")
+    
+    try:
+        service = TenantRadiusConfigService()
+        # 1. Stop and Remove the Docker Container
+        service.remove_tenant_radius(schema_name)
+        
+        # 2. Live-inject VPN routes (Flushes old routes and rebuilds from current file)
+        subprocess.run(['docker', 'exec', 'netily-openvpn', 'sh', '/etc/openvpn/ports/sync_routes.sh'], check=False)
+        
+        logger.info(f"✅ [INFRA TASK] Finished teardown for {schema_name}!")
+        return True
+    except Exception as e:
+        logger.error(f"❌ [INFRA TASK] Failed to teardown infrastructure for {schema_name}: {str(e)}")
+        return False

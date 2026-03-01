@@ -158,10 +158,8 @@ class VPNProvisioningService:
     def _assign_vpn_ip(self, router) -> str:
         """
         Finds the next available IP in the VPN range.
-        Skips .0 (network), .1 (server), and .255 (broadcast).
+        Checks the physical CCD directory to prevent collisions across ALL tenants.
         """
-        from apps.network.models.router_models import Router
-
         range_start = getattr(settings, 'VPN_IP_RANGE_START', 10)
         range_end = getattr(settings, 'VPN_IP_RANGE_END', 250)
 
@@ -169,13 +167,14 @@ class VPNProvisioningService:
         if router.vpn_ip_address:
             return router.vpn_ip_address
 
-        # Get all assigned VPN IPs
-        assigned_ips = set(
-            Router.objects.exclude(vpn_ip_address__isnull=True)
-            .values_list('vpn_ip_address', flat=True)
-        )
+        # THE FIX: Check the physical OpenVPN CCD directory.
+        # This is the "Source of Truth" because all tenants share the same VPN server.
+        existing_ccd_files = self.ccd_manager.list_ccd_files()
+        
+        # Create a set of all IPs currently written to disk globally
+        assigned_ips = {item['vpn_ip'] for item in existing_ccd_files}
 
-        # Find the next available
+        # Find the next available IP
         base = '10.8.0'  # From VPN_NETWORK_CIDR
         for i in range(range_start, range_end + 1):
             candidate = f"{base}.{i}"
