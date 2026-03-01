@@ -1,5 +1,9 @@
 -r base.txt
 
+# Railway / Production
+dj-database-url>=2.1.0
+whitenoise>=6.6.0
+
 # Core Django and REST
 Django==4.2.7
 djangorestframework==3.14.0
