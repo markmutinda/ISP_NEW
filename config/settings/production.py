@@ -12,7 +12,7 @@ SECRET_KEY = os.environ.get('DJANGO_SECRET_KEY', os.environ.get('SECRET_KEY'))
 
 ALLOWED_HOSTS = os.environ.get(
     'DJANGO_ALLOWED_HOSTS',
-    '.railway.app,localhost'
+    'api.netily.co.ke,.netily.co.ke,localhost'
 ).split(',')
 
 # ────────────────────────────────────────────────────────────────
@@ -62,13 +62,16 @@ _extra_origins = os.environ.get('CORS_ALLOWED_ORIGINS', '')
 CORS_ALLOWED_ORIGINS = [
     'https://netily.vercel.app',
     'https://www.netily.vercel.app',
+    'https://netily.co.ke',
+    'https://www.netily.co.ke',
 ]
 if _extra_origins:
     CORS_ALLOWED_ORIGINS += [o.strip() for o in _extra_origins.split(',') if o.strip()]
 
-# Also allow any *.vercel.app preview deployments
+# Also allow any *.vercel.app preview deployments and *.netily.co.ke tenant subdomains
 CORS_ALLOWED_ORIGIN_REGEXES = [
     r'^https://.*\.vercel\.app$',
+    r'^https://.*\.netily\.co\.ke$',
 ]
 
 CORS_ALLOW_CREDENTIALS = True
@@ -79,6 +82,9 @@ CSRF_TRUSTED_ORIGINS = [
     'https://netily.vercel.app',
     'https://*.vercel.app',
     'https://*.railway.app',
+    'https://netily.co.ke',
+    'https://*.netily.co.ke',
+    'https://api.netily.co.ke',
 ]
 # Add the DO domain if set
 _domain = os.environ.get('DOMAIN', '')
