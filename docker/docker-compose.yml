@@ -79,7 +79,8 @@ services:
       - PYTHONPATH=/app
       - DJANGO_SETTINGS_MODULE=config.settings.production
       - DJANGO_SECRET_KEY=${SECRET_KEY:-changeme-generate-a-real-key}
-      - DJANGO_ALLOWED_HOSTS=${DJANGO_ALLOWED_HOSTS:-localhost}
+      - DJANGO_ALLOWED_HOSTS=api.netily.co.ke,.netily.co.ke,localhost
+      - TENANT_BASE_DOMAIN=netily.co.ke
       - REDIS_URL=redis://netily_redis:6379/0
       - DB_HOST=netily_db
       - DB_PORT=5432
