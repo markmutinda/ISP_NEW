@@ -635,10 +635,58 @@ class CompanyRegisterView(generics.CreateAPIView):
     serializer_class = CompanyRegisterSerializer
     
     def create(self, request, *args, **kwargs):
+        import logging as _logging
+        import traceback as _traceback
+        _log = _logging.getLogger(__name__)
+
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         data = serializer.validated_data
-        
+
+        # Track created objects for cleanup on failure
+        company = None
+        tenant = None
+
+        try:
+            return self._create_company(request, data, _log)
+        except Exception as exc:
+            _log.error(
+                "Company registration failed for '%s':\n%s",
+                data.get('company_name', '?'),
+                _traceback.format_exc(),
+            )
+            # Clean up any partial records so re-registration works
+            try:
+                from django.db import connection as _conn
+                _conn.set_schema_to_public()
+            except Exception:
+                pass
+            from apps.core.models import Company as _Company, Domain as _Domain
+            from django_tenants.utils import get_tenant_model as _gtm
+            _Tenant = _gtm()
+            slug = __import__('django.utils.text', fromlist=['slugify']).slugify(
+                data.get('company_name', '')
+            )
+            if slug:
+                # Delete in dependency order
+                try:
+                    _Domain.objects.filter(tenant__subdomain=slug).delete()
+                except Exception:
+                    pass
+                try:
+                    _Tenant.objects.filter(subdomain=slug).delete()
+                except Exception:
+                    pass
+                try:
+                    _Company.objects.filter(slug=slug).delete()
+                except Exception:
+                    pass
+            return Response(
+                {'error': 'Registration failed', 'detail': str(exc)},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+
+    def _create_company(self, request, data, _log):
         # Start in public schema
         from django.db import connection
         connection.set_schema_to_public()
