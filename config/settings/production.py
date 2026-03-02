@@ -68,6 +68,9 @@ CORS_ALLOWED_ORIGINS = [
 if _extra_origins:
     CORS_ALLOWED_ORIGINS += [o.strip() for o in _extra_origins.split(',') if o.strip()]
 
+# Base domain used for new tenant subdomains (e.g. "acme.netily.co.ke")
+TENANT_BASE_DOMAIN = os.environ.get('TENANT_BASE_DOMAIN', 'netily.co.ke')
+
 # Also allow any *.vercel.app preview deployments and *.netily.co.ke tenant subdomains
 CORS_ALLOWED_ORIGIN_REGEXES = [
     r'^https://.*\.vercel\.app$',

@@ -688,12 +688,16 @@ class CompanyRegisterView(generics.CreateAPIView):
             subscription_expiry=trial_end.date()
         )
         
-        # 4. Create Domain in public schema (With Port Check!)
-        domain_name = f"{tenant.subdomain}.localhost"
-        
-        # <--- CRITICAL FIX: Add port 8000 for localhost development
-        if settings.DEBUG:
-             domain_name = f"{tenant.subdomain}.localhost:8000"
+        # 4. Create Domain in public schema
+        # In production use the real base domain (e.g. acme.netily.co.ke),
+        # in local dev fall back to subdomain.localhost:8000
+        base_domain = getattr(settings, 'TENANT_BASE_DOMAIN', None)
+        if base_domain:
+            domain_name = f"{tenant.subdomain}.{base_domain}"
+            domain_protocol = 'https'
+        else:
+            domain_name = f"{tenant.subdomain}.localhost:8000" if settings.DEBUG else f"{tenant.subdomain}.localhost"
+            domain_protocol = 'http'
 
         Domain.objects.create(
             domain=domain_name,
@@ -741,10 +745,25 @@ class CompanyRegisterView(generics.CreateAPIView):
             'message': 'Company created successfully',
             'company': company.name,
             'tenant': tenant.subdomain,
-            # Return URL with the correct port
-            'login_url': f'http://{domain_name}/admin/login/',
+            'subdomain': tenant.subdomain,       # alias expected by frontend
+            'tenant_domain': domain_name,
+            'login_url': f'{domain_protocol}://{domain_name}/admin/login/',
+            'dashboard_url': f'{domain_protocol}://{domain_name}/admin/',
             'email': user.email,
             'access': str(refresh.access_token),
+            # 'user' object expected by frontend for token storage
+            'user': {
+                'id': user.id,
+                'email': user.email,
+                'first_name': user.first_name,
+                'last_name': user.last_name,
+                'role': user.role,
+                'company': {
+                    'name': company.name,
+                    'slug': company.slug,
+                    'subdomain': tenant.subdomain,
+                },
+            },
         }, status=status.HTTP_201_CREATED)
 
     def send_welcome_email(self, user, tenant, domain_name, password):

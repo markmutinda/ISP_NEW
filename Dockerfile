@@ -35,10 +35,10 @@ RUN mkdir -p /app/staticfiles && \
 # Expose Django port
 EXPOSE 8000
 
-# Start with gunicorn - Railway sets PORT env var
+# Start with gunicorn - DigitalOcean/Docker sets PORT env var
 CMD gunicorn config.wsgi:application \
     --bind 0.0.0.0:${PORT:-8000} \
     --workers 3 \
-    --timeout 120 \
+    --timeout 300 \
     --access-logfile - \
     --error-logfile -
