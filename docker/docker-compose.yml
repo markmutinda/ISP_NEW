@@ -84,6 +84,10 @@ services:
       - REDIS_URL=redis://netily_redis:6379/0
       - DB_HOST=netily_db
       - DB_PORT=5432
+      - OPENVPN_MANAGEMENT_HOST=netily-openvpn
+      - VPN_GATEWAY_IP=${VPN_GATEWAY_IP:-10.8.0.1}
+      - BASE_URL=${BASE_URL:-https://api.netily.co.ke}
+      - FRONTEND_URL=${FRONTEND_URL:-https://netily.co.ke}
     cap_add:
       - NET_ADMIN
     depends_on:
@@ -128,6 +132,8 @@ services:
       - REDIS_URL=redis://netily_redis:6379/0
       - DB_HOST=netily_db
       - DB_PORT=5432
+      - OPENVPN_MANAGEMENT_HOST=netily-openvpn
+      - VPN_GATEWAY_IP=${VPN_GATEWAY_IP:-10.8.0.1}
     cap_add:
       - NET_ADMIN
     depends_on:
@@ -275,7 +281,7 @@ services:
     ports:
       - "1194:1194/udp"
       - "1194:1194/tcp"
-      - "7505:7505"
+      # 7505 removed from public — Django talks to OpenVPN internally via container name
       - "8728:8728"
     volumes:
       - openvpn_data:/etc/openvpn
