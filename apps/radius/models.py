@@ -57,6 +57,7 @@ class RadCheck(models.Model):
         on_delete=models.CASCADE,
         null=True,
         blank=True,
+        db_constraint=False,
         related_name='radius_checks'
     )
     
@@ -101,6 +102,7 @@ class RadReply(models.Model):
         on_delete=models.CASCADE,
         null=True,
         blank=True,
+        db_constraint=False,
         related_name='radius_replies'
     )
     
@@ -247,6 +249,7 @@ class RadAcct(models.Model):
         on_delete=models.SET_NULL,
         null=True,
         blank=True,
+        db_constraint=False,
         related_name='radius_sessions'
     )
     router = models.ForeignKey(
@@ -618,6 +621,7 @@ class CustomerRadiusCredentials(models.Model):
     customer = models.OneToOneField(
         'customers.Customer',
         on_delete=models.CASCADE,
+        db_constraint=False,
         related_name='radius_credentials',
         help_text="Customer this RADIUS account belongs to"
     )
