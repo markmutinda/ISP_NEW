@@ -705,10 +705,29 @@ class CompanyRegisterView(generics.CreateAPIView):
             is_primary=True
         )
         
-        # Create schema and run migrations
-        from django.core.management import call_command
-        call_command('migrate_schemas', schema_name=tenant.schema_name, interactive=False)
-        
+        # Create schema and run migrations.
+        # Run in a subprocess so an OOM kill of the child process does NOT
+        # kill the gunicorn worker and reset the client connection.
+        import subprocess, sys, os as _os
+        migrate_env = _os.environ.copy()
+        migrate_env['DJANGO_SETTINGS_MODULE'] = 'config.settings.production'
+        result = subprocess.run(
+            [sys.executable, 'manage.py', 'migrate_schemas',
+             '--schema', tenant.schema_name, '--no-input'],
+            cwd=settings.BASE_DIR,
+            env=migrate_env,
+            capture_output=True,
+            text=True,
+            timeout=240,   # hard cap — gunicorn timeout is 300s
+        )
+        if result.returncode != 0:
+            # Log but don't crash — schema may still be usable
+            import logging as _logging
+            _logging.getLogger(__name__).error(
+                "migrate_schemas failed for %s:\nSTDOUT: %s\nSTDERR: %s",
+                tenant.schema_name, result.stdout, result.stderr
+            )
+
         # Switch to tenant schema
         connection.set_tenant(tenant)
     
