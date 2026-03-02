@@ -33,22 +33,21 @@ class MikrotikScriptGenerator:
         self.router = router
         self.request = request
 
-        # ── URLs Logic ───────────────────────────────────────────
-        # In Docker, the router sees the server via the VPN Gateway
-        self.vpn_gateway = "192.168.255.1"
-        self.base_url = getattr(settings, 'BASE_URL', '').rstrip('/')
+        # ── VPN Gateway Logic ─────────────────────────────────────────
+        # In production, the OpenVPN gateway is usually 10.8.0.1 
+        # This matches your vpn_provisioning_service pool (10.8.0.x)
+        self.vpn_gateway = getattr(settings, 'VPN_GATEWAY_IP', '10.8.0.1')
         
-        # Determine the best URL for the router to use
-        # If we have a request, we use the IP the router used to call us
-        if request:
-            host = request.get_host().split(':')[0]
-            self.active_url = f"http://{host}:8000"
-        else:
-            self.active_url = self.base_url
-
-        # --- RESTORE OUR LOCAL TESTING FIX ---
-        self.active_url = "http://192.168.100.149:8000"
-        self.portal_url = "http://192.168.100.149:3000"
+        # ── Production URLs Logic ─────────────────────────────────────
+        # Read from environment variables (e.g., https://api.netily.co.ke)
+        self.base_url = getattr(settings, 'BASE_URL', 'https://api.netily.co.ke').rstrip('/')
+        
+        # Read from environment variables (e.g., https://netily.co.ke)
+        self.portal_url = getattr(settings, 'FRONTEND_URL', 'https://netily.co.ke').rstrip('/')
+        
+        # The router uses the base_url (Backend API) to download configs
+        # Note: We NO LONGER append :8000 because production uses standard HTTPS (443)
+        self.active_url = self.base_url
         
         # ── Provisioning download base ────────────────────────────
         self.provision_base = f"{self.active_url}/api/v1/network/provision"
