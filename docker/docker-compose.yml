@@ -203,6 +203,27 @@ services:
       - vpn_network
 
   # ────────────────────────────────────────────────────────────────
+  # NEXT.JS FRONTEND
+  # ────────────────────────────────────────────────────────────────
+  frontend:
+    build:
+      context: ../../netily_frontend
+      dockerfile: Dockerfile
+    container_name: netily_frontend
+    restart: unless-stopped
+    environment:
+      - NODE_ENV=production
+      - NEXT_TELEMETRY_DISABLED=1
+    depends_on:
+      - web
+    deploy:
+      resources:
+        limits:
+          memory: 300M
+    networks:
+      - isp_network
+
+  # ────────────────────────────────────────────────────────────────
   # NGINX REVERSE PROXY + SSL TERMINATION
   # ────────────────────────────────────────────────────────────────
   nginx:
@@ -220,6 +241,7 @@ services:
       - certbot_certs:/etc/letsencrypt:ro
     depends_on:
       - web
+      - frontend
     deploy:
       resources:
         limits:
