@@ -57,84 +57,76 @@ class CorsPreflightMiddleware(MiddlewareMixin):
 
 class TenantMainMiddleware(MiddlewareMixin):
     """
-    Custom tenant middleware that properly handles subdomain.localhost
+    Custom tenant middleware that handles both local and production subdomains.
+    - Local:      bluenet.localhost:8000
+    - Production: bluenet.netily.co.ke
+    - API host:   api.netily.co.ke  → public schema
     This replaces django_tenants.middleware.main.TenantMainMiddleware
     """
-    
+
+    # Known base domains — add more as needed
+    BASE_DOMAINS = ['localhost', 'netily.co.ke', 'netily.io', 'netily.com']
+    # Subdomains that should NOT be treated as tenants
+    RESERVED_SUBDOMAINS = {'www', 'api', 'admin', 'app', 'mail', 'smtp', 'ftp', 'cdn', 'static'}
+
+    def _extract_subdomain(self, host):
+        """Return (subdomain, base_domain) or (None, host) for main/API domain."""
+        for base in self.BASE_DOMAINS:
+            if host == base:
+                return None, base
+            if host.endswith(f'.{base}'):
+                sub = host[: -(len(base) + 1)]
+                if sub and sub not in self.RESERVED_SUBDOMAINS:
+                    return sub, base
+                return None, base
+        return None, host
+
+    def _resolve_tenant(self, subdomain, full_host):
+        """Try to find a tenant by subdomain, then by Domain record.
+        Returns (tenant, company) or (None, None).
+        """
+        connection.set_schema_to_public()
+        try:
+            tenant = Tenant.objects.get(subdomain=subdomain, is_active=True)
+        except Tenant.DoesNotExist:
+            # Fallback: look up by exact domain record
+            try:
+                domain = Domain.objects.get(domain=full_host)
+                tenant = domain.tenant
+            except Domain.DoesNotExist:
+                return None, None
+
+        company = None
+        try:
+            company = tenant.company
+        except Exception:
+            pass
+        return tenant, company
+
     def process_request(self, request):
-        # Skip ONLY if it is one of the specific public machine endpoints defined at the top
-        if any(request.path.startswith(path) for path in PUBLIC_ROUTER_PATHS):
-            # For public endpoints, set to public schema and return None to continue processing
+        # Skip public machine-to-server endpoints
+        if any(request.path.startswith(p) for p in PUBLIC_ROUTER_PATHS):
             connection.set_schema_to_public()
             request.tenant = None
             request.company = None
             return None
-        
-        # Get the host from the request
+
         host = request.get_host().split(':')[0]  # Remove port
-        
-        # Check for subdomain.localhost pattern
-        if host.endswith('.localhost') and host != 'localhost':
-            # Extract subdomain (e.g., "dansted" from "dansted.localhost")
-            subdomain = host.split('.')[0]
-            
-            try:
-                # First, ensure we're in public schema to find tenant
-                connection.set_schema_to_public()
-                
-                # Find the tenant by subdomain in public schema
-                tenant = Tenant.objects.get(subdomain=subdomain, is_active=True)
-                
-                # Get company from tenant (in public schema)
-                company = None
-                try:
-                    company = tenant.company
-                except:
-                    # Company might not be accessible or doesn't exist
-                    pass
-                
-                # Now switch to tenant schema for the rest of the request
+        subdomain, _ = self._extract_subdomain(host)
+
+        if subdomain:
+            tenant, company = self._resolve_tenant(subdomain, host)
+            if tenant:
                 connection.set_tenant(tenant)
-                
-                # Set request attributes
                 request.tenant = tenant
-                request.company = company  # This is the company object from public schema
-                
-                print(f"DEBUG: Switched to tenant: {tenant.subdomain}, company: {company.name if company else 'None'}")  # Debug
-                
-            except Tenant.DoesNotExist:
-                # Tenant not found - check if we have a domain record
-                try:
-                    # Check Domain model for the exact domain
-                    domain = Domain.objects.get(domain=host)
-                    tenant = domain.tenant
-                    
-                    # Get company
-                    company = None
-                    try:
-                        company = tenant.company
-                    except:
-                        pass
-                    
-                    connection.set_tenant(tenant)
-                    request.tenant = tenant
-                    request.company = company
-                    
-                    print(f"DEBUG: Switched to tenant via Domain: {tenant.subdomain}")  # Debug
-                    
-                except Domain.DoesNotExist:
-                    # No tenant found - use public schema
-                    connection.set_schema_to_public()
-                    request.tenant = None
-                    request.company = None
-                    print(f"DEBUG: No tenant found for host: {host}, using public schema")  # Debug
-        
-        else:
-            # For localhost or other hosts, use public schema
-            connection.set_schema_to_public()
-            request.tenant = None
-            request.company = None
-        
+                request.company = company
+                return None
+            # Unknown subdomain → fall through to public
+
+        # Main domain / API domain / unknown → public schema
+        connection.set_schema_to_public()
+        request.tenant = None
+        request.company = None
         return None
 
 
