@@ -254,6 +254,7 @@ class RadAcct(models.Model):
         on_delete=models.SET_NULL,
         null=True,
         blank=True,
+        db_constraint=False,
         related_name='radius_sessions'
     )
     
@@ -332,6 +333,7 @@ class Nas(models.Model):
         on_delete=models.CASCADE,
         null=True,
         blank=True,
+        db_constraint=False,
         related_name='nas_entry'
     )
     
@@ -683,6 +685,7 @@ class CustomerRadiusCredentials(models.Model):
         on_delete=models.SET_NULL,
         null=True,
         blank=True,
+        db_constraint=False,
         related_name='radius_credentials',
         help_text="The specific IP address assigned from the pool (Cloud-Led IPAM)"
     )
@@ -692,6 +695,7 @@ class CustomerRadiusCredentials(models.Model):
         on_delete=models.SET_NULL,
         null=True,
         blank=True,
+        db_constraint=False,
         related_name='radius_customers',
         help_text="The router (NAS) this customer connects through"
     )
