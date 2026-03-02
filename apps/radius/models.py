@@ -212,6 +212,8 @@ class RadAcct(models.Model):
     
     # NAS Information
     nasipaddress = models.GenericIPAddressField(db_index=True)
+    # ADDED: nasidentifier field to store the router identifier from RADIUS packets
+    nasidentifier = models.CharField(max_length=64, blank=True, null=True, db_index=True)
     nasportid = models.CharField(max_length=32, blank=True, null=True)
     nasporttype = models.CharField(max_length=32, blank=True, null=True)
     
@@ -269,6 +271,8 @@ class RadAcct(models.Model):
             models.Index(fields=['username', 'acctstarttime']),
             models.Index(fields=['nasipaddress', 'acctstarttime']),
             models.Index(fields=['acctstoptime']),
+            # Added index for nasidentifier for faster lookups
+            models.Index(fields=['nasidentifier']),
         ]
     
     def __str__(self):
@@ -287,10 +291,19 @@ class RadAcct(models.Model):
     @property
     def duration_formatted(self):
         """Session duration in human readable format"""
-        if not self.acctsessiontime:
-            return "N/A"
+        from django.utils import timezone
         
-        seconds = self.acctsessiontime
+        seconds = 0
+        if self.acctsessiontime:
+            seconds = self.acctsessiontime
+        elif self.acctstarttime and not self.acctstoptime:
+            # LIVE UPTIME CALCULATION
+            delta = timezone.now() - self.acctstarttime
+            seconds = int(delta.total_seconds())
+            
+        if not seconds:
+            return "0s"
+            
         hours, remainder = divmod(seconds, 3600)
         minutes, seconds = divmod(remainder, 60)
         

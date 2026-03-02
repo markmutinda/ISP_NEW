@@ -65,9 +65,10 @@ services:
       sh -c "echo 'Setting up routes...' &&
              VPN_IP=$$(python -c \"import socket; print(socket.gethostbyname('netily-openvpn'))\") &&
              echo 'VPN Gateway found at: '$$VPN_IP &&
-             ip route add 192.168.255.0/24 via $$VPN_IP || true &&
+             ip route add 10.8.0.0/24 via $$VPN_IP || true &&
              echo 'Route added successfully!' &&
-             gunicorn config.wsgi:application --bind 0.0.0.0:8000 --workers 2 --threads 2 --timeout 240 --max-requests 500 --max-requests-jitter 50"
+             # --- ADDED --timeout 120 FOR LONG-RUNNING REQUESTS ---
+             gunicorn config.wsgi:application --bind 0.0.0.0:8000 --workers 4 --timeout 840 --reload"
     working_dir: /app
     volumes:
       - ../:/app
@@ -117,10 +118,11 @@ services:
     container_name: netily_worker
     restart: unless-stopped
     working_dir: /app
+    # AUTOMATION: Worker also needs the route to talk to routers
     command: >
-      sh -c "VPN_IP=$$(getent hosts netily-openvpn | awk '{ print $$1 }') &&
-             ip route add 192.168.255.0/24 via $$VPN_IP || true &&
-             celery -A config worker -l info --concurrency=2 --max-memory-per-child=150000"
+      sh -c "VPN_IP=\$(getent hosts netily-openvpn | awk '{ print \$1 }') &&
+             ip route add 10.8.0.0/24 via \$VPN_IP || true &&
+             celery -A config worker -l info --concurrency=4"
     volumes:
       - ../:/app
       - /var/run/docker.sock:/var/run/docker.sock
@@ -281,14 +283,15 @@ services:
     ports:
       - "1194:1194/udp"
       - "1194:1194/tcp"
-      # 7505 removed from public — Django talks to OpenVPN internally via container name
-      - "8728:8728"
+      # 🚨 REMOVED 7505 AND 8728 HERE FOR SECURITY 🚨
     volumes:
       - openvpn_data:/etc/openvpn
       - openvpn_ccd:/etc/openvpn/ccd
       - openvpn_logs:/var/log/openvpn
+      # --- Mount the dynamic ports map folder ---
+      - ../radius_config/ports:/etc/openvpn/ports:ro
     environment:
-      - OPENVPN_OPTS=--management localhost 7505
+      - OPENVPN_OPTS=--management 0.0.0.0 7505 # Allow internal docker access
     command: >
       sh -c "ovpn_run &
              echo 'Waiting for tun0...' &&

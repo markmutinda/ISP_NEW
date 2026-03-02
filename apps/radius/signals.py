@@ -79,11 +79,12 @@ def auto_cleanup_radius_container(sender, instance, **kwargs):
 
     # 4. Tell Docker to apply changes and remove the "orphaned" container
     try:
-        # '--remove-orphans' is the magic flag that deletes containers no longer in the override.yml
-        subprocess.Popen(
-            ['docker-compose', 'up', '-d', '--remove-orphans'],
-            cwd=str(tenant_radius_service.docker_path)
-        )
-        print(f"✅ [ISP CLEANUP] Container for {display_name} is being permanently removed!")
+        # This just stops the orphaned container without trying to "recreate" everything else
+        subprocess.run(
+            ['docker-compose', 'up', '-d', '--remove-orphans'], 
+            cwd=str(tenant_radius_service.docker_path),
+            check=False
+        ) 
+        print(f"\u2705 [CLEANUP] Orphaned containers removed.")
     except Exception as e:
-        logger.error(f"Failed to cleanup docker container: {e}")
+        logger.error(f"Cleanup command failed: {e}")
