@@ -38,6 +38,9 @@ jobs:
             echo "==> Restarting Django services..."
             docker compose up -d web celery-worker celery-beat
 
+            echo "==> Restarting nginx (re-resolve container IPs)..."
+            docker compose restart nginx
+
             echo "==> Waiting for web container to be ready..."
             sleep 5
 
