@@ -8,6 +8,17 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+def sanitize_string(value: str) -> str:
+    """
+    Remove surrogate characters from a string by encoding to UTF-8 with replacement.
+    This prevents 'surrogates not allowed' errors when the string is later encoded
+    (e.g., during database storage or encryption).
+    """
+    if value is None:
+        return ""
+    # Encode to bytes with replacement for any invalid surrogates, then decode back
+    return value.encode('utf-8', 'replace').decode('utf-8')
+
 @receiver(post_save, sender=Router)
 def handle_router_lifecycle(sender, instance, created, **kwargs):
     """
@@ -23,7 +34,7 @@ def handle_router_lifecycle(sender, instance, created, **kwargs):
     # If the router is new and OpenVPN is enabled, provision it immediately
     if (created or not instance.vpn_provisioned) and instance.enable_openvpn:
         try:
-            print(f"\ud83d\ude80 [VPN AUTO-PROVISION] Creating tunnel for {instance.name}...")
+            logger.info(f"[VPN AUTO-PROVISION] Creating tunnel for {instance.name}...")
             service = VPNProvisioningService()
             # This service will assign vpn_ip_address and call .save() internally
             service.provision_router(instance)
@@ -37,17 +48,18 @@ def handle_router_lifecycle(sender, instance, created, **kwargs):
     # 3. AUTO-SYNC TO RADIUS NAS
     # CRITICAL: Only sync if we have a valid, unique VPN IP to avoid UniqueViolations
     if not instance.vpn_ip_address:
-        print(f"\u23f3 [RADIUS SYNC] Skipping {instance.name} - No VPN IP assigned yet.")
+        logger.info(f"[RADIUS SYNC] Skipping {instance.name} - No VPN IP assigned yet.")
         return
 
     nas_ip = instance.vpn_ip_address
-    
-    # The secret must match what the MikroTik script generated
-    secret = instance.shared_secret or f"netily_{connection.schema_name}_secret"
+
+    # Build the secret and sanitize it to remove any surrogate characters
+    raw_secret = instance.shared_secret or f"netily_{connection.schema_name}_secret"
+    secret = sanitize_string(raw_secret)
 
     # Clean up old entry to prevent duplicates if the name/IP changed
     Nas.objects.filter(shortname=instance.name).delete()
-    
+
     # Create the fresh NAS entry in this tenant's schema
     try:
         Nas.objects.create(
@@ -57,7 +69,7 @@ def handle_router_lifecycle(sender, instance, created, **kwargs):
             secret=secret,
             server='Default'
         )
-        print(f"\ud83d\udce1 [RADIUS AUTO-SYNC] Added {instance.name} ({nas_ip}) to {connection.schema_name} NAS table.")
+        logger.info(f"[RADIUS AUTO-SYNC] Added {instance.name} ({nas_ip}) to {connection.schema_name} NAS table.")
     except Exception as e:
         logger.error(f"RADIUS NAS sync failed for {instance.name}: {e}")
 
@@ -71,6 +83,6 @@ def cleanup_router_radius_nas(sender, instance, **kwargs):
         # We delete by shortname to ensure orphaned entries are caught
         deleted_count, _ = Nas.objects.filter(shortname=instance.name).delete()
         if deleted_count > 0:
-            print(f"\ud83e\uddf9 [RADIUS CLEANUP] Removed {instance.name} from {connection.schema_name} NAS table.")
+            logger.info(f"[RADIUS CLEANUP] Removed {instance.name} from {connection.schema_name} NAS table.")
     except Exception as e:
         logger.error(f"Failed to cleanup RADIUS NAS for {instance.name}: {e}")

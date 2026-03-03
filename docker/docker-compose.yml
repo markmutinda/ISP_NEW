@@ -68,7 +68,7 @@ services:
              ip route add 10.8.0.0/24 via $$VPN_IP || true &&
              echo 'Route added successfully!' &&
              # --- ADDED --timeout 120 FOR LONG-RUNNING REQUESTS ---
-             gunicorn config.wsgi:application --bind 0.0.0.0:8000 --workers 4 --timeout 840 --reload"
+             gunicorn config.wsgi:application --bind 0.0.0.0:8000 --workers 4 --timeout 120 --reload"
     working_dir: /app
     volumes:
       - ../:/app
