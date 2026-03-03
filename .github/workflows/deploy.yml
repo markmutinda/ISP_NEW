@@ -1,6 +1,5 @@
-name: Deploy to DigitalOcean VPS
+name: Deploy Backend to DigitalOcean VPS
 
-# This tells GitHub to run this script ONLY when you push to the prod-backend branch
 on:
   push:
     branches:
@@ -9,27 +8,42 @@ on:
 jobs:
   deploy:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Deploy to VPS
+      - name: Deploy backend to VPS
         uses: appleboy/ssh-action@v1.0.3
         with:
           host: ${{ secrets.VPS_HOST }}
           username: ${{ secrets.VPS_USERNAME }}
           key: ${{ secrets.VPS_SSH_KEY }}
+          command_timeout: 12m
           script: |
-            echo "Connected to VPS! Pulling latest code..."
+            set -e
+
+            echo "==> Pulling latest backend code..."
             cd ~/netily_cloud
             git fetch origin prod-backend
             git reset --hard origin/prod-backend
-            
-            echo "Rebuilding and restarting Django container..."
+
+            echo "==> Rebuilding Django services..."
             cd docker
-            docker compose up -d --build web
-            
-            # Optional: Run migrations automatically
-            # docker compose exec web python manage.py migrate
-            
-            echo "Deployment successful!"
+            docker compose build --no-cache web celery-worker celery-beat
+
+            echo "==> Running database migrations..."
+            docker compose run --rm web python manage.py migrate_schemas --shared
+            docker compose run --rm web python manage.py migrate_schemas
+
+            echo "==> Restarting Django services..."
+            docker compose up -d web celery-worker celery-beat
+
+            echo "==> Collecting static files..."
+            docker compose exec web python manage.py collectstatic --noinput || true
+
+            echo "==> Cleaning up old Docker images..."
+            docker image prune -f
+
+            echo "==> Backend deployment complete!"
