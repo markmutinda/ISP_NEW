@@ -37,7 +37,7 @@ class MikrotikAPI:
                     password=self.device.api_password,
                     host=target_ip,
                     port=self.device.api_port or 8728,
-                    timeout=2.0,  # CRITICAL: Short timeout for fast failure/response
+                    timeout=10.0,  # CRITICAL: Short timeout for fast failure/response
                     plain_login=True  # Required for ROS v7
                 )
                 logger.info(f"Connected to Mikrotik {self.device.name} ({target_ip})")
