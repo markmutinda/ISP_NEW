@@ -1,0 +1,35 @@
+name: Deploy to DigitalOcean VPS
+
+# This tells GitHub to run this script ONLY when you push to the prod-backend branch
+on:
+  push:
+    branches:
+      - prod-backend
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Deploy to VPS
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USERNAME }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          script: |
+            echo "Connected to VPS! Pulling latest code..."
+            cd ~/netily_cloud
+            git fetch origin prod-backend
+            git reset --hard origin/prod-backend
+            
+            echo "Rebuilding and restarting Django container..."
+            cd docker
+            docker compose up -d --build web
+            
+            # Optional: Run migrations automatically
+            # docker compose exec web python manage.py migrate
+            
+            echo "Deployment successful!"

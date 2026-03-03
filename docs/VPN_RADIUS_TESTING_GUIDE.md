@@ -1150,3 +1150,10 @@ After successful testing:
 3. **Set up monitoring** - Add alerts for RADIUS/VPN issues
 4. **Scale testing** - Test with multiple users and routers
 5. **Production deployment** - Use production.py settings
+
+
+
+API:       http://68.183.45.64/api/v1/
+  Admin:     http://68.183.45.64/admin/
+  Swagger:   http://68.183.45.64/swagger/
+  Health:    http://68.183.45.64/health/
