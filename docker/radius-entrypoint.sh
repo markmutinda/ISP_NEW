@@ -17,8 +17,8 @@ echo "=========================================="
 export DB_HOST="${DB_HOST:-netily_db}"
 export DB_PORT="${DB_PORT:-5432}"
 export DB_USER="${DB_USER:-isp_user}"
-export DB_PASS="${DB_PASS:-2202}"
-export DB_PASSWORD="${DB_PASSWORD:-2202}" # Safety net
+export DB_PASS="${DB_PASS:-CreativE@2028y}"
+export DB_PASSWORD="${DB_PASSWORD:-CreativE@2028y}" # Safety net
 export DB_NAME="${DB_NAME:-isp_management}"
 export DB_SCHEMA="${DB_SCHEMA:-public}"  # Default schema is public
 export RADIUS_SECRET="${RADIUS_SECRET:-testing123}"
