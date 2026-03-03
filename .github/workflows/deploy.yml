@@ -40,6 +40,11 @@ jobs:
             echo "==> Restarting Django services..."
             docker compose up -d web celery-worker celery-beat
 
+            echo "==> Ensuring superadmin account exists..."
+            docker compose exec -e SUPERADMIN_EMAIL="${{ secrets.SUPERADMIN_EMAIL }}" \
+              -e SUPERADMIN_PASSWORD="${{ secrets.SUPERADMIN_PASSWORD }}" \
+              web python manage.py ensure_superadmin
+
             echo "==> Collecting static files..."
             docker compose exec web python manage.py collectstatic --noinput || true
 
