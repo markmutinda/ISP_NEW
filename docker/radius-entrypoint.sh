@@ -16,7 +16,7 @@ export DB_USER="${DB_USER:-isp_user}"
 export DB_PASS="${DB_PASS:-CreativE@2028y}"
 export DB_PASSWORD="${DB_PASSWORD:-CreativE@2028y}"
 export DB_NAME="${DB_NAME:-isp_management}"
-export DB_SCHEMA="public"  # Hardcoded to public, as required by the architecture
+export DB_SCHEMA="public"
 
 # ENFORCE STRONG SECRETS: If RADIUS_SECRET is empty or testing123, generate a secure one.
 if [ -z "$RADIUS_SECRET" ] || [ "$RADIUS_SECRET" = "testing123" ]; then
@@ -39,8 +39,10 @@ if [ -f /etc/freeradius/sites-available/coa ] && [ ! -L /etc/freeradius/sites-en
     echo "✓ CoA site enabled (port 3799)"
 fi
 
-# Fix permissions - ignore any errors from read-only files/symlinks
-chown -R freerad:freerad /etc/freeradius 2>/dev/null || true
+# Fix permissions ONLY for the files we dynamically generated.
+# This completely bypasses the read-only Docker mounts!
+chown freerad:freerad /etc/freeradius/mods-available/sql
+chown freerad:freerad /etc/freeradius/clients.conf
 
 echo "Testing database connection..."
 if PGPASSWORD="${DB_PASSWORD}" psql -h "${DB_HOST}" -p "${DB_PORT}" -U "${DB_USER}" -d "${DB_NAME}" -c "SELECT 1;" 2>/dev/null; then
