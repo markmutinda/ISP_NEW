@@ -185,7 +185,7 @@ services:
       - isp_network
 
   # ────────────────────────────────────────────────────────────────
-  # FREERADIUS SERVER (SHARED CENTRAL SERVER)
+  # FREERADIUS SERVER (SHARED CENTRAL SERVER) - FIXED WITH VOLUMES
   # ────────────────────────────────────────────────────────────────
   radius:
     build:
@@ -197,9 +197,13 @@ services:
     environment:
       - DB_HOST=netily_db
       - DB_PORT=5432
-      # --- THE FIX: Force public schema for NAS lookup ---
+      # --- Force public schema for NAS lookup ---
       - DB_SCHEMA=public
-      - RADIUS_CLIENTS=0.0.0.0/0
+    volumes:
+      # --- Wire the dynamic routing config (THE BRAIN) ---
+      - ../radius_config/sites-available/default:/etc/freeradius/sites-enabled/default:ro
+      # --- Wire the dynamic SQL queries (SCHEMA ROUTING) ---
+      - ../radius_config/mods-config/sql/main/postgresql/queries.conf:/etc/freeradius/mods-config/sql/main/postgresql/queries.conf:ro
     depends_on:
       db:
         condition: service_healthy

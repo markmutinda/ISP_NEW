@@ -15,7 +15,7 @@ Stage 2 — Version-Specific Config (conf.rsc):
     • OpenVPN tunnel (username/password, NOT certificates)
     • SSL certs downloaded separately via /tool fetch (NOT embedded)
     • Single Bridge + Ports + DHCP
-    • RADIUS (pointing to VPN server IP)
+    • RADIUS (pointing to VPN server IP) - USING STANDARD PORTS 1812/1813
     • Hotspot + Walled Garden
     • PPPoE server (attached to bridge)
     • Smart anti-sharing mangle rules (whitelists PPPoE users)
@@ -177,7 +177,7 @@ class MikrotikScriptGenerator:
             self._section_firewall(r),
             self._section_bridge_ports(r, r_gateway_cidr),  # Pass the calculated gateway CIDR
             self._section_dhcp(r, gateway_ip, pool_range, dhcp_network),
-            self._section_radius(r),
+            self._section_radius(r),  # Uses hardcoded 1812/1813
             self._section_hotspot(r, gateway_ip),
             self._section_walled_garden(r, portal_domain),
             self._section_ssl_certs(r),
@@ -368,39 +368,23 @@ class MikrotikScriptGenerator:
 
     def _section_radius(self, r: Router) -> str:
         """
-        Generate RADIUS configuration with tenant-specific ports.
+        Generate RADIUS configuration with standard ports 1812/1813.
         
-        This method determines the tenant schema from the router's subdomain
-        and fetches the correct authentication and accounting ports from the
-        RadiusTenantConfig model (which lives in the public schema).
+        ARCHITECTURE CHANGE: Using shared central RADIUS means all tenants
+        use the standard RADIUS ports. No more per-tenant port mapping.
         """
-        # 1. Determine the schema name
-        schema = f"tenant_{r.tenant_subdomain}" if r.tenant_subdomain else 'public'
         
-        # 2. IMPORTANT: Switch to 'public' context to read the port registry
-        # RadiusTenantConfig is stored in the public schema, not in tenant schemas
-        from apps.radius.models import RadiusTenantConfig
-        with schema_context('public'):
-            try:
-                tenant_config = RadiusTenantConfig.objects.get(schema_name=schema)
-                auth_port = tenant_config.auth_port
-                acct_port = tenant_config.acct_port
-            except RadiusTenantConfig.DoesNotExist:
-                # Fallback for base/public
-                auth_port = 1812
-                acct_port = 1813
-
-        # 3. Use the ports in the MikroTik command
+        # Hardcode the standard RADIUS ports - all traffic goes to central server
         radius_cmd = (
             f'/radius add address={self.vpn_gateway} secret="{self._escape_ros_string(r.shared_secret)}" '
-            f'authentication-port={auth_port} accounting-port={acct_port} '
+            f'authentication-port=1812 accounting-port=1813 '
             f'service=hotspot,ppp timeout=3000ms comment="Netily-Cloud-RADIUS"'
         )
         
         return f"""# ─────────────────────────────────────────────────────────────
 # 7. RADIUS (Cloud RADIUS via VPN Tunnel)
 # ─────────────────────────────────────────────────────────────
-:put "Configuring Cloud RADIUS for {schema} (Auth:{auth_port}, Acct:{acct_port})..."
+:put "Configuring Cloud RADIUS with standard ports (1812/1813)..."
 :do {{ /radius remove [find comment~"Netily"] }} on-error={{}}
 {radius_cmd}
 /radius incoming set accept=yes port=3799
@@ -593,7 +577,7 @@ class MikrotikScriptGenerator:
 :put " NETILY CLOUD CONTROLLER — SETUP COMPLETE"
 :put " Router:  {self._escape_ros_string(r.name)}"
 :put " VPN:     {self._escape_ros_string(r.openvpn_server)}:{r.openvpn_port}"
-:put " RADIUS:  {self.vpn_gateway}"
+:put " RADIUS:  {self.vpn_gateway}:1812/1813"
 :put " Portal:  {self.portal_url}"
 :put "════════════════════════════════════════════════════"
 """
