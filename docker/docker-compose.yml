@@ -185,18 +185,19 @@ services:
       - isp_network
 
   # ────────────────────────────────────────────────────────────────
-  # FREERADIUS SERVER (BASE TEMPLATE)
+  # FREERADIUS SERVER (SHARED CENTRAL SERVER)
   # ────────────────────────────────────────────────────────────────
   radius:
     build:
       context: ..
       dockerfile: docker/Dockerfile.radius
-    container_name: netily_radius_base
+    container_name: netily_radius
     restart: unless-stopped
     env_file: ../.env
     environment:
       - DB_HOST=netily_db
       - DB_PORT=5432
+      # --- THE FIX: Force public schema for NAS lookup ---
       - DB_SCHEMA=public
       - RADIUS_CLIENTS=0.0.0.0/0
     depends_on:
@@ -300,14 +301,15 @@ services:
              
              iptables -t nat -I POSTROUTING -o tun0 -j MASQUERADE &&
              
-             BASE_IP=\$$(getent hosts netily_radius_base | awk '{ print \$$1 }') &&
-             if [ ! -z \"\$$BASE_IP\" ]; then
-               echo \"Forwarding 1812/1813 to Base Radius (\$$BASE_IP)\" &&
-               iptables -t nat -A PREROUTING -i tun0 -p udp --dport 1812 -j DNAT --to-destination \$$BASE_IP:1812 &&
-               iptables -t nat -A PREROUTING -i tun0 -p udp --dport 1813 -j DNAT --to-destination \$$BASE_IP:1813 &&
-               iptables -t nat -A POSTROUTING -d \$$BASE_IP -p udp -j MASQUERADE;
+             # --- FIXED: Correct syntax for variable substitution ---
+             BASE_IP=$$(getent hosts netily_radius | awk '{ print $$1 }') &&
+             if [ ! -z \"$$BASE_IP\" ]; then
+               echo \"Forwarding 1812/1813 to Shared Radius ($$BASE_IP)\" &&
+               iptables -t nat -A PREROUTING -i tun0 -p udp --dport 1812 -j DNAT --to-destination $$BASE_IP:1812 &&
+               iptables -t nat -A PREROUTING -i tun0 -p udp --dport 1813 -j DNAT --to-destination $$BASE_IP:1813 &&
+               iptables -t nat -A POSTROUTING -d $$BASE_IP -p udp -j MASQUERADE;
              else
-               echo \"Warning: Base RADIUS container not found\";
+               echo \"Warning: Shared RADIUS container not found\";
              fi &&
              
              echo 'All Rules Applied.' &&

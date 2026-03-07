@@ -1,28 +1,26 @@
 # ────────────────────────────────────────────────────────────────
-# FreeRADIUS Authorize Configuration for Netily
-# SQL-based authentication with MikroTik support
+# FreeRADIUS Authorize Configuration - DYNAMIC ROUTING
 # ────────────────────────────────────────────────────────────────
 
-# Preprocess - normalize username
-preprocess {
-    # Convert username to lowercase
-    tolower
+authorize {
+    preprocess
     
-    # Strip realm from username if present (user@domain -> user)
-    # suffix
+    # --- THE BRAIN: DYNAMIC SCHEMA LOOKUP ---
+    # We look up which tenant owns this NAS-IP-Address (the router's VPN IP)
+    update control {
+        Tenant-Schema := "%{sql:SELECT t.schema_name FROM core_tenant t JOIN core_globalroutermap g ON t.id = g.tenant_id WHERE g.nas_ip = '%{NAS-IP-Address}' AND g.is_active = true LIMIT 1}"
+    }
+
+    # If no tenant is found for this IP, reject the request immediately
+    if (&control:Tenant-Schema == "") {
+        reject
+    }
+
+    # Now that we know the schema, proceed with standard SQL auth
+    sql
+    
+    expiration
+    logintime
+    sql.simul_verify
+    pap
 }
-
-# Check against SQL database (radcheck table)
-sql
-
-# Check expiration if set
-expiration
-
-# Check login time restrictions if set
-logintime
-
-# Check simultaneous use limits
-sql.simul_verify
-
-# PAP authentication
-pap
