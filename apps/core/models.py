@@ -587,3 +587,41 @@ class GlobalSystemSettings(models.Model):
         """Get or create the singleton instance"""
         obj, created = cls.objects.get_or_create(pk=1)
         return obj
+
+
+class GlobalRouterMap(models.Model):
+    """
+    CENTRAL RADIUS PHONEBOOK
+    This model lives in the 'public' schema. 
+    It tells the central RADIUS server which tenant schema owns which incoming router IP.
+    """
+    nas_ip = models.GenericIPAddressField(
+        unique=True, 
+        db_index=True,
+        help_text="The VPN IP of the router (e.g., 10.8.0.2)"
+    )
+    nas_secret = models.CharField(
+        max_length=255,
+        help_text="The RADIUS shared secret for this router"
+    )
+    tenant = models.ForeignKey(
+        'core.Tenant', 
+        on_delete=models.CASCADE,
+        related_name='mapped_routers'
+    )
+    is_active = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        app_label = 'core'
+        verbose_name = 'Global Router Map'
+        verbose_name_plural = 'Global Router Maps'
+
+    def __str__(self):
+        return f"{self.nas_ip} -> {self.tenant.schema_name}"
+
+    @property
+    def schema_name(self):
+        """Helper for FreeRADIUS dynamic queries"""
+        return self.tenant.schema_name

@@ -329,6 +329,42 @@ class Router(AuditMixin):
 
             super().save(*args, **kwargs)
 
+            # 7. Update the Central RADIUS Phonebook (GlobalRouterMap)
+            # We must use connection.cursor or switch schema to write to the public schema
+            from django.db import connection
+            from apps.core.models import GlobalRouterMap, Tenant
+            
+            if self.ip_address and self.tenant_subdomain:
+                try:
+                    # Temporarily switch to public schema to save the map
+                    current_schema = connection.schema_name
+                    connection.set_schema_to_public()
+                    
+                    tenant_obj = Tenant.objects.get(subdomain=self.tenant_subdomain)
+                    
+                    GlobalRouterMap.objects.update_or_create(
+                        nas_ip=self.ip_address,
+                        defaults={
+                            'nas_secret': self.shared_secret,
+                            'tenant': tenant_obj,
+                            'is_active': self.status == 'online' or self.is_active
+                        }
+                    )
+                    
+                    # Switch back to the tenant's schema
+                    connection.set_schema(current_schema)
+                except Tenant.DoesNotExist:
+                    # Log error but don't break the save operation
+                    import logging
+                    logging.getLogger(__name__).error(
+                        f"Tenant with subdomain {self.tenant_subdomain} not found for router {self.name}"
+                    )
+                except Exception as e:
+                    import logging
+                    logging.getLogger(__name__).error(
+                        f"Failed to update GlobalRouterMap for router {self.name}: {e}"
+                    )
+
    # ────────────────────────────────────────────────────────────────
     # SMART PROPERTIES (The "Brains" for the Script Generator)
     # ────────────────────────────────────────────────────────────────
