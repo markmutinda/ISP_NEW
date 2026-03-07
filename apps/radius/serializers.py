@@ -251,8 +251,7 @@ class RadiusTenantConfigSerializer(serializers.ModelSerializer):
         model = RadiusTenantConfig
         fields = [
             'id', 'schema_name', 'tenant_name',
-            'radius_secret', 'radius_port_auth', 'radius_port_acct',
-            'deployment_mode', 'container_name', 'container_status',
+            'radius_secret',
             'is_active', 'config_generated', 'last_config_update',
             'created_at', 'updated_at'
         ]
