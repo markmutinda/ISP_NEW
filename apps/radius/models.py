@@ -501,10 +501,7 @@ class RadiusTenantConfig(models.Model):
     Stores RADIUS configuration for each tenant.
     
     This model is stored in the PUBLIC schema and maps tenant schemas
-    to their RADIUS configuration, including:
-    - RADIUS server ports (if isolated mode)
-    - RADIUS secret
-    - Configuration status
+    to their RADIUS configuration, specifically the shared secret.
     """
     schema_name = models.CharField(
         max_length=100,
@@ -524,50 +521,11 @@ class RadiusTenantConfig(models.Model):
         help_text="RADIUS shared secret for this tenant"
     )
     
-    # --- PORT FIELDS (for isolated mode) ---
-    auth_port = models.IntegerField(
-        unique=True,
-        null=True,
-        blank=True,
-        help_text="Authentication port for this tenant (e.g., 1814, 1816, etc.)"
-    )
-    acct_port = models.IntegerField(
-        unique=True,
-        null=True,
-        blank=True,
-        help_text="Accounting port for this tenant (e.g., 1815, 1817, etc.)"
-    )
-    
-    # Deployment Mode
-    DEPLOYMENT_MODES = [
-        ('SHARED', 'Shared RADIUS (single instance)'),
-        ('ISOLATED', 'Isolated RADIUS (per-tenant container)'),
-    ]
-    deployment_mode = models.CharField(
-        max_length=20,
-        choices=DEPLOYMENT_MODES,
-        default='SHARED',
-        help_text="RADIUS deployment mode for this tenant"
-    )
-    
-    # Container Info (for isolated mode)
-    container_name = models.CharField(
-        max_length=100,
-        blank=True,
-        help_text="Docker container name (isolated mode)"
-    )
-    container_status = models.CharField(
-        max_length=50,
-        blank=True,
-        default='not_started',
-        help_text="Container status"
-    )
-    
     # Status
     is_active = models.BooleanField(default=True)
     config_generated = models.BooleanField(
         default=False,
-        help_text="Whether RADIUS config files have been generated"
+        help_text="Whether RADIUS config records have been generated"
     )
     last_config_update = models.DateTimeField(null=True, blank=True)
     
@@ -578,11 +536,9 @@ class RadiusTenantConfig(models.Model):
     class Meta:
         verbose_name = 'RADIUS Tenant Configuration'
         verbose_name_plural = 'RADIUS Tenant Configurations'
-        # This model should be in public schema
-        # managed = True
     
     def __str__(self):
-        return f"RADIUS Config: {self.tenant_name} ({self.schema_name}) [Auth:{self.auth_port}]"
+        return f"RADIUS Config: {self.tenant_name} ({self.schema_name}) [Shared Mode]"
     
     def generate_secret(self):
         """Generate a secure RADIUS secret."""
@@ -590,36 +546,10 @@ class RadiusTenantConfig(models.Model):
         self.radius_secret = secrets.token_urlsafe(32)
         return self.radius_secret
     
-    def assign_ports(self):
-        """
-        Assign unique ports for this tenant.
-        Base starts at 1812/1813 for the main RADIUS.
-        First tenant gets 1814/1815, second gets 1816/1817, etc.
-        """
-        # Find the highest currently used auth port
-        max_auth = RadiusTenantConfig.objects.aggregate(Max('auth_port'))['auth_port__max']
-        
-        if max_auth:
-            # Increment by 2 to get next available pair
-            self.auth_port = max_auth + 2
-            self.acct_port = max_auth + 3
-        else:
-            # First tenant gets 1814/1815 (since 1812/1813 are for base)
-            self.auth_port = 1814
-            self.acct_port = 1815
-    
     def save(self, *args, **kwargs):
         # Auto-generate secret if not set
         if not self.radius_secret:
             self.generate_secret()
-        
-        # Auto-assign ports for isolated mode if not already assigned
-        if self.deployment_mode == 'ISOLATED' and (not self.auth_port or not self.acct_port):
-            self.assign_ports()
-        
-        # Auto-set container name for isolated mode
-        if self.deployment_mode == 'ISOLATED' and not self.container_name:
-            self.container_name = f"netily_radius_{self.schema_name.replace('tenant_', '')}"
         
         super().save(*args, **kwargs)
 
