@@ -39,7 +39,9 @@ if [ -f /etc/freeradius/sites-available/coa ] && [ ! -L /etc/freeradius/sites-en
     echo "✓ CoA site enabled (port 3799)"
 fi
 
-chown -R freerad:freerad /etc/freeradius
+# Fix permissions on directories but ignore read-only bind mounts
+find /etc/freeradius -type d -exec chown freerad:freerad {} +
+find /etc/freeradius -type f ! -path "*/sites-enabled/default" ! -path "*/queries.conf" -exec chown freerad:freerad {} +
 
 echo "Testing database connection..."
 if PGPASSWORD="${DB_PASSWORD}" psql -h "${DB_HOST}" -p "${DB_PORT}" -U "${DB_USER}" -d "${DB_NAME}" -c "SELECT 1;" 2>/dev/null; then
