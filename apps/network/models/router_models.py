@@ -17,6 +17,15 @@ def generate_auth_key():
 def generate_shared_secret():
     return secrets.token_hex(16)
 
+def generate_api_password():
+    """
+    Generate a RouterOS-safe API password.
+    - Max length: 20 characters (safe for v6)
+    - Alphanumeric only (no special chars that might need escaping)
+    """
+    # Use token_hex which gives 0-9a-f only (2 chars per byte)
+    return secrets.token_hex(10)  # 20 characters, hex only
+
 class Router(AuditMixin):
     # ────────────────────────────────────────────────────────────────
     # CONSTANTS & CHOICES
@@ -70,7 +79,12 @@ class Router(AuditMixin):
 
     # API Credentials (The script creates these ON the router)
     api_username = models.CharField(max_length=100, default='netily_api')
-    api_password = models.CharField(max_length=255, blank=True, help_text="Auto-generated on save")
+    api_password = models.CharField(
+        max_length=255, 
+        blank=True, 
+        default=generate_api_password,
+        help_text="Auto-generated on save (RouterOS-safe, max 20 chars)"
+    )
     api_port = models.PositiveIntegerField(default=8728)
 
     # RADIUS Security
@@ -121,7 +135,7 @@ class Router(AuditMixin):
     # VPN & MANAGEMENT TUNNEL
     # ────────────────────────────────────────────────────────────────
     enable_openvpn = models.BooleanField(default=True)
-    openvpn_server = models.CharField(max_length=100, default='vpn.yourisp.com')
+    openvpn_server = models.CharField(max_length=100, default='vpn.netily.co.ke')
     openvpn_port = models.IntegerField(default=1194)
     
     # VPN Creds (Auto-generated per tenant)
@@ -312,8 +326,9 @@ class Router(AuditMixin):
                 self.openvpn_password = secrets.token_urlsafe(16)
             
             # 3. API Credentials — always ensure a strong password
+            # Use the new generator function to ensure RouterOS compatibility
             if not self.api_password:
-                self.api_password = secrets.token_urlsafe(16)
+                self.api_password = generate_api_password()
 
             # 4. Provision Slug (short URL-safe identifier)
             if not self.provision_slug:
@@ -334,7 +349,12 @@ class Router(AuditMixin):
             from django.db import connection
             from apps.core.models import GlobalRouterMap, Tenant
             
-            if self.ip_address and self.tenant_subdomain:
+            # --- FIX A: Prioritize VPN IP for RADIUS NAS identification ---
+            # RADIUS requests come from the VPN tunnel IP, not the public WAN IP
+            nas_ip = self.vpn_ip_address or self.ip_address
+            # -------------------------------------------------------------
+            
+            if nas_ip and self.tenant_subdomain:
                 try:
                     # Temporarily switch to public schema to save the map
                     current_schema = connection.schema_name
@@ -343,7 +363,7 @@ class Router(AuditMixin):
                     tenant_obj = Tenant.objects.get(subdomain=self.tenant_subdomain)
                     
                     GlobalRouterMap.objects.update_or_create(
-                        nas_ip=self.ip_address,
+                        nas_ip=nas_ip,  # Use the prioritized IP
                         defaults={
                             'nas_secret': self.shared_secret,
                             'tenant': tenant_obj,

@@ -26,6 +26,7 @@ from django.conf import settings
 from apps.network.models.router_models import Router
 from django.utils import timezone
 from django_tenants.utils import schema_context  # Import for cross-schema queries
+from urllib.parse import urlparse
 
 
 class MikrotikScriptGenerator:
@@ -65,6 +66,21 @@ class MikrotikScriptGenerator:
         s = s.replace('"', '\\"')
         s = s.replace('$', '\\$')
         return s
+
+    # ────────────────────────────────────────────────────────────────
+    # HELPER METHODS
+    # ────────────────────────────────────────────────────────────────
+    def _get_vpn_host(self, r: Router) -> str:
+        """Logic to determine the correct VPN endpoint."""
+        vpn_host = r.openvpn_server
+        # If the field is blank or contains the old default placeholder
+        if not vpn_host or vpn_host == "vpn.yourisp.com":
+            from urllib.parse import urlparse
+            # Extract netily.co.ke from your BASE_URL (api.netily.co.ke)
+            parsed_url = urlparse(self.base_url)
+            root_domain = parsed_url.netloc.replace('api.', '')
+            return f"vpn.{root_domain}"
+        return vpn_host
 
     def get_magic_link(self) -> str:
         r = self.router
@@ -252,6 +268,10 @@ class MikrotikScriptGenerator:
 """
 
     def _section_openvpn(self, r: Router, cipher: str, auth: str, is_v6: bool) -> str:
+        # --- USE HELPER METHOD TO GET VPN HOST ---
+        vpn_host = self._get_vpn_host(r)
+        # -----------------------------------------
+
         ca_fetch = ""
         if r.ca_certificate:
             ca_url = f"{self.base_url}/api/v1/network/provision/{r.auth_key}/certs/ca.crt"
@@ -268,10 +288,10 @@ class MikrotikScriptGenerator:
         
         if is_v6:
             # V6 usually works with defaults, but setting TCP ensures consistency
-            ovpn_cmd = f'/interface ovpn-client add name="Netily-VPN" connect-to="{self._escape_ros_string(r.openvpn_server)}" port={r.openvpn_port} user="{self._escape_ros_string(r.openvpn_username)}" password="{self._escape_ros_string(r.openvpn_password)}" cipher={cipher} auth={auth} protocol=tcp add-default-route=no comment="Netily Cloud Controller Tunnel"'
+            ovpn_cmd = f'/interface ovpn-client add name="Netily-VPN" connect-to="{self._escape_ros_string(vpn_host)}" port={r.openvpn_port} user="{self._escape_ros_string(r.openvpn_username)}" password="{self._escape_ros_string(r.openvpn_password)}" cipher={cipher} auth={auth} protocol=tcp add-default-route=no comment="Netily Cloud Controller Tunnel"'
         else:
             # V7 requires specific parameters to match server (AES-256-CBC, TCP)
-            ovpn_cmd = f'/interface ovpn-client add name="Netily-VPN" connect-to="{self._escape_ros_string(r.openvpn_server)}" port={r.openvpn_port} user="{self._escape_ros_string(r.openvpn_username)}" password="{self._escape_ros_string(r.openvpn_password)}" cipher=aes256-cbc auth=sha1 protocol=tcp add-default-route=no comment="Netily Cloud Controller Tunnel"'
+            ovpn_cmd = f'/interface ovpn-client add name="Netily-VPN" connect-to="{self._escape_ros_string(vpn_host)}" port={r.openvpn_port} user="{self._escape_ros_string(r.openvpn_username)}" password="{self._escape_ros_string(r.openvpn_password)}" cipher=aes256-cbc auth=sha1 protocol=tcp add-default-route=no comment="Netily Cloud Controller Tunnel"'
 
         return f"""# ─────────────────────────────────────────────────────────────
 # 3. OPENVPN TUNNEL (Username/Password Authentication)
@@ -567,6 +587,10 @@ class MikrotikScriptGenerator:
         return ""
 
     def _section_footer(self, r: Router) -> str:
+        # --- USE HELPER METHOD TO GET VPN HOST ---
+        vpn_host = self._get_vpn_host(r)
+        # -----------------------------------------
+        
         return f"""# ═══════════════════════════════════════════════════════════════
 # PROVISIONING COMPLETE
 # ═══════════════════════════════════════════════════════════════
@@ -576,7 +600,7 @@ class MikrotikScriptGenerator:
 :put "════════════════════════════════════════════════════"
 :put " NETILY CLOUD CONTROLLER — SETUP COMPLETE"
 :put " Router:  {self._escape_ros_string(r.name)}"
-:put " VPN:     {self._escape_ros_string(r.openvpn_server)}:{r.openvpn_port}"
+:put " VPN:     {self._escape_ros_string(vpn_host)}:{r.openvpn_port}"
 :put " RADIUS:  {self.vpn_gateway}:1812/1813"
 :put " Portal:  {self.portal_url}"
 :put "════════════════════════════════════════════════════"
