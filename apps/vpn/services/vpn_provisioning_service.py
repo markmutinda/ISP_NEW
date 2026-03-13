@@ -75,6 +75,7 @@ class VPNProvisioningService:
                 router.client_certificate = cert_record.certificate
                 router.client_key = cert_record.private_key
                 router.vpn_provisioned = True
+                router.status = 'online'
                 router.vpn_provisioned_at = timezone.now()
                 # Also set the management ip_address for backward compat
                 router.ip_address = vpn_ip
