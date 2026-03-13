@@ -287,11 +287,11 @@ class MikrotikScriptGenerator:
 """
         
         if is_v6:
-            # V6 usually works with defaults, but setting TCP ensures consistency
-            ovpn_cmd = f'/interface ovpn-client add name="Netily-VPN" connect-to="{self._escape_ros_string(vpn_host)}" port={r.openvpn_port} user="{self._escape_ros_string(r.openvpn_username)}" password="{self._escape_ros_string(r.openvpn_password)}" cipher={cipher} auth={auth} protocol=tcp add-default-route=no comment="Netily Cloud Controller Tunnel"'
+            # V6 with UDP (server configured for UDP)
+            ovpn_cmd = f'/interface ovpn-client add name="Netily-VPN" connect-to="{self._escape_ros_string(vpn_host)}" port={r.openvpn_port} user="{self._escape_ros_string(r.openvpn_username)}" password="{self._escape_ros_string(r.openvpn_password)}" cipher={cipher} auth={auth} protocol=udp add-default-route=no comment="Netily Cloud Controller Tunnel"'
         else:
-            # V7 requires specific parameters to match server (AES-256-CBC, TCP)
-            ovpn_cmd = f'/interface ovpn-client add name="Netily-VPN" connect-to="{self._escape_ros_string(vpn_host)}" port={r.openvpn_port} user="{self._escape_ros_string(r.openvpn_username)}" password="{self._escape_ros_string(r.openvpn_password)}" cipher=aes256-cbc auth=sha1 protocol=tcp add-default-route=no comment="Netily Cloud Controller Tunnel"'
+            # V7 with UDP (server configured for UDP)
+            ovpn_cmd = f'/interface ovpn-client add name="Netily-VPN" connect-to="{self._escape_ros_string(vpn_host)}" port={r.openvpn_port} user="{self._escape_ros_string(r.openvpn_username)}" password="{self._escape_ros_string(r.openvpn_password)}" cipher=aes256-cbc auth=sha1 protocol=udp add-default-route=no comment="Netily Cloud Controller Tunnel"'
 
         return f"""# ─────────────────────────────────────────────────────────────
 # 3. OPENVPN TUNNEL (Username/Password Authentication)
