@@ -75,13 +75,14 @@ class VPNProvisioningService:
                 router.client_certificate = cert_record.certificate
                 router.client_key = cert_record.private_key
                 router.vpn_provisioned = True
-                router.status = 'online'
+                router.status = 'online'  # <--- SET STATUS TO ONLINE
                 router.vpn_provisioned_at = timezone.now()
                 # Also set the management ip_address for backward compat
                 router.ip_address = vpn_ip
                 router.save(update_fields=[
                     'vpn_ip_address', 'vpn_certificate', 'ca_certificate',
                     'client_certificate', 'client_key', 'vpn_provisioned',
+                    'status',           # <--- ADDED STATUS TO UPDATE FIELDS
                     'vpn_provisioned_at', 'ip_address', 'updated_at',
                 ])
 
