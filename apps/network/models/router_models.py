@@ -302,88 +302,104 @@ class Router(AuditMixin):
         return f"{self.name} ({self.ip_address or 'No IP'})"
 
     def save(self, *args, **kwargs):
-            """Auto-generate credentials and schema links."""
-            from django.utils.text import slugify
+        """Auto-generate credentials and trigger VPN provisioning."""
+        from django.utils.text import slugify
+        
+        # ────────────────────────────────────────────────────────────────
+        # SAFETY CHECK: Protect the MikroTik 'admin' account!
+        # ────────────────────────────────────────────────────────────────
+        if not self.api_username or self.api_username.lower() == 'admin':
+            self.api_username = 'netily_api'
             
-            # ────────────────────────────────────────────────────────────────
-            # SAFETY CHECK: Protect the MikroTik 'admin' account!
-            # ────────────────────────────────────────────────────────────────
-            if not self.api_username or self.api_username.lower() == 'admin':
-                self.api_username = 'netily_api'
+        # 1. Tenant Sync
+        if self.tenant_subdomain:
+            clean_sub = self.tenant_subdomain.lower().replace('-', '_')
+            self.schema_name = f"tenant_{clean_sub}"
+        
+        # 2. VPN Credentials — unique per router (tenant_router_vpn format)
+        if self.enable_openvpn and not self.openvpn_username:
+            tenant_prefix = slugify(self.tenant_subdomain or 'public').replace('-', '')[:10]
+            router_prefix = slugify(self.name or 'router').replace('-', '')[:12]
+            suffix = secrets.token_hex(2)
+            self.openvpn_username = f"{tenant_prefix}_{router_prefix}_{suffix}_vpn"[:60]
+        if self.enable_openvpn and not self.openvpn_password:
+            self.openvpn_password = secrets.token_urlsafe(16)
+        
+        # 3. API Credentials — always ensure a strong password
+        # Use the new generator function to ensure RouterOS compatibility
+        if not self.api_password:
+            self.api_password = generate_api_password()
+
+        # 4. Provision Slug (short URL-safe identifier)
+        if not self.provision_slug:
+            self.provision_slug = secrets.token_hex(4).lower()
+
+        # 5. RADIUS Shared Secret — unique per router
+        if not self.shared_secret:
+            self.shared_secret = secrets.token_hex(16)
+
+        # 6. Radius Server Defaults
+        if self.enable_openvpn and not self.radius_server:
+            self.radius_server = "10.8.0.1"
+
+        # 7. Save the router first (so it has an ID for certificate generation)
+        super().save(*args, **kwargs)
+
+        # ────────────────────────────────────────────────────────────────
+        # 8. Trigger LipaNet-Style VPN Provisioning if not already done
+        # ────────────────────────────────────────────────────────────────
+        if self.enable_openvpn and not self.vpn_provisioned:
+            try:
+                from apps.vpn.services.vpn_provisioning_service import VPNProvisioningService
+                service = VPNProvisioningService()
+                # This will assign IP, generate certs, write CCD, and update router
+                service.provision_router(self)
+            except Exception as e:
+                import logging
+                logging.getLogger(__name__).error(
+                    f"VPN Auto-Provisioning failed for {self.name}: {e}"
+                )
+
+        # 9. Update the Central RADIUS Phonebook (GlobalRouterMap)
+        # We must use connection.cursor or switch schema to write to the public schema
+        from django.db import connection
+        from apps.core.models import GlobalRouterMap, Tenant
+        
+        # --- FIX A: Prioritize VPN IP for RADIUS NAS identification ---
+        # RADIUS requests come from the VPN tunnel IP, not the public WAN IP
+        nas_ip = self.vpn_ip_address or self.ip_address
+        # -------------------------------------------------------------
+        
+        if nas_ip and self.tenant_subdomain:
+            try:
+                # Temporarily switch to public schema to save the map
+                current_schema = connection.schema_name
+                connection.set_schema_to_public()
                 
-            # 1. Tenant Sync
-            if self.tenant_subdomain:
-                clean_sub = self.tenant_subdomain.lower().replace('-', '_')
-                self.schema_name = f"tenant_{clean_sub}"
-            
-            # 2. VPN Credentials — unique per router (tenant_router_vpn format)
-            if self.enable_openvpn and not self.openvpn_username:
-                tenant_prefix = slugify(self.tenant_subdomain or 'public').replace('-', '')[:10]
-                router_prefix = slugify(self.name or 'router').replace('-', '')[:12]
-                suffix = secrets.token_hex(2)
-                self.openvpn_username = f"{tenant_prefix}_{router_prefix}_{suffix}_vpn"[:60]
-            if self.enable_openvpn and not self.openvpn_password:
-                self.openvpn_password = secrets.token_urlsafe(16)
-            
-            # 3. API Credentials — always ensure a strong password
-            # Use the new generator function to ensure RouterOS compatibility
-            if not self.api_password:
-                self.api_password = generate_api_password()
-
-            # 4. Provision Slug (short URL-safe identifier)
-            if not self.provision_slug:
-                self.provision_slug = secrets.token_hex(4).lower()
-
-            # 5. RADIUS Shared Secret — unique per router
-            if not self.shared_secret:
-                self.shared_secret = secrets.token_hex(16)
-
-            # 6. Radius Server Defaults
-            if self.enable_openvpn and not self.radius_server:
-                self.radius_server = "10.8.0.1" 
-
-            super().save(*args, **kwargs)
-
-            # 7. Update the Central RADIUS Phonebook (GlobalRouterMap)
-            # We must use connection.cursor or switch schema to write to the public schema
-            from django.db import connection
-            from apps.core.models import GlobalRouterMap, Tenant
-            
-            # --- FIX A: Prioritize VPN IP for RADIUS NAS identification ---
-            # RADIUS requests come from the VPN tunnel IP, not the public WAN IP
-            nas_ip = self.vpn_ip_address or self.ip_address
-            # -------------------------------------------------------------
-            
-            if nas_ip and self.tenant_subdomain:
-                try:
-                    # Temporarily switch to public schema to save the map
-                    current_schema = connection.schema_name
-                    connection.set_schema_to_public()
-                    
-                    tenant_obj = Tenant.objects.get(subdomain=self.tenant_subdomain)
-                    
-                    GlobalRouterMap.objects.update_or_create(
-                        nas_ip=nas_ip,  # Use the prioritized IP
-                        defaults={
-                            'nas_secret': self.shared_secret,
-                            'tenant': tenant_obj,
-                            'is_active': self.status == 'online' or self.is_active
-                        }
-                    )
-                    
-                    # Switch back to the tenant's schema
-                    connection.set_schema(current_schema)
-                except Tenant.DoesNotExist:
-                    # Log error but don't break the save operation
-                    import logging
-                    logging.getLogger(__name__).error(
-                        f"Tenant with subdomain {self.tenant_subdomain} not found for router {self.name}"
-                    )
-                except Exception as e:
-                    import logging
-                    logging.getLogger(__name__).error(
-                        f"Failed to update GlobalRouterMap for router {self.name}: {e}"
-                    )
+                tenant_obj = Tenant.objects.get(subdomain=self.tenant_subdomain)
+                
+                GlobalRouterMap.objects.update_or_create(
+                    nas_ip=nas_ip,  # Use the prioritized IP
+                    defaults={
+                        'nas_secret': self.shared_secret,
+                        'tenant': tenant_obj,
+                        'is_active': self.status == 'online' or self.is_active
+                    }
+                )
+                
+                # Switch back to the tenant's schema
+                connection.set_schema(current_schema)
+            except Tenant.DoesNotExist:
+                # Log error but don't break the save operation
+                import logging
+                logging.getLogger(__name__).error(
+                    f"Tenant with subdomain {self.tenant_subdomain} not found for router {self.name}"
+                )
+            except Exception as e:
+                import logging
+                logging.getLogger(__name__).error(
+                    f"Failed to update GlobalRouterMap for router {self.name}: {e}"
+                )
 
    # ────────────────────────────────────────────────────────────────
     # SMART PROPERTIES (The "Brains" for the Script Generator)

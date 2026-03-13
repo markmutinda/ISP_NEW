@@ -60,11 +60,11 @@ class VPNProvisioningService:
                 logger.info(f"Assigned VPN IP {vpn_ip} to router {router.name}")
 
                 # 3. Generate client certificate
-                common_name = self._generate_cn(router)
+                common_name = self._generate_cn(router)  # ← returns openvpn_username
                 cert_record = self._generate_client_certificate(ca, router, common_name)
                 logger.info(f"Generated certificate CN={common_name} for router {router.name}")
 
-                # 4. Write CCD file
+                # 4. Write CCD file (filename = common_name = username)
                 self.ccd_manager.create_ccd_file(common_name, vpn_ip)
                 logger.info(f"Wrote CCD file for CN={common_name} → {vpn_ip}")
 
@@ -110,7 +110,7 @@ class VPNProvisioningService:
         if router.vpn_certificate:
             router.vpn_certificate.revoke(reason=f"Router {router.name} deprovisioned")
 
-        # Remove CCD
+        # Remove CCD (filename = openvpn_username)
         common_name = self._generate_cn(router)
         self.ccd_manager.remove_ccd_file(common_name)
 
@@ -188,10 +188,18 @@ class VPNProvisioningService:
         )
 
     def _generate_cn(self, router) -> str:
-        """Generate a unique Common Name for the certificate."""
-        # Format: netily-{router_id}-{sanitized_name}
-        safe_name = router.name.lower().replace(' ', '-').replace('_', '-')[:20]
-        return f"netily-router-{router.id}-{safe_name}"
+        """
+        Generate the Common Name for the certificate and CCD file.
+        Because the OpenVPN server uses 'username-as-common-name',
+        we must use the router's OpenVPN username directly.
+        """
+        # Ensure the router has an openvpn_username (it should be auto-generated)
+        if not router.openvpn_username:
+            raise VPNProvisioningError(
+                f"Router {router.name} has no openvpn_username. "
+                "Make sure Router.save() generates it."
+            )
+        return router.openvpn_username
 
     def _generate_client_certificate(
         self, ca: CertificateAuthority, router, common_name: str
