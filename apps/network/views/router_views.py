@@ -9,7 +9,7 @@ from rest_framework.permissions import AllowAny, IsAuthenticated
 from django.db.models import Sum, Avg, F, Count
 from django.db import ProgrammingError
 from django.http import HttpResponse, Http404
-import textwrap  # <--- Add this
+import textwrap
 from apps.network.services.mikrotik_script_generator import MikrotikScriptGenerator
 from rest_framework import serializers
 import json
@@ -209,9 +209,7 @@ class RouterViewSet(viewsets.ModelViewSet):
 
     def retrieve(self, request, *args, **kwargs):
         """
-        GET /routers/{pk}/  — find router across all tenants so the detail
-        page works even when the request comes in without tenant context
-        (e.g. plain localhost from the Next.js frontend).
+        GET /routers/{pk}/  — find router across all tenants and update its real-time status
         """
         from django.db import connection as db_conn
 
@@ -221,8 +219,18 @@ class RouterViewSet(viewsets.ModelViewSet):
         router, tenant = find_router_across_tenants(router_id=pk)
         if not router:
             return Response({'error': 'Router not found'}, status=status.HTTP_404_NOT_FOUND)
+        
+        # Switch to the correct tenant context
         db_conn.set_tenant(tenant)
         request.tenant = tenant
+        
+        # 🔥 NEW: Perform a quick live check before returning the data to the frontend
+        # This makes the "Online/Offline" status real-time on page refresh
+        try:
+            router.sync_status()
+        except Exception as e:
+            # Log the error but don't break the response - just return current DB status
+            logger.warning(f"Failed to sync status for router {router.id}: {e}")
 
         serializer = self.get_serializer(router)
         return Response(serializer.data)
@@ -1911,6 +1919,70 @@ mute 20
         except Exception as e:
             logger.error(f"VPN revocation failed for router {router.id}: {e}")
             return Response({'error': str(e)}, status=400)
+
+    # ────────────────────────────────────────────────────────────────
+    # HOTSPOT CONFIGURATION ENDPOINT WITH SYNC_STATUS
+    # ────────────────────────────────────────────────────────────────
+    @action(detail=True, methods=['get', 'post'], url_path='hotspot/config')
+    def hotspot_config(self, request, pk=None):
+        """
+        Get or update hotspot configuration.
+        GET: Retrieve current hotspot config from the router
+        POST: Update hotspot configuration on the router
+        """
+        router = self.get_object()
+        
+        # 🔥 NEW: Trigger a fresh sync so if they just plugged it in, it works immediately
+        try:
+            router.sync_status()
+        except Exception as e:
+            logger.warning(f"Failed to sync status for router {router.id} in hotspot_config: {e}")
+
+        if router.status != 'online':
+            return Response({
+                "error": "Router is offline",
+                "message": "Cannot access hotspot configuration. Please check your VPN tunnel and ensure the router is online."
+            }, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+
+        if request.method == 'GET':
+            # GET logic - retrieve hotspot config
+            try:
+                api = mikrotik_api_module.MikrotikAPI(router)
+                config = api.get_hotspot_config()
+                return Response(config)
+            except Exception as e:
+                logger.error(f"Failed to get hotspot config for router {router.id}: {e}")
+                return Response({
+                    "error": "Failed to retrieve hotspot configuration",
+                    "message": str(e)
+                }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        
+        elif request.method == 'POST':
+            # POST logic - update hotspot config
+            try:
+                api = mikrotik_api_module.MikrotikAPI(router)
+                result = api.configure_hotspot(request.data)
+                
+                if result.get('success'):
+                    RouterEvent.objects.create(
+                        router=router,
+                        event_type='config_change',
+                        message="Hotspot configuration updated",
+                        details={'updated_by': request.user.email}
+                    )
+                    return Response({'success': True, 'message': 'Hotspot configuration updated'})
+                else:
+                    return Response({
+                        'success': False,
+                        'message': 'Failed to update hotspot config',
+                        'error': result.get('error')
+                    }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+            except Exception as e:
+                logger.error(f"Failed to update hotspot config for router {router.id}: {e}")
+                return Response({
+                    'error': 'Failed to update hotspot configuration',
+                    'message': str(e)
+                }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 # ────────────────────────────────────────────────────────────────
 # ROUTER PORT SCAN, PORTS & HOTSPOT CONFIGURATION VIEWS

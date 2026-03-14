@@ -301,6 +301,22 @@ class Router(AuditMixin):
     def __str__(self):
         return f"{self.name} ({self.ip_address or 'No IP'})"
 
+    def sync_status(self):
+        """Attempts to connect to the MikroTik API and updates status."""
+        from apps.network.integrations.mikrotik_api import MikrotikAPI
+        
+        api = MikrotikAPI(self)
+        if api.connect():
+            self.status = 'online'
+            self.last_seen = timezone.now()
+            api.disconnect()
+        else:
+            self.status = 'offline'
+        
+        # Use update_fields to avoid triggering the full save() provisioning logic again
+        self.save(update_fields=['status', 'last_seen', 'updated_at'])
+        return self.status
+
     def save(self, *args, **kwargs):
         """Auto-generate credentials and trigger VPN provisioning."""
         from django.utils.text import slugify
