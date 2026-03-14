@@ -301,8 +301,24 @@ class Router(AuditMixin):
     def __str__(self):
         return f"{self.name} ({self.ip_address or 'No IP'})"
 
-    def sync_status(self):
-        """Attempts to connect to the MikroTik API and updates status."""
+    def sync_status(self, force=False):
+        """
+        Attempts to connect to the MikroTik API and updates status.
+        
+        Args:
+            force (bool): If True, bypasses the cooldown check and forces a sync.
+                          If False, only syncs if last check was more than 30 seconds ago.
+        
+        Returns:
+            str: The updated status ('online' or 'offline')
+        """
+        # 🔥 OPTIMIZATION: If we checked very recently, don't ping again (prevents lag on refresh)
+        if not force and self.last_seen:
+            now = timezone.now()
+            diff = (now - self.last_seen).total_seconds()
+            if diff < 30:  # 30-second cooldown
+                return self.status
+
         from apps.network.integrations.mikrotik_api import MikrotikAPI
         
         api = MikrotikAPI(self)

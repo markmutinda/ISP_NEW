@@ -224,7 +224,7 @@ class RouterViewSet(viewsets.ModelViewSet):
         db_conn.set_tenant(tenant)
         request.tenant = tenant
         
-        # 🔥 NEW: Perform a quick live check before returning the data to the frontend
+        # 🔥 Perform a quick live check before returning the data to the frontend
         # This makes the "Online/Offline" status real-time on page refresh
         try:
             router.sync_status()
@@ -238,15 +238,45 @@ class RouterViewSet(viewsets.ModelViewSet):
     def list(self, request, *args, **kwargs):
         """
         GET /routers/  — always scoped to the resolved tenant.
-        Superusers without a tenant see all tenants (admin overview).
-        Regular users without a tenant get an empty list (data isolation).
+        Updates status for paginated routers in real-time.
         """
         from django.db import connection as db_conn
         logger.info(f"[RouterViewSet.list] tenant={getattr(request, 'tenant', None)}")
 
         # If tenant was resolved (by middleware or _ensure_tenant_context), use it
         if hasattr(request, 'tenant') and request.tenant:
-            return super().list(request, *args, **kwargs)
+            # Get the filtered queryset
+            queryset = self.filter_queryset(self.get_queryset())
+            
+            # Paginate the queryset first (important for performance!)
+            # This ensures we only ping the routers visible on this page, 
+            # not every router in the database.
+            page = self.paginate_queryset(queryset)
+            
+            if page is not None:
+                # 🔥 NEW: Sync status for ONLY the routers on this specific page
+                for router in page:
+                    try:
+                        # We use a short timeout inside sync_status logic 
+                        # so the page refresh doesn't take forever.
+                        router.sync_status()
+                    except Exception as e:
+                        logger.debug(f"Failed to sync status for router {router.id} in list: {e}")
+                        pass  # Keep moving if one router hangs
+                
+                serializer = self.get_serializer(page, many=True)
+                return self.get_paginated_response(serializer.data)
+
+            # Fallback for non-paginated requests
+            for router in queryset:
+                try:
+                    router.sync_status()
+                except Exception as e:
+                    logger.debug(f"Failed to sync status for router {router.id} in list: {e}")
+                    pass
+                    
+            serializer = self.get_serializer(queryset, many=True)
+            return Response(serializer.data)
 
         # No tenant context — only allow superusers to aggregate across tenants
         if not request.user.is_superuser:
@@ -267,6 +297,12 @@ class RouterViewSet(viewsets.ModelViewSet):
                 try:
                     db_conn.set_tenant(tenant)
                     for router in Router.objects.all():
+                        # 🔥 Sync status for each router in superuser view
+                        try:
+                            router.sync_status()
+                        except Exception as e:
+                            logger.debug(f"Failed to sync status for router {router.id} in tenant {tenant.subdomain}: {e}")
+                        
                         data = RouterSerializer(router).data
                         all_routers.append(data)
                 except Exception as e:
