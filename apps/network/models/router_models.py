@@ -303,7 +303,7 @@ class Router(AuditMixin):
 
     def sync_status(self, force=False):
         """
-        Attempts to connect to the MikroTik API and updates status.
+        Fast socket check to see if the MikroTik is reachable (1.5s max delay).
         
         Args:
             force (bool): If True, bypasses the cooldown check and forces a sync.
@@ -312,24 +312,41 @@ class Router(AuditMixin):
         Returns:
             str: The updated status ('online' or 'offline')
         """
-        # 🔥 OPTIMIZATION: If we checked very recently, don't ping again (prevents lag on refresh)
+        import socket
+        from django.utils import timezone
+        
+        # 1. COOLDOWN: Don't check if we just checked less than 30 seconds ago
         if not force and self.last_seen:
             now = timezone.now()
             diff = (now - self.last_seen).total_seconds()
             if diff < 30:  # 30-second cooldown
                 return self.status
 
-        from apps.network.integrations.mikrotik_api import MikrotikAPI
+        # 2. GET IP: Use VPN IP if available, else WAN IP
+        target_ip = self.vpn_ip_address if (self.vpn_provisioned and self.vpn_ip_address) else self.ip_address
         
-        api = MikrotikAPI(self)
-        if api.connect():
-            self.status = 'online'
-            self.last_seen = timezone.now()
-            api.disconnect()
-        else:
+        if not target_ip:
             self.status = 'offline'
+            self.save(update_fields=['status', 'updated_at'])
+            return self.status
+
+        # 3. FAST SOCKET PING: Just check if port 8728 is open (bypasses heavy auth)
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(1.5)  # Max 1.5 seconds wait time per router!
         
-        # Use update_fields to avoid triggering the full save() provisioning logic again
+        try:
+            result = sock.connect_ex((target_ip, self.api_port or 8728))
+            if result == 0:
+                self.status = 'online'
+                self.last_seen = timezone.now()
+            else:
+                self.status = 'offline'
+        except Exception:
+            self.status = 'offline'
+        finally:
+            sock.close()
+        
+        # 4. UPDATE DB silently
         self.save(update_fields=['status', 'last_seen', 'updated_at'])
         return self.status
 
@@ -433,7 +450,7 @@ class Router(AuditMixin):
                     f"Failed to update GlobalRouterMap for router {self.name}: {e}"
                 )
 
-   # ────────────────────────────────────────────────────────────────
+    # ────────────────────────────────────────────────────────────────
     # SMART PROPERTIES (The "Brains" for the Script Generator)
     # ────────────────────────────────────────────────────────────────
 
