@@ -988,16 +988,25 @@ class PaymentViewSet(viewsets.ModelViewSet):
             'REFUNDED': queryset.filter(status='REFUNDED').count(),
         }
         
-        # 1. Aliased Method Distribution
+        # 1. Aliased Method Distribution - FIXED: Let the DB do the sum first
         method_distribution = queryset.values(
-            name=F('payment_method__name')  # Alias payment_method__name to 'name'
+            name=F('payment_method__name')
         ).annotate(
             count=Count('id'),
-            total=float(Sum('amount') or 0)
-        ).order_by('-total')
+            total_sum=Sum('amount')  # Let the DB do the sum first
+        ).order_by('-total_sum')
         
-        # 2. Aliased Top Payers
-        top_payers = queryset.filter(
+        # Format the method distribution with proper float conversion
+        formatted_distribution = [
+            {
+                'name': item['name'],
+                'count': item['count'],
+                'total': float(item['total_sum'] or 0)
+            } for item in method_distribution
+        ]
+        
+        # 2. Aliased Top Payers - FIXED: Let the DB do the sum first
+        top_payers_raw = queryset.filter(
             payment_date__date__gte=thirty_days_ago,
             status='COMPLETED'
         ).annotate(
@@ -1007,9 +1016,20 @@ class PaymentViewSet(viewsets.ModelViewSet):
         ).values(
             'customer_code', 'first_name', 'last_name'
         ).annotate(
-            total_paid=float(Sum('amount') or 0),
+            total_paid_sum=Sum('amount'),
             payment_count=Count('id')
-        ).order_by('-total_paid')[:10]
+        ).order_by('-total_paid_sum')[:10]
+        
+        # Format the top payers with proper float conversion
+        formatted_top_payers = [
+            {
+                'customer_code': item['customer_code'],
+                'first_name': item['first_name'],
+                'last_name': item['last_name'],
+                'total_paid': float(item['total_paid_sum'] or 0),
+                'payment_count': item['payment_count']
+            } for item in top_payers_raw
+        ]
         
         # M-Pesa stats
         mpesa_stats = self.get_mpesa_stats(queryset)
@@ -1019,8 +1039,8 @@ class PaymentViewSet(viewsets.ModelViewSet):
             'yesterday': {'count': yesterday_count, 'amount': yesterday_amount},
             'this_month': {'count': month_count, 'amount': month_amount},
             'status_distribution': status_counts,
-            'method_distribution': list(method_distribution),
-            'top_payers': list(top_payers),
+            'method_distribution': formatted_distribution,
+            'top_payers': formatted_top_payers,
             'mpesa_stats': mpesa_stats
         }
         
@@ -1042,13 +1062,21 @@ class PaymentViewSet(viewsets.ModelViewSet):
             total_transactions=Count('id'),
             successful=Count('id', filter=Q(status='COMPLETED')),
             failed=Count('id', filter=Q(status='FAILED')),
-            total_amount=float(Sum('amount', filter=Q(status='COMPLETED')) or 0)
+            total_amount_sum=Sum('amount', filter=Q(status='COMPLETED'))
         )
+        
+        # Format with proper float conversion
+        formatted_txn_stats = {
+            'total_transactions': mpesa_txn_stats['total_transactions'] or 0,
+            'successful': mpesa_txn_stats['successful'] or 0,
+            'failed': mpesa_txn_stats['failed'] or 0,
+            'total_amount': float(mpesa_txn_stats['total_amount_sum'] or 0)
+        }
         
         return {
             'total_mpesa_payments': mpesa_payments.count(),
             'mpesa_amount': float(mpesa_payments.aggregate(Sum('amount'))['amount__sum'] or 0),
-            'transaction_stats': mpesa_txn_stats
+            'transaction_stats': formatted_txn_stats
         }
 
 
