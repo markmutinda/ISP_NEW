@@ -5,7 +5,10 @@ from .invoice_serializers import (
 )
 from .payment_serializers import (
     PaymentMethodSerializer, PaymentSerializer, ReceiptSerializer,
-    PaymentCreateSerializer, PaymentDetailSerializer, MpesaSTKPushSerializer
+    PaymentCreateSerializer, PaymentDetailSerializer, MpesaSTKPushSerializer,
+    MpesaConfigurationSerializer, MpesaConfigurationDetailSerializer,
+    MpesaTransactionSerializer, MpesaTransactionDetailSerializer,
+    MpesaConfigurationTestSerializer
 )
 from .voucher_serializers import (
     VoucherBatchSerializer, VoucherSerializer, VoucherUsageSerializer,
@@ -25,6 +28,9 @@ __all__ = [
     # Payment serializers
     'PaymentMethodSerializer', 'PaymentSerializer', 'ReceiptSerializer',
     'PaymentCreateSerializer', 'PaymentDetailSerializer', 'MpesaSTKPushSerializer',
+    'MpesaConfigurationSerializer', 'MpesaConfigurationDetailSerializer',
+    'MpesaTransactionSerializer', 'MpesaTransactionDetailSerializer',
+    'MpesaConfigurationTestSerializer',
     
     # Voucher serializers
     'VoucherBatchSerializer', 'VoucherSerializer', 'VoucherUsageSerializer',
