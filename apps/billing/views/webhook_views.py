@@ -549,8 +549,8 @@ class MpesaC2BWebhookView(APIView):
                         mpesa_txn = MpesaTransaction.objects.create(
                             configuration=config,
                             transaction_id=trans_id,
-                            merchant_request_id=f"C2B-{trans_id}",  # <--- FIX: Unique merchant_request_id
-                            checkout_request_id=f"C2B-{trans_id}",  # <--- FIX: Unique checkout_request_id
+                            merchant_request_id=f"C2B-{trans_id}",  # Unique merchant_request_id
+                            checkout_request_id=f"C2B-{trans_id}",  # Unique checkout_request_id
                             transaction_type='C2B',
                             amount=amount,
                             phone_number=msisdn,
@@ -625,22 +625,18 @@ class MpesaC2BWebhookView(APIView):
                         customer.save(update_fields=['outstanding_balance'])
                         logger.info(f"Payment {trans_id} reduced outstanding balance to {customer.outstanding_balance}")
 
-                    # E. Auto-Reactivation & Expiry Extension
+                    # E. RADIUS ACTIVATION & EXPIRY EXTENSION
                     monthly_price = Decimal(str(service.monthly_price)) if service.monthly_price else Decimal('0')
                     
                     if amount >= monthly_price:
-                        # 1. Flip Status to ACTIVE
                         service.activate_service()
-
-                        # 2. Calculate New Expiration Date
+                        
                         if service.plan:
-                            new_expiry = service.plan.calculate_expiration()  # Uses the logic in billing_models.py
+                            # FIX: Import the correct model name - CustomerRadiusCredentials
+                            from apps.radius.models import CustomerRadiusCredentials
+                            new_expiry = service.plan.calculate_expiration()
                             
-                            # 3. Update RADIUS Credentials Expiry
-                            # Import here to avoid circular dependencies
-                            from apps.radius.models import RadiusCredential
-                            radius_cred = RadiusCredential.objects.filter(customer=service.customer).first()
-                            
+                            radius_cred = CustomerRadiusCredentials.objects.filter(customer=customer).first()
                             if radius_cred:
                                 radius_cred.expiration_date = new_expiry
                                 radius_cred.is_enabled = True
