@@ -442,34 +442,34 @@ class MpesaC2BWebhookView(APIView):
     
     def trigger_mikrotik_reactivation(self, service):
         """
-        Connects to the MikroTik router and clears the active PPPoE session.
-        The router is found via the CustomerRadiusCredentials linked to the service.
+        Safely connects to the MikroTik router and clears the session.
+        Uses getattr to prevent 'RelatedObjectDoesNotExist' errors.
         """
         try:
             from apps.network.integrations.mikrotik_api import MikrotikAPI
             
-            # 1. Identify which RADIUS credential and router to use
-            # We check PPPoE first, then fallback to Hotspot
-            radius_cred = service.pppoe_user or service.hotspot_user
+            # 1. Safely check for related RADIUS credentials
+            # This returns None if the relationship doesn't exist instead of crashing
+            radius_cred = getattr(service, 'pppoe_user', None) or getattr(service, 'hotspot_user', None)
             
             if not radius_cred:
-                logger.warning(f"Skipping MikroTik kick: No RADIUS credentials found for service {service.id}")
+                logger.warning(f"Skipping MikroTik kick: No RADIUS credentials linked to service {service.id}")
                 return
-                
+            
             if not radius_cred.router:
-                logger.warning(f"Skipping MikroTik kick: No router assigned to RADIUS credentials for service {service.id}")
+                logger.warning(f"Skipping MikroTik kick: No router assigned to RADIUS user {radius_cred.username}")
                 return
 
-            # 2. Connect to the router using the credential's router relation
+            # 2. Connect to the router assigned to the RADIUS credentials
             api = MikrotikAPI(radius_cred.router)
             
-            # 3. Kick the user by their RADIUS username
+            # 3. Kick the user
             success = api.kick_pppoe_user(radius_cred.username)
             
             if success:
-                logger.info(f"MikroTik: Successfully kicked session for {radius_cred.username} on {radius_cred.router.name}")
+                logger.info(f"MikroTik: Kicked session for {radius_cred.username} on {radius_cred.router.name}")
             else:
-                logger.info(f"MikroTik: No active session for {radius_cred.username} (User already offline)")
+                logger.info(f"MikroTik: No active session for {radius_cred.username}")
 
         except Exception as e:
             logger.error(f"Failed MikroTik kick for service {service.id}: {str(e)}", exc_info=True)
@@ -719,4 +719,4 @@ class MpesaC2BWebhookView(APIView):
 # path('api/v1/webhooks/payhero/subscription/', PayHeroSubscriptionWebhookView.as_view()),
 # path('api/v1/webhooks/payhero/hotspot/', PayHeroHotspotWebhookView.as_view()),
 # path('api/v1/webhooks/payhero/billing/', PayHeroBillingWebhookView.as_view()),
-# path('api/v1/webhooks/mpesa/c2b-callback/', MpesaC2BWebhookView.as_view()),),
+# path('api/v1/webhooks/mpesa/c2b-callback/', MpesaC2BWebhookView.as_view()),
