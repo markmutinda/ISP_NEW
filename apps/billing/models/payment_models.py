@@ -4,17 +4,24 @@ from django.core.validators import MinValueValidator
 from django.core.exceptions import ValidationError
 from django.utils import timezone
 from decimal import Decimal
-from apps.core.models import Company, AuditMixin, TenantAwareMixin
+from apps.core.models import Company, AuditMixin  # Removed TenantAwareMixin
 #from apps.customers.models import Customer
 from .billing_models import Invoice
 from django.conf import settings
 
 
-class MpesaConfiguration(AuditMixin, TenantAwareMixin):
+class MpesaConfiguration(AuditMixin):
     """
     Tenant-specific M-Pesa Paybill credentials.
     Each tenant (ISP) configures their own Paybill here.
     """
+    # Tenant schema field to isolate configurations
+    schema_name = models.SlugField(
+        max_length=63,
+        editable=False,
+        default="default_schema"
+    )
+
     # Core Paybill Details
     business_shortcode = models.CharField(
         max_length=20, 
@@ -188,13 +195,8 @@ class MpesaConfiguration(AuditMixin, TenantAwareMixin):
     def get_api_environment(self):
         """Return the appropriate API environment settings"""
         if self.is_sandbox:
-            # You'll create these classes in a separate utils file
-            # from apps.billing.utils.mpesa import SandboxEnvironment
-            # return SandboxEnvironment()
             return "sandbox"
         else:
-            # from apps.billing.utils.mpesa import ProductionEnvironment
-            # return ProductionEnvironment()
             return "production"
     
     def get_callback_url(self, request=None):
@@ -371,7 +373,7 @@ class InvoiceItemPayment(models.Model):
     custom_link = models.URLField(null=True, blank=True)
     is_default = models.BooleanField(default=False, help_text="Default payment method for this company")
 
-    # M-Pesa Configuration Link (new)
+    # M-Pesa Configuration Link
     mpesa_configuration = models.ForeignKey(
         'billing.MpesaConfiguration',
         on_delete=models.SET_NULL,
@@ -401,7 +403,6 @@ class InvoiceItemPayment(models.Model):
     # Tenant schema field
     schema_name = models.SlugField(
         max_length=63,
-        unique=True,
         editable=False,
         default="default_schema"
     )
@@ -476,7 +477,7 @@ class Payment(models.Model):
     payhero_external_reference = models.CharField(max_length=255, blank=True, null=True, unique=True)
     raw_callback = models.JSONField(null=True, blank=True)
     
-    # M-Pesa Transaction Link (new)
+    # M-Pesa Transaction Link
     mpesa_transaction = models.OneToOneField(
         'billing.MpesaTransaction',
         on_delete=models.SET_NULL,
@@ -488,7 +489,6 @@ class Payment(models.Model):
     # Tenant schema field
     schema_name = models.SlugField(
         max_length=63,
-        unique=True,
         editable=False,
         default="default_schema"
     )
@@ -542,7 +542,14 @@ class Payment(models.Model):
         if not self.payment_number:
             date_str = timezone.now().strftime('%Y%m%d')
             last_payment = Payment.objects.filter(payment_number__startswith=f'PAY-{date_str}').order_by('-payment_number').first()
-            new_num = int(last_payment.payment_number.split('-')[-1]) + 1 if last_payment else 1
+            if last_payment and last_payment.payment_number:
+                try:
+                    last_num = int(last_payment.payment_number.split('-')[-1])
+                    new_num = last_num + 1
+                except (IndexError, ValueError):
+                    new_num = Payment.objects.count() + 1
+            else:
+                new_num = 1
             self.payment_number = f"PAY-{date_str}-{new_num:05d}"
 
         if not self.net_amount:
@@ -635,7 +642,6 @@ class Receipt(models.Model):
     # Tenant schema field
     schema_name = models.SlugField(
         max_length=63,
-        unique=True,
         editable=False,
         default="default_schema"
     )
@@ -682,9 +688,12 @@ class Receipt(models.Model):
                 receipt_number__startswith=f'RCPT-{year}'
             ).order_by('-receipt_number').first()
             
-            if last_receipt:
-                last_num = int(last_receipt.receipt_number.split('-')[-1])
-                new_num = last_num + 1
+            if last_receipt and last_receipt.receipt_number:
+                try:
+                    last_num = int(last_receipt.receipt_number.split('-')[-1])
+                    new_num = last_num + 1
+                except (IndexError, ValueError):
+                    new_num = Receipt.objects.count() + 1
             else:
                 new_num = 1
             
