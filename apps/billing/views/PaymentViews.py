@@ -5,7 +5,7 @@ import json
 import logging
 from decimal import Decimal
 from django.conf import settings
-from django.db import transaction
+from django.db import transaction, connection
 from django.utils import timezone
 from django.views.decorators.csrf import csrf_exempt
 from rest_framework import viewsets, status, filters
@@ -389,16 +389,16 @@ class PaymentMethodViewSet(viewsets.ModelViewSet):
     search_fields = ['name', 'code', 'description', 'channel_id']
 
     def get_queryset(self):
-        from ..models.payment_models import InvoiceItemPayment
+        from ..models.payment_models import PaymentMethod
         
         user = self.request.user
         if user.is_superuser:
-            return InvoiceItemPayment.objects.all()
+            return PaymentMethod.objects.all()
         
         if hasattr(user, 'company') and user.company:
-            return InvoiceItemPayment.objects.filter(schema_name=user.company.schema_name)
+            return PaymentMethod.objects.filter(schema_name=user.company.schema_name)
         
-        return InvoiceItemPayment.objects.none()
+        return PaymentMethod.objects.none()
 
     def get_serializer_class(self):
         return PaymentMethodSerializer
@@ -634,14 +634,14 @@ class PaymentViewSet(viewsets.ModelViewSet):
                 return Response({'status': 'error', 'message': 'Service connection not found'}, status=status.HTTP_404_NOT_FOUND)
         
         # Get M-Pesa payment method
-        from ..models.payment_models import InvoiceItemPayment
+        from ..models.payment_models import PaymentMethod
         try:
-            payment_method = InvoiceItemPayment.objects.get(
+            payment_method = PaymentMethod.objects.get(
                 method_type='MPESA_STK',
                 schema_name=request.user.company.schema_name,
                 is_active=True
             )
-        except InvoiceItemPayment.DoesNotExist:
+        except PaymentMethod.DoesNotExist:
             return Response({
                 'status': 'error', 
                 'message': 'M-Pesa STK payment method not configured for this company'
@@ -786,20 +786,20 @@ class PaymentViewSet(viewsets.ModelViewSet):
             return Response({'error': 'Invalid amount or external_reference'}, status=status.HTTP_400_BAD_REQUEST)
 
         try:
-            from ..models.payment_models import InvoiceItemPayment
+            from ..models.payment_models import PaymentMethod
             if channel_id:
-                method = InvoiceItemPayment.objects.get(
+                method = PaymentMethod.objects.get(
                     schema_name=request.user.company.schema_name,
                     channel_id=channel_id,
                     is_active=True
                 )
             else:
-                method = InvoiceItemPayment.objects.get(
+                method = PaymentMethod.objects.get(
                     schema_name=request.user.company.schema_name,
                     is_default=True,
                     is_active=True
                 )
-        except InvoiceItemPayment.DoesNotExist:
+        except PaymentMethod.DoesNotExist:
             return Response({'error': 'No valid payment method found'}, status=status.HTTP_400_BAD_REQUEST)
         except Exception as e:
             logger.error(f"Payment method lookup error: {str(e)}")
@@ -931,14 +931,14 @@ class PaymentViewSet(viewsets.ModelViewSet):
             except Invoice.DoesNotExist:
                 return Response({'status': 'error', 'message': 'Invoice not found'}, status=status.HTTP_404_NOT_FOUND)
         
-        from ..models.payment_models import InvoiceItemPayment, Payment
+        from ..models.payment_models import PaymentMethod, Payment
         try:
-            payment_method = InvoiceItemPayment.objects.get(
+            payment_method = PaymentMethod.objects.get(
                 method_type='BANK_TRANSFER',
                 schema_name=request.user.company.schema_name,
                 is_active=True
             )
-        except InvoiceItemPayment.DoesNotExist:
+        except PaymentMethod.DoesNotExist:
             return Response({'status': 'error', 'message': 'Bank transfer payment method not configured'}, status=status.HTTP_400_BAD_REQUEST)
         
         payment = Payment.objects.create(
@@ -1027,14 +1027,17 @@ class PaymentViewSet(viewsets.ModelViewSet):
         return Response(stats)
 
     def get_mpesa_stats(self, queryset):
-        """Get M-Pesa specific statistics"""
+        """Get M-Pesa specific statistics using active schema context"""
         from ..models.payment_models import MpesaTransaction
+        
+        # Get the schema name from the current DB context
+        schema_name = connection.schema_name
         
         mpesa_payments = queryset.filter(payment_method__method_type__startswith='MPESA_')
         
-        # Get M-Pesa transaction stats
+        # Get M-Pesa transaction stats filtered by current schema
         mpesa_txn_stats = MpesaTransaction.objects.filter(
-            schema_name=self.request.user.company.schema_name
+            schema_name=schema_name
         ).aggregate(
             total_transactions=Count('id'),
             successful=Count('id', filter=Q(status='COMPLETED')),

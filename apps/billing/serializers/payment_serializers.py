@@ -4,7 +4,7 @@ from django.utils import timezone
 from decimal import Decimal
 from django.core.exceptions import ValidationError
 from django.db.models import Sum
-# from ..models.payment_models import PaymentMethod, Payment, Receipt   # ← COMMENTED OUT to prevent early loading / circular import issues
+from ..models.payment_models import MpesaConfiguration, MpesaTransaction, Payment, Receipt, InvoiceItemPayment
 
 from customers.serializers import CustomerSerializer
 from ..serializers.invoice_serializers import InvoiceSerializer
@@ -19,7 +19,7 @@ class MpesaConfigurationSerializer(serializers.ModelSerializer):
     Serializer for M-Pesa Configuration - used for tenant-specific M-Pesa settings
     """
     class Meta:
-        model = 'MpesaConfiguration'  # String literal to avoid circular imports
+        model = MpesaConfiguration
         fields = [
             'id', 'business_shortcode', 'shortcode_type', 'passkey', 
             'consumer_key', 'consumer_secret', 'callback_url', 'timeout_url',
@@ -157,7 +157,7 @@ class MpesaTransactionSerializer(serializers.ModelSerializer):
     )
     
     class Meta:
-        model = 'MpesaTransaction'  # String literal to avoid circular imports
+        model = MpesaTransaction
         fields = [
             'id', 'payment', 'payment_number', 'customer_name', 'customer_phone',
             'configuration', 'configuration_shortcode', 'merchant_request_id',
@@ -223,7 +223,7 @@ class PaymentMethodSerializer(serializers.ModelSerializer):
     )
 
     class Meta:
-        model = 'InvoiceItemPayment'  # Fixed model name from PaymentMethod to InvoiceItemPayment
+        model = InvoiceItemPayment
         fields = [
             'id', 'company', 'company_name', 'name', 'code', 'method_type', 'description',
             'channel_id', 'is_payhero_enabled', 'mpesa_configuration', 'mpesa_configuration_details',
@@ -278,7 +278,7 @@ class PaymentSerializer(serializers.ModelSerializer):
     )
 
     class Meta:
-        model = 'Payment'  # String literal
+        model = Payment
         fields = [
             'id', 'payment_number', 'company', 'company_name', 'customer', 'customer_name',
             'customer_code', 'invoice', 'invoice_number', 'amount', 'transaction_fee',
@@ -302,7 +302,7 @@ class PaymentSerializer(serializers.ModelSerializer):
 
 class PaymentCreateSerializer(serializers.ModelSerializer):
     class Meta:
-        model = 'Payment'  # String literal
+        model = Payment
         fields = [
             'customer', 'invoice', 'amount', 'payment_method', 'payment_reference',
             'transaction_id', 'payer_name', 'payer_phone', 'payer_email',
@@ -437,7 +437,7 @@ class ReceiptSerializer(serializers.ModelSerializer):
     issued_by_name = serializers.CharField(source='issued_by.get_full_name', read_only=True)
 
     class Meta:
-        model = 'Receipt'  # String literal
+        model = Receipt
         fields = [
             'id', 'receipt_number', 'company', 'company_name', 'customer', 'customer_name',
             'customer_code', 'payment', 'payment_number', 'amount', 'amount_in_words',
@@ -453,7 +453,7 @@ class ReceiptSerializer(serializers.ModelSerializer):
 
 class ReceiptCreateSerializer(serializers.ModelSerializer):
     class Meta:
-        model = 'Receipt'  # String literal
+        model = Receipt
         fields = ['payment', 'notes']
 
     def validate(self, data):
