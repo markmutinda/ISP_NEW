@@ -272,7 +272,13 @@ class MpesaTransaction(models.Model):
     # Transaction identifiers
     merchant_request_id = models.CharField(max_length=100, unique=True)
     checkout_request_id = models.CharField(max_length=100, unique=True)
-    transaction_id = models.CharField(max_length=50, blank=True, db_index=True)  # M-Pesa receipt
+    transaction_id = models.CharField(
+        max_length=50, 
+        blank=True, 
+        db_index=True, 
+        unique=True,  # <--- CRITICAL: DB-level idempotency to prevent duplicate payments
+        help_text="M-Pesa Receipt Number (unique)"
+    )
     
     # Transaction details
     transaction_type = models.CharField(max_length=20, choices=TRANSACTION_TYPE, default='STK_PUSH')
