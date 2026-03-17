@@ -250,44 +250,33 @@ class PaymentMethodSerializer(serializers.ModelSerializer):
 
 
 # ==========================
-# Payment Serializers
+# Payment Serializers - FIXED VERSION
 # ==========================
 
 class PaymentSerializer(serializers.ModelSerializer):
-    customer_name = serializers.CharField(source='customer.full_name', read_only=True)
-    customer_code = serializers.CharField(source='customer.customer_code', read_only=True)
-    payment_method_name = serializers.CharField(source='payment_method.name', read_only=True)
-    created_by_name = serializers.CharField(source='created_by.get_full_name', read_only=True)
-    invoice_number = serializers.CharField(source='invoice.invoice_number', read_only=True)
+    """
+    Serializer for Payment model - Returns strings instead of IDs for frontend compatibility
+    """
+    # OVERRIDE: Return strings instead of IDs to satisfy frontend formatting
+    customer = serializers.CharField(source='customer.full_name', read_only=True)
+    payment_method = serializers.CharField(source='payment_method.name', read_only=True)
+    invoice = serializers.CharField(source='invoice.invoice_number', read_only=True)
     
-    # Add M-Pesa transaction details
-    mpesa_transaction_id = serializers.CharField(
-        source='mpesa_transaction.transaction_id', 
-        read_only=True
-    )
-    mpesa_transaction_status = serializers.CharField(
-        source='mpesa_transaction.status', 
-        read_only=True
-    )
+    # Keep these for extra detail if needed
+    customer_code = serializers.CharField(source='customer.customer_code', read_only=True)
+    created_by_name = serializers.CharField(source='created_by.get_full_name', read_only=True)
+    
+    # Add M-Pesa transaction details as strings
+    mpesa_receipt = serializers.CharField(read_only=True)
+    transaction_id = serializers.CharField(read_only=True)
 
     class Meta:
         model = Payment
         fields = [
-            'id', 'payment_number', 'customer', 'customer_name', 'customer_code',
-            'invoice', 'invoice_number', 'amount', 'transaction_fee',
-            'net_amount', 'currency', 'payment_method', 'payment_method_name',
-            'payment_reference', 'transaction_id', 'mpesa_transaction', 'mpesa_transaction_id',
-            'mpesa_transaction_status', 'status', 'is_reconciled',
-            'payment_date', 'processed_at', 'reconciled_at', 'payer_name',
-            'payer_phone', 'payer_email', 'payer_id_number', 'bank_name',
-            'account_number', 'branch', 'cheque_number', 'mpesa_receipt',
-            'mpesa_phone', 'mpesa_name', 'notes', 'failure_reason',
-            'payhero_external_reference', 'raw_callback',
-            'created_by_name', 'created_at', 'updated_at'
-        ]
-        read_only_fields = [
-            'payment_number', 'net_amount', 'created_at', 'updated_at', 'payhero_external_reference', 
-            'raw_callback', 'mpesa_transaction', 'mpesa_transaction_id', 'mpesa_transaction_status'
+            'id', 'payment_number', 'customer', 'customer_code',
+            'invoice', 'amount', 'currency', 'payment_method', 
+            'status', 'transaction_id', 'mpesa_receipt', 
+            'payment_date', 'created_by_name', 'created_at'
         ]
 
 
@@ -340,6 +329,9 @@ class PaymentCreateSerializer(serializers.ModelSerializer):
 
 
 class PaymentDetailSerializer(PaymentSerializer):
+    """
+    Detailed serializer for single payment view - includes full related objects
+    """
     customer_details = CustomerSerializer(source='customer', read_only=True)
     invoice_details = InvoiceSerializer(source='invoice', read_only=True)
     
@@ -348,6 +340,11 @@ class PaymentDetailSerializer(PaymentSerializer):
         source='mpesa_transaction', 
         read_only=True
     )
+    
+    # Keep string versions for frontend display
+    customer = serializers.CharField(source='customer.full_name', read_only=True)
+    payment_method = serializers.CharField(source='payment_method.name', read_only=True)
+    invoice = serializers.CharField(source='invoice.invoice_number', read_only=True)
 
     class Meta(PaymentSerializer.Meta):
         fields = PaymentSerializer.Meta.fields + [
@@ -358,16 +355,17 @@ class PaymentDetailSerializer(PaymentSerializer):
 class PaymentListSerializer(serializers.ModelSerializer):
     """
     Simplified serializer for listing payments with essential fields only
+    All fields return strings for frontend compatibility
     """
-    customer_name = serializers.CharField(source='customer.full_name', read_only=True)
+    customer = serializers.CharField(source='customer.full_name', read_only=True)
     customer_code = serializers.CharField(source='customer.customer_code', read_only=True)
-    payment_method_name = serializers.CharField(source='payment_method.name', read_only=True)
+    payment_method = serializers.CharField(source='payment_method.name', read_only=True)
 
     class Meta:
         model = Payment
         fields = [
-            'id', 'payment_number', 'customer', 'customer_name', 'customer_code', 
-            'amount', 'payment_method', 'payment_method_name', 'status', 
+            'id', 'payment_number', 'customer', 'customer_code', 
+            'amount', 'payment_method', 'status', 
             'transaction_id', 'mpesa_receipt', 'payment_date', 'created_at'
         ]
 

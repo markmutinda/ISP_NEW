@@ -13,7 +13,7 @@ from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
 from django_filters.rest_framework import DjangoFilterBackend
-from django.db.models import Q, Sum, Count
+from django.db.models import Q, Sum, Count, F
 
 # Custom permissions
 from ..models.payment_models import Payment
@@ -70,13 +70,9 @@ class MpesaConfigurationViewSet(viewsets.ModelViewSet):
 
     def perform_create(self, serializer):
         """Create a new M-Pesa configuration for the current tenant"""
-        from ..models.payment_models import MpesaConfiguration
-        
-        user = self.request.user
-        
         serializer.save(
-            created_by=user,
-            schema_name=connection.schema_name
+            created_by=self.request.user,
+            schema_name=connection.schema_name  # Always use active connection
         )
 
     @action(detail=True, methods=['post'])
@@ -376,7 +372,7 @@ class PaymentMethodViewSet(viewsets.ModelViewSet):
     search_fields = ['name', 'code', 'description', 'channel_id']
 
     def get_queryset(self):
-        from ..models.payment_models import InvoiceItemPayment  # FIXED: Correct model name
+        from ..models.payment_models import InvoiceItemPayment
         
         user = self.request.user
         if user.is_superuser:
@@ -497,9 +493,10 @@ class PaymentViewSet(viewsets.ModelViewSet):
         user = self.request.user
         
         if user.is_superuser:
-            company_id = self.request.query_params.get('company_id')
-            if company_id:
-                return Payment.objects.filter(company_id=company_id)
+            # For superusers, optionally filter by schema_name
+            schema_name = self.request.query_params.get('schema_name')
+            if schema_name:
+                return Payment.objects.filter(schema_name=schema_name)
             return Payment.objects.all()
         
         queryset = Payment.objects.filter(schema_name=connection.schema_name)
@@ -529,11 +526,19 @@ class PaymentViewSet(viewsets.ModelViewSet):
     def mark_completed(self, request, pk=None):
         payment = self.get_object()
         if payment.mark_as_completed(request.user):
+            # Safely send SMS confirmation for the tenant
             try:
-                sms_service = SMSService(company=request.user.company)
-                sms_service.send_payment_confirmation(payment.customer, payment)
+                from apps.core.models import Company
+                # Find the company matching the current active tenant
+                current_company = Company.objects.filter(tenant__schema_name=connection.schema_name).first()
+                if current_company:
+                    sms_service = SMSService(company=current_company)
+                    sms_service.send_payment_confirmation(payment.customer, payment)
+                else:
+                    logger.warning(f"No company found for schema {connection.schema_name}, SMS not sent")
             except Exception as e:
                 logger.error(f"SMS sending failed: {str(e)}")
+            
             return Response({'status': 'success', 'message': 'Payment marked as completed'})
         return Response({'error': 'Cannot mark payment as completed'}, status=status.HTTP_400_BAD_REQUEST)
 
@@ -730,10 +735,16 @@ class PaymentViewSet(viewsets.ModelViewSet):
                         callback_data=callback_data
                     )
                     
-                    # Send SMS confirmation
+                    # Safely send SMS confirmation for the tenant
                     try:
-                        sms_service = SMSService(company=request.user.company if request.user.is_authenticated else None)
-                        sms_service.send_payment_confirmation(payment.customer, payment)
+                        from apps.core.models import Company
+                        # Find the company matching the current active tenant
+                        current_company = Company.objects.filter(tenant__schema_name=connection.schema_name).first()
+                        if current_company:
+                            sms_service = SMSService(company=current_company)
+                            sms_service.send_payment_confirmation(payment.customer, payment)
+                        else:
+                            logger.warning(f"No company found for schema {connection.schema_name}, SMS not sent")
                     except Exception as e:
                         logger.error(f"SMS sending failed: {str(e)}")
                     
@@ -942,28 +953,34 @@ class PaymentViewSet(viewsets.ModelViewSet):
             'payment_number': payment.payment_number
         })
 
-    # === Dashboard Stats ===
+    # === FIXED: Dashboard Stats with Proper Aliasing ===
     @action(detail=False, methods=['get'])
     def dashboard_stats(self, request):
-        """Get payment dashboard statistics"""
+        """Get payment dashboard statistics with flattened keys for the frontend"""
+        from django.db.models import F
         queryset = self.get_queryset()
         
         today = timezone.now().date()
         yesterday = today - timezone.timedelta(days=1)
+        thirty_days_ago = today - timezone.timedelta(days=30)
         
+        # Today's payments
         today_payments = queryset.filter(payment_date__date=today)
         today_count = today_payments.count()
-        today_amount = today_payments.aggregate(Sum('amount'))['amount__sum'] or Decimal('0')
+        today_amount = float(today_payments.aggregate(Sum('amount'))['amount__sum'] or 0)
         
+        # Yesterday's payments
         yesterday_payments = queryset.filter(payment_date__date=yesterday)
         yesterday_count = yesterday_payments.count()
-        yesterday_amount = yesterday_payments.aggregate(Sum('amount'))['amount__sum'] or Decimal('0')
+        yesterday_amount = float(yesterday_payments.aggregate(Sum('amount'))['amount__sum'] or 0)
         
+        # This month's payments
         month_start = today.replace(day=1)
         month_payments = queryset.filter(payment_date__date__gte=month_start)
         month_count = month_payments.count()
-        month_amount = month_payments.aggregate(Sum('amount'))['amount__sum'] or Decimal('0')
+        month_amount = float(month_payments.aggregate(Sum('amount'))['amount__sum'] or 0)
         
+        # Status distribution
         status_counts = {
             'PENDING': queryset.filter(status='PENDING').count(),
             'COMPLETED': queryset.filter(status='COMPLETED').count(),
@@ -971,25 +988,30 @@ class PaymentViewSet(viewsets.ModelViewSet):
             'REFUNDED': queryset.filter(status='REFUNDED').count(),
         }
         
-        method_distribution = queryset.values('payment_method__name').annotate(
+        # 1. Aliased Method Distribution
+        method_distribution = queryset.values(
+            name=F('payment_method__name')  # Alias payment_method__name to 'name'
+        ).annotate(
             count=Count('id'),
-            total=Sum('amount')
+            total=float(Sum('amount') or 0)
         ).order_by('-total')
         
-        thirty_days_ago = today - timezone.timedelta(days=30)
+        # 2. Aliased Top Payers
         top_payers = queryset.filter(
             payment_date__date__gte=thirty_days_ago,
             status='COMPLETED'
-        ).values(
-            'customer__customer_code', 
-            'customer__user__first_name', 
-            'customer__user__last_name'
         ).annotate(
-            total_paid=Sum('amount'),
+            customer_code=F('customer__customer_code'),
+            first_name=F('customer__user__first_name'),
+            last_name=F('customer__user__last_name')
+        ).values(
+            'customer_code', 'first_name', 'last_name'
+        ).annotate(
+            total_paid=float(Sum('amount') or 0),
             payment_count=Count('id')
         ).order_by('-total_paid')[:10]
         
-        # Add M-Pesa specific stats
+        # M-Pesa stats
         mpesa_stats = self.get_mpesa_stats(queryset)
         
         stats = {
@@ -1020,12 +1042,12 @@ class PaymentViewSet(viewsets.ModelViewSet):
             total_transactions=Count('id'),
             successful=Count('id', filter=Q(status='COMPLETED')),
             failed=Count('id', filter=Q(status='FAILED')),
-            total_amount=Sum('amount', filter=Q(status='COMPLETED'))
+            total_amount=float(Sum('amount', filter=Q(status='COMPLETED')) or 0)
         )
         
         return {
             'total_mpesa_payments': mpesa_payments.count(),
-            'mpesa_amount': mpesa_payments.aggregate(Sum('amount'))['amount__sum'] or Decimal('0'),
+            'mpesa_amount': float(mpesa_payments.aggregate(Sum('amount'))['amount__sum'] or 0),
             'transaction_stats': mpesa_txn_stats
         }
 
@@ -1049,9 +1071,10 @@ class ReceiptViewSet(viewsets.ModelViewSet):
         user = self.request.user
         
         if user.is_superuser:
-            company_id = self.request.query_params.get('company_id')
-            if company_id:
-                return Receipt.objects.filter(company_id=company_id)
+            # For superusers, optionally filter by schema_name
+            schema_name = self.request.query_params.get('schema_name')
+            if schema_name:
+                return Receipt.objects.filter(schema_name=schema_name)
             return Receipt.objects.all()
         
         queryset = Receipt.objects.filter(schema_name=connection.schema_name)
@@ -1092,14 +1115,23 @@ class ReceiptViewSet(viewsets.ModelViewSet):
         
         if share_method == 'sms':
             try:
-                sms_service = SMSService(company=request.user.company)
-                message = f"Receipt {receipt.receipt_number} for KES {receipt.amount} issued. Thank you!"
-                result = sms_service.send_single_sms(
-                    receipt.customer.user.phone_number, message
-                )
-                if result.get('success'):
-                    return Response({'status': 'success', 'message': 'Receipt sent via SMS'})
-                return Response({'error': 'Failed to send SMS'}, status=status.HTTP_400_BAD_REQUEST)
+                from apps.core.models import Company
+                # Find the company matching the current active tenant
+                current_company = Company.objects.filter(tenant__schema_name=connection.schema_name).first()
+                
+                if current_company and receipt.customer and receipt.customer.user and receipt.customer.user.phone_number:
+                    sms_service = SMSService(company=current_company)
+                    message = f"Receipt {receipt.receipt_number} for KES {receipt.amount} issued. Thank you!"
+                    result = sms_service.send_single_sms(
+                        receipt.customer.user.phone_number, message
+                    )
+                    if result.get('success'):
+                        return Response({'status': 'success', 'message': 'Receipt sent via SMS'})
+                    return Response({'error': 'Failed to send SMS'}, status=status.HTTP_400_BAD_REQUEST)
+                else:
+                    logger.warning(f"Cannot send SMS: missing company or customer phone for schema {connection.schema_name}")
+                    return Response({'error': 'Unable to send SMS - missing recipient or company configuration'}, 
+                                   status=status.HTTP_400_BAD_REQUEST)
             except Exception as e:
                 logger.error(f"SMS sending error: {str(e)}")
                 return Response(
