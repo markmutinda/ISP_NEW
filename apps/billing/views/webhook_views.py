@@ -414,8 +414,9 @@ class PayHeroBillingWebhookView(PayHeroWebhookMixin, APIView):
 
 class MpesaC2BWebhookView(APIView):
     """
-    Receives Customer-to-Business (C2B) Paybill payments from Safaricom.
-    This is where the automation happens (Money -> Active Internet).
+    Production-Grade M-Pesa C2B Webhook.
+    Correctly handles schema switching for multi-tenant environments.
+    All database operations happen inside the tenant schema context.
     
     POST /api/v1/webhooks/mpesa/c2b-callback/
     
@@ -452,20 +453,17 @@ class MpesaC2BWebhookView(APIView):
         except Exception as e:
             logger.error(f"Failed to reactivate service {service.id} on MikroTik: {str(e)}")
     
-    @transaction.atomic
     def post(self, request, *args, **kwargs):
         data = request.data
-        
-        # Extract key fields from Safaricom callback
         trans_id = data.get('TransID')
         shortcode = data.get('BusinessShortCode')
         bill_ref = data.get('BillRefNumber', '').strip().upper()
         amount = Decimal(str(data.get('TransAmount', 0)))
         msisdn = data.get('MSISDN', '')
 
-        # PII Sanitization: Log only the last 4 digits of phone
+        # Mask PII in logs
         safe_phone = f"****{msisdn[-4:]}" if msisdn and len(msisdn) >= 4 else "Unknown"
-        logger.info(f"C2B Received: {trans_id} | Shortcode: {shortcode} | Ref: {bill_ref} | Phone: {safe_phone}")
+        logger.info(f"C2B Webhook: ID={trans_id} | Ref={bill_ref} | SC={shortcode} | Phone={safe_phone}")
 
         # Validate required fields
         if not trans_id:
@@ -483,50 +481,50 @@ class MpesaC2BWebhookView(APIView):
                 status=status.HTTP_200_OK
             )
 
-        target_tenant = None
-        service = None
-        config = None
+        # 1. FIND THE TENANT
+        # We need to find which ISP owns this shortcode and customer
+        target_tenant_schema = None
+        
+        # If we are on a public domain, loop through tenants to find a match
+        if connection.schema_name == 'public':
+            for tenant in Tenant.objects.exclude(schema_name='public'):
+                with schema_context(tenant.schema_name):
+                    try:
+                        # Check if this ISP owns the shortcode
+                        config_exists = MpesaConfiguration.objects.filter(
+                            business_shortcode=shortcode,
+                            is_active=True
+                        ).exists()
+                        
+                        if config_exists:
+                            # Check if the customer exists in this ISP
+                            service_exists = ServiceConnection.objects.filter(
+                                models.Q(billing_account_number__iexact=bill_ref) |
+                                models.Q(mpesa_account_number__iexact=bill_ref) |
+                                models.Q(paybill_account_number__iexact=bill_ref)
+                            ).exists()
+                            
+                            if service_exists:
+                                target_tenant_schema = tenant.schema_name
+                                logger.info(f"Found matching tenant: {tenant.schema_name}")
+                                break
+                    except Exception as e:
+                        # Skip if the table doesn't exist in this specific schema yet
+                        logger.debug(f"Error checking tenant {tenant.schema_name}: {str(e)}")
+                        continue
+        else:
+            # We are already on a tenant domain (e.g. pink4.netily.co.ke)
+            target_tenant_schema = connection.schema_name
 
-        # 1. SCHEMA-SAFE SEARCH
-        # We iterate through all tenants and switch context to their schema
-        # before attempting to query the MpesaConfiguration table.
-        for tenant in Tenant.objects.exclude(schema_name='public'):
-            with schema_context(tenant.schema_name):
-                try:
-                    # Check if this ISP owns this shortcode
-                    config = MpesaConfiguration.objects.filter(
-                        business_shortcode=shortcode, 
-                        is_active=True
-                    ).first()
-
-                    if config:
-                        # Now look for the customer in this ISP's database
-                        service = ServiceConnection.objects.filter(
-                            models.Q(billing_account_number__iexact=bill_ref) |
-                            models.Q(mpesa_account_number__iexact=bill_ref) |
-                            models.Q(paybill_account_number__iexact=bill_ref)
-                        ).select_related('customer').first()
-
-                        if service:
-                            target_tenant = tenant
-                            logger.info(f"Found service in tenant: {tenant.schema_name}")
-                            break  # Found both ISP and Customer!
-                except Exception as e:
-                    # Skip if the table doesn't exist in this specific schema yet
-                    logger.debug(f"Error checking tenant {tenant.schema_name}: {str(e)}")
-                    continue
-
-        if not service or not target_tenant or not config:
+        if not target_tenant_schema:
             logger.warning(
-                f"Unknown Account {bill_ref} or Shortcode {shortcode} - "
+                f"Routing Failed: No tenant found for Ref {bill_ref} on SC {shortcode} - "
                 f"Payment {trans_id} requires manual audit."
             )
-            # Create a transaction record in the public schema for manual reconciliation
+            # Create a minimal record in public schema for audit
             with schema_context(get_public_schema_name()):
-                # We need a config to link the transaction, but we don't have one
-                # So we'll create a minimal record in public schema for audit
                 MpesaTransaction.objects.create(
-                    configuration=None,  # Will need manual linking
+                    configuration=None,
                     schema_name=get_public_schema_name(),
                     merchant_request_id=f"MANUAL-{trans_id}",
                     checkout_request_id=f"MANUAL-{trans_id}",
@@ -536,7 +534,7 @@ class MpesaC2BWebhookView(APIView):
                     account_reference=bill_ref,
                     status='PENDING',
                     result_code=999,
-                    result_desc="Unknown account/shortcode - manual reconciliation required",
+                    result_desc="No tenant found - manual reconciliation required",
                     callback_data=data
                 )
             return Response(
@@ -544,15 +542,57 @@ class MpesaC2BWebhookView(APIView):
                 status=status.HTTP_200_OK
             )
 
-        # 2. PROCESS PAYMENT (In the correct Tenant Context)
-        with schema_context(target_tenant.schema_name):
+        # 2. PERFORM ALL DB OPERATIONS INSIDE THE TENANT SCHEMA
+        with schema_context(target_tenant_schema):
             try:
                 with transaction.atomic():
-                    # Concurrency Guard - DB-level idempotency
+                    # Get the M-Pesa configuration for this tenant
+                    config = MpesaConfiguration.objects.filter(
+                        business_shortcode=shortcode,
+                        is_active=True
+                    ).first()
+                    
+                    if not config:
+                        logger.error(f"Active M-Pesa configuration not found for shortcode: {shortcode}")
+                        return Response(
+                            {"ResultCode": 1, "ResultDesc": "Configuration Error"},
+                            status=status.HTTP_200_OK
+                        )
+                    
+                    # Check for existing service connection record
+                    service = ServiceConnection.objects.filter(
+                        models.Q(billing_account_number__iexact=bill_ref) |
+                        models.Q(mpesa_account_number__iexact=bill_ref) |
+                        models.Q(paybill_account_number__iexact=bill_ref)
+                    ).select_related('customer').first()
+
+                    if not service:
+                        logger.warning(f"Service not found for account {bill_ref} in tenant {target_tenant_schema}")
+                        # Create a transaction record for manual reconciliation
+                        MpesaTransaction.objects.create(
+                            configuration=config,
+                            schema_name=target_tenant_schema,
+                            merchant_request_id=f"MANUAL-{trans_id}",
+                            checkout_request_id=f"MANUAL-{trans_id}",
+                            transaction_id=trans_id,
+                            amount=amount,
+                            phone_number=msisdn,
+                            account_reference=bill_ref,
+                            status='PENDING',
+                            result_code=999,
+                            result_desc="Service not found - manual reconciliation required",
+                            callback_data=data
+                        )
+                        return Response(
+                            {"ResultCode": 0, "ResultDesc": "Account Missing"},
+                            status=status.HTTP_200_OK
+                        )
+
+                    # A. Create MpesaTransaction Record (Idempotency check)
                     try:
                         mpesa_txn = MpesaTransaction.objects.create(
                             configuration=config,
-                            schema_name=target_tenant.schema_name,
+                            schema_name=target_tenant_schema,
                             merchant_request_id=f"C2B-{trans_id}",
                             checkout_request_id=f"C2B-{trans_id}",
                             transaction_id=trans_id,
@@ -567,35 +607,35 @@ class MpesaC2BWebhookView(APIView):
                             callback_received_at=timezone.now()
                         )
                     except IntegrityError:
-                        logger.info(f"Duplicate M-Pesa callback received for transaction: {trans_id}")
+                        logger.info(f"Duplicate callback ignored: {trans_id}")
                         return Response(
                             {"ResultCode": 0, "ResultDesc": "Duplicate"},
                             status=status.HTTP_200_OK
                         )
 
-                    # Find the Paybill payment method for this tenant
-                    payment_method, _ = InvoiceItemPayment.objects.get_or_create(
+                    # B. Find or create the Paybill payment method
+                    method, _ = InvoiceItemPayment.objects.get_or_create(
                         method_type='MPESA_PAYBILL',
                         defaults={
                             'name': 'M-Pesa Paybill',
                             'code': 'MPESA_PAYBILL',
                             'is_active': True,
-                            'schema_name': target_tenant.schema_name
+                            'schema_name': target_tenant_schema
                         }
                     )
 
-                    # Record Payment
+                    # C. Record the Payment
                     payment = Payment.objects.create(
                         customer=service.customer,
                         amount=amount,
-                        payment_method=payment_method,
+                        payment_method=method,
                         status='COMPLETED',
                         transaction_id=trans_id,
                         mpesa_receipt=trans_id,
                         mpesa_phone=msisdn,
                         payer_phone=msisdn,
                         payment_date=timezone.now(),
-                        schema_name=target_tenant.schema_name,
+                        schema_name=target_tenant_schema,
                         mpesa_transaction=mpesa_txn
                     )
 
@@ -603,7 +643,7 @@ class MpesaC2BWebhookView(APIView):
                     mpesa_txn.payment = payment
                     mpesa_txn.save()
 
-                    # Apply payment to customer's account
+                    # D. Apply payment to customer's account
                     customer = service.customer
                     
                     # Check if there's an outstanding invoice for this amount
@@ -620,7 +660,7 @@ class MpesaC2BWebhookView(APIView):
                         # Apply to the oldest pending invoice
                         payment.invoice = pending_invoice
                         payment.save()
-                        pending_invoice.add_payment(amount, payment_method)
+                        pending_invoice.add_payment(amount, method)
                         logger.info(f"Payment {trans_id} applied to invoice {pending_invoice.invoice_number}")
                     else:
                         # Add to customer balance for future invoices
@@ -628,19 +668,25 @@ class MpesaC2BWebhookView(APIView):
                         customer.save(update_fields=['balance'])
                         logger.info(f"Payment {trans_id} added to customer balance")
 
-                    # 3. AUTO-ACTIVATION
-                    if service.status == 'SUSPENDED' and amount >= Decimal(str(service.monthly_price)):
+                    # E. Auto-Reactivation
+                    # Ensure both values are Decimals for safe comparison
+                    monthly_price = Decimal(str(service.monthly_price)) if service.monthly_price else Decimal('0')
+                    
+                    if service.status == 'SUSPENDED' and amount >= monthly_price:
                         service.activate_service()
                         # Trigger MikroTik reactivation
                         self.trigger_mikrotik_reactivation(service)
-                        logger.info(f"Service {bill_ref} for {customer.full_name} reactivated automatically.")
+                        logger.info(
+                            f"SUCCESS: Service {bill_ref} reactivated for {customer.full_name} "
+                            f"- Payment: {trans_id}"
+                        )
                     elif service.status == 'SUSPENDED':
                         logger.info(
-                            f"Payment amount {amount} less than monthly price {service.monthly_price}. "
+                            f"Payment amount {amount} less than monthly price {monthly_price}. "
                             f"Service remains suspended for {customer.full_name}"
                         )
                     
-                    # 4. Send confirmation SMS (optional)
+                    # F. Send confirmation SMS (optional)
                     # TODO: Implement SMS notification
                     # from apps.notifications.services import send_sms
                     # send_sms(
@@ -655,7 +701,7 @@ class MpesaC2BWebhookView(APIView):
                     )
                         
             except Exception as e:
-                logger.error(f"Internal processing failed for {trans_id}: {str(e)}", exc_info=True)
+                logger.error(f"Critical Webhook Failure for {trans_id}: {str(e)}", exc_info=True)
                 return Response(
                     {"ResultCode": 1, "ResultDesc": "Internal Error"},
                     status=status.HTTP_200_OK
