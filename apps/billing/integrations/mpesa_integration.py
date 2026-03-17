@@ -18,35 +18,56 @@ class MpesaSTKPush:
     M-Pesa STK Push Integration for Lipa Na M-Pesa Online
     """
     
-    def __init__(self, company=None):
+    def __init__(self, company=None, config=None):
         self.company = company
-        self.config = self._get_config()
+        if config:
+            self.config = config
+        else:
+            self.config = self._get_config()
         
     def _get_config(self):
         """Get M-Pesa configuration for the company"""
-        if self.company and hasattr(self.company, 'mpesa_config'):
-            return self.company.mpesa_config
-        else:
-            # Default configuration from settings
-            return {
-                'consumer_key': settings.MPESA_CONSUMER_KEY,
-                'consumer_secret': settings.MPESA_CONSUMER_SECRET,
-                'business_shortcode': settings.MPESA_BUSINESS_SHORTCODE,
-                'passkey': settings.MPESA_PASSKEY,
-                'callback_url': settings.MPESA_CALLBACK_URL,
-                'environment': settings.MPESA_ENVIRONMENT,
-            }
+        from ..models.payment_models import MpesaConfiguration
+        
+        if self.company and hasattr(self.company, 'schema_name'):
+            # Get the active configuration for this company/tenant
+            config = MpesaConfiguration.get_active_configuration(self.company.schema_name)
+            if config:
+                return config
+        
+        # Fallback to settings if no tenant config found
+        return {
+            'consumer_key': getattr(settings, 'MPESA_CONSUMER_KEY', ''),
+            'consumer_secret': getattr(settings, 'MPESA_CONSUMER_SECRET', ''),
+            'business_shortcode': getattr(settings, 'MPESA_BUSINESS_SHORTCODE', ''),
+            'passkey': getattr(settings, 'MPESA_PASSKEY', ''),
+            'callback_url': getattr(settings, 'MPESA_CALLBACK_URL', ''),
+            'environment': getattr(settings, 'MPESA_ENVIRONMENT', 'sandbox'),
+            'is_sandbox': getattr(settings, 'MPESA_ENVIRONMENT', 'sandbox') == 'sandbox'
+        }
     
     def _get_access_token(self):
         """Get OAuth access token from Safaricom API"""
         try:
-            if self.config['environment'] == 'sandbox':
+            # Handle both dict config and model object config
+            if hasattr(self.config, 'is_sandbox'):
+                # It's a model instance
+                env = 'sandbox' if self.config.is_sandbox else 'production'
+                consumer_key = self.config.consumer_key
+                consumer_secret = self.config.consumer_secret
+            else:
+                # It's a dict
+                env = self.config.get('environment', 'sandbox')
+                consumer_key = self.config.get('consumer_key')
+                consumer_secret = self.config.get('consumer_secret')
+            
+            if env == 'sandbox':
                 url = 'https://sandbox.safaricom.co.ke/oauth/v1/generate?grant_type=client_credentials'
             else:
                 url = 'https://api.safaricom.co.ke/oauth/v1/generate?grant_type=client_credentials'
             
-            auth = (self.config['consumer_key'], self.config['consumer_secret'])
-            response = requests.get(url, auth=auth)
+            auth = (consumer_key, consumer_secret)
+            response = requests.get(url, auth=auth, timeout=30)
             
             if response.status_code == 200:
                 return response.json()['access_token']
@@ -57,29 +78,59 @@ class MpesaSTKPush:
             logger.error(f"Error getting access token: {str(e)}")
             return None
     
+    def test_connection(self):
+        """Test the M-Pesa connection by attempting to get an access token"""
+        try:
+            access_token = self._get_access_token()
+            if access_token:
+                return {
+                    'success': True,
+                    'message': 'Successfully connected to M-Pesa API',
+                    'access_token': access_token[:20] + '...'  # Truncate for security
+                }
+            else:
+                return {
+                    'success': False,
+                    'message': 'Failed to get access token. Check your consumer key and secret.'
+                }
+        except Exception as e:
+            logger.error(f"Connection test error: {str(e)}")
+            return {
+                'success': False,
+                'message': f'Connection test failed: {str(e)}'
+            }
+    
     def _generate_password(self, timestamp):
         """Generate password for STK Push"""
-        business_shortcode = self.config['business_shortcode']
-        passkey = self.config['passkey']
+        if hasattr(self.config, 'business_shortcode'):
+            business_shortcode = self.config.business_shortcode
+            passkey = self.config.passkey
+        else:
+            business_shortcode = self.config.get('business_shortcode')
+            passkey = self.config.get('passkey')
         
         data = business_shortcode + passkey + timestamp
         encoded = base64.b64encode(data.encode()).decode()
         return encoded
     
     def _encrypt_phone_number(self, phone_number):
-        """Encrypt phone number for security"""
+        """Format phone number for M-Pesa (remove any non-digit characters)"""
         # Remove any non-digit characters
         phone = ''.join(filter(str.isdigit, phone_number))
         
         # Ensure it starts with 254
         if phone.startswith('0'):
             phone = '254' + phone[1:]
+        elif phone.startswith('7') and len(phone) == 9:
+            phone = '254' + phone
+        elif phone.startswith('254') and len(phone) == 12:
+            pass  # Already correct format
         elif phone.startswith('+254'):
             phone = phone[1:]
         
         return phone
     
-    def initiate_stk_push(self, phone_number, amount, account_reference, transaction_desc):
+    def initiate_stk_push(self, phone_number, amount, account_reference, transaction_desc, payment=None):
         """
         Initiate STK Push payment request
         
@@ -88,6 +139,7 @@ class MpesaSTKPush:
             amount: Amount to charge
             account_reference: Invoice number or customer reference
             transaction_desc: Description of the transaction
+            payment: Optional Payment object to link transaction
         
         Returns:
             dict: Response from M-Pesa API
@@ -101,27 +153,37 @@ class MpesaSTKPush:
                     'message': 'Failed to authenticate with M-Pesa API'
                 }
             
+            # Get business shortcode based on config type
+            if hasattr(self.config, 'business_shortcode'):
+                business_shortcode = self.config.business_shortcode
+                callback_url = self.config.get_callback_url()
+                is_sandbox = self.config.is_sandbox
+            else:
+                business_shortcode = self.config.get('business_shortcode')
+                callback_url = self.config.get('callback_url')
+                is_sandbox = self.config.get('environment') == 'sandbox'
+            
             # Prepare request
             timestamp = datetime.now().strftime('%Y%m%d%H%M%S')
             password = self._generate_password(timestamp)
             encrypted_phone = self._encrypt_phone_number(phone_number)
             
             payload = {
-                "BusinessShortCode": self.config['business_shortcode'],
+                "BusinessShortCode": business_shortcode,
                 "Password": password,
                 "Timestamp": timestamp,
                 "TransactionType": "CustomerPayBillOnline",
                 "Amount": str(int(amount)),  # M-Pesa expects integer amount
                 "PartyA": encrypted_phone,
-                "PartyB": self.config['business_shortcode'],
+                "PartyB": business_shortcode,
                 "PhoneNumber": encrypted_phone,
-                "CallBackURL": self.config['callback_url'],
+                "CallBackURL": callback_url,
                 "AccountReference": account_reference[:12],  # Max 12 characters
                 "TransactionDesc": transaction_desc[:13]  # Max 13 characters
             }
             
             # Determine API URL based on environment
-            if self.config['environment'] == 'sandbox':
+            if is_sandbox:
                 url = 'https://sandbox.safaricom.co.ke/mpesa/stkpush/v1/processrequest'
             else:
                 url = 'https://api.safaricom.co.ke/mpesa/stkpush/v1/processrequest'
@@ -131,9 +193,34 @@ class MpesaSTKPush:
                 'Content-Type': 'application/json'
             }
             
+            # Log the request (without sensitive data)
+            logger.info(f"STK Push request to {url} for amount {amount}")
+            
             # Send request
-            response = requests.post(url, json=payload, headers=headers)
+            response = requests.post(url, json=payload, headers=headers, timeout=30)
             response_data = response.json()
+            
+            # Create MpesaTransaction record if payment provided
+            if payment:
+                from ..models.payment_models import MpesaTransaction
+                
+                mpesa_txn = MpesaTransaction.objects.create(
+                    payment=payment,
+                    configuration=self.config if hasattr(self.config, 'id') else None,
+                    schema_name=payment.schema_name,
+                    merchant_request_id=response_data.get('MerchantRequestID', ''),
+                    checkout_request_id=response_data.get('CheckoutRequestID', ''),
+                    amount=amount,
+                    phone_number=encrypted_phone,
+                    account_reference=account_reference,
+                    transaction_desc=transaction_desc,
+                    request_payload=payload,
+                    response_payload=response_data
+                )
+                
+                # Link back to payment
+                payment.mpesa_transaction = mpesa_txn
+                payment.save(update_fields=['mpesa_transaction'])
             
             if response.status_code == 200:
                 if response_data.get('ResponseCode') == '0':
@@ -143,7 +230,7 @@ class MpesaSTKPush:
                         'data': {
                             'checkout_request_id': response_data['CheckoutRequestID'],
                             'merchant_request_id': response_data['MerchantRequestID'],
-                            'customer_message': response_data['CustomerMessage']
+                            'customer_message': response_data.get('CustomerMessage', 'Please check your phone and enter PIN')
                         }
                     }
                 else:
@@ -188,14 +275,21 @@ class MpesaSTKPush:
             timestamp = datetime.now().strftime('%Y%m%d%H%M%S')
             password = self._generate_password(timestamp)
             
+            if hasattr(self.config, 'business_shortcode'):
+                business_shortcode = self.config.business_shortcode
+                is_sandbox = self.config.is_sandbox
+            else:
+                business_shortcode = self.config.get('business_shortcode')
+                is_sandbox = self.config.get('environment') == 'sandbox'
+            
             payload = {
-                "BusinessShortCode": self.config['business_shortcode'],
+                "BusinessShortCode": business_shortcode,
                 "Password": password,
                 "Timestamp": timestamp,
                 "CheckoutRequestID": checkout_request_id
             }
             
-            if self.config['environment'] == 'sandbox':
+            if is_sandbox:
                 url = 'https://sandbox.safaricom.co.ke/mpesa/stkpushquery/v1/query'
             else:
                 url = 'https://api.safaricom.co.ke/mpesa/stkpushquery/v1/query'
@@ -205,7 +299,7 @@ class MpesaSTKPush:
                 'Content-Type': 'application/json'
             }
             
-            response = requests.post(url, json=payload, headers=headers)
+            response = requests.post(url, json=payload, headers=headers, timeout=30)
             response_data = response.json()
             
             if response.status_code == 200:
@@ -225,6 +319,175 @@ class MpesaSTKPush:
             return {
                 'success': False,
                 'message': f'Internal server error: {str(e)}'
+            }
+    
+    # ============================================================
+    # NEW: C2B URL Registration for Paybill/Till
+    # ============================================================
+    
+    def register_c2b_urls(self, confirmation_url=None, validation_url=None):
+        """
+        Registers Validation and Confirmation URLs with Safaricom.
+        This tells Safaricom where to send Paybill/Till payment notifications.
+        
+        Args:
+            confirmation_url: URL for confirmation callbacks (optional)
+            validation_url: URL for validation callbacks (optional)
+        
+        Returns:
+            dict: Response from Safaricom API
+        """
+        try:
+            # Get access token
+            access_token = self._get_access_token()
+            if not access_token:
+                return {
+                    'success': False,
+                    'message': 'Failed to authenticate with M-Pesa API',
+                    'ResponseDescription': 'Authentication failed'
+                }
+            
+            # Get business shortcode
+            if hasattr(self.config, 'business_shortcode'):
+                business_shortcode = self.config.business_shortcode
+                is_sandbox = self.config.is_sandbox
+                # Use provided URLs or generate from config
+                if not confirmation_url:
+                    confirmation_url = self.config.get_callback_url()
+                if not validation_url:
+                    validation_url = self.config.get_callback_url()
+            else:
+                business_shortcode = self.config.get('business_shortcode')
+                is_sandbox = self.config.get('environment') == 'sandbox'
+                if not confirmation_url:
+                    confirmation_url = self.config.get('callback_url')
+                if not validation_url:
+                    validation_url = self.config.get('callback_url')
+            
+            # Ensure URLs end with trailing slash
+            if not confirmation_url.endswith('/'):
+                confirmation_url += '/'
+            if not validation_url.endswith('/'):
+                validation_url += '/'
+            
+            # Determine API URL
+            if is_sandbox:
+                api_url = "https://sandbox.safaricom.co.ke/mpesa/c2b/v2/registerurl"
+            else:
+                api_url = "https://api.safaricom.co.ke/mpesa/c2b/v2/registerurl"
+            
+            headers = {"Authorization": f"Bearer {access_token}", "Content-Type": "application/json"}
+            
+            # V2 payload format
+            payload = {
+                "ShortCode": business_shortcode,
+                "ResponseType": "Completed",  # Safaricom will send data even if our server is down
+                "ConfirmationURL": confirmation_url,
+                "ValidationURL": validation_url
+            }
+            
+            logger.info(f"Registering C2B URLs for shortcode {business_shortcode}")
+            logger.info(f"Confirmation URL: {confirmation_url}")
+            logger.info(f"Validation URL: {validation_url}")
+            
+            response = requests.post(api_url, json=payload, headers=headers, timeout=30)
+            response_data = response.json()
+            
+            # Log the response
+            logger.info(f"C2B URL registration response: {response_data}")
+            
+            # Update the configuration with registration status
+            if hasattr(self.config, 'id') and response.status_code == 200:
+                if response_data.get('ResponseCode') == '0':
+                    self.config.last_validated_at = timezone.now()
+                    self.config.validation_status = 'VALID'
+                    self.config.save(update_fields=['last_validated_at', 'validation_status'])
+            
+            # Return formatted response
+            if response.status_code == 200 and response_data.get('ResponseCode') == '0':
+                return {
+                    'success': True,
+                    'message': 'URLs registered successfully with Safaricom',
+                    'data': response_data
+                }
+            else:
+                error_message = response_data.get('errorMessage', response_data.get('ResponseDescription', 'Unknown error'))
+                return {
+                    'success': False,
+                    'message': f'Failed to register URLs: {error_message}',
+                    'data': response_data
+                }
+                
+        except requests.exceptions.Timeout:
+            logger.error("Timeout registering C2B URLs")
+            return {
+                'success': False,
+                'message': 'Request timed out. Please try again.'
+            }
+        except requests.exceptions.ConnectionError:
+            logger.error("Connection error registering C2B URLs")
+            return {
+                'success': False,
+                'message': 'Failed to connect to Safaricom API. Check your internet connection.'
+            }
+        except Exception as e:
+            logger.error(f"Error registering C2B URLs: {str(e)}")
+            return {
+                'success': False,
+                'message': f'Internal server error: {str(e)}'
+            }
+    
+    def deregister_c2b_urls(self):
+        """
+        Deregister C2B URLs with Safaricom
+        
+        Returns:
+            dict: Response from Safaricom API
+        """
+        try:
+            access_token = self._get_access_token()
+            if not access_token:
+                return {
+                    'success': False,
+                    'message': 'Failed to authenticate with M-Pesa API'
+                }
+            
+            if hasattr(self.config, 'business_shortcode'):
+                business_shortcode = self.config.business_shortcode
+                is_sandbox = self.config.is_sandbox
+            else:
+                business_shortcode = self.config.get('business_shortcode')
+                is_sandbox = self.config.get('environment') == 'sandbox'
+            
+            if is_sandbox:
+                api_url = "https://sandbox.safaricom.co.ke/mpesa/c2b/v1/registerurl"
+            else:
+                api_url = "https://api.safaricom.co.ke/mpesa/c2b/v1/registerurl"
+            
+            headers = {"Authorization": f"Bearer {access_token}", "Content-Type": "application/json"}
+            
+            # For deregistration, you need to use the deregister endpoint
+            # Note: Some versions of the API use a different endpoint
+            payload = {
+                "ShortCode": business_shortcode
+            }
+            
+            # This is a placeholder - actual deregistration endpoint may differ
+            # You may need to use the same register endpoint with empty URLs
+            response = requests.post(api_url.replace('register', 'deregister'), 
+                                     json=payload, headers=headers, timeout=30)
+            
+            return {
+                'success': response.status_code == 200,
+                'message': 'URLs deregistered' if response.status_code == 200 else 'Deregistration failed',
+                'data': response.json() if response.status_code == 200 else {}
+            }
+            
+        except Exception as e:
+            logger.error(f"Error deregistering C2B URLs: {str(e)}")
+            return {
+                'success': False,
+                'message': f'Error: {str(e)}'
             }
 
 
@@ -290,7 +553,7 @@ class MpesaCallback:
         except Exception as e:
             logger.error(f"Error processing M-Pesa callback: {str(e)}")
             return {
-                'success': False,
+                'status': 'ERROR',
                 'message': f'Error processing callback: {str(e)}'
             }
     

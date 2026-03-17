@@ -28,6 +28,7 @@ from .views.webhook_views import (
     PayHeroSubscriptionWebhookView,
     PayHeroHotspotWebhookView,
     PayHeroBillingWebhookView,
+    MpesaC2BWebhookView,  # ADDED: Import the new M-Pesa C2B webhook view
 )
 
 router = DefaultRouter()
@@ -56,7 +57,11 @@ urlpatterns = [
     # M-Pesa Endpoints
     # ==========================
     # Main callback endpoint for Safaricom M-Pesa API
-    path('mpesa/callback/', PaymentViewSet.as_view({'post': 'mpesa_callback'}), name='mpesa-callback'),
+    # UPDATED: Changed from 'mpesa/callback/' to 'mpesa/c2b-callback/' to match Safaricom expectations
+    path('mpesa/c2b-callback/', MpesaC2BWebhookView.as_view(), name='mpesa-c2b-callback'),
+    
+    # Keep the old callback for backward compatibility if needed
+    path('mpesa/callback/', PaymentViewSet.as_view({'post': 'mpesa_callback'}), name='mpesa-callback-legacy'),
     
     # M-Pesa configuration test endpoint
     path('mpesa-config/<int:pk>/test/', 
@@ -182,7 +187,18 @@ webhook_urlpatterns = [
     path('billing/', PayHeroBillingWebhookView.as_view(), name='payhero-billing-webhook'),
 ]
 
+# ==========================
+# M-Pesa Webhook URLs (PUBLIC - no auth)
+# These receive callbacks from Safaricom
+# ==========================
+mpesa_webhook_urlpatterns = [
+    path('c2b-callback/', MpesaC2BWebhookView.as_view(), name='mpesa-c2b-callback'),
+]
+
 # Combine all URL patterns for easy inclusion in main urls.py
 hotspot_all_urlpatterns = hotspot_urlpatterns + hotspot_admin_urlpatterns
+
+# Combine all webhook URL patterns
+webhook_all_urlpatterns = webhook_urlpatterns + mpesa_webhook_urlpatterns
 
 app_name = 'billing'

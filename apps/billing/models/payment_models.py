@@ -202,22 +202,30 @@ class MpesaConfiguration(AuditMixin):
     def get_callback_url(self, request=None):
         """
         Generate the callback URL for this configuration.
-        Uses tenant-specific override if provided, otherwise generates dynamically.
+        Uses tenant-specific override if provided, otherwise generates dynamically
+        using subdomain-based URL structure for better M-Pesa compatibility.
         """
         if self.callback_url:
             return self.callback_url
         
-        # Generate dynamic callback URL
-        base_url = getattr(settings, 'BASE_URL', 'https://example.com')
-        return f"{base_url}/api/billing/mpesa/callback/{self.schema_name}/"
+        # Extract subdomain from schema (tenant_pink4 -> pink4)
+        # Remove 'tenant_' prefix if it exists to get the subdomain
+        sub_domain = self.schema_name.replace('tenant_', '')
+        
+        # Use subdomain-based URL structure for better M-Pesa API compatibility
+        # This avoids path-based parameters that can cause issues with callbacks
+        return f"https://{sub_domain}.netily.co.ke/api/v1/billing/mpesa/c2b-callback/"
     
     def get_timeout_url(self, request=None):
         """Generate the timeout URL for this configuration"""
         if self.timeout_url:
             return self.timeout_url
         
-        base_url = getattr(settings, 'BASE_URL', 'https://example.com')
-        return f"{base_url}/api/billing/mpesa/timeout/{self.schema_name}/"
+        # Extract subdomain from schema (tenant_pink4 -> pink4)
+        sub_domain = self.schema_name.replace('tenant_', '')
+        
+        # Use subdomain-based URL structure for timeout URL as well
+        return f"https://{sub_domain}.netily.co.ke/api/v1/billing/mpesa/timeout/"
 
 
 class MpesaTransaction(models.Model):

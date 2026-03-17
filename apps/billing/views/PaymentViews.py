@@ -150,6 +150,70 @@ class MpesaConfigurationViewSet(viewsets.ModelViewSet):
                 'message': f'Test failed: {str(e)}'
             }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
+    # ============================================================
+    # NEW: Register URLs with Safaricom for C2B payments
+    # ============================================================
+    @action(detail=True, methods=['post'])
+    def register_urls(self, request, pk=None):
+        """
+        Triggers the Register URL API call to Safaricom for this configuration.
+        This tells Safaricom where to send payment notifications for Paybill/Till.
+        """
+        config = self.get_object()
+        
+        try:
+            # Initialize M-Pesa service with this configuration
+            from ..integrations.mpesa_integration import MpesaSTKPush
+            mpesa_service = MpesaSTKPush(config=config)
+            
+            # Get optional custom URLs from request
+            confirmation_url = request.data.get('confirmation_url')
+            validation_url = request.data.get('validation_url')
+            
+            # Register URLs with Safaricom
+            result = mpesa_service.register_c2b_urls(
+                confirmation_url=confirmation_url,
+                validation_url=validation_url
+            )
+            
+            # Check if registration was successful
+            if result.get('success', False):
+                # Update configuration with successful registration
+                config.last_validated_at = timezone.now()
+                config.validation_status = 'VALID'
+                config.validation_error = ''
+                config.save(update_fields=['last_validated_at', 'validation_status', 'validation_error'])
+                
+                return Response({
+                    "status": "success",
+                    "message": "URLs registered successfully with Safaricom",
+                    "details": result.get('data', result)
+                })
+            else:
+                # Update configuration with failed registration
+                config.validation_status = 'INVALID'
+                config.validation_error = result.get('message', 'URL registration failed')
+                config.save(update_fields=['validation_status', 'validation_error'])
+                
+                return Response({
+                    "status": "error",
+                    "message": result.get('message', 'Failed to register URLs'),
+                    "details": result.get('data', result)
+                }, status=status.HTTP_400_BAD_REQUEST)
+                
+        except Exception as e:
+            logger.error(f"Error registering URLs for config {config.id}: {str(e)}")
+            
+            # Update configuration with error
+            config.validation_status = 'INVALID'
+            config.validation_error = str(e)[:255]
+            config.save(update_fields=['validation_status', 'validation_error'])
+            
+            return Response({
+                "status": "error",
+                "message": f"Error registering URLs: {str(e)}"
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
     @action(detail=True, methods=['post'])
     def set_default(self, request, pk=None):
         """
@@ -287,7 +351,7 @@ class MpesaTransactionViewSet(viewsets.ReadOnlyModelViewSet):
                 mpesa_service = MpesaSTKPush(config=transaction.configuration)
                 
                 # Query transaction status
-                status_result = mpesa_service.query_status(
+                status_result = mpesa_service.query_stk_status(
                     checkout_request_id=transaction.checkout_request_id
                 )
                 
@@ -669,7 +733,7 @@ class PaymentViewSet(viewsets.ModelViewSet):
                     checkout_request_id=checkout_request_id
                 )
                 
-                payment = mpesa_transaction.payment
+                payment = mpesa_transaction.payment_record if hasattr(mpesa_transaction, 'payment_record') else None
                 if payment:
                     transaction_data = result['transaction_data']
                     
