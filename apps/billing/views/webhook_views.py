@@ -442,35 +442,34 @@ class MpesaC2BWebhookView(APIView):
     
     def trigger_mikrotik_reactivation(self, service):
         """
-        Connects to the MikroTik router and clears the active PPPoE session
-        to force an immediate reconnection with new expiry dates.
+        Connects to the MikroTik router and clears the active PPPoE session.
+        The router is found via the CustomerRadiusCredentials linked to the service.
         """
         try:
             from apps.network.integrations.mikrotik_api import MikrotikAPI
-            from apps.radius.models import CustomerRadiusCredentials
             
-            # 1. Get the RADIUS username (the login name on the router)
-            radius_cred = CustomerRadiusCredentials.objects.filter(customer=service.customer).first()
+            # 1. Identify which RADIUS credential and router to use
+            # We check PPPoE first, then fallback to Hotspot
+            radius_cred = service.pppoe_user or service.hotspot_user
+            
             if not radius_cred:
-                logger.warning(f"Skipping MikroTik kick: No radius credentials found for customer {service.customer.id}")
+                logger.warning(f"Skipping MikroTik kick: No RADIUS credentials found for service {service.id}")
                 return
-            
-            if not service.router:
-                logger.warning(f"Skipping MikroTik kick: No router assigned to service {service.id}")
+                
+            if not radius_cred.router:
+                logger.warning(f"Skipping MikroTik kick: No router assigned to RADIUS credentials for service {service.id}")
                 return
 
-            # 2. Connect to the router assigned to this service
-            api = MikrotikAPI(service.router)
+            # 2. Connect to the router using the credential's router relation
+            api = MikrotikAPI(radius_cred.router)
             
-            # 3. Kick the user
-            # This removes them from /ppp active, forcing their router to re-dial
-            # The router will then check RADIUS, see the new expiry date, and allow connection
+            # 3. Kick the user by their RADIUS username
             success = api.kick_pppoe_user(radius_cred.username)
             
             if success:
-                logger.info(f"MikroTik: Successfully kicked active session for {radius_cred.username}")
+                logger.info(f"MikroTik: Successfully kicked session for {radius_cred.username} on {radius_cred.router.name}")
             else:
-                logger.info(f"MikroTik: No active session found for {radius_cred.username} (User was already offline)")
+                logger.info(f"MikroTik: No active session for {radius_cred.username} (User already offline)")
 
         except Exception as e:
             logger.error(f"Failed MikroTik kick for service {service.id}: {str(e)}", exc_info=True)
@@ -541,10 +540,16 @@ class MpesaC2BWebhookView(APIView):
             try:
                 with transaction.atomic():
                     # Get the service connection
+                    # FIXED: Removed 'router' from select_related - router is accessed via RADIUS credentials
                     service = ServiceConnection.objects.filter(
                         models.Q(billing_account_number__iexact=bill_ref) |
                         models.Q(mpesa_account_number__iexact=bill_ref)
-                    ).select_related('customer', 'plan', 'router').first()
+                    ).select_related(
+                        'customer', 
+                        'plan', 
+                        'pppoe_user',      # Include PPPoE credentials
+                        'hotspot_user'      # Include Hotspot credentials
+                    ).first()
 
                     if not service:
                         logger.warning(f"Service not found for account {bill_ref} in tenant {target_tenant_schema}")
@@ -714,4 +719,4 @@ class MpesaC2BWebhookView(APIView):
 # path('api/v1/webhooks/payhero/subscription/', PayHeroSubscriptionWebhookView.as_view()),
 # path('api/v1/webhooks/payhero/hotspot/', PayHeroHotspotWebhookView.as_view()),
 # path('api/v1/webhooks/payhero/billing/', PayHeroBillingWebhookView.as_view()),
-# path('api/v1/webhooks/mpesa/c2b-callback/', MpesaC2BWebhookView.as_view()),
+# path('api/v1/webhooks/mpesa/c2b-callback/', MpesaC2BWebhookView.as_view()),),
