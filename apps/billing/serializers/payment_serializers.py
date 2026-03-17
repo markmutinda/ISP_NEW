@@ -364,6 +364,23 @@ class PaymentDetailSerializer(PaymentSerializer):
         ]
 
 
+class PaymentListSerializer(serializers.ModelSerializer):
+    """
+    Simplified serializer for listing payments with essential fields only
+    """
+    customer_name = serializers.CharField(source='customer.full_name', read_only=True)
+    customer_code = serializers.CharField(source='customer.customer_code', read_only=True)
+    payment_method_name = serializers.CharField(source='payment_method.name', read_only=True)
+
+    class Meta:
+        model = Payment
+        fields = [
+            'id', 'payment_number', 'customer', 'customer_name', 'customer_code', 
+            'amount', 'payment_method', 'payment_method_name', 'status', 
+            'transaction_id', 'mpesa_receipt', 'payment_date', 'created_at'
+        ]
+
+
 # ==========================
 # M-Pesa STK Push Serializer
 # ==========================
@@ -430,24 +447,13 @@ class MpesaSTKPushSerializer(serializers.Serializer):
 
 class ReceiptSerializer(serializers.ModelSerializer):
     customer_name = serializers.CharField(source='customer.full_name', read_only=True)
-    customer_code = serializers.CharField(source='customer.customer_code', read_only=True)
-    company_name = serializers.CharField(source='company.name', read_only=True)
     payment_number = serializers.CharField(source='payment.payment_number', read_only=True)
-    created_by_name = serializers.CharField(source='created_by.get_full_name', read_only=True)
-    issued_by_name = serializers.CharField(source='issued_by.get_full_name', read_only=True)
 
     class Meta:
         model = Receipt
         fields = [
-            'id', 'receipt_number', 'company', 'company_name', 'customer', 'customer_name',
-            'customer_code', 'payment', 'payment_number', 'amount', 'amount_in_words',
-            'currency', 'payment_method', 'payment_reference', 'status', 'receipt_date',
-            'issued_at', 'issued_by', 'issued_by_name', 'notes', 'digital_signature',
-            'qr_code', 'created_by', 'created_by_name', 'created_at', 'updated_at'
-        ]
-        read_only_fields = [
-            'receipt_number', 'amount_in_words', 'digital_signature', 'qr_code',
-            'issued_by', 'issued_at', 'created_by', 'created_at', 'updated_at'
+            'id', 'receipt_number', 'customer', 'customer_name', 'payment', 
+            'payment_number', 'amount', 'status', 'receipt_date'
         ]
 
 

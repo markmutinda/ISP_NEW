@@ -61,10 +61,7 @@ class MpesaConfigurationViewSet(viewsets.ModelViewSet):
             return MpesaConfiguration.objects.all()
         
         # Regular users only see their tenant's configurations
-        if hasattr(user, 'company') and user.company:
-            return MpesaConfiguration.objects.filter(schema_name=user.company.schema_name)
-        
-        return MpesaConfiguration.objects.none()
+        return MpesaConfiguration.objects.filter(schema_name=connection.schema_name)
 
     def get_serializer_class(self):
         if self.action == 'retrieve':
@@ -76,11 +73,10 @@ class MpesaConfigurationViewSet(viewsets.ModelViewSet):
         from ..models.payment_models import MpesaConfiguration
         
         user = self.request.user
-        schema_name = user.company.schema_name if hasattr(user, 'company') else 'default'
         
         serializer.save(
             created_by=user,
-            schema_name=schema_name
+            schema_name=connection.schema_name
         )
 
     @action(detail=True, methods=['post'])
@@ -261,10 +257,7 @@ class MpesaConfigurationViewSet(viewsets.ModelViewSet):
         """
         from ..models.payment_models import MpesaConfiguration
         
-        user = request.user
-        schema_name = user.company.schema_name if hasattr(user, 'company') else 'default'
-        
-        config = MpesaConfiguration.get_active_configuration(schema_name)
+        config = MpesaConfiguration.get_active_configuration(connection.schema_name)
         
         if not config:
             return Response({
@@ -282,10 +275,7 @@ class MpesaConfigurationViewSet(viewsets.ModelViewSet):
         """
         from ..models.payment_models import MpesaConfiguration
         
-        user = request.user
-        schema_name = user.company.schema_name if hasattr(user, 'company') else 'default'
-        
-        config = MpesaConfiguration.get_default_configuration(schema_name)
+        config = MpesaConfiguration.get_default_configuration(connection.schema_name)
         
         if not config:
             return Response({
@@ -326,10 +316,7 @@ class MpesaTransactionViewSet(viewsets.ReadOnlyModelViewSet):
                 return MpesaTransaction.objects.filter(schema_name=schema_name)
             return MpesaTransaction.objects.all()
         
-        if hasattr(user, 'company') and user.company:
-            return MpesaTransaction.objects.filter(schema_name=user.company.schema_name)
-        
-        return MpesaTransaction.objects.none()
+        return MpesaTransaction.objects.filter(schema_name=connection.schema_name)
 
     def get_serializer_class(self):
         from ..serializers import MpesaTransactionSerializer, MpesaTransactionDetailSerializer
@@ -389,27 +376,24 @@ class PaymentMethodViewSet(viewsets.ModelViewSet):
     search_fields = ['name', 'code', 'description', 'channel_id']
 
     def get_queryset(self):
-        from ..models.payment_models import PaymentMethod
+        from ..models.payment_models import InvoiceItemPayment  # FIXED: Correct model name
         
         user = self.request.user
         if user.is_superuser:
-            return PaymentMethod.objects.all()
+            return InvoiceItemPayment.objects.all()
         
-        if hasattr(user, 'company') and user.company:
-            return PaymentMethod.objects.filter(schema_name=user.company.schema_name)
-        
-        return PaymentMethod.objects.none()
+        # Use connection.schema_name for tenant safety
+        return InvoiceItemPayment.objects.filter(schema_name=connection.schema_name)
 
     def get_serializer_class(self):
         return PaymentMethodSerializer
 
     def perform_create(self, serializer):
         user = self.request.user
-        schema_name = user.company.schema_name if hasattr(user, 'company') else 'default'
         
         serializer.save(
             created_by=user,
-            schema_name=schema_name
+            schema_name=connection.schema_name
         )
 
     @action(detail=True, methods=['post'])
@@ -518,15 +502,12 @@ class PaymentViewSet(viewsets.ModelViewSet):
                 return Payment.objects.filter(company_id=company_id)
             return Payment.objects.all()
         
-        if hasattr(user, 'company') and user.company:
-            queryset = Payment.objects.filter(schema_name=user.company.schema_name)
-            
-            if hasattr(user, 'customer_profile'):
-                return queryset.filter(customer=user.customer_profile)
-            
-            return queryset
+        queryset = Payment.objects.filter(schema_name=connection.schema_name)
         
-        return Payment.objects.none()
+        if hasattr(user, 'customer_profile'):
+            return queryset.filter(customer=user.customer_profile)
+        
+        return queryset
 
     def get_serializer_class(self):
         if self.action == 'create':
@@ -537,11 +518,10 @@ class PaymentViewSet(viewsets.ModelViewSet):
 
     def perform_create(self, serializer):
         user = self.request.user
-        schema_name = user.company.schema_name if hasattr(user, 'company') else 'default'
         
         serializer.save(
             created_by=user,
-            schema_name=schema_name
+            schema_name=connection.schema_name
         )
 
     # === Standard Actions ===
@@ -634,14 +614,14 @@ class PaymentViewSet(viewsets.ModelViewSet):
                 return Response({'status': 'error', 'message': 'Service connection not found'}, status=status.HTTP_404_NOT_FOUND)
         
         # Get M-Pesa payment method
-        from ..models.payment_models import PaymentMethod
+        from ..models.payment_models import InvoiceItemPayment
         try:
-            payment_method = PaymentMethod.objects.get(
+            payment_method = InvoiceItemPayment.objects.get(
                 method_type='MPESA_STK',
-                schema_name=request.user.company.schema_name,
+                schema_name=connection.schema_name,
                 is_active=True
             )
-        except PaymentMethod.DoesNotExist:
+        except InvoiceItemPayment.DoesNotExist:
             return Response({
                 'status': 'error', 
                 'message': 'M-Pesa STK payment method not configured for this company'
@@ -657,7 +637,7 @@ class PaymentViewSet(viewsets.ModelViewSet):
         # Create payment record
         from ..models.payment_models import Payment
         payment = Payment.objects.create(
-            schema_name=request.user.company.schema_name,
+            schema_name=connection.schema_name,
             customer=customer,
             invoice=invoice,
             amount=amount,
@@ -786,20 +766,20 @@ class PaymentViewSet(viewsets.ModelViewSet):
             return Response({'error': 'Invalid amount or external_reference'}, status=status.HTTP_400_BAD_REQUEST)
 
         try:
-            from ..models.payment_models import PaymentMethod
+            from ..models.payment_models import InvoiceItemPayment
             if channel_id:
-                method = PaymentMethod.objects.get(
-                    schema_name=request.user.company.schema_name,
+                method = InvoiceItemPayment.objects.get(
+                    schema_name=connection.schema_name,
                     channel_id=channel_id,
                     is_active=True
                 )
             else:
-                method = PaymentMethod.objects.get(
-                    schema_name=request.user.company.schema_name,
+                method = InvoiceItemPayment.objects.get(
+                    schema_name=connection.schema_name,
                     is_default=True,
                     is_active=True
                 )
-        except PaymentMethod.DoesNotExist:
+        except InvoiceItemPayment.DoesNotExist:
             return Response({'error': 'No valid payment method found'}, status=status.HTTP_400_BAD_REQUEST)
         except Exception as e:
             logger.error(f"Payment method lookup error: {str(e)}")
@@ -809,7 +789,7 @@ class PaymentViewSet(viewsets.ModelViewSet):
         
         from ..models.payment_models import Payment
         payment = Payment.objects.create(
-            schema_name=request.user.company.schema_name,
+            schema_name=connection.schema_name,
             customer=customer,
             amount=amount,
             payment_method=method,
@@ -931,18 +911,18 @@ class PaymentViewSet(viewsets.ModelViewSet):
             except Invoice.DoesNotExist:
                 return Response({'status': 'error', 'message': 'Invoice not found'}, status=status.HTTP_404_NOT_FOUND)
         
-        from ..models.payment_models import PaymentMethod, Payment
+        from ..models.payment_models import InvoiceItemPayment, Payment
         try:
-            payment_method = PaymentMethod.objects.get(
+            payment_method = InvoiceItemPayment.objects.get(
                 method_type='BANK_TRANSFER',
-                schema_name=request.user.company.schema_name,
+                schema_name=connection.schema_name,
                 is_active=True
             )
-        except PaymentMethod.DoesNotExist:
+        except InvoiceItemPayment.DoesNotExist:
             return Response({'status': 'error', 'message': 'Bank transfer payment method not configured'}, status=status.HTTP_400_BAD_REQUEST)
         
         payment = Payment.objects.create(
-            schema_name=request.user.company.schema_name,
+            schema_name=connection.schema_name,
             customer=customer,
             invoice=invoice,
             amount=amount,
@@ -1010,9 +990,7 @@ class PaymentViewSet(viewsets.ModelViewSet):
         ).order_by('-total_paid')[:10]
         
         # Add M-Pesa specific stats
-        mpesa_stats = {}
-        if hasattr(self, 'get_mpesa_stats'):
-            mpesa_stats = self.get_mpesa_stats(queryset)
+        mpesa_stats = self.get_mpesa_stats(queryset)
         
         stats = {
             'today': {'count': today_count, 'amount': today_amount},
@@ -1026,6 +1004,7 @@ class PaymentViewSet(viewsets.ModelViewSet):
         
         return Response(stats)
 
+    # === FIXED: get_mpesa_stats method ===
     def get_mpesa_stats(self, queryset):
         """Get M-Pesa specific statistics using active schema context"""
         from ..models.payment_models import MpesaTransaction
@@ -1035,14 +1014,12 @@ class PaymentViewSet(viewsets.ModelViewSet):
         
         mpesa_payments = queryset.filter(payment_method__method_type__startswith='MPESA_')
         
-        # Get M-Pesa transaction stats filtered by current schema
         mpesa_txn_stats = MpesaTransaction.objects.filter(
             schema_name=schema_name
         ).aggregate(
             total_transactions=Count('id'),
             successful=Count('id', filter=Q(status='COMPLETED')),
             failed=Count('id', filter=Q(status='FAILED')),
-            pending=Count('id', filter=Q(status='PENDING')),
             total_amount=Sum('amount', filter=Q(status='COMPLETED'))
         )
         
@@ -1077,26 +1054,22 @@ class ReceiptViewSet(viewsets.ModelViewSet):
                 return Receipt.objects.filter(company_id=company_id)
             return Receipt.objects.all()
         
-        if hasattr(user, 'company') and user.company:
-            queryset = Receipt.objects.filter(schema_name=user.company.schema_name)
-            
-            if hasattr(user, 'customer_profile'):
-                return queryset.filter(customer=user.customer_profile)
-            
-            return queryset
+        queryset = Receipt.objects.filter(schema_name=connection.schema_name)
         
-        return Receipt.objects.none()
+        if hasattr(user, 'customer_profile'):
+            return queryset.filter(customer=user.customer_profile)
+        
+        return queryset
 
     def get_serializer_class(self):
         return ReceiptSerializer
 
     def perform_create(self, serializer):
         user = self.request.user
-        schema_name = user.company.schema_name if hasattr(user, 'company') else 'default'
         
         serializer.save(
             created_by=user,
-            schema_name=schema_name
+            schema_name=connection.schema_name
         )
 
     @action(detail=True, methods=['post'])
