@@ -416,7 +416,7 @@ class PayHeroBillingWebhookView(PayHeroWebhookMixin, APIView):
 class MpesaC2BWebhookView(APIView):
     """
     Production-Grade M-Pesa C2B Webhook.
-    Handles RADIUS Expiry Extension & Unique ID Generation.
+    Handles RADIUS Expiry Extension, Unique ID Generation, and MikroTik Session Kick.
     
     POST /api/v1/webhooks/mpesa/c2b-callback/
     
@@ -442,16 +442,38 @@ class MpesaC2BWebhookView(APIView):
     
     def trigger_mikrotik_reactivation(self, service):
         """
-        Trigger MikroTik API to reactivate a suspended service.
-        This should eventually be moved to a Celery task.
+        Connects to the MikroTik router and clears the active PPPoE session
+        to force an immediate reconnection with new expiry dates.
         """
         try:
-            # TODO: Implement actual MikroTik API call
-            # router_api = MikrotikAPI(service.router)
-            # router_api.activate_customer(service)
-            logger.info(f"MikroTik reactivation triggered for service {service.id}")
+            from apps.network.integrations.mikrotik_api import MikrotikAPI
+            from apps.radius.models import CustomerRadiusCredentials
+            
+            # 1. Get the RADIUS username (the login name on the router)
+            radius_cred = CustomerRadiusCredentials.objects.filter(customer=service.customer).first()
+            if not radius_cred:
+                logger.warning(f"Skipping MikroTik kick: No radius credentials found for customer {service.customer.id}")
+                return
+            
+            if not service.router:
+                logger.warning(f"Skipping MikroTik kick: No router assigned to service {service.id}")
+                return
+
+            # 2. Connect to the router assigned to this service
+            api = MikrotikAPI(service.router)
+            
+            # 3. Kick the user
+            # This removes them from /ppp active, forcing their router to re-dial
+            # The router will then check RADIUS, see the new expiry date, and allow connection
+            success = api.kick_pppoe_user(radius_cred.username)
+            
+            if success:
+                logger.info(f"MikroTik: Successfully kicked active session for {radius_cred.username}")
+            else:
+                logger.info(f"MikroTik: No active session found for {radius_cred.username} (User was already offline)")
+
         except Exception as e:
-            logger.error(f"Failed to reactivate service {service.id} on MikroTik: {str(e)}")
+            logger.error(f"Failed MikroTik kick for service {service.id}: {str(e)}", exc_info=True)
     
     def post(self, request, *args, **kwargs):
         data = request.data
@@ -522,7 +544,7 @@ class MpesaC2BWebhookView(APIView):
                     service = ServiceConnection.objects.filter(
                         models.Q(billing_account_number__iexact=bill_ref) |
                         models.Q(mpesa_account_number__iexact=bill_ref)
-                    ).select_related('customer', 'plan').first()
+                    ).select_related('customer', 'plan', 'router').first()
 
                     if not service:
                         logger.warning(f"Service not found for account {bill_ref} in tenant {target_tenant_schema}")
@@ -632,7 +654,7 @@ class MpesaC2BWebhookView(APIView):
                         service.activate_service()
                         
                         if service.plan:
-                            # FIX: Import the correct model name - CustomerRadiusCredentials
+                            # Import the correct model name - CustomerRadiusCredentials
                             from apps.radius.models import CustomerRadiusCredentials
                             new_expiry = service.plan.calculate_expiration()
                             
@@ -645,22 +667,22 @@ class MpesaC2BWebhookView(APIView):
                             else:
                                 logger.warning(f"No RADIUS credentials found for customer {customer.full_name}")
 
-                        # 4. Check if the customer profile needs status update
+                        # Check if the customer profile needs status update
                         if customer.status == 'SUSPENDED':
                             customer.status = 'ACTIVE'
                             customer.save(update_fields=['status'])
 
-                        # 5. Trigger MikroTik
+                        # F. MIKROTIK KICK - Force immediate reconnection with new expiry
                         self.trigger_mikrotik_reactivation(service)
                         
-                        logger.info(f"SUCCESS: Service {bill_ref} reactivated and extended for {customer.full_name}")
+                        logger.info(f"SUCCESS: Service {bill_ref} reactivated, expiry extended, and MikroTik kicked for {customer.full_name}")
                     elif service.status == 'SUSPENDED':
                         logger.info(
                             f"Payment amount {amount} less than monthly price {monthly_price}. "
                             f"Service remains suspended for {customer.full_name}"
                         )
                     
-                    # F. Send confirmation SMS (optional)
+                    # G. Send confirmation SMS (optional)
                     # TODO: Implement SMS notification
                     # from apps.notifications.services import send_sms
                     # send_sms(
