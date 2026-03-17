@@ -1,7 +1,7 @@
 """
 Core views for ISP Management System
 """
-from venv import logger
+
 from rest_framework import viewsets, status, generics, permissions
 from rest_framework.response import Response
 from rest_framework.decorators import action, api_view, permission_classes
@@ -174,18 +174,31 @@ class UserViewSet(viewsets.ModelViewSet):
     
     def perform_create(self, serializer):
         """
-        When creating a user, auto-set company to current user's company
-        (unless superuser explicitly sets another)
+        Automatically determine staff status and company context based on the assigned role.
         """
-        if self.request.user.is_superuser:
-            # Superuser can set any company
-            serializer.save()
-        else:
-            # Normal company admin/staff → force their company
+        # 1. Get the role from the request
+        role = self.request.data.get('role')
+        
+        # 2. Define roles that should automatically have dashboard (staff) access
+        staff_roles = ['admin', 'support', 'technician', 'accountant', 'staff']
+        is_staff_status = role in staff_roles
+        
+        # 3. Prepare the save arguments
+        # We auto-verify staff so they don't get stuck at a 'Verify Email' screen
+        save_kwargs = {
+            'is_staff': is_staff_status,
+            'is_verified': True if is_staff_status else False
+        }
+        
+        # 4. Handle Company assignment (if not a superuser)
+        if not self.request.user.is_superuser:
             if hasattr(self.request.user, 'company') and self.request.user.company:
-                serializer.save(company=self.request.user.company)
-            else:
-                serializer.save()  # fallback
+                save_kwargs['company'] = self.request.user.company
+        
+        # 5. Save the user with these calculated flags
+        serializer.save(**save_kwargs)
+        
+        logger.info(f"UserViewSet: Created {role} user {serializer.instance.email}. is_staff={is_staff_status}")
     
     @action(detail=False, methods=['get'])
     def me(self, request):
