@@ -16,10 +16,11 @@ class MpesaConfiguration(AuditMixin):
     Each tenant (ISP) configures their own Paybill here.
     """
     # Tenant schema field to isolate configurations
+    # REMOVED dangerous default - will fail loudly if schema_name not set
     schema_name = models.SlugField(
         max_length=63,
-        editable=False,
-        default="default_schema"
+        editable=False
+        # default="default_schema"  # REMOVED - this was dangerous
     )
 
     # Core Paybill Details
@@ -267,6 +268,7 @@ class MpesaTransaction(models.Model):
     )
     
     # Tenant schema field
+    # REMOVED dangerous default - will fail loudly if schema_name not set
     schema_name = models.SlugField(max_length=63, editable=False)
     
     # Transaction identifiers
@@ -321,6 +323,12 @@ class MpesaTransaction(models.Model):
         # Auto-set schema_name from configuration if not set
         if not self.schema_name and self.configuration:
             self.schema_name = self.configuration.schema_name
+        
+        # If still no schema_name after trying configuration, validate
+        if not self.schema_name:
+            from django.core.exceptions import ValidationError
+            raise ValidationError("schema_name must be set for MpesaTransaction")
+            
         super().save(*args, **kwargs)
     
     def mark_completed(self, transaction_id, callback_data=None):
@@ -419,6 +427,8 @@ class InvoiceItemPayment(models.Model):
     schema_name = models.SlugField(
         max_length=63,
         editable=False,
+        # Keeping default here as InvoiceItemPayment might be created in various contexts
+        # but should ideally be set explicitly as well
         default="default_schema"
     )
     
@@ -506,6 +516,7 @@ class Payment(models.Model):
     schema_name = models.SlugField(
         max_length=63,
         editable=False,
+        # Keeping default here as Payment might be created in various contexts
         default="default_schema"
     )
     
