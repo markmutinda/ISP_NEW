@@ -4,7 +4,7 @@ from django.core.validators import MinValueValidator
 from django.core.exceptions import ValidationError
 from django.utils import timezone
 from decimal import Decimal
-from apps.core.models import Company, AuditMixin  # Removed TenantAwareMixin
+from apps.core.models import Company, AuditMixin
 #from apps.customers.models import Customer
 from .billing_models import Invoice
 from django.conf import settings
@@ -242,12 +242,13 @@ class MpesaTransaction(models.Model):
     ]
     
     # Link to payment if created
+    # FIXED: Changed related_name from 'mpesa_transaction' to 'payment_log' to avoid conflict
     payment = models.OneToOneField(
         'billing.Payment', 
         on_delete=models.SET_NULL, 
         null=True, 
         blank=True,
-        related_name='mpesa_transaction'
+        related_name='payment_log'
     )
     
     # Link to configuration
@@ -478,12 +479,13 @@ class Payment(models.Model):
     raw_callback = models.JSONField(null=True, blank=True)
     
     # M-Pesa Transaction Link
+    # FIXED: Changed related_name from 'related_payment' to 'payment_record' for clarity
     mpesa_transaction = models.OneToOneField(
         'billing.MpesaTransaction',
         on_delete=models.SET_NULL,
         null=True,
         blank=True,
-        related_name='related_payment'
+        related_name='payment_record'
     )
 
     # Tenant schema field
