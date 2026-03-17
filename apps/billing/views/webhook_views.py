@@ -363,12 +363,12 @@ class PayHeroBillingWebhookView(PayHeroWebhookMixin, APIView):
                     # Apply to invoice
                     payment.invoice.add_payment(payment.amount, payment.payment_method)
                 else:
-                    # Add to customer balance
-                    customer.balance = (customer.balance or 0) + payment.amount
-                    customer.save(update_fields=['balance'])
+                    # FIXED: Use 'outstanding_balance' instead of 'balance'
+                    customer.outstanding_balance = (customer.outstanding_balance or 0) + payment.amount
+                    customer.save(update_fields=['outstanding_balance'])
                 
                 # Check if customer was suspended and should be reactivated
-                if customer.status == 'SUSPENDED' and customer.balance >= 0:
+                if customer.status == 'SUSPENDED' and customer.outstanding_balance >= 0:
                     customer.status = 'ACTIVE'
                     customer.save(update_fields=['status'])
                     # TODO: Reactivate on router
@@ -600,10 +600,8 @@ class MpesaC2BWebhookView(APIView):
                     # D. Apply payment to customer's account
                     customer = service.customer
                     
-                    # Check if there's an outstanding invoice for this amount
-                    from apps.billing.models.billing_models import Invoice
-                    
                     # Look for pending invoices for this customer
+                    from apps.billing.models.billing_models import Invoice
                     pending_invoice = Invoice.objects.filter(
                         customer=customer,
                         status__in=['ISSUED', 'OVERDUE'],
@@ -617,18 +615,32 @@ class MpesaC2BWebhookView(APIView):
                         pending_invoice.add_payment(amount, method)
                         logger.info(f"Payment {trans_id} applied to invoice {pending_invoice.invoice_number}")
                     else:
-                        # Add to customer balance for future invoices
-                        customer.balance = (customer.balance or 0) + amount
-                        customer.save(update_fields=['balance'])
-                        logger.info(f"Payment {trans_id} added to customer balance")
+                        # FIXED: Use 'outstanding_balance' and reduce it by the payment amount
+                        # Ensure we handle None/Null values
+                        if customer.outstanding_balance is None:
+                            customer.outstanding_balance = Decimal('0')
+                        
+                        # Reduce the outstanding balance by the payment amount
+                        customer.outstanding_balance -= amount
+                        customer.save(update_fields=['outstanding_balance'])
+                        logger.info(f"Payment {trans_id} reduced outstanding balance to {customer.outstanding_balance}")
 
                     # E. Auto-Reactivation
                     monthly_price = Decimal(str(service.monthly_price)) if service.monthly_price else Decimal('0')
                     
+                    # Ensure status check matches 'SUSPENDED' and logic handles reactivation
                     if service.status == 'SUSPENDED' and amount >= monthly_price:
                         service.activate_service()
                         self.trigger_mikrotik_reactivation(service)
-                        logger.info(f"SUCCESS: {bill_ref} for {customer.full_name} reactivated.")
+                        
+                        # Also check if the customer profile needs status update
+                        # Ensure we handle None/Null values for outstanding_balance
+                        customer_outstanding = customer.outstanding_balance or Decimal('0')
+                        if customer.status == 'SUSPENDED' and customer_outstanding <= 0:
+                            customer.status = 'ACTIVE'
+                            customer.save(update_fields=['status'])
+                            
+                        logger.info(f"SUCCESS: Service {bill_ref} reactivated for {customer.full_name}")
                     elif service.status == 'SUSPENDED':
                         logger.info(
                             f"Payment amount {amount} less than monthly price {monthly_price}. "
