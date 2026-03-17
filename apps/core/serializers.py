@@ -39,16 +39,17 @@ class UserSerializer(serializers.ModelSerializer):
         return obj.get_full_name()
     
     def validate(self, data):
-        """Validate password confirmation"""
+        """Validate password confirmation - only if confirm_password is provided"""
         password = data.get('password')
         confirm_password = data.get('confirm_password')
         
-        if password and password != confirm_password:
+        # Only check if confirm_password is provided in the request
+        if confirm_password is not None and password != confirm_password:
             raise serializers.ValidationError({
                 "password": "Passwords do not match."
             })
         
-        # Remove confirm_password from validated data
+        # Remove confirm_password from validated data if present
         if 'confirm_password' in data:
             del data['confirm_password']
         
@@ -56,7 +57,8 @@ class UserSerializer(serializers.ModelSerializer):
     
     def validate_password(self, value):
         """Validate password strength"""
-        validate_password(value)
+        if value:  # Only validate if password is provided
+            validate_password(value)
         return value
     
     def create(self, validated_data):
@@ -102,7 +104,7 @@ class UserCreateSerializer(serializers.ModelSerializer):
     )
     confirm_password = serializers.CharField(
         write_only=True, 
-        required=False,
+        required=False,  # Changed from required=True to required=False
         style={'input_type': 'password'}
     )
     
@@ -116,14 +118,20 @@ class UserCreateSerializer(serializers.ModelSerializer):
         read_only_fields = ['id']
     
     def validate(self, attrs):
-        if attrs.get('password') != attrs.get('confirm_password'):
+        """Validate that passwords match - only if confirm_password is provided"""
+        password = attrs.get('password')
+        confirm_password = attrs.get('confirm_password')
+        
+        # Only check if confirm_password is provided in the request
+        if confirm_password is not None and password != confirm_password:
             raise serializers.ValidationError({
                 "password": "Password fields didn't match."
             })
         return attrs
     
     def create(self, validated_data):
-        validated_data.pop('confirm_password')
+        # Remove confirm_password from validated data if present
+        validated_data.pop('confirm_password', None)
         password = validated_data.pop('password')
         
         # Set default role if not provided
