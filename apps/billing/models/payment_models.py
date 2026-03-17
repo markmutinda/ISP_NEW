@@ -1,12 +1,337 @@
 # apps/billing/models/payment_models.py
 from django.db import models
 from django.core.validators import MinValueValidator
+from django.core.exceptions import ValidationError
 from django.utils import timezone
 from decimal import Decimal
-from apps.core.models import Company
+from apps.core.models import Company, AuditMixin, TenantAwareMixin
 #from apps.customers.models import Customer
 from .billing_models import Invoice
+from django.conf import settings
 
+
+class MpesaConfiguration(AuditMixin, TenantAwareMixin):
+    """
+    Tenant-specific M-Pesa Paybill credentials.
+    Each tenant (ISP) configures their own Paybill here.
+    """
+    # Core Paybill Details
+    business_shortcode = models.CharField(
+        max_length=20, 
+        help_text="The Paybill/Till Number (e.g., 123456)"
+    )
+    shortcode_type = models.CharField(
+        max_length=10,
+        choices=[('PAYBILL', 'Paybill'), ('TILL', 'Till Number')],
+        default='PAYBILL',
+        help_text="Type of shortcode (Paybill or Till)"
+    )
+    passkey = models.CharField(
+        max_length=255, 
+        blank=True, 
+        null=True, 
+        help_text="Lipa Na M-Pesa Online Passkey (for STK Push)"
+    )
+    
+    # API Credentials from Daraja Portal
+    consumer_key = models.CharField(max_length=255, help_text="Daraja App Consumer Key")
+    consumer_secret = models.CharField(max_length=255, help_text="Daraja App Consumer Secret")
+    
+    # Callback URLs - can be overridden per tenant
+    callback_url = models.URLField(
+        max_length=500,
+        blank=True,
+        null=True,
+        help_text="Override default callback URL (optional)"
+    )
+    timeout_url = models.URLField(
+        max_length=500,
+        blank=True,
+        null=True,
+        help_text="Override default timeout URL (optional)"
+    )
+    
+    # Environment
+    is_sandbox = models.BooleanField(default=True, help_text="Use Daraja Sandbox environment")
+    
+    # Status
+    is_active = models.BooleanField(
+        default=False, 
+        help_text="Enable/Disable M-Pesa for this tenant"
+    )
+    is_default = models.BooleanField(
+        default=False,
+        help_text="Default configuration for this tenant (used when multiple exist)"
+    )
+    
+    # Test Mode
+    test_mode = models.BooleanField(
+        default=False,
+        help_text="In test mode, transactions are simulated without real money"
+    )
+    
+    # Validation timestamps
+    last_validated_at = models.DateTimeField(
+        null=True, 
+        blank=True,
+        help_text="When the credentials were last successfully validated"
+    )
+    validation_status = models.CharField(
+        max_length=20,
+        choices=[('PENDING', 'Pending'), ('VALID', 'Valid'), ('INVALID', 'Invalid')],
+        default='PENDING',
+        help_text="Status of last credential validation"
+    )
+    validation_error = models.TextField(blank=True, help_text="Error message from last validation")
+    
+    # Usage limits
+    daily_transaction_limit = models.DecimalField(
+        max_digits=12, 
+        decimal_places=2, 
+        null=True, 
+        blank=True,
+        help_text="Maximum total transaction amount per day"
+    )
+    min_transaction_amount = models.DecimalField(
+        max_digits=10, 
+        decimal_places=2, 
+        default=1.00,
+        help_text="Minimum allowed transaction amount"
+    )
+    max_transaction_amount = models.DecimalField(
+        max_digits=10, 
+        decimal_places=2, 
+        default=150000.00,
+        help_text="Maximum allowed transaction amount (Safaricom limit is 150K)"
+    )
+    
+    class Meta:
+        verbose_name = 'M-Pesa Configuration'
+        verbose_name_plural = 'M-Pesa Configurations'
+        indexes = [
+            models.Index(fields=['schema_name', 'is_active']),
+            models.Index(fields=['schema_name', 'is_default']),
+            models.Index(fields=['business_shortcode', 'shortcode_type']),
+        ]
+        unique_together = [
+            ['schema_name', 'business_shortcode', 'shortcode_type'],  # Unique shortcode per tenant
+        ]
+        
+    def __str__(self):
+        env = "Sandbox" if self.is_sandbox else "Production"
+        status = "✓" if self.is_active else "✗"
+        default = " (Default)" if self.is_default else ""
+        return f"{self.shortcode_type}: {self.business_shortcode} [{env}]{default} {status}"
+    
+    def clean(self):
+        """Validate configuration before saving"""
+        # Validate transaction amount limits
+        if self.min_transaction_amount < Decimal('0.01'):
+            raise ValidationError({'min_transaction_amount': 'Minimum amount must be at least 0.01'})
+            
+        if self.max_transaction_amount > Decimal('150000.00'):
+            raise ValidationError({'max_transaction_amount': 'Amount cannot exceed Safaricom limit of 150,000'})
+            
+        if self.min_transaction_amount > self.max_transaction_amount:
+            raise ValidationError('Minimum amount cannot exceed maximum amount')
+    
+    def save(self, *args, **kwargs):
+        # Ensure only one active configuration per tenant
+        if self.is_active:
+            MpesaConfiguration.objects.filter(
+                schema_name=self.schema_name, 
+                is_active=True
+            ).exclude(pk=self.pk).update(is_active=False)
+        
+        # Ensure only one default configuration per tenant
+        if self.is_default:
+            MpesaConfiguration.objects.filter(
+                schema_name=self.schema_name,
+                is_default=True
+            ).exclude(pk=self.pk).update(is_default=False)
+        
+        # If this is the first configuration for this tenant, make it default and active
+        if not self.pk and not MpesaConfiguration.objects.filter(schema_name=self.schema_name).exists():
+            self.is_default = True
+            self.is_active = True
+        
+        self.full_clean()  # Run validations
+        super().save(*args, **kwargs)
+    
+    @classmethod
+    def get_active_configuration(cls, schema_name):
+        """
+        Get the active M-Pesa configuration for a tenant.
+        Returns the active config or None.
+        """
+        return cls.objects.filter(
+            schema_name=schema_name,
+            is_active=True
+        ).first()
+    
+    @classmethod
+    def get_default_configuration(cls, schema_name):
+        """
+        Get the default M-Pesa configuration for a tenant.
+        Falls back to active if no default is set.
+        """
+        config = cls.objects.filter(
+            schema_name=schema_name,
+            is_default=True
+        ).first()
+        
+        if not config:
+            config = cls.get_active_configuration(schema_name)
+        
+        return config
+    
+    def get_api_environment(self):
+        """Return the appropriate API environment settings"""
+        if self.is_sandbox:
+            # You'll create these classes in a separate utils file
+            # from apps.billing.utils.mpesa import SandboxEnvironment
+            # return SandboxEnvironment()
+            return "sandbox"
+        else:
+            # from apps.billing.utils.mpesa import ProductionEnvironment
+            # return ProductionEnvironment()
+            return "production"
+    
+    def get_callback_url(self, request=None):
+        """
+        Generate the callback URL for this configuration.
+        Uses tenant-specific override if provided, otherwise generates dynamically.
+        """
+        if self.callback_url:
+            return self.callback_url
+        
+        # Generate dynamic callback URL
+        base_url = getattr(settings, 'BASE_URL', 'https://example.com')
+        return f"{base_url}/api/billing/mpesa/callback/{self.schema_name}/"
+    
+    def get_timeout_url(self, request=None):
+        """Generate the timeout URL for this configuration"""
+        if self.timeout_url:
+            return self.timeout_url
+        
+        base_url = getattr(settings, 'BASE_URL', 'https://example.com')
+        return f"{base_url}/api/billing/mpesa/timeout/{self.schema_name}/"
+
+
+class MpesaTransaction(models.Model):
+    """
+    Track M-Pesa transactions for reconciliation and audit
+    """
+    TRANSACTION_STATUS = [
+        ('PENDING', 'Pending'),
+        ('COMPLETED', 'Completed'),
+        ('FAILED', 'Failed'),
+        ('TIMEOUT', 'Timeout'),
+        ('CANCELLED', 'Cancelled'),
+    ]
+    
+    TRANSACTION_TYPE = [
+        ('STK_PUSH', 'STK Push'),
+        ('C2B', 'Customer to Business'),
+        ('B2C', 'Business to Customer'),
+        ('B2B', 'Business to Business'),
+        ('QUERY', 'Transaction Query'),
+        ('REVERSAL', 'Transaction Reversal'),
+    ]
+    
+    # Link to payment if created
+    payment = models.OneToOneField(
+        'billing.Payment', 
+        on_delete=models.SET_NULL, 
+        null=True, 
+        blank=True,
+        related_name='mpesa_transaction'
+    )
+    
+    # Link to configuration
+    configuration = models.ForeignKey(
+        'billing.MpesaConfiguration', 
+        on_delete=models.PROTECT,
+        related_name='transactions'
+    )
+    
+    # Tenant schema field
+    schema_name = models.SlugField(max_length=63, editable=False)
+    
+    # Transaction identifiers
+    merchant_request_id = models.CharField(max_length=100, unique=True)
+    checkout_request_id = models.CharField(max_length=100, unique=True)
+    transaction_id = models.CharField(max_length=50, blank=True, db_index=True)  # M-Pesa receipt
+    
+    # Transaction details
+    transaction_type = models.CharField(max_length=20, choices=TRANSACTION_TYPE, default='STK_PUSH')
+    amount = models.DecimalField(max_digits=12, decimal_places=2)
+    phone_number = models.CharField(max_length=20)
+    account_reference = models.CharField(max_length=50, blank=True)
+    transaction_desc = models.CharField(max_length=200, blank=True)
+    
+    # Status
+    status = models.CharField(max_length=20, choices=TRANSACTION_STATUS, default='PENDING')
+    result_code = models.IntegerField(null=True, blank=True)
+    result_desc = models.TextField(blank=True)
+    
+    # Callback data
+    callback_data = models.JSONField(null=True, blank=True)
+    callback_received_at = models.DateTimeField(null=True, blank=True)
+    
+    # Request/Response logging
+    request_payload = models.JSONField(null=True, blank=True)
+    response_payload = models.JSONField(null=True, blank=True)
+    
+    # Timestamps
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    
+    class Meta:
+        ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['merchant_request_id']),
+            models.Index(fields=['checkout_request_id']),
+            models.Index(fields=['transaction_id']),
+            models.Index(fields=['status', 'created_at']),
+            models.Index(fields=['schema_name', 'status']),
+        ]
+    
+    def __str__(self):
+        return f"{self.transaction_id or 'Pending'} - {self.amount} - {self.status}"
+    
+    def save(self, *args, **kwargs):
+        # Auto-set schema_name from configuration if not set
+        if not self.schema_name and self.configuration:
+            self.schema_name = self.configuration.schema_name
+        super().save(*args, **kwargs)
+    
+    def mark_completed(self, transaction_id, callback_data=None):
+        """Mark transaction as completed"""
+        self.status = 'COMPLETED'
+        self.transaction_id = transaction_id
+        self.result_code = 0
+        self.result_desc = "Success"
+        if callback_data:
+            self.callback_data = callback_data
+            self.callback_received_at = timezone.now()
+        self.save()
+    
+    def mark_failed(self, result_code, result_desc, callback_data=None):
+        """Mark transaction as failed"""
+        self.status = 'FAILED'
+        self.result_code = result_code
+        self.result_desc = result_desc
+        if callback_data:
+            self.callback_data = callback_data
+            self.callback_received_at = timezone.now()
+        self.save()
+    
+    def mark_timeout(self):
+        """Mark transaction as timed out"""
+        self.status = 'TIMEOUT'
+        self.result_desc = "Transaction timed out - no callback received"
+        self.save()
 
 
 class InvoiceItemPayment(models.Model):
@@ -45,6 +370,16 @@ class InvoiceItemPayment(models.Model):
     bank_name = models.CharField(max_length=100, null=True, blank=True)
     custom_link = models.URLField(null=True, blank=True)
     is_default = models.BooleanField(default=False, help_text="Default payment method for this company")
+
+    # M-Pesa Configuration Link (new)
+    mpesa_configuration = models.ForeignKey(
+        'billing.MpesaConfiguration',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='payment_methods',
+        help_text="Link to tenant-specific M-Pesa configuration"
+    )
 
     # Configuration
     is_active = models.BooleanField(default=True)
@@ -89,12 +424,13 @@ class InvoiceItemPayment(models.Model):
             models.Index(fields=['is_active']),
             models.Index(fields=['channel_id']),
             models.Index(fields=['is_default']),
+            models.Index(fields=['schema_name', 'method_type']),
         ]
 
     def __str__(self):
         payhero_status = " (PayHero)" if self.is_payhero_enabled else ""
-        return f"{self.name}{payhero_status}"
-
+        mpesa_status = " (M-Pesa)" if self.mpesa_configuration else ""
+        return f"{self.name}{payhero_status}{mpesa_status}"
 
     def calculate_fee(self, amount):
         if self.fee_type == 'PERCENTAGE':
@@ -103,6 +439,13 @@ class InvoiceItemPayment(models.Model):
 
     def is_amount_valid(self, amount):
         return self.minimum_amount <= amount <= self.maximum_amount
+    
+    def get_mpesa_config(self):
+        """Get the M-Pesa configuration for this payment method"""
+        if self.mpesa_configuration and self.mpesa_configuration.is_active:
+            return self.mpesa_configuration
+        # Fall back to default tenant configuration
+        return MpesaConfiguration.get_default_configuration(self.schema_name)
 
 
 class Payment(models.Model):
@@ -132,6 +475,15 @@ class Payment(models.Model):
     # PayHero-specific fields
     payhero_external_reference = models.CharField(max_length=255, blank=True, null=True, unique=True)
     raw_callback = models.JSONField(null=True, blank=True)
+    
+    # M-Pesa Transaction Link (new)
+    mpesa_transaction = models.OneToOneField(
+        'billing.MpesaTransaction',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='related_payment'
+    )
 
     # Tenant schema field
     schema_name = models.SlugField(
@@ -180,6 +532,7 @@ class Payment(models.Model):
             models.Index(fields=['transaction_id']),
             models.Index(fields=['mpesa_receipt']),
             models.Index(fields=['payhero_external_reference']),
+            models.Index(fields=['schema_name', 'status', 'payment_date']),
         ]
 
     def __str__(self):
@@ -198,9 +551,9 @@ class Payment(models.Model):
         if not self.payer_name and self.customer:
             self.payer_name = self.customer.full_name
         if not self.payer_phone and self.customer:
-            self.payer_phone = self.customer.user.phone_number
+            self.payer_phone = getattr(self.customer.user, 'phone_number', '')
         if not self.payer_email and self.customer:
-            self.payer_email = self.customer.user.email
+            self.payer_email = getattr(self.customer.user, 'email', '')
 
         super().save(*args, **kwargs)
 
@@ -234,14 +587,14 @@ class Payment(models.Model):
             return None
 
         refund_payment = Payment.objects.create(
-            
             customer=self.customer,
             amount=-refund_amount,
             payment_method=self.payment_method,
             status='COMPLETED',
             payment_reference=f"REFUND-{self.payment_number}",
             notes=f"Refund for {self.payment_number}. Reason: {refund_reason}",
-            created_by=self.created_by
+            created_by=self.created_by,
+            schema_name=self.schema_name
         )
 
         self.status = 'REFUNDED'
@@ -315,6 +668,7 @@ class Receipt(models.Model):
             models.Index(fields=['receipt_number']),
             models.Index(fields=['customer', 'receipt_date']),
             models.Index(fields=['payment']),
+            models.Index(fields=['schema_name', 'receipt_date']),
         ]
 
     def __str__(self):
@@ -348,6 +702,10 @@ class Receipt(models.Model):
         if not self.payment_reference and self.payment:
             self.payment_reference = self.payment.payment_reference
         
+        # Set schema_name from payment if not set
+        if not self.schema_name and self.payment:
+            self.schema_name = self.payment.schema_name
+        
         super().save(*args, **kwargs)
 
     def issue_receipt(self, user):
@@ -357,19 +715,25 @@ class Receipt(models.Model):
             self.issued_at = timezone.now()
             
             # Generate amount in words
-            from utils.helpers import number_to_words
-            self.amount_in_words = number_to_words(self.amount)
+            try:
+                from utils.helpers import number_to_words
+                self.amount_in_words = number_to_words(self.amount)
+            except ImportError:
+                self.amount_in_words = f"{self.amount} only"
             
             # Generate QR code
-            from utils.helpers import generate_qr_code
-            receipt_data = {
-                'receipt_number': self.receipt_number,
-                'date': self.receipt_date.isoformat(),
-                'amount': str(self.amount),
-                'customer': self.customer.full_name,
-                'payment_method': self.payment_method,
-            }
-            self.qr_code = generate_qr_code(str(receipt_data))
+            try:
+                from utils.helpers import generate_qr_code
+                receipt_data = {
+                    'receipt_number': self.receipt_number,
+                    'date': self.receipt_date.isoformat(),
+                    'amount': str(self.amount),
+                    'customer': self.customer.full_name,
+                    'payment_method': self.payment_method,
+                }
+                self.qr_code = generate_qr_code(str(receipt_data))
+            except ImportError:
+                pass
             
             self.save()
             return True

@@ -8,9 +8,10 @@ from django.core.exceptions import ValidationError
 from django.utils import timezone
 from django.utils.translation import gettext_lazy as _
 from django.conf import settings
+import random
+import string
 
-from apps.core.models import Company
-# REMOVED: from apps.network.models.ipam_models import IPAddress  # ← DELETED THIS LINE
+from apps.core.models import AuditMixin  # Make sure this import exists
 
 # Use Django's settings.AUTH_USER_MODEL for foreign keys
 User = get_user_model()
@@ -128,6 +129,11 @@ KENYAN_COUNTIES = (
 )
 
 
+def generate_billing_account_number():
+    """Generates a unique 6-character alphanumeric account number (e.g., X7K9A2)"""
+    return ''.join(random.choices(string.ascii_uppercase + string.digits, k=6))
+
+
 class Customer(models.Model):  
     """Main customer model"""
     user = models.OneToOneField(
@@ -135,7 +141,7 @@ class Customer(models.Model):
         on_delete=models.CASCADE, 
         related_name='customer_profile'
     )
-    # company = models.ForeignKey(...)  # ← REMOVE this line (TenantMixin scopes automatically)
+    # company = models.ForeignKey(...)  # REMOVE this line (TenantMixin scopes automatically)
     
     # Personal Information
     customer_code = models.CharField(
@@ -603,7 +609,7 @@ class CustomerNotes(models.Model):
         return f"Note for {self.customer.customer_code}"
 
 
-class ServiceConnection(models.Model):  
+class ServiceConnection(AuditMixin):  
     customer = models.ForeignKey(
         Customer,
         on_delete=models.CASCADE,
@@ -644,6 +650,31 @@ class ServiceConnection(models.Model):
         choices=CONNECTION_TYPE_CHOICES,
         default='FIBER',
         verbose_name="Connection Medium"
+    )
+
+    # === Billing Account Number ===
+    billing_account_number = models.CharField(
+        max_length=20,
+        unique=True,
+        default=generate_billing_account_number,
+        editable=True,
+        db_index=True,
+        help_text="The Account Number the customer uses when paying via Paybill. Usually 6-10 alphanumeric characters."
+    )
+
+    # === Alternative Account Numbers for Different Payment Methods ===
+    mpesa_account_number = models.CharField(
+        max_length=20,
+        blank=True,
+        db_index=True,
+        help_text="Alternative account number specifically for M-Pesa payments (if different from billing_account_number)"
+    )
+    
+    paybill_account_number = models.CharField(
+        max_length=20,
+        blank=True,
+        db_index=True,
+        help_text="Account number for Paybill payments (usually customer code or billing_account_number)"
     )
 
     # === Status & Timeline ===
@@ -733,26 +764,8 @@ class ServiceConnection(models.Model):
         verbose_name="Contract Period (months)"
     )
 
-    # Tenant schema field
-    # === Audit Trail ===
-    created_by = models.ForeignKey(
-        settings.AUTH_USER_MODEL,
-        on_delete=models.SET_NULL,
-        null=True,
-        blank=True,
-        related_name='created_service_connections',
-        verbose_name="Created By"
-    )
-    updated_by = models.ForeignKey(
-        settings.AUTH_USER_MODEL,
-        on_delete=models.SET_NULL,
-        null=True,
-        blank=True,
-        related_name='updated_service_connections',
-        verbose_name="Updated By"
-    )
-    created_at = models.DateTimeField(auto_now_add=True, verbose_name="Created At")
-    updated_at = models.DateTimeField(auto_now=True, verbose_name="Updated At")
+    # === Audit Trail (provided by AuditMixin) ===
+    # created_by, updated_by, created_at, updated_at are inherited from AuditMixin
 
     class Meta:
         app_label = 'customers'
@@ -764,6 +777,9 @@ class ServiceConnection(models.Model):
             models.Index(fields=['customer', 'status']),
             models.Index(fields=['plan', 'status']),
             models.Index(fields=['auth_connection_type']),
+            models.Index(fields=['billing_account_number']),
+            models.Index(fields=['mpesa_account_number']),
+            models.Index(fields=['paybill_account_number']),
         ]
 
     def __str__(self):
@@ -780,10 +796,62 @@ class ServiceConnection(models.Model):
             return (timezone.now() - self.activation_date).days
         return 0
 
+    @property
+    def effective_mpesa_account(self):
+        """Get the effective account number for M-Pesa payments"""
+        if self.mpesa_account_number:
+            return self.mpesa_account_number
+        return self.billing_account_number
+
+    @property
+    def effective_paybill_account(self):
+        """Get the effective account number for Paybill payments"""
+        if self.paybill_account_number:
+            return self.paybill_account_number
+        return self.customer.customer_code
+
+    def get_payment_account_number(self, payment_method_type=None):
+        """
+        Get the appropriate account number based on payment method type
+        """
+        if payment_method_type in ['MPESA_STK', 'MPESA_PAYBILL', 'MPESA_TILL']:
+            return self.effective_mpesa_account
+        elif payment_method_type == 'BANK_TRANSFER':
+            return self.billing_account_number
+        else:
+            return self.billing_account_number
+
     def clean(self):
         """Validate the service connection data."""
         super().clean()
         
+        # Validate billing account number format
+        if self.billing_account_number:
+            if not self.billing_account_number.isalnum():
+                raise ValidationError({
+                    'billing_account_number': 'Billing account number must be alphanumeric.'
+                })
+            if len(self.billing_account_number) < 4:
+                raise ValidationError({
+                    'billing_account_number': 'Billing account number must be at least 4 characters.'
+                })
+            if len(self.billing_account_number) > 20:
+                raise ValidationError({
+                    'billing_account_number': 'Billing account number cannot exceed 20 characters.'
+                })
+
+        # Validate M-Pesa account number if provided
+        if self.mpesa_account_number and not self.mpesa_account_number.isalnum():
+            raise ValidationError({
+                'mpesa_account_number': 'M-Pesa account number must be alphanumeric.'
+            })
+
+        # Validate Paybill account number if provided
+        if self.paybill_account_number and not self.paybill_account_number.isalnum():
+            raise ValidationError({
+                'paybill_account_number': 'Paybill account number must be alphanumeric.'
+            })
+
         # === LAZY IMPORT HERE ===
         # This prevents the circular error because it only imports when saving, not at startup.
         from apps.network.models.ipam_models import IPAddress
@@ -809,19 +877,23 @@ class ServiceConnection(models.Model):
                 raise ValidationError({
                     'ip_address': f"The IP {self.ip_address} does not exist in the IPAM ledger. Please provision it first."
                 })
-            
-            # If the IP is available, we might want to auto-assign it
-            if ip_record.status == 'AVAILABLE' and self.pk:  # Only for existing records
-                # This could be handled automatically, but we'll just warn
-                pass
 
     def save(self, *args, **kwargs):
         """
-        Auto-populate auth_connection_type from plan if not set
+        Auto-populate fields and ensure unique billing account number
         """
-        # Run full validation before saving
-        self.full_clean()
-        
+        # Generate unique billing account number if not set or if it conflicts
+        if not self.billing_account_number:
+            self.billing_account_number = self._generate_unique_account_number()
+        else:
+            # Ensure uniqueness even when manually set
+            original_number = self.billing_account_number
+            while ServiceConnection.objects.exclude(pk=self.pk).filter(
+                billing_account_number=self.billing_account_number
+            ).exists():
+                self.billing_account_number = self._generate_unique_account_number()
+            
+        # Auto-populate auth_connection_type from plan if not set
         if self.plan and not self.auth_connection_type:
             mapping = {
                 'HOTSPOT': 'HOTSPOT',
@@ -831,12 +903,42 @@ class ServiceConnection(models.Model):
             }
             self.auth_connection_type = mapping.get(self.plan.plan_type, 'OTHER')
 
+        # Set speeds from plan if not set
         if self.plan and not self.download_speed:
             self.download_speed = self.plan.download_speed or 0
         if self.plan and not self.upload_speed:
             self.upload_speed = self.plan.upload_speed or 0
 
+        # Run full validation before saving
+        self.full_clean()
         super().save(*args, **kwargs)
+
+    def _generate_unique_account_number(self):
+        """Generate a unique billing account number"""
+        max_attempts = 10
+        for attempt in range(max_attempts):
+            # Generate different formats based on attempt
+            if attempt < 3:
+                # First attempts: 6-character alphanumeric
+                new_number = ''.join(random.choices(string.ascii_uppercase + string.digits, k=6))
+            elif attempt < 6:
+                # Next attempts: 8-character alphanumeric
+                new_number = ''.join(random.choices(string.ascii_uppercase + string.digits, k=8))
+            else:
+                # Final attempts: Include customer code prefix for guaranteed uniqueness
+                prefix = self.customer.customer_code[:3] if self.customer else 'CUS'
+                suffix = ''.join(random.choices(string.digits, k=4))
+                new_number = f"{prefix}{suffix}"
+            
+            # Check uniqueness
+            if not ServiceConnection.objects.exclude(pk=self.pk).filter(
+                billing_account_number=new_number
+            ).exists():
+                return new_number
+        
+        # Ultimate fallback: timestamp-based number
+        import time
+        return f"ACC{int(time.time())}"
 
     def activate_service(self, user=None):
         if self.status != 'ACTIVE':
@@ -853,6 +955,8 @@ class ServiceConnection(models.Model):
         if user:
             self.updated_by = user
         self.save()
+        
+        # Create note about suspension
         CustomerNotes.objects.create(
             customer=self.customer,
             note=f"Service suspended. Reason: {reason}",
@@ -867,6 +971,8 @@ class ServiceConnection(models.Model):
         if user:
             self.updated_by = user
         self.save()
+        
+        # Create note about termination
         CustomerNotes.objects.create(
             customer=self.customer,
             note=f"Service terminated. Reason: {reason}",

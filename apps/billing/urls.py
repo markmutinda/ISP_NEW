@@ -1,7 +1,7 @@
 from django.urls import path, include
 from rest_framework.routers import DefaultRouter
 from .views.InvoiceViews import PlanViewSet, BillingCycleViewSet, InvoiceViewSet, InvoiceItemViewSet
-from .views.PaymentViews import PaymentViewSet
+from .views.PaymentViews import PaymentViewSet, MpesaConfigurationViewSet, MpesaTransactionViewSet
 from .views.VoucherViews import VoucherBatchViewSet, VoucherViewSet
 
 from .views.hotspot_views import CaptivePortalView, HotspotPlansView, HotspotPurchaseView, HotspotPurchaseStatusView
@@ -41,6 +41,10 @@ router.register(r'invoice-items', InvoiceItemViewSet, basename='invoice-item')
 # Payment URLs
 router.register(r'payments', PaymentViewSet, basename='payment')
 
+# M-Pesa Configuration URLs (NEW)
+router.register(r'mpesa-config', MpesaConfigurationViewSet, basename='mpesa-config')
+router.register(r'mpesa-transactions', MpesaTransactionViewSet, basename='mpesa-transaction')
+
 # Voucher URLs
 router.register(r'voucher-batches', VoucherBatchViewSet, basename='voucher-batch')
 router.register(r'vouchers', VoucherViewSet, basename='voucher')
@@ -48,32 +52,69 @@ router.register(r'vouchers', VoucherViewSet, basename='voucher')
 urlpatterns = [
     path('', include(router.urls)),
 
-    # Additional endpoints
+    # ==========================
+    # M-Pesa Endpoints
+    # ==========================
+    # Main callback endpoint for Safaricom M-Pesa API
     path('mpesa/callback/', PaymentViewSet.as_view({'post': 'mpesa_callback'}), name='mpesa-callback'),
+    
+    # M-Pesa configuration test endpoint
+    path('mpesa-config/<int:pk>/test/', 
+         MpesaConfigurationViewSet.as_view({'post': 'test_connection'}), 
+         name='mpesa-config-test'),
+    
+    # M-Pesa configuration management endpoints
+    path('mpesa-config/<int:pk>/set-default/', 
+         MpesaConfigurationViewSet.as_view({'post': 'set_default'}), 
+         name='mpesa-config-set-default'),
+    path('mpesa-config/<int:pk>/toggle-active/', 
+         MpesaConfigurationViewSet.as_view({'post': 'toggle_active'}), 
+         name='mpesa-config-toggle-active'),
+    path('mpesa-config/active/', 
+         MpesaConfigurationViewSet.as_view({'get': 'active'}), 
+         name='mpesa-config-active'),
+    path('mpesa-config/default/', 
+         MpesaConfigurationViewSet.as_view({'get': 'default'}), 
+         name='mpesa-config-default'),
+    
+    # M-Pesa transaction endpoints
+    path('mpesa-transactions/<int:pk>/status/', 
+         MpesaTransactionViewSet.as_view({'get': 'status'}), 
+         name='mpesa-transaction-status'),
+
+    # ==========================
+    # PayHero Endpoints
+    # ==========================
     path('payments/payhero/callback/', PaymentViewSet.as_view({'post': 'payhero_callback'}), name='payhero-callback'),
 
-    # Dashboard endpoints
+    # ==========================
+    # Dashboard Endpoints
+    # ==========================
     path('dashboard/invoice-stats/', InvoiceViewSet.as_view({'get': 'dashboard_stats'}), name='invoice-dashboard-stats'),
     path('dashboard/payment-stats/', PaymentViewSet.as_view({'get': 'dashboard_stats'}), name='payment-dashboard-stats'),
 
-    # Customer endpoints
+    # ==========================
+    # Customer Endpoints
+    # ==========================
     path('customer/outstanding/', InvoiceViewSet.as_view({'get': 'customer_outstanding'}), name='customer-outstanding'),
 
-    # Utility endpoints
+    # ==========================
+    # Utility Endpoints
+    # ==========================
     path('vouchers/validate/', VoucherViewSet.as_view({'post': 'validate_code'}), name='voucher-validate'),
     
-    # ─────────────────────────────────────────────────────────────
+    # ==========================
     # Customer Payment Initiation (payments to Netily → ISP)
-    # ─────────────────────────────────────────────────────────────
+    # ==========================
     path('payments/initiate/', InitiateCustomerPaymentView.as_view(), name='initiate-payment'),
     path('payments/<int:payment_id>/status/', CustomerPaymentStatusView.as_view(), name='payment-status'),
     path('payment-methods/', CustomerPaymentMethodsView.as_view(), name='payment-methods'),
 ]
 
-# ─────────────────────────────────────────────────────────────
+# ==========================
 # Hotspot URLs (PUBLIC - no auth)
 # These are accessed from captive portal
-# ─────────────────────────────────────────────────────────────
+# ==========================
 hotspot_urlpatterns = [
     path('captive-portal/', CaptivePortalView.as_view(), name='hotspot-captive-portal'),
     path('routers/<int:router_id>/plans/', HotspotPlansView.as_view(), name='hotspot-plans'),
@@ -89,10 +130,10 @@ hotspot_urlpatterns = [
     path('device-auth/status/', HotspotDeviceAuthStatusView.as_view(), name='hotspot-device-auth-status'),
 ]
 
-# ─────────────────────────────────────────────────────────────
+# ==========================
 # Hotspot Admin URLs (AUTHENTICATED - admin/staff only)
 # These are used by the hotspot management admin page
-# ─────────────────────────────────────────────────────────────
+# ==========================
 hotspot_admin_urlpatterns = [
     # Dashboard
     path('dashboard/', HotspotDashboardView.as_view(), name='hotspot-dashboard'),
@@ -131,14 +172,17 @@ hotspot_admin_urlpatterns = [
          name='hotspot-admin-branding'),
 ]
 
-# ─────────────────────────────────────────────────────────────
+# ==========================
 # PayHero Webhook URLs (PUBLIC - no auth)
 # These receive callbacks from PayHero
-# ─────────────────────────────────────────────────────────────
+# ==========================
 webhook_urlpatterns = [
     path('subscription/', PayHeroSubscriptionWebhookView.as_view(), name='payhero-subscription-webhook'),
     path('hotspot/', PayHeroHotspotWebhookView.as_view(), name='payhero-hotspot-webhook'),
     path('billing/', PayHeroBillingWebhookView.as_view(), name='payhero-billing-webhook'),
 ]
+
+# Combine all URL patterns for easy inclusion in main urls.py
+hotspot_all_urlpatterns = hotspot_urlpatterns + hotspot_admin_urlpatterns
 
 app_name = 'billing'

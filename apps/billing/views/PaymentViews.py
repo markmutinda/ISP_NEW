@@ -23,7 +23,9 @@ from ..models.billing_models import Invoice
 # from ..models.payment_models import Payment, PaymentMethod, Receipt   # ← COMMENTED OUT to prevent circular/early import error
 from ..serializers import (
     PaymentSerializer, PaymentMethodSerializer, ReceiptSerializer,
-    PaymentCreateSerializer, PaymentDetailSerializer, MpesaSTKPushSerializer
+    PaymentCreateSerializer, PaymentDetailSerializer, MpesaSTKPushSerializer,
+    MpesaConfigurationSerializer, MpesaConfigurationDetailSerializer,
+    MpesaTransactionSerializer, MpesaConfigurationTestSerializer
 )
 from ..integrations.mpesa_integration import MpesaSTKPush, MpesaCallback, MpesaValidation
 from ..integrations.africastalking import SMSService
@@ -31,61 +33,407 @@ from ..integrations.africastalking import SMSService
 logger = logging.getLogger(__name__)
 
 
-# Temporarily disabled PaymentMethodViewSet to break import chain
-# Uncomment after migrations succeed and models are loadable
-# class PaymentMethodViewSet(viewsets.ModelViewSet):
-#     """
-#     ViewSet for managing payment methods (including PayHero channels)
-#     """
-#     queryset = PaymentMethod.objects.all()  # ← this line was causing the crash
-#     serializer_class = PaymentMethodSerializer
-#     permission_classes = [IsAuthenticated, IsCompanyAdmin]
-#     filter_backends = [DjangoFilterBackend, filters.SearchFilter]
-#     filterset_fields = ['method_type', 'is_active', 'status', 'is_payhero_enabled']
-#     search_fields = ['name', 'code', 'description', 'channel_id']
-#
-#     def get_queryset(self):
-#         user = self.request.user
-#         if user.is_superuser:
-#             return PaymentMethod.objects.all()
-#         return PaymentMethod.objects.filter(company=user.company)
-#
-#     def perform_create(self, serializer):
-#         serializer.save(
-#             created_by=self.request.user,
-#             company=self.request.user.company
-#         )
-#
-#     @action(detail=True, methods=['post'])
-#     def toggle_active(self, request, pk=None):
-#         method = self.get_object()
-#         method.is_active = not method.is_active
-#         method.save()
-#         return Response({'status': 'success', 'is_active': method.is_active})
-#
-#     @action(detail=True, methods=['post'])
-#     def test_connection(self, request, pk=None):
-#         method = self.get_object()
-#
-#         if method.method_type.startswith('MPESA') and not method.is_payhero_enabled:
-#             mpesa = MpesaSTKPush(method.company)
-#             token = mpesa._get_access_token()
-#             return Response({
-#                 'status': 'success' if token else 'error',
-#                 'message': 'M-Pesa connection successful' if token else 'M-Pesa connection failed'
-#             })
-#
-#         return Response({
-#             'status': 'info',
-#             'message': f'No test available for {method.method_type} {"(PayHero)" if method.is_payhero_enabled else ""}'
-#         })
+# ==========================
+# M-Pesa Configuration Views
+# ==========================
 
+class MpesaConfigurationViewSet(viewsets.ModelViewSet):
+    """
+    ViewSet for managing tenant-specific M-Pesa configurations
+    """
+    permission_classes = [IsAuthenticated, IsCompanyAdmin]
+    filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
+    filterset_fields = ['is_active', 'is_default', 'is_sandbox', 'shortcode_type']
+    search_fields = ['business_shortcode', 'shortcode_type']
+    ordering_fields = ['created_at', 'updated_at']
+
+    def get_queryset(self):
+        """Return only configurations for the current tenant"""
+        from ..models.payment_models import MpesaConfiguration
+        
+        user = self.request.user
+        
+        if user.is_superuser:
+            # Superusers can see all configurations across tenants
+            schema_name = self.request.query_params.get('schema_name')
+            if schema_name:
+                return MpesaConfiguration.objects.filter(schema_name=schema_name)
+            return MpesaConfiguration.objects.all()
+        
+        # Regular users only see their tenant's configurations
+        if hasattr(user, 'company') and user.company:
+            return MpesaConfiguration.objects.filter(schema_name=user.company.schema_name)
+        
+        return MpesaConfiguration.objects.none()
+
+    def get_serializer_class(self):
+        if self.action == 'retrieve':
+            return MpesaConfigurationDetailSerializer
+        return MpesaConfigurationSerializer
+
+    def perform_create(self, serializer):
+        """Create a new M-Pesa configuration for the current tenant"""
+        from ..models.payment_models import MpesaConfiguration
+        
+        user = self.request.user
+        schema_name = user.company.schema_name if hasattr(user, 'company') else 'default'
+        
+        serializer.save(
+            created_by=user,
+            schema_name=schema_name
+        )
+
+    @action(detail=True, methods=['post'])
+    def test_connection(self, request, pk=None):
+        """
+        Test the M-Pesa configuration by attempting to get an access token
+        """
+        config = self.get_object()
+        test_serializer = MpesaConfigurationTestSerializer(data=request.data)
+        
+        if not test_serializer.is_valid():
+            return Response(test_serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+        
+        validated_data = test_serializer.validated_data
+        phone = validated_data['test_phone']
+        amount = validated_data['test_amount']
+        
+        try:
+            # Initialize M-Pesa service with this configuration
+            from ..integrations.mpesa_integration import MpesaSTKPush
+            mpesa_service = MpesaSTKPush(config=config)
+            
+            # Test 1: Get access token
+            token_result = mpesa_service.test_connection()
+            
+            if not token_result['success']:
+                return Response({
+                    'status': 'error',
+                    'message': 'Connection test failed',
+                    'details': token_result
+                }, status=status.HTTP_400_BAD_REQUEST)
+            
+            # Test 2: Send test STK push if phone and amount provided
+            test_result = mpesa_service.initiate_stk_push(
+                phone_number=phone,
+                amount=amount,
+                account_reference="TEST",
+                transaction_desc="Test Transaction"
+            )
+            
+            # Update last validated timestamp
+            config.last_validated_at = timezone.now()
+            config.validation_status = 'VALID' if test_result['success'] else 'INVALID'
+            if not test_result['success']:
+                config.validation_error = test_result.get('message', 'Test failed')
+            config.save(update_fields=['last_validated_at', 'validation_status', 'validation_error'])
+            
+            return Response({
+                'status': 'success' if test_result['success'] else 'error',
+                'message': 'Configuration test completed',
+                'token_test': token_result,
+                'stk_test': {
+                    'success': test_result['success'],
+                    'message': test_result.get('message', ''),
+                    'checkout_request_id': test_result.get('data', {}).get('checkout_request_id') if test_result['success'] else None
+                }
+            })
+            
+        except Exception as e:
+            logger.error(f"Error testing M-Pesa configuration {config.id}: {str(e)}")
+            config.validation_status = 'INVALID'
+            config.validation_error = str(e)[:255]
+            config.save(update_fields=['validation_status', 'validation_error'])
+            
+            return Response({
+                'status': 'error',
+                'message': f'Test failed: {str(e)}'
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+    @action(detail=True, methods=['post'])
+    def set_default(self, request, pk=None):
+        """
+        Set this configuration as the default for the tenant
+        """
+        config = self.get_object()
+        
+        # Clear existing default
+        from ..models.payment_models import MpesaConfiguration
+        MpesaConfiguration.objects.filter(
+            schema_name=config.schema_name,
+            is_default=True
+        ).exclude(pk=config.pk).update(is_default=False)
+        
+        # Set this as default
+        config.is_default = True
+        config.is_active = True  # Default should also be active
+        config.save(update_fields=['is_default', 'is_active', 'updated_at'])
+        
+        return Response({
+            'status': 'success',
+            'message': 'Configuration set as default',
+            'data': MpesaConfigurationSerializer(config).data
+        })
+
+    @action(detail=True, methods=['post'])
+    def toggle_active(self, request, pk=None):
+        """
+        Toggle the active status of this configuration
+        """
+        config = self.get_object()
+        config.is_active = not config.is_active
+        config.save(update_fields=['is_active', 'updated_at'])
+        
+        return Response({
+            'status': 'success',
+            'is_active': config.is_active,
+            'message': f'Configuration {"activated" if config.is_active else "deactivated"}'
+        })
+
+    @action(detail=False, methods=['get'])
+    def active(self, request):
+        """
+        Get the active M-Pesa configuration for the current tenant
+        """
+        from ..models.payment_models import MpesaConfiguration
+        
+        user = request.user
+        schema_name = user.company.schema_name if hasattr(user, 'company') else 'default'
+        
+        config = MpesaConfiguration.get_active_configuration(schema_name)
+        
+        if not config:
+            return Response({
+                'status': 'error',
+                'message': 'No active M-Pesa configuration found for this tenant'
+            }, status=status.HTTP_404_NOT_FOUND)
+        
+        serializer = MpesaConfigurationDetailSerializer(config)
+        return Response(serializer.data)
+
+    @action(detail=False, methods=['get'])
+    def default(self, request):
+        """
+        Get the default M-Pesa configuration for the current tenant
+        """
+        from ..models.payment_models import MpesaConfiguration
+        
+        user = request.user
+        schema_name = user.company.schema_name if hasattr(user, 'company') else 'default'
+        
+        config = MpesaConfiguration.get_default_configuration(schema_name)
+        
+        if not config:
+            return Response({
+                'status': 'error',
+                'message': 'No default M-Pesa configuration found for this tenant'
+            }, status=status.HTTP_404_NOT_FOUND)
+        
+        serializer = MpesaConfigurationDetailSerializer(config)
+        return Response(serializer.data)
+
+
+# ==========================
+# M-Pesa Transaction Views
+# ==========================
+
+class MpesaTransactionViewSet(viewsets.ReadOnlyModelViewSet):
+    """
+    ViewSet for viewing M-Pesa transactions (read-only)
+    """
+    permission_classes = [IsAuthenticated, IsCompanyStaff]
+    filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
+    filterset_fields = ['status', 'transaction_type', 'configuration']
+    search_fields = [
+        'merchant_request_id', 'checkout_request_id', 'transaction_id',
+        'phone_number', 'account_reference'
+    ]
+    ordering_fields = ['created_at', 'amount']
+
+    def get_queryset(self):
+        """Return only transactions for the current tenant"""
+        from ..models.payment_models import MpesaTransaction
+        
+        user = self.request.user
+        
+        if user.is_superuser:
+            schema_name = self.request.query_params.get('schema_name')
+            if schema_name:
+                return MpesaTransaction.objects.filter(schema_name=schema_name)
+            return MpesaTransaction.objects.all()
+        
+        if hasattr(user, 'company') and user.company:
+            return MpesaTransaction.objects.filter(schema_name=user.company.schema_name)
+        
+        return MpesaTransaction.objects.none()
+
+    def get_serializer_class(self):
+        from ..serializers import MpesaTransactionSerializer, MpesaTransactionDetailSerializer
+        if self.action == 'retrieve':
+            return MpesaTransactionDetailSerializer
+        return MpesaTransactionSerializer
+
+    @action(detail=True, methods=['get'])
+    def status(self, request, pk=None):
+        """
+        Check the current status of a transaction
+        """
+        transaction = self.get_object()
+        
+        # If transaction is still pending, query M-Pesa for status
+        if transaction.status == 'PENDING':
+            try:
+                from ..integrations.mpesa_integration import MpesaSTKPush
+                mpesa_service = MpesaSTKPush(config=transaction.configuration)
+                
+                # Query transaction status
+                status_result = mpesa_service.query_status(
+                    checkout_request_id=transaction.checkout_request_id
+                )
+                
+                if status_result['success']:
+                    result_data = status_result['data']
+                    if result_data.get('ResultCode') == 0:
+                        transaction.mark_completed(
+                            transaction_id=result_data.get('TransactionID', ''),
+                            callback_data=result_data
+                        )
+                    else:
+                        transaction.mark_failed(
+                            result_code=result_data.get('ResultCode'),
+                            result_desc=result_data.get('ResultDesc', 'Transaction failed'),
+                            callback_data=result_data
+                        )
+            except Exception as e:
+                logger.error(f"Error querying transaction status: {str(e)}")
+        
+        serializer = self.get_serializer(transaction)
+        return Response(serializer.data)
+
+
+# ==========================
+# Payment Method Views (Updated)
+# ==========================
+
+class PaymentMethodViewSet(viewsets.ModelViewSet):
+    """
+    ViewSet for managing payment methods (including PayHero channels and M-Pesa)
+    """
+    permission_classes = [IsAuthenticated, IsCompanyAdmin]
+    filter_backends = [DjangoFilterBackend, filters.SearchFilter]
+    filterset_fields = ['method_type', 'is_active', 'status', 'is_payhero_enabled']
+    search_fields = ['name', 'code', 'description', 'channel_id']
+
+    def get_queryset(self):
+        from ..models.payment_models import InvoiceItemPayment
+        
+        user = self.request.user
+        if user.is_superuser:
+            return InvoiceItemPayment.objects.all()
+        
+        if hasattr(user, 'company') and user.company:
+            return InvoiceItemPayment.objects.filter(schema_name=user.company.schema_name)
+        
+        return InvoiceItemPayment.objects.none()
+
+    def get_serializer_class(self):
+        return PaymentMethodSerializer
+
+    def perform_create(self, serializer):
+        user = self.request.user
+        schema_name = user.company.schema_name if hasattr(user, 'company') else 'default'
+        
+        serializer.save(
+            created_by=user,
+            schema_name=schema_name
+        )
+
+    @action(detail=True, methods=['post'])
+    def toggle_active(self, request, pk=None):
+        method = self.get_object()
+        method.is_active = not method.is_active
+        method.save()
+        return Response({'status': 'success', 'is_active': method.is_active})
+
+    @action(detail=True, methods=['post'])
+    def test_connection(self, request, pk=None):
+        method = self.get_object()
+
+        # Test M-Pesa connection if it's an M-Pesa method
+        if method.method_type.startswith('MPESA') and not method.is_payhero_enabled:
+            if not method.mpesa_configuration:
+                return Response({
+                    'status': 'error',
+                    'message': 'No M-Pesa configuration linked to this payment method'
+                }, status=status.HTTP_400_BAD_REQUEST)
+            
+            try:
+                from ..integrations.mpesa_integration import MpesaSTKPush
+                mpesa = MpesaSTKPush(config=method.mpesa_configuration)
+                token_result = mpesa.test_connection()
+                
+                return Response({
+                    'status': 'success' if token_result['success'] else 'error',
+                    'message': 'M-Pesa connection successful' if token_result['success'] else 'M-Pesa connection failed',
+                    'details': token_result
+                })
+            except Exception as e:
+                logger.error(f"Error testing M-Pesa connection: {str(e)}")
+                return Response({
+                    'status': 'error',
+                    'message': f'M-Pesa connection test failed: {str(e)}'
+                }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+        # Test PayHero connection
+        elif method.is_payhero_enabled:
+            try:
+                auth_str = f"{settings.PAYHERO_API_USERNAME}:{settings.PAYHERO_API_PASSWORD}"
+                headers = {
+                    'Authorization': f'Basic {base64.b64encode(auth_str.encode()).decode()}',
+                    'Content-Type': 'application/json'
+                }
+                
+                response = requests.get(
+                    'https://api.payhero.co.ke/v1.1/channels',
+                    headers=headers,
+                    timeout=10
+                )
+                
+                if response.status_code == 200:
+                    channels = response.json()
+                    channel_exists = any(str(ch.get('id')) == str(method.channel_id) for ch in channels)
+                    
+                    return Response({
+                        'status': 'success' if channel_exists else 'warning',
+                        'message': 'PayHero connected' if channel_exists else 'Channel ID not found',
+                        'channel_found': channel_exists
+                    })
+                else:
+                    return Response({
+                        'status': 'error',
+                        'message': f'PayHero API error: {response.status_code}'
+                    }, status=status.HTTP_502_BAD_GATEWAY)
+                    
+            except Exception as e:
+                return Response({
+                    'status': 'error',
+                    'message': f'PayHero connection failed: {str(e)}'
+                }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+        return Response({
+            'status': 'info',
+            'message': f'No test available for {method.method_type}'
+        })
+
+
+# ==========================
+# Payment Views (Updated)
+# ==========================
 
 class PaymentViewSet(viewsets.ModelViewSet):
     """
-    ViewSet for managing payments with unified PayHero + fallback support
+    ViewSet for managing payments with unified PayHero + M-Pesa support
     """
-    # queryset = Payment.objects.all()  # ← Avoid direct queryset here to prevent early model load
     permission_classes = [IsAuthenticated, IsCompanyStaff]
     filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
     filterset_fields = ['status', 'payment_method', 'customer', 'is_reconciled']
@@ -96,20 +444,19 @@ class PaymentViewSet(viewsets.ModelViewSet):
     ordering_fields = ['payment_date', 'amount', 'created_at']
 
     def get_queryset(self):
+        from ..models.payment_models import Payment
+        
         user = self.request.user
         
         if user.is_superuser:
             company_id = self.request.query_params.get('company_id')
             if company_id:
-                # Use string model name if needed, but Payment is safe here
                 return Payment.objects.filter(company_id=company_id)
             return Payment.objects.all()
         
-        # Company users can only see payments from their company
         if hasattr(user, 'company') and user.company:
-            queryset = Payment.objects.filter(company=user.company)
+            queryset = Payment.objects.filter(schema_name=user.company.schema_name)
             
-            # Customers can only see their own payments
             if hasattr(user, 'customer_profile'):
                 return queryset.filter(customer=user.customer_profile)
             
@@ -125,9 +472,12 @@ class PaymentViewSet(viewsets.ModelViewSet):
         return PaymentSerializer
 
     def perform_create(self, serializer):
+        user = self.request.user
+        schema_name = user.company.schema_name if hasattr(user, 'company') else 'default'
+        
         serializer.save(
-            created_by=self.request.user,
-            company=self.request.user.company
+            created_by=user,
+            schema_name=schema_name
         )
 
     # === Standard Actions ===
@@ -136,10 +486,10 @@ class PaymentViewSet(viewsets.ModelViewSet):
         payment = self.get_object()
         if payment.mark_as_completed(request.user):
             try:
-                sms_service = SMSService(payment.company)
+                sms_service = SMSService(company=request.user.company)
                 sms_service.send_payment_confirmation(payment.customer, payment)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.error(f"SMS sending failed: {str(e)}")
             return Response({'status': 'success', 'message': 'Payment marked as completed'})
         return Response({'error': 'Cannot mark payment as completed'}, status=status.HTTP_400_BAD_REQUEST)
 
@@ -177,6 +527,190 @@ class PaymentViewSet(viewsets.ModelViewSet):
             })
         return Response({'error': 'Cannot process refund'}, status=status.HTTP_400_BAD_REQUEST)
 
+    # === M-Pesa STK Push with Tenant Configuration ===
+    @action(detail=False, methods=['post'])
+    def mpesa_stk_push(self, request):
+        serializer = MpesaSTKPushSerializer(data=request.data)
+        if not serializer.is_valid():
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+        
+        data = serializer.validated_data
+        customer_id = data.get('customer_id')
+        invoice_id = data.get('invoice_id')
+        service_connection_id = data.get('service_connection_id')
+        amount = data.get('amount')
+        phone_number = data.get('phone_number')
+        account_reference = data.get('account_reference')
+        transaction_desc = data.get('transaction_desc', 'Payment for Internet Services')
+        
+        # Get customer
+        try:
+            customer = Customer.objects.get(id=customer_id)
+        except Customer.DoesNotExist:
+            return Response({'status': 'error', 'message': 'Customer not found'}, status=status.HTTP_404_NOT_FOUND)
+        
+        # Get invoice if provided
+        invoice = None
+        if invoice_id:
+            try:
+                invoice = Invoice.objects.get(id=invoice_id, customer=customer)
+            except Invoice.DoesNotExist:
+                return Response({'status': 'error', 'message': 'Invoice not found'}, status=status.HTTP_404_NOT_FOUND)
+        
+        # Get service connection for account reference if needed
+        service_connection = None
+        if service_connection_id:
+            try:
+                from apps.customers.models import ServiceConnection
+                service_connection = ServiceConnection.objects.get(
+                    id=service_connection_id, 
+                    customer=customer
+                )
+            except ServiceConnection.DoesNotExist:
+                return Response({'status': 'error', 'message': 'Service connection not found'}, status=status.HTTP_404_NOT_FOUND)
+        
+        # Get M-Pesa payment method
+        from ..models.payment_models import InvoiceItemPayment
+        try:
+            payment_method = InvoiceItemPayment.objects.get(
+                method_type='MPESA_STK',
+                schema_name=request.user.company.schema_name,
+                is_active=True
+            )
+        except InvoiceItemPayment.DoesNotExist:
+            return Response({
+                'status': 'error', 
+                'message': 'M-Pesa STK payment method not configured for this company'
+            }, status=status.HTTP_400_BAD_REQUEST)
+        
+        # Check if payment method has M-Pesa configuration
+        if not payment_method.mpesa_configuration or not payment_method.mpesa_configuration.is_active:
+            return Response({
+                'status': 'error',
+                'message': 'M-Pesa service is not properly configured. Please contact support.'
+            }, status=status.HTTP_400_BAD_REQUEST)
+        
+        # Create payment record
+        from ..models.payment_models import Payment
+        payment = Payment.objects.create(
+            schema_name=request.user.company.schema_name,
+            customer=customer,
+            invoice=invoice,
+            amount=amount,
+            payment_method=payment_method,
+            status='PENDING',
+            payer_phone=phone_number,
+            payer_name=customer.full_name,
+            created_by=request.user
+        )
+        
+        # Determine account reference
+        if not account_reference:
+            if service_connection:
+                account_reference = service_connection.effective_mpesa_account
+            elif invoice:
+                account_reference = invoice.invoice_number
+            else:
+                account_reference = customer.customer_code
+        
+        # Initialize M-Pesa service with tenant configuration
+        from ..integrations.mpesa_integration import MpesaSTKPush
+        mpesa_service = MpesaSTKPush(config=payment_method.mpesa_configuration)
+        
+        # Initiate STK push
+        result = mpesa_service.initiate_stk_push(
+            phone_number=phone_number,
+            amount=amount,
+            account_reference=account_reference,
+            transaction_desc=transaction_desc,
+            payment=payment  # Pass payment to link transaction
+        )
+        
+        if result['success']:
+            return Response({
+                'status': 'success',
+                'message': result['message'],
+                'payment_id': payment.id,
+                'checkout_request_id': result['data']['checkout_request_id'],
+                'customer_message': 'Please check your phone and enter your PIN to complete payment'
+            })
+        else:
+            payment.status = 'FAILED'
+            payment.failure_reason = result.get('message', 'STK Push failed')
+            payment.save()
+            
+            return Response({
+                'status': 'error',
+                'message': result.get('message', 'Failed to initiate STK Push'),
+                'payment_id': payment.id
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+    # === M-Pesa Callback Handler ===
+    @csrf_exempt
+    @action(detail=False, methods=['post'], url_path='mpesa/callback')
+    def mpesa_callback(self, request):
+        """
+        Handle M-Pesa callbacks from Safaricom
+        """
+        callback_data = request.data
+        logger.info(f"M-Pesa callback received: {json.dumps(callback_data, default=str)}")
+        
+        from ..integrations.mpesa_integration import MpesaCallback
+        callback_handler = MpesaCallback()
+        result = callback_handler.handle_stk_callback(callback_data)
+        
+        if result['status'] == 'SUCCESS':
+            checkout_request_id = result['checkout_request_id']
+            
+            # Find the payment via MpesaTransaction
+            from ..models.payment_models import MpesaTransaction, Payment
+            try:
+                mpesa_transaction = MpesaTransaction.objects.get(
+                    checkout_request_id=checkout_request_id
+                )
+                
+                payment = mpesa_transaction.payment
+                if payment:
+                    transaction_data = result['transaction_data']
+                    
+                    # Update payment with M-Pesa details
+                    payment.mpesa_receipt = transaction_data['mpesa_receipt']
+                    payment.mpesa_phone = transaction_data['phone_number']
+                    payment.transaction_id = transaction_data['mpesa_receipt']
+                    payment.payment_date = timezone.now()
+                    payment.mark_as_completed()
+                    
+                    # Update the MpesaTransaction
+                    mpesa_transaction.mark_completed(
+                        transaction_id=transaction_data['mpesa_receipt'],
+                        callback_data=callback_data
+                    )
+                    
+                    # Send SMS confirmation
+                    try:
+                        sms_service = SMSService(company=request.user.company if request.user.is_authenticated else None)
+                        sms_service.send_payment_confirmation(payment.customer, payment)
+                    except Exception as e:
+                        logger.error(f"SMS sending failed: {str(e)}")
+                    
+                    return Response({
+                        'ResultCode': 0,
+                        'ResultDesc': 'Success',
+                        'payment_id': payment.id,
+                        'receipt_number': payment.mpesa_receipt
+                    })
+                else:
+                    logger.warning(f"No payment linked to transaction {checkout_request_id}")
+                    
+            except MpesaTransaction.DoesNotExist:
+                logger.warning(f"Transaction not found for checkout_request_id: {checkout_request_id}")
+        
+        # Return success to M-Pesa even if we couldn't process (they'll retry)
+        return Response({
+            'ResultCode': 0,
+            'ResultDesc': 'Accepted'
+        })
+
     # === PayHero Unified Initiation ===
     @action(detail=False, methods=['post'])
     def initiate(self, request):
@@ -188,29 +722,30 @@ class PaymentViewSet(viewsets.ModelViewSet):
             return Response({'error': 'Invalid amount or external_reference'}, status=status.HTTP_400_BAD_REQUEST)
 
         try:
-            # Use safe string-based lookup or delayed import
-            from ..models.payment_models import PaymentMethod
+            from ..models.payment_models import InvoiceItemPayment
             if channel_id:
-                method = PaymentMethod.objects.get(
-                    company=request.user.company,
+                method = InvoiceItemPayment.objects.get(
+                    schema_name=request.user.company.schema_name,
                     channel_id=channel_id,
                     is_active=True
                 )
             else:
-                method = PaymentMethod.objects.get(
-                    company=request.user.company,
+                method = InvoiceItemPayment.objects.get(
+                    schema_name=request.user.company.schema_name,
                     is_default=True,
                     is_active=True
                 )
-        except PaymentMethod.DoesNotExist:
+        except InvoiceItemPayment.DoesNotExist:
             return Response({'error': 'No valid payment method found'}, status=status.HTTP_400_BAD_REQUEST)
         except Exception as e:
             logger.error(f"Payment method lookup error: {str(e)}")
             return Response({'error': 'Error finding payment method'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
         customer = getattr(request.user, 'customer_profile', None)
+        
+        from ..models.payment_models import Payment
         payment = Payment.objects.create(
-            company=request.user.company,
+            schema_name=request.user.company.schema_name,
             customer=customer,
             amount=amount,
             payment_method=method,
@@ -307,138 +842,7 @@ class PaymentViewSet(viewsets.ModelViewSet):
             logger.error(f"PayHero callback processing error: {str(e)}")
             return Response({'error': 'Processing failed'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
-    # === Legacy Direct M-Pesa ===
-    @action(detail=False, methods=['post'])
-    def mpesa_stk_push(self, request):
-        serializer = MpesaSTKPushSerializer(data=request.data)
-        if not serializer.is_valid():
-            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
-        
-        data = serializer.validated_data
-        customer_id = data.get('customer_id')
-        invoice_id = data.get('invoice_id')
-        amount = data.get('amount')
-        phone_number = data.get('phone_number')
-        
-        try:
-            customer = Customer.objects.get(id=customer_id)
-        except Customer.DoesNotExist:
-            return Response({'status': 'error', 'message': 'Customer not found'}, status=status.HTTP_404_NOT_FOUND)
-        
-        invoice = None
-        if invoice_id:
-            try:
-                invoice = Invoice.objects.get(id=invoice_id, customer=customer)
-            except Invoice.DoesNotExist:
-                return Response({'status': 'error', 'message': 'Invoice not found'}, status=status.HTTP_404_NOT_FOUND)
-        
-        is_valid_amount, amount_error = MpesaValidation.validate_amount(amount)
-        if not is_valid_amount:
-            return Response({'status': 'error', 'message': amount_error}, status=status.HTTP_400_BAD_REQUEST)
-        
-        is_valid_phone, formatted_phone, phone_error = MpesaValidation.validate_phone_number(phone_number)
-        if not is_valid_phone:
-            return Response({'status': 'error', 'message': phone_error}, status=status.HTTP_400_BAD_REQUEST)
-        
-        try:
-            from ..models.payment_models import PaymentMethod
-            payment_method = PaymentMethod.objects.get(
-                method_type='MPESA_STK',
-                company=request.user.company,
-                is_active=True
-            )
-        except PaymentMethod.DoesNotExist:
-            return Response({'status': 'error', 'message': 'M-Pesa payment method not configured'}, status=status.HTTP_400_BAD_REQUEST)
-        
-        from ..models.payment_models import Payment
-        payment = Payment.objects.create(
-            company=request.user.company,
-            customer=customer,
-            invoice=invoice,
-            amount=amount,
-            payment_method=payment_method,
-            status='PENDING',
-            payer_phone=formatted_phone,
-            created_by=request.user
-        )
-        
-        mpesa = MpesaSTKPush(request.user.company)
-        account_reference = invoice.invoice_number if invoice else f"CUST-{customer.customer_code}"
-        transaction_desc = f"Payment for {account_reference}"
-        
-        result = mpesa.initiate_stk_push(
-            phone_number=formatted_phone,
-            amount=amount,
-            account_reference=account_reference,
-            transaction_desc=transaction_desc
-        )
-        
-        if result['success']:
-            payment.transaction_id = result['data']['checkout_request_id']
-            payment.payment_reference = result['data']['merchant_request_id']
-            payment.save()
-            return Response({
-                'status': 'success',
-                'message': result['message'],
-                'payment_id': payment.id,
-                'checkout_request_id': result['data']['checkout_request_id'],
-                'customer_message': result['data']['customer_message']
-            })
-        else:
-            payment.status = 'FAILED'
-            payment.failure_reason = result.get('message', 'STK Push failed')
-            payment.save()
-            return Response({
-                'error': result.get('message', 'Failed to initiate STK Push'),
-                'payment_id': payment.id
-            }, status=status.HTTP_400_BAD_REQUEST)
-
-    # ... rest of the file remains unchanged ...
-
-    @action(detail=False, methods=['post'])
-    def mpesa_callback(self, request):
-        callback_data = request.data
-        callback_handler = MpesaCallback()
-        result = callback_handler.handle_stk_callback(callback_data)
-        
-        if result['status'] == 'SUCCESS':
-            checkout_request_id = result['checkout_request_id']
-            try:
-                payment = Payment.objects.get(transaction_id=checkout_request_id, status='PENDING')
-            except Payment.DoesNotExist:
-                return Response({'status': 'error', 'message': 'Payment not found'}, status=status.HTTP_404_NOT_FOUND)
-            
-            transaction_data = result['transaction_data']
-            payment.mpesa_receipt = transaction_data['mpesa_receipt']
-            payment.mpesa_phone = transaction_data['phone_number']
-            payment.payment_date = timezone.now()
-            payment.mark_as_completed(payment.created_by)
-            
-            try:
-                sms_service = SMSService(payment.company)
-                sms_service.send_payment_confirmation(payment.customer, payment)
-            except Exception:
-                pass
-            
-            return Response({
-                'status': 'success',
-                'message': 'Payment processed successfully',
-                'payment_id': payment.id,
-                'receipt_number': payment.mpesa_receipt
-            })
-        else:
-            checkout_request_id = result['checkout_request_id']
-            try:
-                payment = Payment.objects.get(transaction_id=checkout_request_id)
-                payment.status = 'FAILED'
-                payment.failure_reason = result.get('error_message', 'Transaction failed')
-                payment.save()
-            except Payment.DoesNotExist:
-                pass
-            return Response({
-                'error': result.get('error_message', 'Transaction failed')
-            }, status=status.HTTP_400_BAD_REQUEST)
-
+    # === Bank Transfer ===
     @action(detail=False, methods=['post'])
     def bank_transfer(self, request):
         customer_id = request.data.get('customer_id')
@@ -463,17 +867,18 @@ class PaymentViewSet(viewsets.ModelViewSet):
             except Invoice.DoesNotExist:
                 return Response({'status': 'error', 'message': 'Invoice not found'}, status=status.HTTP_404_NOT_FOUND)
         
+        from ..models.payment_models import InvoiceItemPayment, Payment
         try:
-            payment_method = PaymentMethod.objects.get(
+            payment_method = InvoiceItemPayment.objects.get(
                 method_type='BANK_TRANSFER',
-                company=request.user.company,
+                schema_name=request.user.company.schema_name,
                 is_active=True
             )
-        except PaymentMethod.DoesNotExist:
+        except InvoiceItemPayment.DoesNotExist:
             return Response({'status': 'error', 'message': 'Bank transfer payment method not configured'}, status=status.HTTP_400_BAD_REQUEST)
         
         payment = Payment.objects.create(
-            company=request.user.company,
+            schema_name=request.user.company.schema_name,
             customer=customer,
             invoice=invoice,
             amount=amount,
@@ -483,7 +888,6 @@ class PaymentViewSet(viewsets.ModelViewSet):
             bank_name=bank_name,
             account_number=account_number,
             payer_name=customer.full_name,
-            payer_phone=customer.user.phone_number,
             created_by=request.user
         )
         
@@ -494,7 +898,7 @@ class PaymentViewSet(viewsets.ModelViewSet):
             'payment_number': payment.payment_number
         })
 
-    # === Fixed: Dashboard Stats (No more 500 error) ===
+    # === Dashboard Stats ===
     @action(detail=False, methods=['get'])
     def dashboard_stats(self, request):
         """Get payment dashboard statistics"""
@@ -532,10 +936,19 @@ class PaymentViewSet(viewsets.ModelViewSet):
         top_payers = queryset.filter(
             payment_date__date__gte=thirty_days_ago,
             status='COMPLETED'
-        ).values('customer__customer_code', 'customer__user__first_name', 'customer__user__last_name').annotate(
+        ).values(
+            'customer__customer_code', 
+            'customer__user__first_name', 
+            'customer__user__last_name'
+        ).annotate(
             total_paid=Sum('amount'),
             payment_count=Count('id')
         ).order_by('-total_paid')[:10]
+        
+        # Add M-Pesa specific stats
+        mpesa_stats = {}
+        if hasattr(self, 'get_mpesa_stats'):
+            mpesa_stats = self.get_mpesa_stats(queryset)
         
         stats = {
             'today': {'count': today_count, 'amount': today_amount},
@@ -543,104 +956,115 @@ class PaymentViewSet(viewsets.ModelViewSet):
             'this_month': {'count': month_count, 'amount': month_amount},
             'status_distribution': status_counts,
             'method_distribution': list(method_distribution),
-            'top_payers': list(top_payers)
+            'top_payers': list(top_payers),
+            'mpesa_stats': mpesa_stats
         }
         
         return Response(stats)
 
+    def get_mpesa_stats(self, queryset):
+        """Get M-Pesa specific statistics"""
+        from ..models.payment_models import MpesaTransaction
+        
+        mpesa_payments = queryset.filter(payment_method__method_type__startswith='MPESA_')
+        
+        # Get M-Pesa transaction stats
+        mpesa_txn_stats = MpesaTransaction.objects.filter(
+            schema_name=self.request.user.company.schema_name
+        ).aggregate(
+            total_transactions=Count('id'),
+            successful=Count('id', filter=Q(status='COMPLETED')),
+            failed=Count('id', filter=Q(status='FAILED')),
+            pending=Count('id', filter=Q(status='PENDING')),
+            total_amount=Sum('amount', filter=Q(status='COMPLETED'))
+        )
+        
+        return {
+            'total_mpesa_payments': mpesa_payments.count(),
+            'mpesa_amount': mpesa_payments.aggregate(Sum('amount'))['amount__sum'] or Decimal('0'),
+            'transaction_stats': mpesa_txn_stats
+        }
+
+
+# ==========================
+# Receipt Views (Updated)
+# ==========================
+
+class ReceiptViewSet(viewsets.ModelViewSet):
+    """
+    ViewSet for managing receipts
+    """
+    permission_classes = [IsAuthenticated, IsCompanyStaff]
+    filter_backends = [DjangoFilterBackend, filters.SearchFilter]
+    filterset_fields = ['status', 'customer']
+    search_fields = ['receipt_number', 'customer__customer_code']
+
     def get_queryset(self):
+        from ..models.payment_models import Receipt
+        
         user = self.request.user
         
         if user.is_superuser:
             company_id = self.request.query_params.get('company_id')
             if company_id:
-                return Payment.objects.filter(company_id=company_id)
-            return Payment.objects.all()
+                return Receipt.objects.filter(company_id=company_id)
+            return Receipt.objects.all()
         
         if hasattr(user, 'company') and user.company:
-            queryset = Payment.objects.filter(company=user.company)
+            queryset = Receipt.objects.filter(schema_name=user.company.schema_name)
+            
             if hasattr(user, 'customer_profile'):
                 return queryset.filter(customer=user.customer_profile)
+            
             return queryset
         
-        return Payment.objects.none()
+        return Receipt.objects.none()
 
+    def get_serializer_class(self):
+        return ReceiptSerializer
 
-# class ReceiptViewSet(viewsets.ModelViewSet):
-#     queryset = Receipt.objects.all()
-#     serializer_class = ReceiptSerializer
-#     permission_classes = [IsAuthenticated, IsCompanyStaff]
-#     filter_backends = [DjangoFilterBackend, filters.SearchFilter]
-#     filterset_fields = ['status', 'customer', 'company']
-#     search_fields = ['receipt_number', 'customer__customer_code']
-#
-#     def get_queryset(self):
-#         user = self.request.user
-#         queryset = Receipt.objects.all()
-#         if user.is_superuser:
-#             return queryset
-#         queryset = queryset.filter(company=user.company)
-#         if getattr(user, 'role', None) == 'customer' and hasattr(user, 'customer_profile'):
-#             return queryset.filter(customer=user.customer_profile)
-#         return queryset
-#
-#     def perform_create(self, serializer):
-#         serializer.save(
-#             created_by=self.request.user,
-#             company=self.request.user.company
-#         )
-#
-#     @action(detail=True, methods=['post'])
-#     def issue(self, request, pk=None):
-#         receipt = self.get_object()
-#         if receipt.issue_receipt(request.user):
-#             return Response({'status': 'success', 'message': 'Receipt issued'})
-#         return Response({'error': 'Cannot issue receipt'}, status=status.HTTP_400_BAD_REQUEST)
-#
-#     @action(detail=True, methods=['get'])
-#     def download_pdf(self, request, pk=None):
-#         receipt = self.get_object()
-#         serializer = self.get_serializer(receipt)
-#         return Response(serializer.data)
-#
-#     @action(detail=True, methods=['get'])
-#     def share(self, request, pk=None):
-#         receipt = self.get_object()
-#         share_method = request.query_params.get('method', 'email')
-#         if share_method == 'sms':
-#             try:
-#                 sms_service = SMSService(receipt.company)
-#                 message = f"Receipt {receipt.receipt_number} for KES {receipt.amount} issued. Thank you!"
-#                 result = sms_service.send_single_sms(
-#                     receipt.customer.user.phone_number, message
-#                 )
-#                 if result['success']:
-#                     return Response({'status': 'success', 'message': 'Receipt sent via SMS'})
-#                 return Response({'error': 'Failed to send SMS'}, status=status.HTTP_400_BAD_REQUEST)
-#             except Exception as e:
-#                 return Response(
-#                     {'error': str(e)},
-#                     status=status.HTTP_500_INTERNAL_SERVER_ERROR
-#                 )
-#         return Response({'error': 'Invalid share method'}, status=status.HTTP_400_BAD_REQUEST)
-#
-#     def get_queryset(self):
-#         user = self.request.user
-#
-#         if user.is_superuser:
-#             company_id = self.request.query_params.get('company_id')
-#             if company_id:
-#                 return Receipt.objects.filter(company_id=company_id)
-#             return Receipt.objects.all()
-#
-#         # Company users can only see receipts from their company
-#         if hasattr(user, 'company') and user.company:
-#             queryset = Receipt.objects.filter(company=user.company)
-#
-#             # Customers can only see their own receipts
-#             if hasattr(user, 'customer_profile'):
-#                 return queryset.filter(customer=user.customer_profile)
-#
-#             return queryset
-#
-#         return Receipt.objects.none()
+    def perform_create(self, serializer):
+        user = self.request.user
+        schema_name = user.company.schema_name if hasattr(user, 'company') else 'default'
+        
+        serializer.save(
+            created_by=user,
+            schema_name=schema_name
+        )
+
+    @action(detail=True, methods=['post'])
+    def issue(self, request, pk=None):
+        receipt = self.get_object()
+        if receipt.issue_receipt(request.user):
+            return Response({'status': 'success', 'message': 'Receipt issued'})
+        return Response({'error': 'Cannot issue receipt'}, status=status.HTTP_400_BAD_REQUEST)
+
+    @action(detail=True, methods=['get'])
+    def download_pdf(self, request, pk=None):
+        receipt = self.get_object()
+        serializer = self.get_serializer(receipt)
+        return Response(serializer.data)
+
+    @action(detail=True, methods=['get'])
+    def share(self, request, pk=None):
+        receipt = self.get_object()
+        share_method = request.query_params.get('method', 'email')
+        
+        if share_method == 'sms':
+            try:
+                sms_service = SMSService(company=request.user.company)
+                message = f"Receipt {receipt.receipt_number} for KES {receipt.amount} issued. Thank you!"
+                result = sms_service.send_single_sms(
+                    receipt.customer.user.phone_number, message
+                )
+                if result.get('success'):
+                    return Response({'status': 'success', 'message': 'Receipt sent via SMS'})
+                return Response({'error': 'Failed to send SMS'}, status=status.HTTP_400_BAD_REQUEST)
+            except Exception as e:
+                logger.error(f"SMS sending error: {str(e)}")
+                return Response(
+                    {'error': str(e)},
+                    status=status.HTTP_500_INTERNAL_SERVER_ERROR
+                )
+        
+        return Response({'error': 'Invalid share method'}, status=status.HTTP_400_BAD_REQUEST)
