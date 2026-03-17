@@ -416,7 +416,7 @@ class PayHeroBillingWebhookView(PayHeroWebhookMixin, APIView):
 class MpesaC2BWebhookView(APIView):
     """
     Production-Grade M-Pesa C2B Webhook.
-    Strictly isolated for Multi-Tenant environments.
+    Handles RADIUS Expiry Extension & Unique ID Generation.
     
     POST /api/v1/webhooks/mpesa/c2b-callback/
     
@@ -491,8 +491,7 @@ class MpesaC2BWebhookView(APIView):
                         if MpesaConfiguration.objects.filter(business_shortcode=shortcode, is_active=True).exists():
                             if ServiceConnection.objects.filter(
                                 models.Q(billing_account_number__iexact=bill_ref) |
-                                models.Q(mpesa_account_number__iexact=bill_ref) |
-                                models.Q(paybill_account_number__iexact=bill_ref)
+                                models.Q(mpesa_account_number__iexact=bill_ref)
                             ).exists():
                                 target_tenant_schema = tenant.schema_name
                                 logger.info(f"Found matching tenant: {tenant.schema_name}")
@@ -522,8 +521,7 @@ class MpesaC2BWebhookView(APIView):
                     # Get the service connection
                     service = ServiceConnection.objects.filter(
                         models.Q(billing_account_number__iexact=bill_ref) |
-                        models.Q(mpesa_account_number__iexact=bill_ref) |
-                        models.Q(paybill_account_number__iexact=bill_ref)
+                        models.Q(mpesa_account_number__iexact=bill_ref)
                     ).select_related('customer', 'plan').first()
 
                     if not service:
@@ -546,11 +544,13 @@ class MpesaC2BWebhookView(APIView):
                             status=status.HTTP_200_OK
                         )
 
-                    # A. Idempotent Transaction Log
+                    # A. Idempotent Transaction Log (FIXED: Added Unique Merchant/Checkout IDs)
                     try:
                         mpesa_txn = MpesaTransaction.objects.create(
                             configuration=config,
                             transaction_id=trans_id,
+                            merchant_request_id=f"C2B-{trans_id}",  # <--- FIX: Unique merchant_request_id
+                            checkout_request_id=f"C2B-{trans_id}",  # <--- FIX: Unique checkout_request_id
                             transaction_type='C2B',
                             amount=amount,
                             phone_number=msisdn,
