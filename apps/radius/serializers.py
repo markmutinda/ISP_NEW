@@ -2,6 +2,7 @@
 RADIUS Serializers
 """
 from django.utils import timezone
+from django.db import models
 from rest_framework import serializers
 from .models import (
     RadCheck,
@@ -81,7 +82,7 @@ class OnlineUserSerializer(serializers.ModelSerializer):
     ip_address = serializers.CharField(source='framedipaddress', read_only=True)
     uptime = serializers.SerializerMethodField()
     usage = serializers.SerializerMethodField()
-    router = serializers.CharField(source='router.name', read_only=True, allow_null=True)
+    router = serializers.SerializerMethodField()
     service_type = serializers.SerializerMethodField()
 
     class Meta:
@@ -93,17 +94,43 @@ class OnlineUserSerializer(serializers.ModelSerializer):
         ]
 
     def get_full_name(self, obj):
-        # PPPoE: Get name from customer profile
+        # 1. Try the direct link (if it exists)
         if obj.customer:
             return obj.customer.full_name
-        # Hotspot: Fallback to Hotspot-{username}
+            
+        # 2. FALLBACK: Resolve name manually from credentials
+        from apps.radius.models import CustomerRadiusCredentials
+        creds = CustomerRadiusCredentials.objects.filter(username=obj.username).select_related('customer').first()
+        if creds and creds.customer:
+            return creds.customer.full_name
+            
         return f"Hotspot-{obj.username}"
 
     def get_phone_number(self, obj):
-        # Fetch phone number if customer and user exist
+        # 1. Resolve phone number via direct link
         if obj.customer and hasattr(obj.customer, 'user') and obj.customer.user:
             return obj.customer.user.phone_number or "N/A"
+        
+        # 2. Manual lookup fallback
+        from apps.radius.models import CustomerRadiusCredentials
+        creds = CustomerRadiusCredentials.objects.filter(username=obj.username).select_related('customer__user').first()
+        if creds and creds.customer and hasattr(creds.customer, 'user') and creds.customer.user:
+            return creds.customer.user.phone_number or "N/A"
+            
         return "N/A"
+
+    def get_router(self, obj):
+        # 1. Try the direct link
+        if obj.router:
+            return obj.router.name
+            
+        # 2. FALLBACK: Resolve router name from NAS IP Address
+        from apps.network.models import Router
+        r = Router.objects.filter(
+            models.Q(vpn_ip_address=obj.nasipaddress) | 
+            models.Q(ip_address=obj.nasipaddress)
+        ).first()
+        return r.name if r else "Unknown Router"
 
     def get_uptime(self, obj):
         # Calculate live uptime based on when session started
