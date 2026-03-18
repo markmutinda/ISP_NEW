@@ -226,7 +226,7 @@ class CustomerDetailSerializer(serializers.ModelSerializer):
     class Meta:
         model = Customer
         fields = [
-            'id', 'customer_code', 'full_name', 'email', 
+            'id', 'customer_code', 'billing_account_number', 'full_name', 'email', 
             'phone_number', 'alternative_phone', 'date_of_birth', 'gender',
             'id_type', 'id_number', 'marital_status', 'occupation', 'employer',
             'customer_type', 'status', 'category', 'activation_date',

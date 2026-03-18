@@ -67,11 +67,19 @@ urlpatterns = [
     path('mpesa-config/<int:pk>/test/', 
          MpesaConfigurationViewSet.as_view({'post': 'test_connection'}), 
          name='mpesa-config-test'),
+    # Legacy/guide-compatible alias
+    path('mpesa-config/<int:pk>/test_connection/', 
+         MpesaConfigurationViewSet.as_view({'post': 'test_connection'}), 
+         name='mpesa-config-test-connection'),
     
     # M-Pesa configuration management endpoints
     path('mpesa-config/<int:pk>/set-default/', 
          MpesaConfigurationViewSet.as_view({'post': 'set_default'}), 
          name='mpesa-config-set-default'),
+    # Legacy/guide-compatible alias
+    path('mpesa-config/<int:pk>/set_default/', 
+         MpesaConfigurationViewSet.as_view({'post': 'set_default'}), 
+         name='mpesa-config-set-default-legacy'),
     path('mpesa-config/<int:pk>/toggle-active/', 
          MpesaConfigurationViewSet.as_view({'post': 'toggle_active'}), 
          name='mpesa-config-toggle-active'),

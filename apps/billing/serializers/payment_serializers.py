@@ -109,19 +109,23 @@ class MpesaConfigurationTestSerializer(serializers.Serializer):
     """
     test_phone = serializers.CharField(
         max_length=20,
-        required=True,
+        required=False,
+        allow_blank=True,
         help_text="Phone number to send test STK push to"
     )
     test_amount = serializers.DecimalField(
         max_digits=10,
         decimal_places=2,
-        required=True,
+        required=False,
         min_value=1,
         help_text="Amount to test with (minimum 1 KES)"
     )
 
     def validate_test_phone(self, value):
         """Validate phone number format"""
+        if not value:
+            return value
+
         # Remove any non-digit characters
         phone = ''.join(filter(str.isdigit, value))
         
@@ -138,6 +142,18 @@ class MpesaConfigurationTestSerializer(serializers.Serializer):
             )
         
         return phone
+
+    def validate(self, attrs):
+        """If one STK test field is provided, require the other as well."""
+        phone = attrs.get('test_phone')
+        amount = attrs.get('test_amount')
+
+        if (phone and amount is None) or (amount is not None and not phone):
+            raise serializers.ValidationError(
+                "Provide both test_phone and test_amount for an STK push test, or omit both for token-only testing."
+            )
+
+        return attrs
 
 
 # ==========================

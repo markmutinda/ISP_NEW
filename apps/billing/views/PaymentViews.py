@@ -78,7 +78,8 @@ class MpesaConfigurationViewSet(viewsets.ModelViewSet):
     @action(detail=True, methods=['post'])
     def test_connection(self, request, pk=None):
         """
-        Test the M-Pesa configuration by attempting to get an access token
+        Test the M-Pesa configuration by attempting to get an access token.
+        If test_phone and test_amount are provided, also performs an STK push test.
         """
         config = self.get_object()
         test_serializer = MpesaConfigurationTestSerializer(data=request.data)
@@ -87,8 +88,8 @@ class MpesaConfigurationViewSet(viewsets.ModelViewSet):
             return Response(test_serializer.errors, status=status.HTTP_400_BAD_REQUEST)
         
         validated_data = test_serializer.validated_data
-        phone = validated_data['test_phone']
-        amount = validated_data['test_amount']
+        phone = validated_data.get('test_phone')
+        amount = validated_data.get('test_amount')
         
         try:
             # Initialize M-Pesa service with this configuration
@@ -104,14 +105,21 @@ class MpesaConfigurationViewSet(viewsets.ModelViewSet):
                     'message': 'Connection test failed',
                     'details': token_result
                 }, status=status.HTTP_400_BAD_REQUEST)
-            
-            # Test 2: Send test STK push if phone and amount provided
-            test_result = mpesa_service.initiate_stk_push(
-                phone_number=phone,
-                amount=amount,
-                account_reference="TEST",
-                transaction_desc="Test Transaction"
-            )
+
+            # Default to token-only success unless STK test payload is provided.
+            test_result = {
+                'success': True,
+                'message': 'Access token retrieved successfully (token-only test)'
+            }
+
+            # Test 2: Send test STK push only when both fields are provided.
+            if phone and amount is not None:
+                test_result = mpesa_service.initiate_stk_push(
+                    phone_number=phone,
+                    amount=amount,
+                    account_reference="TEST",
+                    transaction_desc="Test Transaction"
+                )
             
             # Update last validated timestamp
             config.last_validated_at = timezone.now()
@@ -128,7 +136,8 @@ class MpesaConfigurationViewSet(viewsets.ModelViewSet):
                     'success': test_result['success'],
                     'message': test_result.get('message', ''),
                     'checkout_request_id': test_result.get('data', {}).get('checkout_request_id') if test_result['success'] else None
-                }
+                },
+                'mode': 'token_and_stk' if phone and amount is not None else 'token_only'
             })
             
         except Exception as e:
