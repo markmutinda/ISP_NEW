@@ -94,15 +94,21 @@ class OnlineUserSerializer(serializers.ModelSerializer):
         ]
 
     def get_full_name(self, obj):
-        # 1. Try the direct link (if it exists)
+        # 1. Try direct link
         if obj.customer:
             return obj.customer.full_name
             
-        # 2. FALLBACK: Resolve name manually from credentials
+        # 2. Try PPPoE/Customer Credentials link
         from apps.radius.models import CustomerRadiusCredentials
         creds = CustomerRadiusCredentials.objects.filter(username=obj.username).select_related('customer').first()
         if creds and creds.customer:
             return creds.customer.full_name
+
+        # 3. NEW: Try Hotspot Session link (Persistent Identity)
+        from apps.billing.models.hotspot_models import HotspotSession
+        h_session = HotspotSession.objects.filter(access_code=obj.username).first()
+        if h_session:
+            return f"{h_session.phone_number} (Hotspot)"
             
         return f"Hotspot-{obj.username}"
 
@@ -111,11 +117,17 @@ class OnlineUserSerializer(serializers.ModelSerializer):
         if obj.customer and hasattr(obj.customer, 'user') and obj.customer.user:
             return obj.customer.user.phone_number or "N/A"
         
-        # 2. Manual lookup fallback
+        # 2. Manual lookup fallback via CustomerRadiusCredentials
         from apps.radius.models import CustomerRadiusCredentials
         creds = CustomerRadiusCredentials.objects.filter(username=obj.username).select_related('customer__user').first()
         if creds and creds.customer and hasattr(creds.customer, 'user') and creds.customer.user:
             return creds.customer.user.phone_number or "N/A"
+        
+        # 3. Try Hotspot Session link for phone number
+        from apps.billing.models.hotspot_models import HotspotSession
+        h_session = HotspotSession.objects.filter(access_code=obj.username).first()
+        if h_session and h_session.phone_number:
+            return h_session.phone_number
             
         return "N/A"
 
