@@ -187,7 +187,7 @@ services:
       - isp_network
 
   # ────────────────────────────────────────────────────────────────
-  # FREERADIUS SERVER (SHARED CENTRAL SERVER) - FIXED WITH VOLUMES
+  # FREERADIUS SERVER (SHARED CENTRAL SERVER) - FIXED WITH ROUTING
   # ────────────────────────────────────────────────────────────────
   radius:
     build:
@@ -195,6 +195,16 @@ services:
       dockerfile: docker/Dockerfile.radius
     container_name: netily_radius
     restart: unless-stopped
+    # ADDED NET_ADMIN capability for routing
+    cap_add:
+      - NET_ADMIN
+    command: >
+      sh -c "echo 'Setting up routes...' &&
+             VPN_IP=$$(getent hosts netily-openvpn | awk '{ print $$1 }') &&
+             echo 'VPN Gateway found at: '$$VPN_IP &&
+             ip route add 10.8.0.0/24 via $$VPN_IP || true &&
+             echo 'Route added! Starting RADIUS...' &&
+             freeradius -f -X"
     env_file: ../.env
     environment:
       - DB_HOST=netily_db
@@ -209,6 +219,8 @@ services:
     depends_on:
       db:
         condition: service_healthy
+      openvpn:                # ADDED DEPENDENCY ON OPENVPN
+        condition: service_started
     deploy:
       resources:
         limits:
@@ -313,7 +325,8 @@ services:
                echo \"Forwarding 1812/1813 to Shared Radius ($$BASE_IP)\" &&
                iptables -t nat -A PREROUTING -i tun0 -p udp --dport 1812 -j DNAT --to-destination $$BASE_IP:1812 &&
                iptables -t nat -A PREROUTING -i tun0 -p udp --dport 1813 -j DNAT --to-destination $$BASE_IP:1813 &&
-               iptables -t nat -A POSTROUTING -d $$BASE_IP -p udp -j MASQUERADE;
+               # 🚨 REMOVED THE MASQUERADE RULE TO PRESERVE REAL CLIENT IPs 🚨
+               echo \"MASQUERADE rule removed to preserve real client IPs\";
              else
                echo \"Warning: Shared RADIUS container not found\";
              fi &&
