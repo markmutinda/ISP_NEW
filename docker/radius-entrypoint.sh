@@ -3,7 +3,7 @@
 # NETILY ISP - FreeRADIUS Entrypoint Script (SECURED)
 # ============================================================================
 
-set -e
+set -euo pipefail
 
 echo "=========================================="
 echo "NETILY RADIUS Server Starting..."
@@ -14,42 +14,61 @@ export DB_HOST="${DB_HOST:-netily_db}"
 export DB_PORT="${DB_PORT:-5432}"
 export DB_USER="${DB_USER:-isp_user}"
 export DB_PASS="${DB_PASS:-CreativE@2028y}"
-export DB_PASSWORD="${DB_PASSWORD:-CreativE@2028y}"
+export DB_PASSWORD="${DB_PASSWORD:-${DB_PASS}}"
 export DB_NAME="${DB_NAME:-isp_management}"
-export DB_SCHEMA="public"
+export DB_SCHEMA="${DB_SCHEMA:-public}"
+
+CONF_ROOT="/etc/freeradius"
+LEGACY_CONF_ROOT="/etc/raddb"
+SQL_TEMPLATE_SOURCE="${CONF_ROOT}/sql.template"
+if [ ! -f "${SQL_TEMPLATE_SOURCE}" ] && [ -f "${LEGACY_CONF_ROOT}/sql.template" ]; then
+    SQL_TEMPLATE_SOURCE="${LEGACY_CONF_ROOT}/sql.template"
+fi
+
+if [ ! -f "${SQL_TEMPLATE_SOURCE}" ]; then
+    echo "ERROR: SQL template not found in ${CONF_ROOT} or ${LEGACY_CONF_ROOT}."
+    exit 1
+fi
+
+MODS_AVAILABLE_DIR="${CONF_ROOT}/mods-available"
+MODS_ENABLED_DIR="${CONF_ROOT}/mods-enabled"
+CLIENTS_CONF="${CONF_ROOT}/clients.conf"
+CLIENTS_TMP="${CLIENTS_CONF}.tmp"
+GENERATED_SQL_MODULE="${MODS_AVAILABLE_DIR}/sql"
+
+mkdir -p "${MODS_AVAILABLE_DIR}" "${MODS_ENABLED_DIR}"
 
 # ENFORCE STRONG SECRETS: If RADIUS_SECRET is empty or testing123, generate a secure one.
-if [ -z "$RADIUS_SECRET" ] || [ "$RADIUS_SECRET" = "testing123" ]; then
+if [ -z "${RADIUS_SECRET:-}" ] || [ "${RADIUS_SECRET}" = "testing123" ]; then
     echo "WARNING: Weak or missing RADIUS_SECRET detected. Auto-generating secure secret."
     export RADIUS_SECRET=$(head -c 32 /dev/urandom | base64 | tr -dc 'a-zA-Z0-9' | head -c 32)
 fi
 
-echo "Configuring SQL module..."
-envsubst '$DB_HOST $DB_PORT $DB_USER $DB_PASS $DB_PASSWORD $DB_NAME $DB_SCHEMA' < /etc/freeradius/sql.template > /etc/freeradius/mods-available/sql
+echo "Configuring SQL module at ${GENERATED_SQL_MODULE} from ${SQL_TEMPLATE_SOURCE}..."
+envsubst '$DB_HOST $DB_PORT $DB_USER $DB_PASS $DB_PASSWORD $DB_NAME $DB_SCHEMA' < "${SQL_TEMPLATE_SOURCE}" > "${GENERATED_SQL_MODULE}"
 
 echo "Configuring Clients..."
-envsubst '$RADIUS_SECRET' < /etc/freeradius/clients.conf > /etc/freeradius/clients.conf.tmp
-mv /etc/freeradius/clients.conf.tmp /etc/freeradius/clients.conf
+envsubst '$RADIUS_SECRET' < "${CLIENTS_CONF}" > "${CLIENTS_TMP}"
+mv "${CLIENTS_TMP}" "${CLIENTS_CONF}"
 
-ln -sf /etc/freeradius/mods-available/sql /etc/freeradius/mods-enabled/sql
+ln -sf "${GENERATED_SQL_MODULE}" "${MODS_ENABLED_DIR}/sql"
 
-if [ -f /etc/freeradius/sites-available/coa ] && [ ! -L /etc/freeradius/sites-enabled/coa ]; then
+if [ -f "${CONF_ROOT}/sites-available/coa" ] && [ ! -L "${CONF_ROOT}/sites-enabled/coa" ]; then
     echo "Enabling CoA site..."
-    ln -sf /etc/freeradius/sites-available/coa /etc/freeradius/sites-enabled/coa
+    ln -sf "${CONF_ROOT}/sites-available/coa" "${CONF_ROOT}/sites-enabled/coa"
     echo "✓ CoA site enabled (port 3799)"
 fi
 
 # Fix permissions ONLY for the files we dynamically generated.
-# This completely bypasses the read-only Docker mounts!
-chown freerad:freerad /etc/freeradius/mods-available/sql
-chown freerad:freerad /etc/freeradius/clients.conf
+chown freerad:freerad "${GENERATED_SQL_MODULE}"
+chown freerad:freerad "${CLIENTS_CONF}"
 
 echo "Testing database connection..."
-if PGPASSWORD="${DB_PASSWORD}" psql -h "${DB_HOST}" -p "${DB_PORT}" -U "${DB_USER}" -d "${DB_NAME}" -c "SELECT 1;" 2>/dev/null; then
+if PGPASSWORD="${DB_PASSWORD}" psql -h "${DB_HOST}" -p "${DB_PORT}" -U "${DB_USER}" -d "${DB_NAME}" -c "SELECT current_schema(), current_setting('search_path');" 2>/dev/null; then
     echo "✓ Database connection successful"
 else
     echo "✗ WARNING: Could not connect to database."
 fi
 
-echo "Starting FreeRADIUS..."
+echo "Starting FreeRADIUS with config root ${CONF_ROOT}..."
 exec gosu freerad "$@"
