@@ -171,24 +171,6 @@ sql {
              '%{NAS-IP-Address}', \
              '%{NAS-Port-Id}')"
 
-    # ───────────────────────────────────────────────────────────────────────────
-    # QUERY MAPPING (The fix for "No such configuration item .query")
-    # ───────────────────────────────────────────────────────────────────────────
-    # This maps incoming packets to the blocks defined in queries.conf
-    # Without these references, FreeRADIUS doesn't know which query to run
-    # ───────────────────────────────────────────────────────────────────────────
-    
-    # Map accounting packets to the accounting block in queries.conf
-    # The %{Acct-Status-Type} determines which sub-section (Start, Interim-Update, Stop)
-    accounting {
-        reference = "accounting.%{Acct-Status-Type}"
-    }
-
-    # Map post-auth packets to the post-auth block in queries.conf
-    post-auth {
-        reference = "post-auth"
-    }
-
     # ═══════════════════════════════════════════════════════════════════════════
     # Include dynamic queries from external file
     # This file contains dynamic queries with schema routing for multi-tenancy
