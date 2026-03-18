@@ -17,8 +17,7 @@ sql {
     password = "${DB_PASSWORD}"
     radius_db = "${DB_NAME}"
     
-    # IMPORTANT: Stay in public schema to find the routers, then we switch per-user
-    # The core_globalroutermap table lives in public, not tenant schemas
+    # IMPORTANT: Use public schema for router lookup, queries.conf handles the rest
     connect_query = "SET search_path TO public"
 
     # Connection Pool Settings
@@ -39,6 +38,13 @@ sql {
 
     # SQL User Name - Used in query expansion
     sql_user_name = "%{User-Name}"
+
+    # Table Names
+    authcheck_table = "radcheck"
+    authreply_table = "radreply"
+    acct_table1 = "radacct"
+    acct_table2 = "radacct"
+    postauth_table = "radpostauth"
 
     # ───────────────────────────────────────────────────────────────────────────
     # CLIENT QUERY - Load NAS devices from database (MUST BE IN PUBLIC SCHEMA)
