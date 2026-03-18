@@ -353,6 +353,8 @@ class HotspotPurchaseView(APIView):
     """
     Initiate hotspot purchase (SIMULATION MODE).
     Generates a unique short code (e.g., MXTV-827S) and binds it to the device's MAC.
+    Now with persistent identity - returning customers keep their username!
+    Also tracks roaming patterns across the network.
     """
     
     permission_classes = [AllowAny]
@@ -418,37 +420,63 @@ class HotspotPurchaseView(APIView):
             # This logic is critical for device locking
             mac_address = mac_address.upper().replace('-', ':')
             
-            # 3. Generate the Friendly Username (MXTV-827S)
-            friendly_username = self.generate_unique_code()
+            # ─────────────────────────────────────────────────────────────────
+            # 3. PERSISTENT IDENTITY & ROAMING DETECTOR
+            # ─────────────────────────────────────────────────────────────────
+            # Search the ENTIRE network for this MAC address
+            existing_user = HotspotSession.objects.filter(
+                mac_address=mac_address
+            ).exclude(
+                access_code__isnull=True
+            ).order_by('-created_at').first()
 
-            # 4. Create Session (Instantly PAID)
+            is_roaming = False
+            roamed_from_name = None
+
+            if existing_user and existing_user.access_code:
+                # RETURNING CUSTOMER
+                friendly_username = existing_user.access_code
+                
+                # ── ROAMING CHECK ──
+                if existing_user.router_id != router.id:
+                    is_roaming = True
+                    roamed_from_name = existing_user.router.name
+                    logger.info(f"📍 ROAMING DETECTED: User {friendly_username} moved from {roamed_from_name} to {router.name}")
+                else:
+                    logger.info(f"🏠 HOME ROUTER: User {friendly_username} returning to {router.name}")
+                    
+            else:
+                # BRAND NEW CUSTOMER
+                friendly_username = self.generate_unique_code()
+                logger.info(f"✨ NEW USER: {mac_address} -> {friendly_username} at {router.name}")
+
+            # 4. Create Session (Now with roaming data!)
             session_id = HotspotSession.generate_session_id()
             
             session = HotspotSession.objects.create(
                 session_id=session_id,
                 router=router,
                 plan=plan,
-                phone_number=phone_number,
+                phone_number=phone_number,  # Important for financial analytics
                 mac_address=mac_address,
                 amount=plan.price,
                 status='paid',          # <--- SIMULATION: Marked as paid instantly
-                access_code=friendly_username,
+                access_code=friendly_username,  # Uses either the old one or the new one!
                 payhero_checkout_id='SIMULATED_' + friendly_username,
-                # start_time=timezone.now()  <--- DELETED: This caused the error
+                is_roaming=is_roaming,            # <--- SAVED TO DB
+                roamed_from=roamed_from_name      # <--- SAVED TO DB
             )
 
-            # 5. Activate & Create Radius Credentials Instantly
+            # 5. Activate & Update Radius Credentials
             try:
                 # Pass the friendly_username to activate method
-                session.activate(friendly_username) # <--- Pass the code here!
+                session.activate(friendly_username)
                 
                 from apps.billing.services.hotspot_radius_service import HotspotRadiusService
                 radius_service = HotspotRadiusService()
                 
-                # Create RADIUS entry: 
-                # Username = MXTV-827S
-                # Password = MXTV-827S
-                # MAC Address = Locked to user's device
+                # This service should use `update_or_create` logic under the hood. 
+                # If the user exists, it just updates the Expiration and Speed.
                 radius_service.create_hotspot_credentials(
                     username=friendly_username,
                     password=friendly_username,
@@ -457,7 +485,7 @@ class HotspotPurchaseView(APIView):
                     expires_at=session.expires_at,
                     mac_address=mac_address  # <--- LOCKS CODE TO THIS DEVICE
                 )
-                logger.info(f"✅ SIMULATION: Created RADIUS user {friendly_username} locked to {mac_address}")
+                logger.info(f"✅ SIMULATION: Created/Updated RADIUS user {friendly_username} locked to {mac_address}")
                 
             except Exception as e:
                 logger.error(f"RADIUS activation failed: {e}")

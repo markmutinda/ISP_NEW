@@ -361,6 +361,18 @@ class HotspotSession(models.Model):
     activated_at = models.DateTimeField(null=True, blank=True)
     expires_at = models.DateTimeField(null=True, blank=True)
     
+    # ── NEW: ROAMING ANALYTICS ──
+    is_roaming = models.BooleanField(
+        default=False, 
+        help_text="True if purchased at a different router than their last session"
+    )
+    roamed_from = models.CharField(
+        max_length=100, 
+        blank=True, 
+        null=True,
+        help_text="The name of the previous router they connected to"
+    )
+    
     # Data Usage (updated by MikroTik)
     data_used_mb = models.PositiveIntegerField(default=0)
     
