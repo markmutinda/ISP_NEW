@@ -6,12 +6,14 @@ FROM freeradius/freeradius-server:latest
 USER root
 
 # 1. Install dependencies AND dos2unix (Critical for Windows users)
+#    ADDED iproute2 package for route command (ip route)
 RUN apt-get update && apt-get install -y \
     libpq5 \
     postgresql-client \
     gettext-base \
     gosu \
     dos2unix \
+    iproute2 \
     && rm -rf /var/lib/apt/lists/*
 
 # 2. Create directory for custom configs
