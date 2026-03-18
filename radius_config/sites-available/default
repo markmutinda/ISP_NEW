@@ -27,12 +27,11 @@ server default {
             reject
         }
 
+        # --- FIXED: Added chap here so James can connect ---
+        chap
         sql
         expiration
         logintime
-        
-        # --- FIXED: Added pap module at the bottom of authorize section ---
-        # This is required for PAP authentication to work properly
         pap
     }
 
@@ -57,7 +56,6 @@ server default {
 
     # 4. Accounting - Record data usage
     accounting {
-        # Re-verify schema for accounting packets
         update control {
             Tmp-String-0 := "%{sql:SELECT t.schema_name FROM core_tenant t JOIN core_globalroutermap g ON t.id = g.tenant_id WHERE g.nas_ip = '%{NAS-IP-Address}' AND g.is_active = true LIMIT 1}"
         }
@@ -67,12 +65,10 @@ server default {
         }
     }
 
-    # 5. Session - Simultaneous use check
     session {
         sql
     }
 
-    # 6. Post-authentication - Log login attempts
     post-auth {
         sql
         
