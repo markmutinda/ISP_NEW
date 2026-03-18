@@ -50,6 +50,14 @@ sql {
         reference = "%{tolower:type.%{Acct-Status-Type}.query}"
 
         type {
+            accounting-on {
+                query = "${....accounting_on_query}"
+            }
+
+            accounting-off {
+                query = "${....accounting_off_query}"
+            }
+
             start {
                 query = "${....accounting_start_query}"
             }
