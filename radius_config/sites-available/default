@@ -30,6 +30,9 @@ server default {
         sql
         expiration
         logintime
+        
+        # --- FIXED: Added pap module at the bottom of authorize section ---
+        # This is required for PAP authentication to work properly
         pap
     }
 
