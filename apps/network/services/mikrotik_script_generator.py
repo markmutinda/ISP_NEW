@@ -82,6 +82,24 @@ class MikrotikScriptGenerator:
             return f"vpn.{root_domain}"
         return vpn_host
 
+    def get_tenant_portal_url(self) -> str:
+        """Dynamically construct the tenant-specific frontend URL (e.g., https://pink4.netily.co.ke)."""
+        r = self.router
+        base_frontend = self.portal_url  # e.g., https://netily.co.ke
+        
+        if not r.tenant_subdomain or r.tenant_subdomain == 'public':
+            return base_frontend
+            
+        parsed = urlparse(base_frontend)
+        netloc = parsed.netloc
+        
+        # Prevent doubling if the subdomain is somehow already in the string
+        if netloc.startswith(f"{r.tenant_subdomain}."):
+            return base_frontend
+            
+        # Build: https://pink4.netily.co.ke
+        return f"{parsed.scheme}://{r.tenant_subdomain}.{netloc}"
+
     def get_magic_link(self) -> str:
         r = self.router
         # The Magic Link uses whatever IP the Admin is currently using to reach the server
@@ -426,6 +444,9 @@ class MikrotikScriptGenerator:
 """
 
     def _section_walled_garden(self, r: Router, portal_domain: str) -> str:
+        # Get the specific tenant domain (e.g., pink4.netily.co.ke)
+        tenant_domain = urlparse(self.get_tenant_portal_url()).netloc
+        
         return f"""# ─────────────────────────────────────────────────────────────
 # 9. WALLED GARDEN (Pre-Auth Access)
 # ─────────────────────────────────────────────────────────────
@@ -434,12 +455,16 @@ class MikrotikScriptGenerator:
 :do {{ :foreach i in=[/ip hotspot walled-garden find comment~"Netily"] do={{ /ip hotspot walled-garden remove $i }} }} on-error={{}}
 :do {{ :foreach i in=[/ip hotspot walled-garden ip find comment~"Netily"] do={{ /ip hotspot walled-garden ip remove $i }} }} on-error={{}}
 
-/ip hotspot walled-garden add dst-host="*{portal_domain}*" comment="Netily-Portal"
-/ip hotspot walled-garden add dst-host="*netily.co.ke*" comment="Netily-Backend"
-/ip hotspot walled-garden add dst-host="*netily.io*" comment="Netily-Alt"
+# Allow the specific tenant portal
+/ip hotspot walled-garden add dst-host="*{tenant_domain}*" comment="Netily-Tenant-Portal"
+/ip hotspot walled-garden add dst-host="*netily.co.ke*" comment="Netily-Backend-Core"
+
+# Allow Payment Gateways & APIs
 /ip hotspot walled-garden add dst-host="*.safaricom.co.ke" comment="Netily-MPesa"
 /ip hotspot walled-garden add dst-host="*.safaricom.com" comment="Netily-Safaricom"
 /ip hotspot walled-garden add dst-host="*.payhero.co.ke" comment="Netily-PayHero"
+
+# Allow VPN / API ranges
 /ip hotspot walled-garden ip add dst-address={self.vpn_gateway}/32 action=accept comment="Netily-VPN-API"
 /ip hotspot walled-garden ip add dst-address=10.8.0.0/24 action=accept comment="Netily-VPN-Network"
 """
@@ -602,15 +627,16 @@ class MikrotikScriptGenerator:
 :put " Router:  {self._escape_ros_string(r.name)}"
 :put " VPN:     {self._escape_ros_string(vpn_host)}:{r.openvpn_port}"
 :put " RADIUS:  {self.vpn_gateway}:1812/1813"
-:put " Portal:  {self.portal_url}"
+:put " Portal:  {self.get_tenant_portal_url()}"
 :put "════════════════════════════════════════════════════"
 """
 
     def generate_login_html(self) -> str:
         r = self.router
-        # Ensure portal URL doesn't end with a slash for cleaner concatenation
-        portal_base = self.portal_url.rstrip('/')
-        tenant_name = self._escape_ros_string(r.tenant_subdomain or 'yellow1')
+        
+        # USE THE NEW DYNAMIC URL HERE
+        portal_base = self.get_tenant_portal_url().rstrip('/')
+        tenant_name = self._escape_ros_string(r.tenant_subdomain or 'public')
         
         return f"""<!DOCTYPE html>
 <html lang="en">
@@ -721,8 +747,11 @@ class MikrotikScriptGenerator:
 
     def generate_status_html(self) -> str:
         r = self.router
-        portal = self.portal_url
-        tenant_name = self._escape_ros_string(r.tenant_subdomain or 'yellow1')
+        
+        # USE THE NEW DYNAMIC URL HERE
+        portal_base = self.get_tenant_portal_url().rstrip('/')
+        tenant_name = self._escape_ros_string(r.tenant_subdomain or 'public')
+        
         return f"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -786,7 +815,7 @@ class MikrotikScriptGenerator:
             <div>Data Used: <span>$(bytes-in-nice) / $(bytes-out-nice)</span></div>
         </div>
         <a class="btn" href="$(link-logout)">Disconnect</a>
-        <a class="portal-link" href="{portal}/hotspot/{r.id}/status?mac=$(mac)&ip=$(ip)&tenant={tenant_name}">
+        <a class="portal-link" href="{portal_base}/hotspot/{r.id}/status?mac=$(mac)&ip=$(ip)&tenant={tenant_name}">
             Manage Account &rarr;
         </a>
     </div>
