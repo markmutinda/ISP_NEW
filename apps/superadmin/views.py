@@ -902,6 +902,34 @@ class TenantStatsView(APIView):
             "company_name": tenant.company.name,
         }
 
+        # ── NEW: LIVE METERED BILLING STATS ──
+        from apps.subscriptions.models import BillingCycle
+        
+        metered_stats = {
+            "is_metered": False,
+            "pppoe_clients": 0,
+            "hotspot_revenue": 0.0,
+            "estimated_total": 0.0,
+            "cycle_end": None
+        }
+
+        try:
+            # Get active billing cycle for this tenant
+            active_cycle = BillingCycle.objects.filter(tenant=tenant, status='active').first()
+            
+            if active_cycle and active_cycle.subscription and active_cycle.subscription.plan:
+                metered_stats.update({
+                    "is_metered": active_cycle.subscription.plan.is_metered,
+                    "pppoe_clients": active_cycle.calculate_total_pppoe(),
+                    "hotspot_revenue": float(active_cycle.hotspot_revenue_accumulated),
+                    "estimated_total": float(active_cycle.calculate_total_charge()),
+                    "cycle_end": active_cycle.end_date.isoformat() if active_cycle.end_date else None
+                })
+        except Exception as e:
+            logger.warning(f"Could not fetch metered billing stats for tenant {tenant.subdomain}: {e}")
+        
+        result["metered_usage"] = metered_stats
+
         # ── Simple counts ──
         count_tables = {
             "customers": "customers_customer",
