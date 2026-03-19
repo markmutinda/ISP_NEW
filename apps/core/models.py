@@ -645,7 +645,7 @@ class Changelog(models.Model):
     update_type = models.CharField(max_length=20, choices=TYPE_CHOICES, default='feature')
     
     is_published = models.BooleanField(default=True, help_text="Uncheck to hide from ISPs as a draft")
-    release_date = models.DateField(default=timezone.now)
+    release_date = models.DateField(auto_now_add=True)
     
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
