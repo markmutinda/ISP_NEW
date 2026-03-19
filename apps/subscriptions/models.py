@@ -8,6 +8,8 @@ These models live in the PUBLIC schema and handle:
 4. ISPPayoutConfig - ISP's bank/M-Pesa details for receiving settlements
 5. ISPSettlement - Record of payouts from Netily to ISPs
 6. CommissionLedger - Track Netily's 5% commission earnings
+7. BillingCycle - Tracks 30-day metered cycles for tenants
+8. BillableClientRecord - Ghost records of PPPoE users counted per cycle
 """
 
 import secrets
@@ -43,6 +45,16 @@ class NetilyPlan(models.Model):
     price_yearly = models.DecimalField(max_digits=10, decimal_places=2)
     currency = models.CharField(max_length=3, default='KES')
     
+    # NEW: DYNAMIC / METERED PRICING FIELDS
+    is_metered = models.BooleanField(
+        default=False, 
+        help_text="If True, uses dynamic metered billing instead of flat price_monthly"
+    )
+    base_license_fee = models.DecimalField(max_digits=10, decimal_places=2, default=Decimal('500.00'))
+    pppoe_unit_price = models.DecimalField(max_digits=10, decimal_places=2, default=Decimal('20.00'))
+    pppoe_min_clients = models.PositiveIntegerField(default=20)
+    hotspot_revenue_share_pct = models.DecimalField(max_digits=5, decimal_places=2, default=Decimal('3.00'))
+    
     # Limits
     max_subscribers = models.PositiveIntegerField(
         help_text="Maximum number of ISP subscribers allowed. 0 = unlimited"
@@ -72,6 +84,8 @@ class NetilyPlan(models.Model):
         verbose_name_plural = 'Netily Plans'
     
     def __str__(self):
+        if self.is_metered:
+            return f"{self.name} (KES {self.base_license_fee} base + usage)"
         return f"{self.name} (KES {self.price_monthly}/mo)"
     
     @property
@@ -228,6 +242,8 @@ class CompanySubscription(models.Model):
     @property
     def current_price(self) -> Decimal:
         """Get current price based on billing period"""
+        if self.plan.is_metered:
+            return self.plan.base_license_fee
         if self.billing_period == 'yearly':
             return self.plan.price_yearly
         return self.plan.price_monthly
@@ -745,3 +761,110 @@ class CommissionLedger(models.Model):
             pass
         
         return entry
+
+
+class BillingCycle(models.Model):
+    """
+    Tracks the 30-day metered cycle for a tenant.
+    Lives in PUBLIC schema. Cannot be deleted by tenant.
+    """
+    
+    STATUS_CHOICES = [
+        ('active', 'Active'),
+        ('invoiced', 'Invoiced'),
+        ('paid', 'Paid'),
+    ]
+    
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    tenant = models.ForeignKey(
+        'core.Tenant',
+        on_delete=models.CASCADE,
+        related_name='billing_cycles'
+    )
+    subscription = models.ForeignKey(
+        CompanySubscription,
+        on_delete=models.CASCADE,
+        related_name='billing_cycles'
+    )
+    
+    start_date = models.DateTimeField(default=timezone.now)
+    end_date = models.DateTimeField()
+    
+    status = models.CharField(
+        max_length=20,
+        choices=STATUS_CHOICES,
+        default='active'
+    )
+    
+    # Metered Usage
+    hotspot_revenue_accumulated = models.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        default=Decimal('0.00')
+    )
+    
+    # Track the actual generated invoice (if using apps.billing.models.Invoice)
+    invoice_reference = models.CharField(max_length=100, blank=True, null=True)
+
+    class Meta:
+        ordering = ['-start_date']
+        verbose_name = 'Billing Cycle'
+        verbose_name_plural = 'Billing Cycles'
+
+    def __str__(self):
+        return f"{self.tenant.name} - Cycle {self.start_date.date()} to {self.end_date.date()}"
+
+    def calculate_total_pppoe(self):
+        """Calculate total PPPoE clients for this cycle based on minimum commitment"""
+        count = self.billable_clients.count()
+        if self.subscription.plan.is_metered:
+            return max(count, self.subscription.plan.pppoe_min_clients)
+        return count
+
+    def calculate_pppoe_charge(self):
+        """Calculate the total PPPoE charge for this cycle"""
+        total_clients = self.calculate_total_pppoe()
+        unit_price = self.subscription.plan.pppoe_unit_price
+        return (total_clients * unit_price).quantize(Decimal('0.01'))
+
+    def calculate_total_charge(self):
+        """Calculate total charge for this billing cycle (base fee + PPPoE + hotspot revenue share)"""
+        plan = self.subscription.plan
+        
+        if not plan.is_metered:
+            return self.subscription.current_price
+        
+        # For metered plans
+        base_fee = plan.base_license_fee
+        pppoe_charge = self.calculate_pppoe_charge()
+        hotspot_share = (self.hotspot_revenue_accumulated * plan.hotspot_revenue_share_pct / 100).quantize(Decimal('0.01'))
+        
+        return base_fee + pppoe_charge + hotspot_share
+
+
+class BillableClientRecord(models.Model):
+    """
+    The 'Ghost Record' of a PPPoE user.
+    Once a user connects in a billing cycle, they are recorded here permanently.
+    """
+    
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    cycle = models.ForeignKey(
+        BillingCycle,
+        related_name='billable_clients',
+        on_delete=models.CASCADE
+    )
+    username = models.CharField(max_length=100, db_index=True)
+    first_seen = models.DateTimeField(auto_now_add=True)
+    
+    class Meta:
+        # A user is only counted ONCE per 30-day cycle
+        unique_together = ('cycle', 'username')
+        verbose_name = 'Billable Client Record'
+        verbose_name_plural = 'Billable Client Records'
+        indexes = [
+            models.Index(fields=['cycle', 'username']),
+        ]
+    
+    def __str__(self):
+        return f"{self.username} - {self.cycle.start_date.date()}"

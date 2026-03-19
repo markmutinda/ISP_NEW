@@ -1,4 +1,3 @@
-# apps/billing/models/hotspot_models.py
 """
 Hotspot Models for WiFi Access Payments
 
@@ -420,6 +419,33 @@ class HotspotSession(models.Model):
         self.activated_at = timezone.now()
         self.expires_at = timezone.now() + timedelta(minutes=self.plan.duration_minutes)
         self.save()
+        
+        # ── NEW: METERED BILLING HOOK (Hotspot Revenue) ──
+        try:
+            from django.db import connection
+            from django_tenants.utils import schema_context, get_public_schema_name
+            from apps.subscriptions.models import BillingCycle
+            from apps.core.models import Tenant
+            
+            # 1. Capture the tenant's schema BEFORE switching
+            tenant_schema = connection.schema_name
+            
+            # 2. Switch to public schema
+            with schema_context(get_public_schema_name()):
+                current_tenant = Tenant.objects.get(schema_name=tenant_schema)
+                active_cycle = BillingCycle.objects.filter(
+                    tenant=current_tenant, 
+                    status='active'
+                ).first()
+                
+                if active_cycle:
+                    # Add this session's amount to the monthly accumulated total
+                    active_cycle.hotspot_revenue_accumulated += Decimal(str(self.amount))
+                    active_cycle.save(update_fields=['hotspot_revenue_accumulated'])
+                    
+        except Exception as e:
+            import logging
+            logging.getLogger(__name__).error(f"Failed to record hotspot revenue: {e}")
     
     def mark_paid(self, mpesa_receipt: str = None):
         """Mark as paid, pending activation"""
