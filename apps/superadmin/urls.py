@@ -31,7 +31,7 @@ urlpatterns = [
 
     # Plans
     path("plans/", views.PlanListView.as_view(), name="plan-list"),
-    path("plans/<uuid:pk>/", views.PlanDetailView.as_view(), name="plan-detail"),
+    path("plans/<int:pk>/", views.PlanDetailView.as_view(), name="plan-detail"),
 
     # User management
     path("users/", views.UserListView.as_view(), name="user-list"),
