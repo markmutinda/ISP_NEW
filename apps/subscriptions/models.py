@@ -10,6 +10,7 @@ These models live in the PUBLIC schema and handle:
 6. CommissionLedger - Track Netily's 5% commission earnings
 7. BillingCycle - Tracks 30-day metered cycles for tenants
 8. BillableClientRecord - Ghost records of PPPoE users counted per cycle
+9. BillingSnapshot - Additional ghost record model for PPPoE users
 """
 
 import secrets
@@ -885,3 +886,25 @@ class BillableClientRecord(models.Model):
     
     def __str__(self):
         return f"{self.username} - {self.cycle.start_date.date()}"
+
+
+class BillingSnapshot(models.Model):
+    """
+    The 'Ghost Record' - Stores unique PPPoE users seen during a cycle.
+    Even if the ISP deletes the user mid-month, this record remains for billing.
+    """
+    cycle = models.ForeignKey('BillingCycle', on_delete=models.CASCADE, related_name='snapshots')
+    username = models.CharField(max_length=150)
+    mac_address = models.CharField(max_length=50, null=True, blank=True)
+    captured_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        unique_together = ('cycle', 'username')
+        verbose_name = "Billing Snapshot"
+        verbose_name_plural = "Billing Snapshots"
+        indexes = [
+            models.Index(fields=['cycle', 'username']),
+        ]
+
+    def __str__(self):
+        return f"{self.username} in Cycle {self.cycle_id}"
