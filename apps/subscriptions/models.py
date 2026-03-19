@@ -805,6 +805,13 @@ class BillingCycle(models.Model):
     
     # Track the actual generated invoice (if using apps.billing.models.Invoice)
     invoice_reference = models.CharField(max_length=100, blank=True, null=True)
+    
+    # ── FIX 3.1: PRICING SNAPSHOTS ──
+    # Locks in the pricing at the moment the cycle is created
+    snapshot_base_fee = models.DecimalField(max_digits=10, decimal_places=2, default=Decimal('0.00'))
+    snapshot_pppoe_price = models.DecimalField(max_digits=10, decimal_places=2, default=Decimal('0.00'))
+    snapshot_min_clients = models.PositiveIntegerField(default=20)
+    snapshot_hotspot_share_pct = models.DecimalField(max_digits=5, decimal_places=2, default=Decimal('0.00'))
 
     class Meta:
         ordering = ['-start_date']
@@ -813,18 +820,28 @@ class BillingCycle(models.Model):
 
     def __str__(self):
         return f"{self.tenant.name} - Cycle {self.start_date.date()} to {self.end_date.date()}"
+    
+    def save(self, *args, **kwargs):
+        # On creation, snapshot the plan variables
+        if not self.pk and self.subscription and self.subscription.plan:
+            plan = self.subscription.plan
+            self.snapshot_base_fee = plan.base_license_fee
+            self.snapshot_pppoe_price = plan.pppoe_unit_price
+            self.snapshot_min_clients = plan.pppoe_min_clients
+            self.snapshot_hotspot_share_pct = plan.hotspot_revenue_share_pct
+        super().save(*args, **kwargs)
 
     def calculate_total_pppoe(self):
         """Calculate total PPPoE clients for this cycle based on minimum commitment"""
         count = self.billable_clients.count()
         if self.subscription.plan.is_metered:
-            return max(count, self.subscription.plan.pppoe_min_clients)
+            return max(count, self.snapshot_min_clients)
         return count
 
     def calculate_pppoe_charge(self):
         """Calculate the total PPPoE charge for this cycle"""
         total_clients = self.calculate_total_pppoe()
-        unit_price = self.subscription.plan.pppoe_unit_price
+        unit_price = self.snapshot_pppoe_price
         return (total_clients * unit_price).quantize(Decimal('0.01'))
 
     def calculate_total_charge(self):
@@ -835,9 +852,9 @@ class BillingCycle(models.Model):
             return self.subscription.current_price
         
         # For metered plans
-        base_fee = plan.base_license_fee
+        base_fee = self.snapshot_base_fee
         pppoe_charge = self.calculate_pppoe_charge()
-        hotspot_share = (self.hotspot_revenue_accumulated * plan.hotspot_revenue_share_pct / 100).quantize(Decimal('0.01'))
+        hotspot_share = (self.hotspot_revenue_accumulated * self.snapshot_hotspot_share_pct / 100).quantize(Decimal('0.01'))
         
         return base_fee + pppoe_charge + hotspot_share
 

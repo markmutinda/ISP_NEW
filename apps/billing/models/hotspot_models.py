@@ -13,6 +13,7 @@ from datetime import timedelta
 from decimal import Decimal
 
 from django.db import models
+from django.db.models import F
 from django.utils import timezone
 
 
@@ -414,13 +415,18 @@ class HotspotSession(models.Model):
         Mark session as active after successful payment.
         Sets access code and expiration time.
         """
+        # ── FIX 3.4: IDEMPOTENCY GUARD ──
+        # Prevent double-accrual if called multiple times (e.g., webhook + polling)
+        if self.status == 'active':
+            return
+
         self.status = 'active'
         self.access_code = access_code or self.generate_access_code()
         self.activated_at = timezone.now()
         self.expires_at = timezone.now() + timedelta(minutes=self.plan.duration_minutes)
         self.save()
         
-        # ── NEW: METERED BILLING HOOK (Hotspot Revenue) ──
+        # ── FIX 2.1: METERED BILLING HOOK (Hotspot Revenue) ──
         try:
             from django.db import connection
             from django_tenants.utils import schema_context, get_public_schema_name
@@ -439,13 +445,48 @@ class HotspotSession(models.Model):
                 ).first()
                 
                 if active_cycle:
-                    # Add this session's amount to the monthly accumulated total
-                    active_cycle.hotspot_revenue_accumulated += Decimal(str(self.amount))
-                    active_cycle.save(update_fields=['hotspot_revenue_accumulated'])
+                    # FIX 2.1: Use F() expression to push math to the database level
+                    # This prevents 'lost updates' when concurrent payments occur
+                    BillingCycle.objects.filter(id=active_cycle.id).update(
+                        hotspot_revenue_accumulated=F('hotspot_revenue_accumulated') + Decimal(str(self.amount))
+                    )
                     
         except Exception as e:
             import logging
             logging.getLogger(__name__).error(f"Failed to record hotspot revenue: {e}")
+    
+    # ── FIX 3.3: REFUND / REVERSAL LOGIC ──
+    def refund_or_cancel(self, reason: str = "Refunded"):
+        """Reverses a previously active session and decrements the ledger."""
+        was_active = self.status == 'active'
+        self.status = 'cancelled'
+        self.failure_reason = reason
+        self.save()
+
+        if was_active:
+            try:
+                from django.db import connection
+                from django_tenants.utils import schema_context, get_public_schema_name
+                from apps.subscriptions.models import BillingCycle
+                from apps.core.models import Tenant
+                
+                tenant_schema = connection.schema_name
+                
+                with schema_context(get_public_schema_name()):
+                    current_tenant = Tenant.objects.get(schema_name=tenant_schema)
+                    active_cycle = BillingCycle.objects.filter(
+                        tenant=current_tenant, 
+                        status='active'
+                    ).first()
+                    
+                    if active_cycle:
+                        # Use F() expression to safely decrement the revenue
+                        BillingCycle.objects.filter(id=active_cycle.id).update(
+                            hotspot_revenue_accumulated=F('hotspot_revenue_accumulated') - Decimal(str(self.amount))
+                        )
+            except Exception as e:
+                import logging
+                logging.getLogger(__name__).error(f"Failed to reverse hotspot revenue: {e}")
     
     def mark_paid(self, mpesa_receipt: str = None):
         """Mark as paid, pending activation"""
