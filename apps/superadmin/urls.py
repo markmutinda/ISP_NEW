@@ -63,4 +63,8 @@ urlpatterns = [
     path("export/tenants/", views.ExportTenantsView.as_view(), name="export-tenants"),
     path("export/users/", views.ExportUsersView.as_view(), name="export-users"),
     path("export/payments/", views.ExportPaymentsView.as_view(), name="export-payments"),
+
+    # Changelog Management
+    path("changelogs/", views.SuperadminChangelogListView.as_view(), name="superadmin-changelog-list"),
+    path("changelogs/<int:pk>/", views.SuperadminChangelogDetailView.as_view(), name="superadmin-changelog-detail"),
 ]

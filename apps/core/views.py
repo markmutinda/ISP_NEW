@@ -15,6 +15,7 @@ from rest_framework_simplejwt.views import TokenRefreshView
 from rest_framework.views import APIView
 from rest_framework import generics
 from datetime import timedelta
+from django_tenants.utils import schema_context, get_public_schema_name  # Add this import
 from .models import GlobalSystemSettings  # Add this
 from .serializers import GlobalSystemSettingsSerializer, CustomTokenRefreshSerializer  # Add this
 from rest_framework_simplejwt.exceptions import InvalidToken  # Already needed for token fix
@@ -25,12 +26,12 @@ from django.utils.html import strip_tags  # For plain text email
 from .models import Domain   # ← This is your custom Domain in core/models.
 import logging
 
-from .models import User, Company, SystemSettings, AuditLog, Tenant
+from .models import User, Company, SystemSettings, AuditLog, Tenant, Changelog  # Add Changelog here
 from .serializers import (
     CustomTokenRefreshSerializer, UserSerializer, LoginSerializer, UserCreateSerializer, UserUpdateSerializer,
     ProfileSerializer, PasswordChangeSerializer,
     CompanySerializer, TenantSerializer, SystemSettingsSerializer, AuditLogSerializer,
-    CustomTokenObtainPairSerializer, DashboardStatsSerializer
+    CustomTokenObtainPairSerializer, DashboardStatsSerializer, ChangelogSerializer  # Add ChangelogSerializer
 )
 from .permissions import IsAdmin, IsAdminOrStaff, IsCustomer, IsTechnician
 
@@ -792,7 +793,7 @@ class CompanyRegisterView(generics.CreateAPIView):
         # Switch to tenant schema
         connection.set_tenant(tenant)
     
-        # Create user with all necessary info
+        # Create user with all necessary information
         user = User.objects.create(
            email=data['admin_email'],
            first_name=data['admin_first_name'],
@@ -871,3 +872,20 @@ class CompanyRegisterView(generics.CreateAPIView):
             html_message=html_message,
             fail_silently=False,
         )
+
+
+class PlatformChangelogView(APIView):
+    """
+    Read-only view for ISPs to see platform updates.
+    Safely reads from the public schema while the user is logged into a tenant.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        # Temporarily switch to the public schema to read the global changelogs
+        with schema_context(get_public_schema_name()):
+            # Only fetch published changelogs
+            changelogs = Changelog.objects.filter(is_published=True)
+            # Evaluate the queryset immediately inside the public context using list()
+            serializer = ChangelogSerializer(list(changelogs), many=True)
+            return Response(serializer.data)

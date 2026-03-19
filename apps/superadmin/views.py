@@ -22,7 +22,7 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from apps.core.models import Tenant, Company, Domain, User, AuditLog, GlobalSystemSettings
+from apps.core.models import Tenant, Company, Domain, User, AuditLog, GlobalSystemSettings, Changelog  # Added Changelog
 from .permissions import IsSuperAdmin
 from .serializers import (
     TenantListSerializer,
@@ -36,6 +36,7 @@ from .serializers import (
     DashboardKPISerializer,
     AuditLogSerializer,
 )
+from apps.core.serializers import ChangelogSerializer  # Added ChangelogSerializer
 
 logger = logging.getLogger(__name__)
 
@@ -1686,3 +1687,57 @@ class TenantImpersonateView(APIView):
             },
             "panel_url": panel_url,
         })
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  CHANGELOG MANAGEMENT (Superadmin CRUD)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+
+class SuperadminChangelogListView(APIView):
+    """List and Create Changelogs from the Superadmin Panel"""
+    permission_classes = SUPERADMIN_PERMS
+
+    def get(self, request):
+        _ensure_public()
+        changelogs = Changelog.objects.all()
+        return Response(ChangelogSerializer(changelogs, many=True).data)
+
+    def post(self, request):
+        _ensure_public()
+        serializer = ChangelogSerializer(data=request.data)
+        if serializer.is_valid():
+            changelog = serializer.save()
+            _log_action(request.user, "create", "Changelog", changelog.title, changelog.id, request=request)
+            return Response(serializer.data, status=status.HTTP_201_CREATED)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+
+class SuperadminChangelogDetailView(APIView):
+    """Update and Delete Changelogs from the Superadmin Panel"""
+    permission_classes = SUPERADMIN_PERMS
+
+    def patch(self, request, pk):
+        _ensure_public()
+        try:
+            changelog = Changelog.objects.get(pk=pk)
+        except Changelog.DoesNotExist:
+            return Response({"detail": "Not found"}, status=status.HTTP_404_NOT_FOUND)
+            
+        serializer = ChangelogSerializer(changelog, data=request.data, partial=True)
+        if serializer.is_valid():
+            serializer.save()
+            _log_action(request.user, "update", "Changelog", changelog.title, changelog.id, request=request)
+            return Response(serializer.data)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+    def delete(self, request, pk):
+        _ensure_public()
+        try:
+            changelog = Changelog.objects.get(pk=pk)
+            title = changelog.title
+            changelog.delete()
+            _log_action(request.user, "delete", "Changelog", title, pk, request=request)
+            return Response(status=status.HTTP_204_NO_CONTENT)
+        except Changelog.DoesNotExist:
+            return Response({"detail": "Not found"}, status=status.HTTP_404_NOT_FOUND)

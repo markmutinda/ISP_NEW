@@ -625,3 +625,35 @@ class GlobalRouterMap(models.Model):
     def schema_name(self):
         """Helper for FreeRADIUS dynamic queries"""
         return self.tenant.schema_name
+
+
+class Changelog(models.Model):
+    """
+    Platform-wide updates, features, and bug fixes written by Superadmin
+    and broadcasted to all ISP tenant dashboards.
+    """
+    TYPE_CHOICES = (
+        ('feature', 'New Feature'),
+        ('improvement', 'Improvement'),
+        ('bugfix', 'Bug Fix'),
+        ('maintenance', 'Maintenance'),
+    )
+    
+    title = models.CharField(max_length=255)
+    version = models.CharField(max_length=50, blank=True, null=True, help_text="e.g., v1.2.0")
+    content = models.TextField(help_text="Markdown or HTML content of the update")
+    update_type = models.CharField(max_length=20, choices=TYPE_CHOICES, default='feature')
+    
+    is_published = models.BooleanField(default=True, help_text="Uncheck to hide from ISPs as a draft")
+    release_date = models.DateField(default=timezone.now)
+    
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['-release_date', '-created_at']
+        verbose_name = 'Changelog'
+        verbose_name_plural = 'Changelogs'
+
+    def __str__(self):
+        return f"{self.version} - {self.title}" if self.version else self.title

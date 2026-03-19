@@ -37,6 +37,9 @@ urlpatterns = [
     # Health check
     path('health/', views.health_check, name='health_check'),
     
+    # Changelog endpoint for ISP dashboards (read-only)
+    path('changelogs/', views.PlatformChangelogView.as_view(), name='platform-changelogs'),
+    
     # Include router URLs
     path('', include(router.urls)),
 ]

@@ -10,7 +10,7 @@ from rest_framework_simplejwt.exceptions import InvalidToken  # Add this
 from rest_framework_simplejwt.serializers import TokenRefreshSerializer  # Already there or add
 from django.utils import timezone
 from django.contrib.auth.password_validation import validate_password
-from .models import User, Company, Tenant, SystemSettings, AuditLog
+from .models import User, Company, Tenant, SystemSettings, AuditLog, Changelog  # Add Changelog here
 
 
 class UserSerializer(serializers.ModelSerializer):
@@ -552,3 +552,18 @@ class CompanyRegisterSerializer(serializers.Serializer):
                 "admin_email": "Admin email should be different from company email."
             })
         return data
+
+
+class ChangelogSerializer(serializers.ModelSerializer):
+    """Serializer for Changelog model"""
+    
+    update_type_display = serializers.CharField(source='get_update_type_display', read_only=True)
+    
+    class Meta:
+        model = Changelog
+        fields = [
+            'id', 'title', 'version', 'content', 'update_type',
+            'update_type_display', 'is_published', 'release_date',
+            'created_at', 'updated_at'
+        ]
+        read_only_fields = ['id', 'created_at', 'updated_at']
