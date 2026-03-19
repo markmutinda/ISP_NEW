@@ -192,7 +192,7 @@ class InvoiceSerializer(serializers.ModelSerializer):
     class Meta:
         model = Invoice
         fields = [
-            'id', 'invoice_number', 'company', 'company_name', 'customer', 'customer_name',
+            'id', 'invoice_number', 'company_name', 'customer', 'customer_name',
             'customer_code', 'billing_cycle', 'billing_cycle_code', 'billing_date',
             'due_date', 'payment_terms', 'service_period_start', 'service_period_end',
             'subtotal', 'tax_amount', 'discount_amount', 'total_amount', 'amount_paid',
