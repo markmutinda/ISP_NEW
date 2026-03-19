@@ -840,24 +840,24 @@ class BillingCycle(models.Model):
         return count
 
     def calculate_pppoe_charge(self):
-        """Calculate the total PPPoE charge for this cycle"""
-        total_clients = self.calculate_total_pppoe()
-        unit_price = self.snapshot_pppoe_price
-        return (total_clients * unit_price).quantize(Decimal('0.01'))
+        """Calculate charge only for clients ABOVE the minimum included"""
+        actual_count = self.billable_clients.count()
+        # Calculate the overage
+        overage = max(0, actual_count - self.snapshot_min_clients)
+        return (overage * self.snapshot_pppoe_price).quantize(Decimal('0.01'))
 
     def calculate_total_charge(self):
-        """Calculate total charge for this billing cycle (base fee + PPPoE + hotspot revenue share)"""
+        """Calculate total (Base + Overage + Hotspot Commission)"""
         plan = self.subscription.plan
         
         if not plan.is_metered:
             return self.subscription.current_price
         
-        # For metered plans
         base_fee = self.snapshot_base_fee
-        pppoe_charge = self.calculate_pppoe_charge()
+        pppoe_overage_charge = self.calculate_pppoe_charge()
         hotspot_share = (self.hotspot_revenue_accumulated * self.snapshot_hotspot_share_pct / 100).quantize(Decimal('0.01'))
         
-        return base_fee + pppoe_charge + hotspot_share
+        return base_fee + pppoe_overage_charge + hotspot_share
 
 
 class BillableClientRecord(models.Model):
