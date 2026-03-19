@@ -69,6 +69,6 @@ urlpatterns = [
     path("changelogs/<int:pk>/", views.SuperadminChangelogDetailView.as_view(), name="superadmin-changelog-detail"),
 
     # Feature Request Management
-    path("feature-requests/", views.SuperadminFeatureManagementListView.as_view(), name="superadmin-feature-list"),
-    path("feature-requests/<int:pk>/", views.SuperadminFeatureManagementView.as_view(), name="superadmin-feature-detail"),
+    path("feature-requests/", views.SuperadminFeatureListView.as_view(), name="superadmin-feature-list"),
+    path("feature-requests/<int:pk>/", views.SuperadminFeatureDetailView.as_view(), name="superadmin-feature-detail"),
 ]
