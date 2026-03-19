@@ -40,6 +40,10 @@ urlpatterns = [
     # Changelog endpoint for ISP dashboards (read-only)
     path('changelogs/', views.PlatformChangelogView.as_view(), name='platform-changelogs'),
     
+    # Community Feature Requests
+    path('feature-requests/', views.CommunityFeatureRequestView.as_view(), name='feature-requests'),
+    path('feature-requests/<int:pk>/toggle-upvote/', views.ToggleUpvoteView.as_view(), name='toggle-upvote'),
+    
     # Include router URLs
     path('', include(router.urls)),
 ]

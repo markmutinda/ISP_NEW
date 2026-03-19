@@ -1750,18 +1750,24 @@ class SuperadminChangelogDetailView(APIView):
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 
-class SuperadminFeatureManagementView(APIView):
-    """
-    Superadmin management view for feature requests.
-    Allows updating status and adding official comments.
-    """
-    permission_classes = [IsAdminUser]  # Only Netily Admins
+class SuperadminFeatureListView(APIView):
+    """List all feature requests for the Superadmin Roadmap"""
+    permission_classes = SUPERADMIN_PERMS
+
+    def get(self, request):
+        with schema_context(get_public_schema_name()):
+            requests = FeatureRequest.objects.all()
+            serializer = FeatureRequestSerializer(requests, many=True, context={'request': request})
+            return Response(serializer.data)
+
+
+class SuperadminFeatureDetailView(APIView):
+    """Update status or add comments to a feature request"""
+    permission_classes = SUPERADMIN_PERMS
 
     def patch(self, request, pk):
-        """Update a feature request's status or admin comment"""
         with schema_context(get_public_schema_name()):
             feature = get_object_or_404(FeatureRequest, pk=pk)
-            # You can update status or admin_comment
             serializer = FeatureRequestSerializer(feature, data=request.data, partial=True)
             if serializer.is_valid():
                 serializer.save()
