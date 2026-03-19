@@ -18,11 +18,11 @@ from django.utils import timezone
 from django.utils.text import slugify
 from rest_framework import status
 from rest_framework.generics import ListAPIView, RetrieveUpdateDestroyAPIView
-from rest_framework.permissions import IsAuthenticated
+from rest_framework.permissions import IsAuthenticated, IsAdminUser  # Add IsAdminUser here
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from apps.core.models import Tenant, Company, Domain, User, AuditLog, GlobalSystemSettings, Changelog  # Added Changelog
+from apps.core.models import Tenant, Company, Domain, User, AuditLog, GlobalSystemSettings, Changelog, FeatureRequest  # Added FeatureRequest here
 from .permissions import IsSuperAdmin
 from .serializers import (
     TenantListSerializer,
@@ -36,7 +36,9 @@ from .serializers import (
     DashboardKPISerializer,
     AuditLogSerializer,
 )
-from apps.core.serializers import ChangelogSerializer  # Added ChangelogSerializer
+from apps.core.serializers import ChangelogSerializer, FeatureRequestSerializer  # Added FeatureRequestSerializer here
+from django_tenants.utils import schema_context, get_public_schema_name  # Add this import
+from django.shortcuts import get_object_or_404  # Add this import
 
 logger = logging.getLogger(__name__)
 
@@ -1741,3 +1743,39 @@ class SuperadminChangelogDetailView(APIView):
             return Response(status=status.HTTP_204_NO_CONTENT)
         except Changelog.DoesNotExist:
             return Response({"detail": "Not found"}, status=status.HTTP_404_NOT_FOUND)
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  FEATURE REQUEST MANAGEMENT (Superadmin)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+
+class SuperadminFeatureManagementView(APIView):
+    """
+    Superadmin management view for feature requests.
+    Allows updating status and adding official comments.
+    """
+    permission_classes = [IsAdminUser]  # Only Netily Admins
+
+    def patch(self, request, pk):
+        """Update a feature request's status or admin comment"""
+        with schema_context(get_public_schema_name()):
+            feature = get_object_or_404(FeatureRequest, pk=pk)
+            # You can update status or admin_comment
+            serializer = FeatureRequestSerializer(feature, data=request.data, partial=True)
+            if serializer.is_valid():
+                serializer.save()
+                
+                # Log the action
+                _log_action(
+                    request.user, 
+                    "update", 
+                    "FeatureRequest",
+                    object_repr=feature.title,
+                    object_id=feature.id,
+                    changes=serializer.validated_data,
+                    request=request,
+                )
+                
+                return Response(serializer.data)
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)

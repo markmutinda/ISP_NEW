@@ -25,13 +25,15 @@ from django.template.loader import render_to_string  # For email template
 from django.utils.html import strip_tags  # For plain text email
 from .models import Domain   # ← This is your custom Domain in core/models.
 import logging
+from django.shortcuts import get_object_or_404  # Add this import
 
-from .models import User, Company, SystemSettings, AuditLog, Tenant, Changelog  # Add Changelog here
+from .models import User, Company, SystemSettings, AuditLog, Tenant, Changelog, FeatureRequest, FeatureUpvote  # Add FeatureRequest and FeatureUpvote here
 from .serializers import (
     CustomTokenRefreshSerializer, UserSerializer, LoginSerializer, UserCreateSerializer, UserUpdateSerializer,
     ProfileSerializer, PasswordChangeSerializer,
     CompanySerializer, TenantSerializer, SystemSettingsSerializer, AuditLogSerializer,
-    CustomTokenObtainPairSerializer, DashboardStatsSerializer, ChangelogSerializer  # Add ChangelogSerializer
+    CustomTokenObtainPairSerializer, DashboardStatsSerializer, ChangelogSerializer,
+    FeatureRequestSerializer  # Add FeatureRequestSerializer here
 )
 from .permissions import IsAdmin, IsAdminOrStaff, IsCustomer, IsTechnician
 
@@ -889,3 +891,59 @@ class PlatformChangelogView(APIView):
             # Evaluate the queryset immediately inside the public context using list()
             serializer = ChangelogSerializer(list(changelogs), many=True)
             return Response(serializer.data)
+
+
+class CommunityFeatureRequestView(APIView):
+    """
+    Community feature requests board.
+    Allows ISPs to view, create, and vote on feature requests.
+    Lives in public schema so all ISPs can participate.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        """Get all feature requests with upvote status for current ISP"""
+        with schema_context(get_public_schema_name()):
+            requests = FeatureRequest.objects.all()
+            serializer = FeatureRequestSerializer(requests, many=True, context={'request': request})
+            return Response(serializer.data)
+
+    def post(self, request):
+        """Create a new feature request as the current ISP"""
+        with schema_context(get_public_schema_name()):
+            # Assign the request to the current ISP (tenant)
+            serializer = FeatureRequestSerializer(data=request.data, context={'request': request})
+            if serializer.is_valid():
+                serializer.save(requested_by_tenant=request.tenant)
+                return Response(serializer.data, status=status.HTTP_201_CREATED)
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+
+class ToggleUpvoteView(APIView):
+    """
+    Toggle upvote on a feature request.
+    One ISP = one vote per feature.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, pk):
+        """Toggle upvote status for a feature request"""
+        with schema_context(get_public_schema_name()):
+            feature = get_object_or_404(FeatureRequest, pk=pk)
+            upvote_qs = FeatureUpvote.objects.filter(feature_request=feature, tenant=request.tenant)
+            
+            if upvote_qs.exists():
+                upvote_qs.delete()
+                feature.upvotes_count -= 1
+                action = "removed"
+            else:
+                FeatureUpvote.objects.create(feature_request=feature, tenant=request.tenant)
+                feature.upvotes_count += 1
+                action = "added"
+            
+            feature.save()
+            return Response({
+                "status": "success", 
+                "action": action, 
+                "count": feature.upvotes_count
+            })

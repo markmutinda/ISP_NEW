@@ -10,7 +10,7 @@ from rest_framework_simplejwt.exceptions import InvalidToken  # Add this
 from rest_framework_simplejwt.serializers import TokenRefreshSerializer  # Already there or add
 from django.utils import timezone
 from django.contrib.auth.password_validation import validate_password
-from .models import User, Company, Tenant, SystemSettings, AuditLog, Changelog  # Add Changelog here
+from .models import User, Company, Tenant, SystemSettings, AuditLog, Changelog, FeatureRequest, FeatureUpvote  # Add FeatureRequest and FeatureUpvote here
 
 
 class UserSerializer(serializers.ModelSerializer):
@@ -567,3 +567,26 @@ class ChangelogSerializer(serializers.ModelSerializer):
             'created_at', 'updated_at'
         ]
         read_only_fields = ['id', 'created_at', 'updated_at']
+
+
+class FeatureRequestSerializer(serializers.ModelSerializer):
+    """Serializer for FeatureRequest model"""
+    
+    requested_by_name = serializers.ReadOnlyField(source='requested_by_tenant.company.name')
+    has_upvoted = serializers.SerializerMethodField()
+
+    class Meta:
+        model = FeatureRequest
+        fields = [
+            'id', 'title', 'description', 'category', 'status', 
+            'requested_by_name', 'admin_comment', 'upvotes_count', 
+            'has_upvoted', 'created_at', 'updated_at'
+        ]
+        read_only_fields = ['id', 'upvotes_count', 'created_at', 'updated_at']
+
+    def get_has_upvoted(self, obj):
+        """Check if the current tenant has upvoted this feature request"""
+        request = self.context.get('request')
+        if request and hasattr(request, 'tenant'):
+            return FeatureUpvote.objects.filter(feature_request=obj, tenant=request.tenant).exists()
+        return False

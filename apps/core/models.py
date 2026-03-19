@@ -657,3 +657,68 @@ class Changelog(models.Model):
 
     def __str__(self):
         return f"{self.version} - {self.title}" if self.version else self.title
+
+
+class FeatureRequest(models.Model):
+    """
+    Feature requests submitted by ISPs to request new functionality or improvements.
+    Lives in the public schema so all ISPs can see and vote on each other's requests.
+    """
+    STATUS_CHOICES = (
+        ('pending', 'Pending Review'),
+        ('planned', 'Planned'),
+        ('in_progress', 'In Progress'),
+        ('completed', 'Completed'),
+        ('rejected', 'Rejected'),
+    )
+    
+    CATEGORY_CHOICES = (
+        ('network', 'Network & Mikrotik'),
+        ('billing', 'Billing & Payments'),
+        ('hotspot', 'Hotspot & Vouchers'),
+        ('ui_ux', 'Dashboard & UI'),
+        ('automation', 'Automation'),
+        ('other', 'Other'),
+    )
+
+    title = models.CharField(max_length=255)
+    description = models.TextField()
+    category = models.CharField(max_length=50, choices=CATEGORY_CHOICES, default='other')
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='pending')
+    
+    # Track which ISP created it
+    requested_by_tenant = models.ForeignKey('core.Tenant', on_delete=models.CASCADE, related_name='feature_requests')
+    
+    # Official response from Netily
+    admin_comment = models.TextField(blank=True, null=True)
+    
+    # Quick count for sorting
+    upvotes_count = models.PositiveIntegerField(default=0)
+    
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        app_label = 'core'
+        ordering = ['-upvotes_count', '-created_at']
+
+    def __str__(self):
+        return self.title
+
+
+class FeatureUpvote(models.Model):
+    """
+    Tracks which ISP has upvoted which feature request.
+    Ensures one ISP = one vote per feature request.
+    """
+    feature_request = models.ForeignKey(FeatureRequest, on_delete=models.CASCADE, related_name='upvotes')
+    tenant = models.ForeignKey('core.Tenant', on_delete=models.CASCADE)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        app_label = 'core'
+        # Crucial: This prevents an ISP from upvoting the same feature twice
+        unique_together = ('feature_request', 'tenant')
+
+    def __str__(self):
+        return f"{self.tenant.company.name} upvoted {self.feature_request.title}"
