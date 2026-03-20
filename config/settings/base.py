@@ -47,14 +47,21 @@ BASE_APPS = [
     'drf_yasg',
 ]
 
-# Add Celery apps only if celery is installed (production)
+# ────────────────────────────────────────────────────────────────
+#  🚨 FIXED: Celery Apps moved to SHARED_APPS (not BASE_APPS)
+#  This ensures they exist in the public schema and can access
+#  the database schedule table without schema confusion
+# ────────────────────────────────────────────────────────────────
 try:
     import celery
-    BASE_APPS.extend([
+    # Celery apps are added to SHARED_APPS so they live in the public schema
+    # This prevents the "relation django_celery_beat_periodictask does not exist" error
+    CELERY_APPS = (
         'django_celery_beat',      # Celery Beat scheduler (periodic tasks)
         'django_celery_results',   # Celery task results backend
-    ])
+    )
 except ImportError:
+    CELERY_APPS = ()
     pass  # Celery not installed (local development)
 
 # ────────────────────────────────────────────────────────────────
@@ -70,8 +77,8 @@ SHARED_APPS = (
     'apps.core',                       # Tenant & Domain models go here - MUST be in BOTH
     'apps.subscriptions',              # Netily platform subscriptions (public schema only)
     'apps.superadmin', 
-    'apps.radius',                # Platform owner dashboard (public schema only, no models)
-)
+    'apps.radius',                     # Platform owner dashboard (public schema only, no models)
+) + CELERY_APPS  # Add Celery apps to SHARED_APPS
 
 TENANT_APPS = (
     'django.contrib.contenttypes',     # 🚨 MUST BE HERE TOO
@@ -178,8 +185,14 @@ CELERY_RESULT_SERIALIZER = 'json'
 CELERY_TIMEZONE = 'Africa/Nairobi'
 CELERY_ENABLE_UTC = True
 
-# Celery Beat (scheduled tasks) - Use database scheduler
-CELERY_BEAT_SCHEDULER = 'django_celery_beat.schedulers:DatabaseScheduler'
+# ────────────────────────────────────────────────────────────────
+#  🚨 FIXED: Comment out DatabaseScheduler to use code-defined schedule
+#  The Senior Developer requested we use the crontab schedule defined in celery.py
+#  instead of relying on the database schedule table.
+#  This prevents the "relation does not exist" error on first run.
+# ────────────────────────────────────────────────────────────────
+# CELERY_BEAT_SCHEDULER = 'django_celery_beat.schedulers:DatabaseScheduler'
+# Using the default scheduler which reads from celery.py beat_schedule
 
 # ────────────────────────────────────────────────────────────────
 #  ROOT URLCONF, TEMPLATES, WSGI
