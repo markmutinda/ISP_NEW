@@ -250,22 +250,61 @@ class CompanySubscription(models.Model):
         return self.plan.price_monthly
     
     def extend_subscription(self, periods: int = 1):
-        """Extend subscription by number of periods"""
-        if self.billing_period == 'yearly':
-            days = 365 * periods
-        else:
-            days = 30 * periods
+        """
+        Extend subscription, unlock the account, and generate the next Billing Cycle.
         
-        # If expired, start from now
-        if self.current_period_end < timezone.now():
-            self.current_period_start = timezone.now()
-            self.current_period_end = timezone.now() + timedelta(days=days)
-        else:
-            # Extend from current end
-            self.current_period_end += timedelta(days=days)
+        This method:
+        - Extends the subscription period by the specified number of billing cycles
+        - Unlocks the account (sets status to 'active')
+        - Marks the previous invoiced cycle as 'paid'
+        - Creates the new active billing cycle for the next period
         
-        self.status = 'active'
-        self.save()
+        This ensures that regardless of how payment is made (M-Pesa, Card, admin manual),
+        the same cycle-creation logic runs and the audit trail is complete.
+        """
+        from django.db import transaction
+        
+        with transaction.atomic():
+            if self.billing_period == 'yearly':
+                days = 365 * periods
+            else:
+                days = 30 * periods
+            
+            # If expired/past_due, start the new cycle from right now
+            if self.current_period_end < timezone.now():
+                self.current_period_start = timezone.now()
+                self.current_period_end = timezone.now() + timedelta(days=days)
+            else:
+                # Extend from current end if they paid early
+                self.current_period_end += timedelta(days=days)
+            
+            # UNLOCK the account
+            self.status = 'active'
+            self.save()
+            
+            # ─── PHASE 4: CLOSE THE LOOP ───
+            tenant = getattr(self.company, 'tenant', None)
+            if not tenant and hasattr(self.company, 'tenant_set'):
+                tenant = self.company.tenant_set.first()
+                
+            if tenant:
+                # 1. Mark the previous cycle as 'paid' so it stops showing as due
+                BillingCycle.objects.filter(
+                    tenant=tenant,
+                    subscription=self,
+                    status='invoiced'
+                ).update(status='paid')
+                
+                # 2. Generate the NEW active container for the next period
+                BillingCycle.objects.get_or_create(
+                    tenant=tenant,
+                    subscription=self,
+                    status='active',
+                    defaults={
+                        'start_date': self.current_period_start,
+                        'end_date': self.current_period_end
+                    }
+                )
     
     def cancel(self, immediate: bool = False):
         """Cancel subscription"""
@@ -283,22 +322,48 @@ class CompanySubscription(models.Model):
         """
         Convert trial subscription to paid subscription.
         Called after successful payment.
+        
+        This method:
+        - Converts trial to paid
+        - Creates the first billing cycle (ghost container)
+        - Snapshot pricing at moment of conversion
+        - All wrapped in a transaction for data consistency
         """
-        now = timezone.now()
+        from django.db import transaction
         
-        self.is_trial = False
-        self.status = 'active'
-        self.billing_period = billing_period
-        self.converted_from_trial_at = now
-        self.current_period_start = now
-        
-        # Set period end based on billing cycle
-        if billing_period == 'yearly':
-            self.current_period_end = now + timedelta(days=365)
-        else:
-            self.current_period_end = now + timedelta(days=30)
-        
-        self.save()
+        with transaction.atomic():
+            now = timezone.now()
+            
+            self.is_trial = False
+            self.status = 'active'
+            self.billing_period = billing_period
+            self.converted_from_trial_at = now
+            self.current_period_start = now
+            
+            # Set period end based on billing cycle
+            if billing_period == 'yearly':
+                self.current_period_end = now + timedelta(days=365)
+            else:
+                self.current_period_end = now + timedelta(days=30)
+            
+            self.save()
+            
+            # CRITICAL: Create the first billing cycle immediately
+            # This ensures the ghost container exists before any usage data arrives
+            tenant = getattr(self.company, 'tenant', None)
+            if not tenant and hasattr(self.company, 'tenant_set'):
+                tenant = self.company.tenant_set.first()
+            
+            if tenant:
+                BillingCycle.objects.get_or_create(
+                    subscription=self,
+                    tenant=tenant,
+                    start_date=now,
+                    defaults={
+                        'end_date': self.current_period_end,
+                        'status': 'active',
+                    }
+                )
     
     @classmethod
     def create_trial_subscription(cls, company, plan=None):
@@ -421,7 +486,7 @@ class SubscriptionPayment(models.Model):
         
         self.save()
         
-        # Extend subscription
+        # Extend subscription - this will also handle cycle creation
         self.subscription.extend_subscription()
     
     def mark_failed(self, reason: str = None):
@@ -835,37 +900,43 @@ class BillingCycle(models.Model):
     def get_raw_pppoe_count(self):
         """
         Returns the actual number of unique physical users tracked this month.
-        This shows the TRUE count before applying minimum commitment floor.
-        Use this for UI transparency to show both "Actual" and "Billed" counts.
         """
         return self.billable_clients.count()
 
     def calculate_total_pppoe(self):
-        """Calculate total PPPoE clients for this cycle based on minimum commitment"""
-        count = self.billable_clients.count()
-        if self.subscription.plan.is_metered:
-            return max(count, self.snapshot_min_clients)
-        return count
+        """
+        Calculate total PPPoE clients for this cycle.
+        (Removed the minimum commitment floor to strictly enforce flat billing)
+        """
+        return self.billable_clients.count()
 
     def calculate_pppoe_charge(self):
-        """Calculate charge only for clients ABOVE the minimum included"""
-        actual_count = self.billable_clients.count()
-        # Calculate the overage
-        overage = max(0, actual_count - self.snapshot_min_clients)
-        return (overage * self.snapshot_pppoe_price).quantize(Decimal('0.01'))
+        """
+        Calculate charge for ALL active clients (Active Users * 20 KES).
+        No free users, no minimum thresholds.
+        """
+        actual_count = self.calculate_total_pppoe()
+        # Ensure we multiply using Decimals for currency safety
+        return (Decimal(str(actual_count)) * self.snapshot_pppoe_price).quantize(Decimal('0.01'))
 
     def calculate_total_charge(self):
-        """Calculate total (Base + Overage + Hotspot Commission)"""
+        """
+        Calculate the strict billing formula: 
+        Base Fee + (Active Users * 20 KES) + (Hotspot Revenue * 3%)
+        """
         plan = self.subscription.plan
         
+        # If it's a flat-rate plan (like an old legacy plan), just return the flat price
         if not plan.is_metered:
             return self.subscription.current_price
         
         base_fee = self.snapshot_base_fee
-        pppoe_overage_charge = self.calculate_pppoe_charge()
-        hotspot_share = (self.hotspot_revenue_accumulated * self.snapshot_hotspot_share_pct / 100).quantize(Decimal('0.01'))
+        pppoe_charge = self.calculate_pppoe_charge()
         
-        return base_fee + pppoe_overage_charge + hotspot_share
+        # Calculate Hotspot Share (e.g., Revenue * 0.03)
+        hotspot_share = (self.hotspot_revenue_accumulated * self.snapshot_hotspot_share_pct / Decimal('100.0')).quantize(Decimal('0.01'))
+        
+        return base_fee + pppoe_charge + hotspot_share
 
 
 class BillableClientRecord(models.Model):

@@ -685,6 +685,10 @@ class CustomerRadiusCredentials(models.Model):
         """
         Sync this customer's credentials to RADIUS tables.
         Called automatically via signals.
+        
+        NOTE: The metered billing hook that previously existed here has been REMOVED.
+        Active PPPoE users are now counted by analyzing the radacct table at invoice time,
+        not by a save hook when creating RADIUS credentials.
         """
         from .services.radius_sync_service import RadiusSyncService
         
@@ -731,37 +735,6 @@ class CustomerRadiusCredentials(models.Model):
                 attributes=check_attrs,
                 reply_attributes=reply_attrs,
             )
-            
-            # ── NEW: METERED BILLING HOOK (Ghost Record) ──
-            if self.connection_type in ['PPPOE', 'BOTH'] and self.is_enabled:
-                try:
-                    from django.db import connection
-                    from django_tenants.utils import schema_context, get_public_schema_name
-                    from apps.subscriptions.models import BillingCycle, BillableClientRecord
-                    from apps.core.models import Tenant
-                    
-                    # 1. Capture the tenant's schema BEFORE switching
-                    tenant_schema = connection.schema_name
-                    
-                    # 2. Switch to public schema
-                    with schema_context(get_public_schema_name()):
-                        current_tenant = Tenant.objects.get(schema_name=tenant_schema)
-                        
-                        # Find active billing cycle
-                        active_cycle = BillingCycle.objects.filter(
-                            tenant=current_tenant, 
-                            status='active'
-                        ).first()
-                        
-                        if active_cycle:
-                            # Record them. get_or_create ensures they are only counted once per month
-                            BillableClientRecord.objects.get_or_create(
-                                cycle=active_cycle,
-                                username=self.username
-                            )
-                except Exception as e:
-                    import logging
-                    logging.getLogger(__name__).error(f"Failed to record billable client: {e}")
         else:
             service.disable_radius_user(
                 username=self.username,

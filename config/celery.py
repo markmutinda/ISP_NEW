@@ -120,6 +120,15 @@ app.conf.beat_schedule = {
         'schedule': crontab(hour=4, minute=0),  # Daily at 4 AM
         'options': {'queue': 'default'}
     },
+
+    # ════════════════════════════════════════════════════════════════
+    # PLATFORM BILLING — The Engine (Phase 5 Autopilot)
+    # ════════════════════════════════════════════════════════════════
+    'generate-metered-invoices-daily': {
+        'task': 'apps.subscriptions.tasks.generate_metered_invoices',
+        'schedule': crontab(hour=0, minute=5),  # Daily at 12:05 AM
+        'options': {'queue': 'billing'}
+    },
 }
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -130,6 +139,7 @@ app.conf.task_routes = {
     'apps.radius.tasks.*': {'queue': 'radius'},
     'apps.notifications.tasks.*': {'queue': 'notifications'},
     'apps.billing.tasks.*': {'queue': 'billing'},
+    'apps.subscriptions.tasks.*': {'queue': 'billing'},  # Added subscription routing
     'apps.vpn.tasks.*': {'queue': 'default'},
 }
 
