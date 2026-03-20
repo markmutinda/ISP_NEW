@@ -184,7 +184,7 @@ class TenantDetailSerializer(TenantListSerializer):
                 "billed_pppoe_count": active_cycle.calculate_total_pppoe(),
                 "pppoe_charge": active_cycle.calculate_pppoe_charge(),
                 "hotspot_revenue_accumulated": active_cycle.hotspot_revenue_accumulated,
-                "hotspot_share": (active_cycle.hotspot_revenue_accumulated * active_cycle.snapshot_hotspot_share_pct / 100).quantize(Decimal('0.01')) if active_cycle.hotspot_revenue_accumulated else Decimal('0.00'),
+                "hotspot_share": (active_cycle.hotspot_revenue_accumulated * active_cycle.snapshot_hotspot_share_pct / Decimal('100.0')).quantize(Decimal('0.01')) if active_cycle.hotspot_revenue_accumulated else Decimal('0.00'),
                 "total_charge": active_cycle.calculate_total_charge(),
                 "invoice_reference": active_cycle.invoice_reference,
                 "plan_name": plan.name if plan else None,
@@ -307,7 +307,6 @@ class NetilyPlanSerializer(serializers.Serializer):
     is_metered = serializers.BooleanField(default=False, required=False)
     base_license_fee = serializers.DecimalField(max_digits=10, decimal_places=2, required=False, allow_null=True)
     pppoe_unit_price = serializers.DecimalField(max_digits=10, decimal_places=2, required=False, allow_null=True)
-    # REMOVED: pppoe_min_clients - No longer used
     hotspot_revenue_share_pct = serializers.DecimalField(max_digits=5, decimal_places=2, required=False, allow_null=True)
     
     currency = serializers.CharField(max_length=3, default="KES")
