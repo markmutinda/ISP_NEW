@@ -341,11 +341,20 @@ class InitiateSubscriptionPaymentView(APIView):
         billing_period = serializer.validated_data['billing_period']
         phone_number = serializer.validated_data.get('phone_number')
         
-        # Calculate amount
-        if billing_period == 'yearly':
+        # ─────────────────────────────────────────────────────────────
+        # P2 FIX: Enforce base_license_fee for metered plans
+        # When an ISP initiates payment to leave the trial, they should be
+        # charged the base_license_fee (500 KES) instead of price_monthly.
+        # This ensures the correct amount for the first month after trial.
+        # ─────────────────────────────────────────────────────────────
+        if plan.is_metered:
+            amount = plan.base_license_fee
+        elif billing_period == 'yearly':
             amount = plan.price_yearly
         else:
             amount = plan.price_monthly
+        
+        logger.info(f"Calculated payment amount: KES {amount} for plan {plan.name} (is_metered={plan.is_metered}, billing_period={billing_period})")
         
         # Get or create subscription
         subscription, created = CompanySubscription.objects.get_or_create(

@@ -89,6 +89,12 @@ class PayHeroSubscriptionWebhookView(PayHeroWebhookMixin, APIView):
     Webhook for ISP subscription payments (ISP → Netily).
     
     POST /api/v1/webhooks/payhero/subscription/
+    
+    🚨 FIXED: Added strict idempotency and prevented double-extension.
+    - select_for_update() prevents race conditions
+    - Early return for already processed payments
+    - Manual status update instead of mark_completed() to avoid double-firing
+    - Single lifecycle transition (either convert_from_trial OR extend_subscription)
     """
     
     @transaction.atomic
@@ -112,20 +118,30 @@ class PayHeroSubscriptionWebhookView(PayHeroWebhookMixin, APIView):
             from apps.subscriptions.models import SubscriptionPayment
             
             try:
-                payment = SubscriptionPayment.objects.select_related(
-                    'subscription__company'
+                # ─── P0 FIX: STRICT IDEMPOTENCY ───
+                # select_for_update() locks the row so concurrent webhooks wait in line
+                payment = SubscriptionPayment.objects.select_for_update().select_related(
+                    'subscription__company', 'subscription__plan'
                 ).get(payhero_checkout_id=checkout_id)
             except SubscriptionPayment.DoesNotExist:
                 logger.error(f"Subscription payment not found: {checkout_id}")
                 return Response({'error': 'Payment not found'}, status=status.HTTP_404_NOT_FOUND)
             
+            # ─── P0 FIX: PREVENT DOUBLE PROCESSING ───
+            if payment.status in ['completed', 'failed']:
+                logger.info(f"Payment {checkout_id} already processed. Ignoring duplicate webhook.")
+                return Response({'status': 'already_processed'}, status=status.HTTP_200_OK)
+            
             result_code = int(payload['result_code'])
             
             if result_code == 0:
-                # Success
-                payment.mark_completed(payload['mpesa_receipt'])
+                # Success - UPDATE PAYMENT ONLY (do not call mark_completed to avoid double-firing)
+                payment.status = 'completed'
+                payment.completed_at = timezone.now()
+                payment.mpesa_receipt = payload['mpesa_receipt']
+                payment.save(update_fields=['status', 'completed_at', 'mpesa_receipt'])
                 
-                # Check if this is a trial conversion
+                # ─── SINGLE LIFECYCLE TRANSITION ───
                 subscription = payment.subscription
                 if subscription.is_trial:
                     # Convert from trial to paid subscription
@@ -147,7 +163,9 @@ class PayHeroSubscriptionWebhookView(PayHeroWebhookMixin, APIView):
                 
             else:
                 # Failed
-                payment.mark_failed(payload['result_desc'])
+                payment.status = 'failed'
+                payment.failure_reason = payload['result_desc']
+                payment.save(update_fields=['status', 'failure_reason'])
                 
                 logger.info(
                     f"Subscription payment failed: {payment.subscription.company.name} "
@@ -199,7 +217,7 @@ class PayHeroHotspotWebhookView(PayHeroWebhookMixin, APIView):
             
             with schema_context(t.schema_name):
                 try:
-                    session = HotspotSession.objects.select_related(
+                    session = HotspotSession.objects.select_for_update().select_related(
                         'router', 'plan'
                     ).get(payhero_checkout_id=checkout_id)
                     tenant = t
@@ -213,6 +231,11 @@ class PayHeroHotspotWebhookView(PayHeroWebhookMixin, APIView):
         
         # Process in the correct tenant schema
         with schema_context(tenant.schema_name):
+            # ─── P0 FIX: PREVENT DOUBLE PROCESSING ───
+            if session.status in ['paid', 'active']:
+                logger.info(f"Hotspot session {checkout_id} already processed. Ignoring duplicate.")
+                return Response({'status': 'already_processed'}, status=status.HTTP_200_OK)
+            
             result_code = int(payload['result_code'])
             
             if result_code == 0:
@@ -334,7 +357,7 @@ class PayHeroBillingWebhookView(PayHeroWebhookMixin, APIView):
             
             with schema_context(t.schema_name):
                 try:
-                    payment = Payment.objects.select_related('customer').get(
+                    payment = Payment.objects.select_for_update().select_related('customer').get(
                         payhero_checkout_id=checkout_id
                     )
                     tenant = t
@@ -348,6 +371,11 @@ class PayHeroBillingWebhookView(PayHeroWebhookMixin, APIView):
         
         # Process in the correct tenant schema
         with schema_context(tenant.schema_name):
+            # ─── P0 FIX: PREVENT DOUBLE PROCESSING ───
+            if payment.status in ['COMPLETED', 'FAILED']:
+                logger.info(f"Billing payment {checkout_id} already processed. Ignoring duplicate.")
+                return Response({'status': 'already_processed'}, status=status.HTTP_200_OK)
+            
             result_code = int(payload['result_code'])
             
             if result_code == 0:

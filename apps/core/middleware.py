@@ -4,13 +4,17 @@ Middleware for core functionality: audit logging, tenant switching, company cont
 
 import json
 import re
+import logging
 from django.utils.deprecation import MiddlewareMixin
 from django.db import connection
 from django.conf import settings
-from django.http import HttpResponseForbidden, HttpResponse
+from django.http import HttpResponseForbidden, HttpResponse, JsonResponse
 from django.core.exceptions import PermissionDenied
 
 from .models import AuditLog, Tenant, Domain, Company
+
+# Get logger for this module
+logger = logging.getLogger(__name__)
 
 
 # ================================
@@ -232,3 +236,94 @@ class AuditLogMiddleware(MiddlewareMixin):
             'PATCH': 'update',
             'DELETE': 'delete',
         }.get(method, 'view')
+
+
+# ─────────────────────────────────────────────────────────────
+# FIX 3: SUBSCRIPTION ENFORCEMENT MIDDLEWARE (P1)
+# ─────────────────────────────────────────────────────────────
+# This middleware enforces a hard lockout when an ISP's subscription
+# is past_due or trial has expired. It blocks all API requests
+# except those needed to settle the invoice (billing, subscriptions, auth).
+# This ensures ISPs cannot continue using the platform without paying.
+# ─────────────────────────────────────────────────────────────
+
+class SubscriptionEnforcementMiddleware(MiddlewareMixin):
+    """
+    Enforces a hard lockout if the tenant's subscription is past_due or expired.
+    Allows access to billing/payment endpoints so they can settle the invoice.
+    
+    Returns HTTP 402 Payment Required for blocked requests.
+    """
+    
+    def process_request(self, request):
+        # 1. Skip public machine endpoints (routers must keep tracking usage)
+        if any(request.path.startswith(p) for p in PUBLIC_ROUTER_PATHS):
+            return None
+        
+        # 2. Only block API endpoints
+        if not request.path.startswith('/api/'):
+            return None
+        
+        # 3. Allow billing/subscription/auth endpoints so they can actually log in and pay!
+        #    These endpoints must remain accessible even when subscription is expired.
+        ALLOWED_PATHS = [
+            '/api/v1/subscriptions/',
+            '/api/v1/billing/',
+            '/api/v1/auth/',
+            '/api/v1/core/payout-config/',  # Allow them to see their payouts
+            '/api/v1/core/settlements/',     # Allow them to see settlement history
+            '/api/v1/companies/current/',    # Allow them to get company info
+        ]
+        
+        if any(request.path.startswith(p) for p in ALLOWED_PATHS):
+            return None
+        
+        # 4. Check subscription state
+        tenant = getattr(request, 'tenant', None)
+        
+        # Only enforce if we have a tenant and company
+        if tenant and hasattr(request, 'company') and request.company:
+            # Use public schema to access subscription models
+            from django_tenants.utils import schema_context
+            
+            with schema_context('public'):
+                from apps.subscriptions.models import CompanySubscription
+                
+                try:
+                    sub = CompanySubscription.objects.select_related('plan').get(company=request.company)
+                    
+                    # Check if subscription is locked (past_due or trial expired)
+                    is_locked = False
+                    lock_reason = None
+                    
+                    if sub.status == 'past_due':
+                        is_locked = True
+                        lock_reason = 'Your subscription payment is past due. Please settle your invoice to restore access.'
+                    elif sub.trial_expired:
+                        is_locked = True
+                        lock_reason = 'Your free trial has expired. Please subscribe to continue using Netily.'
+                    
+                    if is_locked:
+                        logger.warning(
+                            f"Blocked API request for {request.company.name}: {request.path} - "
+                            f"Reason: {lock_reason}"
+                        )
+                        
+                        return JsonResponse({
+                            'error': 'payment_required',
+                            'message': lock_reason,
+                            'code': 'SUBSCRIPTION_EXPIRED',
+                            'status': sub.status,
+                            'trial_expired': sub.trial_expired,
+                        }, status=402)  # HTTP 402 Payment Required
+                        
+                except CompanySubscription.DoesNotExist:
+                    # No subscription found - this is a new company still in setup
+                    # Allow access but log for monitoring
+                    logger.debug(f"No subscription found for {request.company.name}")
+                    pass
+                except Exception as e:
+                    # Log error but don't block - better to let through than lock out due to error
+                    logger.error(f"Error checking subscription status for {request.company.name}: {e}")
+        
+        return None

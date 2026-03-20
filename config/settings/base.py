@@ -131,6 +131,7 @@ MIDDLEWARE = [
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
     'apps.core.middleware.AuditLogMiddleware',
     'apps.core.middleware.CompanyContextMiddleware',
+    'apps.core.middleware.SubscriptionEnforcementMiddleware',
     # REMOVED: 'apps.core.middleware.TenantMiddleware',
 ]
 if DEBUG:
