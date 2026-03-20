@@ -53,7 +53,7 @@ class NetilyPlan(models.Model):
     )
     base_license_fee = models.DecimalField(max_digits=10, decimal_places=2, default=Decimal('500.00'))
     pppoe_unit_price = models.DecimalField(max_digits=10, decimal_places=2, default=Decimal('20.00'))
-    pppoe_min_clients = models.PositiveIntegerField(default=20)
+    # REMOVED: pppoe_min_clients - No longer used, all users are billed
     hotspot_revenue_share_pct = models.DecimalField(max_digits=5, decimal_places=2, default=Decimal('3.00'))
     
     # Limits
@@ -446,7 +446,8 @@ class SubscriptionPayment(models.Model):
     )
     
     # PayHero Integration
-    payhero_checkout_id = models.CharField(max_length=100, blank=True, null=True)
+    # FIXED: Added unique=True to prevent duplicate webhook processing
+    payhero_checkout_id = models.CharField(max_length=100, blank=True, null=True, unique=True)
     payhero_reference = models.CharField(max_length=100, blank=True, null=True)
     
     # M-Pesa specific
@@ -477,17 +478,21 @@ class SubscriptionPayment(models.Model):
         return f"{self.subscription.company.name} - KES {self.amount} ({self.status})"
     
     def mark_completed(self, mpesa_receipt: str = None):
-        """Mark payment as completed and extend subscription"""
+        """
+        Mark payment as completed. 
+        NOTE: This is a pure state setter. It does NOT trigger subscription extensions.
+        The lifecycle transition is handled explicitly by the webhook/polling views.
+        """
         self.status = 'completed'
         self.completed_at = timezone.now()
         
         if mpesa_receipt:
             self.mpesa_receipt = mpesa_receipt
+            
+        self.save(update_fields=['status', 'completed_at', 'mpesa_receipt'])
         
-        self.save()
-        
-        # Extend subscription - this will also handle cycle creation
-        self.subscription.extend_subscription()
+        # REMOVED: self.subscription.extend_subscription()
+        # Extension is now handled explicitly by the webhook to prevent double-extension
     
     def mark_failed(self, reason: str = None):
         """Mark payment as failed"""
@@ -876,7 +881,7 @@ class BillingCycle(models.Model):
     # Locks in the pricing at the moment the cycle is created
     snapshot_base_fee = models.DecimalField(max_digits=10, decimal_places=2, default=Decimal('0.00'))
     snapshot_pppoe_price = models.DecimalField(max_digits=10, decimal_places=2, default=Decimal('0.00'))
-    snapshot_min_clients = models.PositiveIntegerField(default=20)
+    # REMOVED: snapshot_min_clients - No longer used, all users are billed
     snapshot_hotspot_share_pct = models.DecimalField(max_digits=5, decimal_places=2, default=Decimal('0.00'))
 
     class Meta:
@@ -893,7 +898,7 @@ class BillingCycle(models.Model):
             plan = self.subscription.plan
             self.snapshot_base_fee = plan.base_license_fee
             self.snapshot_pppoe_price = plan.pppoe_unit_price
-            self.snapshot_min_clients = plan.pppoe_min_clients
+            # REMOVED: self.snapshot_min_clients = plan.pppoe_min_clients
             self.snapshot_hotspot_share_pct = plan.hotspot_revenue_share_pct
         super().save(*args, **kwargs)
 

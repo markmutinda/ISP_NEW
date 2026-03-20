@@ -519,8 +519,11 @@ class SubscriptionPaymentViewSet(viewsets.ReadOnlyModelViewSet):
     def status(self, request, pk=None):
         """
         Poll payment status.
-        
         GET /api/v1/subscriptions/payments/{id}/status/
+        
+        FIXED: Now uses the unified lifecycle engine to prevent split-brain.
+        This ensures that whether the webhook processes first or the user polls,
+        the subscription is only extended ONCE with proper transaction locking.
         """
         payment = self.get_object()
         
@@ -541,7 +544,26 @@ class SubscriptionPaymentViewSet(viewsets.ReadOnlyModelViewSet):
                 status_response = client.get_payment_status(payment.payhero_checkout_id)
                 
                 if status_response.status == PaymentStatus.SUCCESS:
-                    payment.mark_completed(status_response.mpesa_receipt)
+                    # ─── P0 FIX: UNIFIED LIFECYCLE ENGINE ───
+                    # Ensure this runs in a transaction just like the webhook
+                    with transaction.atomic():
+                        # Lock the row to prevent race condition with the webhook
+                        locked_payment = SubscriptionPayment.objects.select_for_update().get(id=payment.id)
+                        
+                        # Only process if still pending (prevent double-processing)
+                        if locked_payment.status in ['pending', 'processing']:
+                            locked_payment.mark_completed(status_response.mpesa_receipt)
+                            
+                            subscription = locked_payment.subscription
+                            if subscription.is_trial:
+                                subscription.convert_from_trial(billing_period=subscription.billing_period)
+                                logger.info(f"Trial converted to paid via Polling: {subscription.company.name}")
+                            else:
+                                subscription.extend_subscription()
+                                logger.info(f"Subscription extended via Polling: {subscription.company.name}")
+                            
+                            payment = locked_payment  # Update reference for response
+                    
                     return Response({
                         'payment_id': str(payment.id),
                         'status': 'completed',

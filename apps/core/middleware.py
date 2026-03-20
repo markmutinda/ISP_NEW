@@ -264,17 +264,18 @@ class SubscriptionEnforcementMiddleware(MiddlewareMixin):
         if not request.path.startswith('/api/'):
             return None
         
-        # 3. Allow billing/subscription/auth endpoints so they can actually log in and pay!
-        #    These endpoints must remain accessible even when subscription is expired.
+        # 3. Restrict allowlist to EXACTLY what is needed to pay the bill
+        #    This ensures ISPs cannot access ANY platform functionality until payment is made.
+        #    Only the minimal endpoints for viewing lockout status, making payment,
+        #    and checking payment status are allowed.
         ALLOWED_PATHS = [
-            '/api/v1/subscriptions/',
-            '/api/v1/billing/',
-            '/api/v1/auth/',
-            '/api/v1/core/payout-config/',  # Allow them to see their payouts
-            '/api/v1/core/settlements/',     # Allow them to see settlement history
-            '/api/v1/companies/current/',    # Allow them to get company info
+            '/api/v1/subscriptions/current/',  # View their locked status
+            '/api/v1/subscriptions/pay/',      # Initiate M-Pesa payment
+            '/api/v1/subscriptions/payments/', # Poll payment status
+            '/api/v1/auth/',                   # Login/Logout/Refresh
         ]
         
+        # Check if the request path starts with any allowed path
         if any(request.path.startswith(p) for p in ALLOWED_PATHS):
             return None
         
@@ -315,6 +316,12 @@ class SubscriptionEnforcementMiddleware(MiddlewareMixin):
                             'code': 'SUBSCRIPTION_EXPIRED',
                             'status': sub.status,
                             'trial_expired': sub.trial_expired,
+                            'allowed_endpoints': [
+                                '/api/v1/subscriptions/current/',
+                                '/api/v1/subscriptions/pay/',
+                                '/api/v1/subscriptions/payments/',
+                                '/api/v1/auth/',
+                            ]
                         }, status=402)  # HTTP 402 Payment Required
                         
                 except CompanySubscription.DoesNotExist:
