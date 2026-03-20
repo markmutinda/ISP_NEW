@@ -118,7 +118,7 @@ class TenantListSerializer(serializers.ModelSerializer):
         return 0
     
     def get_billed_pppoe_count(self, obj):
-        """Return the billed count (actual + minimum commitment floor)."""
+        """Return the billed count (all active users with no minimum floor)."""
         active_cycle = self.get_active_cycle(obj)
         if active_cycle:
             try:
@@ -179,11 +179,9 @@ class TenantDetailSerializer(TenantListSerializer):
                 "status": active_cycle.status,
                 "snapshot_base_fee": active_cycle.snapshot_base_fee,
                 "snapshot_pppoe_price": active_cycle.snapshot_pppoe_price,
-                "snapshot_min_clients": active_cycle.snapshot_min_clients,
                 "snapshot_hotspot_share_pct": active_cycle.snapshot_hotspot_share_pct,
                 "raw_pppoe_count": active_cycle.get_raw_pppoe_count(),
                 "billed_pppoe_count": active_cycle.calculate_total_pppoe(),
-                "pppoe_overage": max(0, active_cycle.get_raw_pppoe_count() - active_cycle.snapshot_min_clients),
                 "pppoe_charge": active_cycle.calculate_pppoe_charge(),
                 "hotspot_revenue_accumulated": active_cycle.hotspot_revenue_accumulated,
                 "hotspot_share": (active_cycle.hotspot_revenue_accumulated * active_cycle.snapshot_hotspot_share_pct / 100).quantize(Decimal('0.01')) if active_cycle.hotspot_revenue_accumulated else Decimal('0.00'),
@@ -309,7 +307,7 @@ class NetilyPlanSerializer(serializers.Serializer):
     is_metered = serializers.BooleanField(default=False, required=False)
     base_license_fee = serializers.DecimalField(max_digits=10, decimal_places=2, required=False, allow_null=True)
     pppoe_unit_price = serializers.DecimalField(max_digits=10, decimal_places=2, required=False, allow_null=True)
-    pppoe_min_clients = serializers.IntegerField(required=False, allow_null=True)
+    # REMOVED: pppoe_min_clients - No longer used
     hotspot_revenue_share_pct = serializers.DecimalField(max_digits=5, decimal_places=2, required=False, allow_null=True)
     
     currency = serializers.CharField(max_length=3, default="KES")
