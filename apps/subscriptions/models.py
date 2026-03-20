@@ -832,6 +832,14 @@ class BillingCycle(models.Model):
             self.snapshot_hotspot_share_pct = plan.hotspot_revenue_share_pct
         super().save(*args, **kwargs)
 
+    def get_raw_pppoe_count(self):
+        """
+        Returns the actual number of unique physical users tracked this month.
+        This shows the TRUE count before applying minimum commitment floor.
+        Use this for UI transparency to show both "Actual" and "Billed" counts.
+        """
+        return self.billable_clients.count()
+
     def calculate_total_pppoe(self):
         """Calculate total PPPoE clients for this cycle based on minimum commitment"""
         count = self.billable_clients.count()

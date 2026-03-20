@@ -13,6 +13,8 @@ from apps.subscriptions.models import BillingCycle, BillableClientRecord
 # Make sure to import your billing models inside the tenant context or locally
 from apps.billing.models import Invoice, InvoiceItem
 from apps.customers.models import Customer
+# CRITICAL: Import the CustomerRadiusCredentials model for PPPoE user tracking
+from apps.radius.models import CustomerRadiusCredentials  # Adjust path if needed
 
 logger = logging.getLogger(__name__)
 User = get_user_model()
@@ -40,6 +42,8 @@ def generate_metered_invoices():
     for cycle in ended_cycles:
         tenant = cycle.tenant
         plan = cycle.subscription.plan
+        new_cycle = None
+        new_invoice = None
         
         try:
             with transaction.atomic():
@@ -91,7 +95,7 @@ def generate_metered_invoices():
                     )
 
                     # Create Invoice
-                    inv = Invoice.objects.create(
+                    new_invoice = Invoice.objects.create(
                         invoice_number=f'NET-BILL-{now.strftime("%y%m%d%H%M%S")}',
                         customer=sys_customer,
                         total_amount=total_due,
@@ -104,36 +108,44 @@ def generate_metered_invoices():
 
                     # Create Line Items (Breakdown)
                     InvoiceItem.objects.create(
-                        invoice=inv, description='Netily Platform - Base License Fee',
+                        invoice=new_invoice, description='Netily Platform - Base License Fee',
                         quantity=1, unit_price=base_fee, tax_rate=0, tax_amount=0, total=base_fee
                     )
                     if pppoe_fee > 0:
                         InvoiceItem.objects.create(
-                            invoice=inv, description=f'Metered Overage: {pppoe_billable} PPPoE Clients',
+                            invoice=new_invoice, description=f'Metered Overage: {pppoe_billable} PPPoE Clients',
                             quantity=1, unit_price=pppoe_fee, tax_rate=0, tax_amount=0, total=pppoe_fee
                         )
                     if hotspot_share > 0:
                         InvoiceItem.objects.create(
-                            invoice=inv, description='Hotspot Revenue Share',
+                            invoice=new_invoice, description='Hotspot Revenue Share',
                             quantity=1, unit_price=hotspot_share, tax_rate=0, tax_amount=0, total=hotspot_share
                         )
 
-                # 3. Carry Forward Active PPPoE Users
+                # 3. Carry Forward Active PPPoE Users - FIXED: Force evaluation inside tenant context
                 with schema_context(tenant.schema_name):
-                    from apps.radius.models import CustomerRadiusCredentials
-                    active_creds_iterator = CustomerRadiusCredentials.objects.filter(
+                    # Fetch AND EVALUATE the usernames while inside the tenant schema
+                    # Wrapping in list() forces the DB query to execute right now
+                    active_usernames = list(CustomerRadiusCredentials.objects.filter(
                         is_enabled=True,
                         connection_type__in=['PPPOE', 'BOTH']
-                    ).values_list('username', flat=True).iterator(chunk_size=1000)
+                    ).values_list('username', flat=True))
                 
+                # Switch back to public schema to insert the ghost records
                 with schema_context(get_public_schema_name()):
-                    total_carried = 0
-                    for username_batch in batched(active_creds_iterator, 1000):
-                        records = [BillableClientRecord(cycle=new_cycle, username=uname) for uname in username_batch]
-                        BillableClientRecord.objects.bulk_create(records, batch_size=1000, ignore_conflicts=True)
-                        total_carried += len(records)
-                        
-                    logger.info(f"[{tenant.name}] Invoiced KES {total_due}. Rolled over {total_carried} active PPPoE clients.")
+                    # Use bulk_create for massive performance gains
+                    records_to_create = [
+                        BillableClientRecord(cycle=new_cycle, username=username)
+                        for username in active_usernames
+                    ]
+                    BillableClientRecord.objects.bulk_create(records_to_create, ignore_conflicts=True)
+                    total_carried = len(records_to_create)
+                    
+                    # 4. Save Invoice Reference - FIXED: Add audit trail
+                    cycle.invoice_reference = str(new_invoice.id)  # Or new_invoice.invoice_number
+                    cycle.save(update_fields=['invoice_reference'])
+                    
+                    logger.info(f"[{tenant.name}] Invoiced KES {total_due} (Invoice #{new_invoice.id}). Rolled over {total_carried} active PPPoE clients.")
 
         except Exception as e:
             logger.error(f"Failed to process billing cycle for tenant {tenant.name}: {str(e)}")

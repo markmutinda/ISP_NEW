@@ -8,8 +8,10 @@ All queries target the PUBLIC schema (Tenant, Company, Domain, User, subscriptio
 from rest_framework import serializers
 from django.utils import timezone
 from django.utils.text import slugify
+from decimal import Decimal
 
 from apps.core.models import Tenant, Company, Domain, User
+from apps.subscriptions.models import BillingCycle  # Import BillingCycle
 
 
 # ──────────────────────────────────────────
@@ -64,6 +66,13 @@ class TenantListSerializer(serializers.ModelSerializer):
     subscription_plan = serializers.CharField(source="company.subscription_plan", read_only=True)
     days_left = serializers.SerializerMethodField()
     domains = DomainSerializer(many=True, read_only=True)
+    
+    # NEW: Billing cycle metrics for active cycle
+    raw_active_pppoe_count = serializers.SerializerMethodField()
+    billed_pppoe_count = serializers.SerializerMethodField()
+    current_cycle_status = serializers.SerializerMethodField()
+    current_cycle_start = serializers.SerializerMethodField()
+    current_cycle_end = serializers.SerializerMethodField()
 
     class Meta:
         model = Tenant
@@ -76,6 +85,9 @@ class TenantListSerializer(serializers.ModelSerializer):
             "company_type", "company_logo", "subscription_plan",
             "days_left", "domains",
             "is_active", "created_at", "updated_at",
+            # NEW FIELDS
+            "raw_active_pppoe_count", "billed_pppoe_count",
+            "current_cycle_status", "current_cycle_start", "current_cycle_end",
         ]
 
     def get_days_left(self, obj):
@@ -83,14 +95,106 @@ class TenantListSerializer(serializers.ModelSerializer):
             return None
         delta = obj.subscription_expiry - timezone.now().date()
         return max(delta.days, 0)
+    
+    def get_active_cycle(self, obj):
+        """Helper to get the active billing cycle for a tenant."""
+        try:
+            # Get the most recent active cycle for this tenant
+            return BillingCycle.objects.filter(
+                tenant=obj,
+                status='active'
+            ).order_by('-start_date').first()
+        except Exception:
+            return None
+    
+    def get_raw_active_pppoe_count(self, obj):
+        """Return the actual number of unique physical PPPoE users."""
+        active_cycle = self.get_active_cycle(obj)
+        if active_cycle:
+            try:
+                return active_cycle.get_raw_pppoe_count()
+            except Exception:
+                return 0
+        return 0
+    
+    def get_billed_pppoe_count(self, obj):
+        """Return the billed count (actual + minimum commitment floor)."""
+        active_cycle = self.get_active_cycle(obj)
+        if active_cycle:
+            try:
+                return active_cycle.calculate_total_pppoe()
+            except Exception:
+                return 0
+        return 0
+    
+    def get_current_cycle_status(self, obj):
+        """Return the status of the current billing cycle."""
+        active_cycle = self.get_active_cycle(obj)
+        if active_cycle:
+            return active_cycle.status
+        return None
+    
+    def get_current_cycle_start(self, obj):
+        """Return the start date of the current billing cycle."""
+        active_cycle = self.get_active_cycle(obj)
+        if active_cycle:
+            return active_cycle.start_date
+        return None
+    
+    def get_current_cycle_end(self, obj):
+        """Return the end date of the current billing cycle."""
+        active_cycle = self.get_active_cycle(obj)
+        if active_cycle:
+            return active_cycle.end_date
+        return None
 
 
 class TenantDetailSerializer(TenantListSerializer):
     """Adds company details for the detail view."""
     company = CompanyBriefSerializer(read_only=True)
+    
+    # NEW: Add billing cycle details with more comprehensive information
+    billing_cycle_details = serializers.SerializerMethodField()
 
     class Meta(TenantListSerializer.Meta):
-        fields = TenantListSerializer.Meta.fields + ["company", "domain"]
+        fields = TenantListSerializer.Meta.fields + ["company", "domain", "billing_cycle_details"]
+    
+    def get_billing_cycle_details(self, obj):
+        """Provide comprehensive billing cycle details for the detail view."""
+        active_cycle = self.get_active_cycle(obj)
+        if not active_cycle:
+            return None
+        
+        try:
+            # Get plan details from subscription
+            plan = None
+            subscription = active_cycle.subscription
+            if subscription:
+                plan = subscription.plan
+            
+            return {
+                "cycle_id": str(active_cycle.id),
+                "start_date": active_cycle.start_date,
+                "end_date": active_cycle.end_date,
+                "status": active_cycle.status,
+                "snapshot_base_fee": active_cycle.snapshot_base_fee,
+                "snapshot_pppoe_price": active_cycle.snapshot_pppoe_price,
+                "snapshot_min_clients": active_cycle.snapshot_min_clients,
+                "snapshot_hotspot_share_pct": active_cycle.snapshot_hotspot_share_pct,
+                "raw_pppoe_count": active_cycle.get_raw_pppoe_count(),
+                "billed_pppoe_count": active_cycle.calculate_total_pppoe(),
+                "pppoe_overage": max(0, active_cycle.get_raw_pppoe_count() - active_cycle.snapshot_min_clients),
+                "pppoe_charge": active_cycle.calculate_pppoe_charge(),
+                "hotspot_revenue_accumulated": active_cycle.hotspot_revenue_accumulated,
+                "hotspot_share": (active_cycle.hotspot_revenue_accumulated * active_cycle.snapshot_hotspot_share_pct / 100).quantize(Decimal('0.01')) if active_cycle.hotspot_revenue_accumulated else Decimal('0.00'),
+                "total_charge": active_cycle.calculate_total_charge(),
+                "invoice_reference": active_cycle.invoice_reference,
+                "plan_name": plan.name if plan else None,
+                "plan_code": plan.code if plan else None,
+                "is_metered": plan.is_metered if plan else False,
+            }
+        except Exception as e:
+            return {"error": str(e)}
 
 
 class TenantUpdateSerializer(serializers.ModelSerializer):
