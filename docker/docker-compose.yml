@@ -63,7 +63,8 @@ services:
     restart: unless-stopped
     command: >
       sh -c "echo 'Setting up routes...' &&
-             VPN_IP=$$(python -c \"import socket; print(socket.gethostbyname('netily-openvpn'))\") &&
+             # FIXED: Use the vpn-specific alias for reliable resolution
+             VPN_IP=$$(python -c \"import socket; print(socket.gethostbyname('netily-openvpn-vpn'))\") &&
              echo 'VPN Gateway found at: '$$VPN_IP &&
              ip route add 10.8.0.0/24 via $$VPN_IP || true &&
              echo 'Route added successfully!' &&
@@ -119,9 +120,9 @@ services:
     container_name: netily_worker
     restart: unless-stopped
     working_dir: /app
-    # AUTOMATION: Worker also needs the route to talk to routers
+    # FIXED: Use the vpn-specific alias for reliable resolution
     command: >
-      sh -c "VPN_IP=\$(getent hosts netily-openvpn | awk '{ print \$1 }') &&
+      sh -c "VPN_IP=\$(getent hosts netily-openvpn-vpn | awk '{ print \$1 }') &&
              ip route add 10.8.0.0/24 via \$VPN_IP || true &&
              celery -A config worker -l info --concurrency=4"
     volumes:
@@ -198,9 +199,10 @@ services:
     # ADDED NET_ADMIN capability for routing
     cap_add:
       - NET_ADMIN
+    # FIXED: Use the vpn-specific alias for reliable resolution
     command: >
       sh -c "echo 'Setting up routes...' &&
-             VPN_IP=$$(getent hosts netily-openvpn | awk '{ print $$1 }') &&
+             VPN_IP=$$(getent hosts netily-openvpn-vpn | awk '{ print $$1 }') &&
              echo 'VPN Gateway found at: '$$VPN_IP &&
              ip route add 10.8.0.0/24 via $$VPN_IP || true &&
              echo 'Route added! Starting RADIUS...' &&
@@ -219,15 +221,18 @@ services:
     depends_on:
       db:
         condition: service_healthy
-      openvpn:                # ADDED DEPENDENCY ON OPENVPN
+      openvpn:
         condition: service_started
     deploy:
       resources:
         limits:
           memory: 60M
+    # FIXED: Proper YAML syntax for networks with alias
     networks:
-      - isp_network
-      - vpn_network
+      isp_network:
+      vpn_network:
+        aliases:
+          - netily-radius-vpn
 
   # ────────────────────────────────────────────────────────────────
   # NEXT.JS FRONTEND
@@ -311,6 +316,7 @@ services:
       - ../radius_config/ports:/etc/openvpn/ports:ro
     environment:
       - OPENVPN_OPTS=--management 0.0.0.0 7505 # Allow internal docker access
+    # FIXED: Added FORWARD rule and use vpn-specific alias for radius
     command: >
       sh -c "ovpn_run &
              echo 'Waiting for tun0...' &&
@@ -319,13 +325,15 @@ services:
              
              iptables -t nat -I POSTROUTING -o tun0 -j MASQUERADE &&
              
-             # --- FIXED: Correct syntax for variable substitution ---
-             BASE_IP=$$(getent hosts netily_radius | awk '{ print $$1 }') &&
+             # --- ADD THIS RULE: Explicitly allow RADIUS traffic to be forwarded ---
+             iptables -I FORWARD -i tun0 -p udp -m multiport --dports 1812,1813 -j ACCEPT &&
+             
+             # --- FIXED: Use the new vpn-specific alias for radius ---
+             BASE_IP=$$(getent hosts netily-radius-vpn | awk '{ print $$1 }') &&
              if [ ! -z \"$$BASE_IP\" ]; then
                echo \"Forwarding 1812/1813 to Shared Radius ($$BASE_IP)\" &&
                iptables -t nat -A PREROUTING -i tun0 -p udp --dport 1812 -j DNAT --to-destination $$BASE_IP:1812 &&
                iptables -t nat -A PREROUTING -i tun0 -p udp --dport 1813 -j DNAT --to-destination $$BASE_IP:1813 &&
-               # 🚨 REMOVED THE MASQUERADE RULE TO PRESERVE REAL CLIENT IPs 🚨
                echo \"MASQUERADE rule removed to preserve real client IPs\";
              else
                echo \"Warning: Shared RADIUS container not found\";
@@ -339,9 +347,12 @@ services:
       resources:
         limits:
           memory: 50M
+    # FIXED: Proper YAML syntax for networks with alias
     networks:
-      - vpn_network
-      - isp_network
+      vpn_network:
+        aliases:
+          - netily-openvpn-vpn
+      isp_network:
 
 # ────────────────────────────────────────────────────────────────
 # NETWORKS
