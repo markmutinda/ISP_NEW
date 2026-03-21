@@ -211,12 +211,12 @@ class MikrotikScriptGenerator:
             self._section_firewall(r),
             self._section_bridge_ports(r, r_gateway_cidr),  # Pass the calculated gateway CIDR
             self._section_dhcp(r, gateway_ip, pool_range, dhcp_network),
-            self._section_radius(r),  # Uses hardcoded 1812/1813
-            self._section_hotspot(r, gateway_ip),
+            self._section_radius(r),  # Uses hardcoded 1812/1813 with interim-update
+            self._section_hotspot(r, gateway_ip),  # Uses radius-interim-update
             self._section_walled_garden(r, portal_domain),
             self._section_ssl_certs(r),
             self._section_hotspot_html(r),
-            self._section_pppoe(r, pppoe_local) if r.enable_pppoe else "",
+            self._section_pppoe(r, pppoe_local) if r.enable_pppoe else "",  # Uses interim-update
             self._section_anti_sharing(r, is_v6),
             self._section_nat(r),
             self._section_schedulers(r),
@@ -410,13 +410,17 @@ class MikrotikScriptGenerator:
         
         ARCHITECTURE CHANGE: Using shared central RADIUS means all tenants
         use the standard RADIUS ports. No more per-tenant port mapping.
+        
+        FIX: Added interim-update=3m for 3-minute heartbeat/accounting updates.
         """
         
         # Hardcode the standard RADIUS ports - all traffic goes to central server
         radius_cmd = (
             f'/radius add address={self.vpn_gateway} secret="{self._escape_ros_string(r.shared_secret)}" '
             f'authentication-port=1812 accounting-port=1813 '
-            f'service=hotspot,ppp timeout=3000ms comment="Netily-Cloud-RADIUS"'
+            f'service=hotspot,ppp timeout=3000ms '
+            f'interim-update=3m '  # <--- ADDED: 3-minute heartbeat
+            f'comment="Netily-Cloud-RADIUS"'
         )
         
         return f"""# ─────────────────────────────────────────────────────────────
@@ -429,7 +433,17 @@ class MikrotikScriptGenerator:
 """
 
     def _section_hotspot(self, r: Router, gateway_ip: str) -> str:
-        profile_cmd = f'/ip hotspot profile add name="netily-profile" hotspot-address="{gateway_ip}" dns-name="{self._escape_ros_string(r.dns_name)}" login-by=http-pap,mac-cookie use-radius=yes radius-accounting=yes http-cookie-lifetime=1d rate-limit=""'
+        """
+        FIX: Added radius-interim-update=3m to hotspot profile for 3-minute heartbeat.
+        """
+        profile_cmd = (
+            f'/ip hotspot profile add name="netily-profile" '
+            f'hotspot-address="{gateway_ip}" '
+            f'dns-name="{self._escape_ros_string(r.dns_name)}" '
+            f'login-by=http-pap,mac-cookie use-radius=yes '
+            f'radius-accounting=yes radius-interim-update=3m '  # <--- ADDED: 3-minute heartbeat
+            f'http-cookie-lifetime=1d rate-limit=""'
+        )
         server_cmd = f'/ip hotspot add name="netily-hotspot" interface="netily-bridge" address-pool="netily-pool" profile="netily-profile" disabled=no'
         
         return f"""# ─────────────────────────────────────────────────────────────
@@ -543,10 +557,14 @@ class MikrotikScriptGenerator:
 """
 
     def _section_pppoe(self, r: Router, pppoe_local: str) -> str:
-        # ARCHITECTURE CHANGE: 
-        # 1. Attach to 'netily-bridge'
-        # 2. Use 'netily-pppoe-pool' (Radius will override this with static IP usually)
-        # 3. Disable encryption to match Lipanet profile
+        """
+        ARCHITECTURE CHANGE: 
+        - Attach to 'netily-bridge'
+        - Use 'netily-pppoe-pool' (Radius will override this with static IP usually)
+        - Disable encryption to match Lipanet profile
+        
+        FIX: Added interim-update=3m to PPP AAA configuration.
+        """
         
         return f"""# ─────────────────────────────────────────────────────────────
 # 12. PPPoE SERVER (Bridge Mode)
@@ -565,8 +583,8 @@ class MikrotikScriptGenerator:
 :do {{ /interface pppoe-server server remove [find service-name="netily-pppoe"] }} on-error={{}}
 /interface pppoe-server server add service-name="netily-pppoe" interface="netily-bridge" default-profile="netily-pppoe-profile" authentication=pap,chap disabled=no
 
-# Enforce RADIUS
-/ppp aaa set use-radius=yes accounting=yes
+# Enforce RADIUS and enable heartbeat
+/ppp aaa set use-radius=yes accounting=yes interim-update=3m  # <--- ADDED: 3-minute heartbeat
 """
 
     def _section_anti_sharing(self, r: Router, is_v6: bool) -> str:
@@ -626,7 +644,7 @@ class MikrotikScriptGenerator:
 :put " NETILY CLOUD CONTROLLER — SETUP COMPLETE"
 :put " Router:  {self._escape_ros_string(r.name)}"
 :put " VPN:     {self._escape_ros_string(vpn_host)}:{r.openvpn_port}"
-:put " RADIUS:  {self.vpn_gateway}:1812/1813"
+:put " RADIUS:  {self.vpn_gateway}:1812/1813 (interim-update=3m)"
 :put " Portal:  {self.get_tenant_portal_url()}"
 :put "════════════════════════════════════════════════════"
 """
