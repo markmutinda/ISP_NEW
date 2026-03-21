@@ -15,25 +15,34 @@ def auto_provision_radius_config(sender, instance, created, **kwargs):
     """
     if created:
         display_name = getattr(instance, 'name', getattr(instance, 'company_name', instance.schema_name))
-        
-        # 1. Create the Radius config entry in the public schema
-        RadiusTenantConfig.objects.get_or_create(
-            schema_name=instance.schema_name,
-            defaults={
-                'tenant_name': display_name,
-                'is_active': True,
-                'deployment_mode': 'SHARED' # Force shared mode
-            }
-        )
-        
-        # 2. Generate the directory structure and queries.conf
-        # The shared RADIUS server will use these files dynamically.
-        tenant_radius_service.configure_tenant_radius(
-            schema_name=instance.schema_name, 
-            tenant_name=display_name
-        )
-        
-        print(f"✅ [ISP PROVISIONING] RADIUS database records initialized for {display_name}.")
+
+        # Keep registration flow resilient: RADIUS bootstrap should never block tenant creation.
+        try:
+            # 1. Create the Radius config entry in the public schema.
+            # NOTE: deployment_mode was removed from the model, so we only pass valid fields.
+            RadiusTenantConfig.objects.get_or_create(
+                schema_name=instance.schema_name,
+                defaults={
+                    'tenant_name': display_name,
+                    'is_active': True,
+                }
+            )
+
+            # 2. Generate the directory structure and queries.conf.
+            # The shared RADIUS server will use these files dynamically.
+            tenant_radius_service.configure_tenant_radius(
+                schema_name=instance.schema_name,
+                tenant_name=display_name
+            )
+
+            logger.info("✅ [ISP PROVISIONING] RADIUS database records initialized for %s.", display_name)
+        except Exception:
+            logger.exception(
+                "RADIUS provisioning failed for tenant '%s' (schema: %s). "
+                "Tenant registration will continue.",
+                display_name,
+                instance.schema_name,
+            )
 
 
 @receiver(post_delete, sender=Tenant)

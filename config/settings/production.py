@@ -10,10 +10,24 @@ from .base import *
 DEBUG = False
 SECRET_KEY = os.environ.get('DJANGO_SECRET_KEY', os.environ.get('SECRET_KEY'))
 
-ALLOWED_HOSTS = os.environ.get(
-    'DJANGO_ALLOWED_HOSTS',
-    'api.netily.co.ke,.netily.co.ke,localhost'
-).split(',')
+def _csv_env(name):
+    value = os.environ.get(name, '')
+    return [item.strip() for item in value.split(',') if item.strip()]
+
+
+_default_hosts = ['api.netily.co.ke', '.netily.co.ke', 'localhost', '127.0.0.1']
+_env_hosts = _csv_env('DJANGO_ALLOWED_HOSTS')
+
+# Common deployment env names used across DO/nginx/compose setups.
+_domain = os.environ.get('DOMAIN', '').strip()
+_droplet_ip = os.environ.get('DROPLET_IP', '').strip()
+_public_ip = os.environ.get('PUBLIC_IP', '').strip()
+_server_ip = os.environ.get('SERVER_IP', '').strip()
+
+ALLOWED_HOSTS = _env_hosts or _default_hosts
+for host in [_domain, _droplet_ip, _public_ip, _server_ip]:
+    if host and host not in ALLOWED_HOSTS:
+        ALLOWED_HOSTS.append(host)
 
 # ────────────────────────────────────────────────────────────────
 #  DATABASE
