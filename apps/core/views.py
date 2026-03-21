@@ -780,7 +780,8 @@ class CompanyRegisterView(generics.CreateAPIView):
              '--schema', tenant.schema_name, '--no-input'],
             cwd=settings.BASE_DIR,
             env=migrate_env,
-            capture_output=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
             text=True,
             timeout=240,   # hard cap — gunicorn timeout is 300s
         )

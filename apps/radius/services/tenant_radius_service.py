@@ -35,7 +35,6 @@ class TenantRadiusConfigService:
             defaults={
                 'tenant_name': tenant_name,
                 'is_active': True,
-                'deployment_mode': 'SHARED'
             }
         )
         
