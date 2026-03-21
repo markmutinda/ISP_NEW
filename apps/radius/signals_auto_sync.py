@@ -491,41 +491,30 @@ def sync_plan_bandwidth_to_radius(sender, instance, created, **kwargs):
 
 
 # ────────────────────────────────────────────────────────────────
-# ROUTER/NAS SIGNALS
+# ⚠️ ROUTER/NAS SIGNALS - DISABLED ⚠️
 # ────────────────────────────────────────────────────────────────
-
-@receiver(post_save, sender='network.Router')
-def sync_router_to_nas(sender, instance, created, **kwargs):
-    """Sync router to RADIUS NAS table."""
-    from .models import Nas
-    try:
-        if not getattr(instance, 'ip_address', None):
-            return
-        
-        Nas.objects.update_or_create(
-            nasname=str(instance.ip_address),
-            defaults={
-                'shortname': instance.name or f"router_{instance.id}",
-                'type': 'mikrotik',
-                'secret': getattr(instance, 'radius_secret', None) or 'testing123',
-                'description': f"Auto-synced from router: {instance.name}",
-                'router': instance,
-            }
-        )
-        logger.info(f"Synced NAS entry for router: {instance.name}")
-    except Exception as e:
-        logger.error(f"Failed to sync router to NAS: {e}")
+# These signals have been REMOVED because they cause conflicts with the
+# main router provisioning flow. The Router model's save() method already
+# handles syncing to the Nas table with the correct data (VPN IP, proper secret).
+# 
+# If you re-enable these, you risk overwriting the Nas table with:
+# - Wrong IP address (using router.ip_address instead of router.vpn_ip_address)
+# - Wrong secret (fallback 'testing123' instead of the actual radius_secret)
+# - Causing RADIUS authentication failures for connected users
+#
+# The Router model's save() method is the SOURCE OF TRUTH for NAS records.
+# All NAS entries should be created/updated/deleted from there.
+# ────────────────────────────────────────────────────────────────
+# @receiver(post_save, sender='network.Router')  # DISABLED
+# def sync_router_to_nas(sender, instance, created, **kwargs):
+#     """Sync router to RADIUS NAS table - DISABLED (handled by Router.save())."""
+#     pass
 
 
-@receiver(post_delete, sender='network.Router')
-def remove_router_from_nas(sender, instance, **kwargs):
-    from .models import Nas
-    try:
-        deleted, _ = Nas.objects.filter(router=instance).delete()
-        if deleted:
-            logger.info(f"Removed NAS entry for router: {instance.name}")
-    except Exception as e:
-        logger.error(f"Failed to remove NAS entry: {e}")
+# @receiver(post_delete, sender='network.Router')  # DISABLED
+# def remove_router_from_nas(sender, instance, **kwargs):
+#     """Remove router from RADIUS NAS table - DISABLED (handled by Router.delete())."""
+#     pass
 
 
 # ────────────────────────────────────────────────────────────────

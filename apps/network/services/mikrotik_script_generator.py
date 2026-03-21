@@ -1,31 +1,12 @@
 """
-Lipanet-Style Cloud Controller Script Generator (v4.5)
-
-Architecture: Two-Stage Download
-─────────────────────────────────
-Stage 1 — "Magic Link":
-    Admin pastes ONE command into MikroTik terminal.
-    Downloads a small base script that:
-    • Detects RouterOS version (v6 vs v7)
-    • Checks internet connectivity
-    • Fetches the version-specific full config (Stage 2)
-
-Stage 2 — Version-Specific Config (conf.rsc):
-    The full RouterOS configuration with v6/v7-aware syntax.
-    • OpenVPN tunnel (username/password, NOT certificates)
-    • SSL certs downloaded separately via /tool fetch (NOT embedded)
-    • Single Bridge + Ports + DHCP
-    • RADIUS (pointing to VPN server IP) - USING STANDARD PORTS 1812/1813
-    • Hotspot + Walled Garden
-    • PPPoE server (attached to bridge)
-    • Smart anti-sharing mangle rules (whitelists PPPoE users)
-    • Cloud portal redirector (login.html)
+Lipanet-Style Cloud Controller Script Generator (v4.6)
+Hardcoded 3-minute interim updates for automatic accounting
 """
 
 from django.conf import settings
 from apps.network.models.router_models import Router
 from django.utils import timezone
-from django_tenants.utils import schema_context  # Import for cross-schema queries
+from django_tenants.utils import schema_context
 from urllib.parse import urlparse
 
 
@@ -35,19 +16,11 @@ class MikrotikScriptGenerator:
         self.request = request
 
         # ── VPN Gateway Logic ─────────────────────────────────────────
-        # In production, the OpenVPN gateway is usually 10.8.0.1 
-        # This matches your vpn_provisioning_service pool (10.8.0.x)
         self.vpn_gateway = getattr(settings, 'VPN_GATEWAY_IP', '10.8.0.1')
         
         # ── Production URLs Logic ─────────────────────────────────────
-        # Read from environment variables (e.g., https://api.netily.co.ke)
         self.base_url = getattr(settings, 'BASE_URL', 'https://api.netily.co.ke').rstrip('/')
-        
-        # Read from environment variables (e.g., https://netily.co.ke)
         self.portal_url = getattr(settings, 'FRONTEND_URL', 'https://netily.co.ke').rstrip('/')
-        
-        # The router uses the base_url (Backend API) to download configs
-        # Note: We NO LONGER append :8000 because production uses standard HTTPS (443)
         self.active_url = self.base_url
         
         # ── Provisioning download base ────────────────────────────
@@ -56,10 +29,6 @@ class MikrotikScriptGenerator:
         self.vpn_api_url = getattr(settings, 'VPN_API_URL', f'http://{self.vpn_server_ip}:8000')
 
     def _escape_ros_string(self, s: str) -> str:
-        """
-        Escape backslash, double quote, and dollar sign for RouterOS double-quoted strings.
-        Order matters: first escape backslash, then double quote, then dollar.
-        """
         if s is None:
             return ""
         s = s.replace('\\', '\\\\')
@@ -67,25 +36,18 @@ class MikrotikScriptGenerator:
         s = s.replace('$', '\\$')
         return s
 
-    # ────────────────────────────────────────────────────────────────
-    # HELPER METHODS
-    # ────────────────────────────────────────────────────────────────
     def _get_vpn_host(self, r: Router) -> str:
-        """Logic to determine the correct VPN endpoint."""
         vpn_host = r.openvpn_server
-        # If the field is blank or contains the old default placeholder
         if not vpn_host or vpn_host == "vpn.yourisp.com":
             from urllib.parse import urlparse
-            # Extract netily.co.ke from your BASE_URL (api.netily.co.ke)
             parsed_url = urlparse(self.base_url)
             root_domain = parsed_url.netloc.replace('api.', '')
             return f"vpn.{root_domain}"
         return vpn_host
 
     def get_tenant_portal_url(self) -> str:
-        """Dynamically construct the tenant-specific frontend URL (e.g., https://pink4.netily.co.ke)."""
         r = self.router
-        base_frontend = self.portal_url  # e.g., https://netily.co.ke
+        base_frontend = self.portal_url
         
         if not r.tenant_subdomain or r.tenant_subdomain == 'public':
             return base_frontend
@@ -93,19 +55,14 @@ class MikrotikScriptGenerator:
         parsed = urlparse(base_frontend)
         netloc = parsed.netloc
         
-        # Prevent doubling if the subdomain is somehow already in the string
         if netloc.startswith(f"{r.tenant_subdomain}."):
             return base_frontend
             
-        # Build: https://pink4.netily.co.ke
         return f"{parsed.scheme}://{r.tenant_subdomain}.{netloc}"
 
     def get_magic_link(self) -> str:
         r = self.router
-        # The Magic Link uses whatever IP the Admin is currently using to reach the server
-        url = (
-            f"{self.provision_base}/{r.auth_key}/{r.provision_slug}/script.rsc"
-        )
+        url = f"{self.provision_base}/{r.auth_key}/{r.provision_slug}/script.rsc"
         return (
             f'/tool fetch url="{url}" dst-path="netily.rsc"; '
             f':delay 2s; /import netily.rsc'
@@ -127,7 +84,7 @@ class MikrotikScriptGenerator:
 # Router: {self._escape_ros_string(r.name)}
 # Generated: {timezone.now().strftime("%Y-%m-%d %H:%M:%S")}
 # ═══════════════════════════════════════════════════════════════
-:put ">>> NETILY CLOUD CONTROLLER v4.5 <<<"
+:put ">>> NETILY CLOUD CONTROLLER v4.6 <<<"
 :put ">>> Stage 1: Detecting RouterOS version..."
 
 # ─── Check Internet Connectivity ────────────────────────────
@@ -183,10 +140,8 @@ class MikrotikScriptGenerator:
 
         portal_domain = self.portal_url.split('://')[-1]
         
-        # --- FIX: Dynamically calculate the exact network math ---
         from apps.network.services.ipam_calculator import calculate_mikrotik_hotspot_network
         
-        # Fallback to 172.12.0.1/16 if the database is completely empty
         base_ip = getattr(r, 'hotspot_base_ip', None) or '172.12.0.1'
         cidr = getattr(r, 'hotspot_subnet_cidr', None) or 16
         
@@ -196,7 +151,6 @@ class MikrotikScriptGenerator:
         pool_range = math['pool_range']
         dhcp_network = f"{math['network']}/{cidr}"
         r_gateway_cidr = math['interface_address']
-        # --- END FIX ---
 
         pppoe_local = getattr(r, 'pppoe_local_address', None) or r.get_pppoe_local_ip()
 
@@ -209,14 +163,14 @@ class MikrotikScriptGenerator:
             self._section_api_user(r),
             self._section_openvpn(r, ovpn_cipher, ovpn_auth, is_v6),
             self._section_firewall(r),
-            self._section_bridge_ports(r, r_gateway_cidr),  # Pass the calculated gateway CIDR
+            self._section_bridge_ports(r, r_gateway_cidr),
             self._section_dhcp(r, gateway_ip, pool_range, dhcp_network),
-            self._section_radius(r),  # Uses hardcoded 1812/1813
-            self._section_hotspot(r, gateway_ip),
+            self._section_radius(r),
+            self._section_hotspot(r, gateway_ip),  # UPDATED with 3-minute interval
             self._section_walled_garden(r, portal_domain),
             self._section_ssl_certs(r),
             self._section_hotspot_html(r),
-            self._section_pppoe(r, pppoe_local) if r.enable_pppoe else "",
+            self._section_pppoe(r, pppoe_local) if r.enable_pppoe else "",  # UPDATED with 3-minute interval
             self._section_anti_sharing(r, is_v6),
             self._section_nat(r),
             self._section_schedulers(r),
@@ -226,14 +180,14 @@ class MikrotikScriptGenerator:
 
     def _section_header(self, r: Router, version: str) -> str:
         return f"""# ═══════════════════════════════════════════════════════════════
-# Netily Cloud Controller — Configuration Script v4.5
+# Netily Cloud Controller — Configuration Script v4.6
 # Router: {self._escape_ros_string(r.name)}
 # Tenant: {self._escape_ros_string(r.tenant_subdomain or 'public')}
 # VPN IP: {r.vpn_ip_address or 'auto-assigned'}
 # RouterOS: v{version}
 # Generated: {timezone.now().strftime("%Y-%m-%d %H:%M:%S")}
 # ═══════════════════════════════════════════════════════════════
-:put ">>> Netily v4.5 — Configuring {self._escape_ros_string(r.name)} (RouterOS v{version})..."
+:put ">>> Netily v4.6 — Configuring {self._escape_ros_string(r.name)} (RouterOS v{version})..."
 :delay 1s
 """
 
@@ -267,7 +221,6 @@ class MikrotikScriptGenerator:
 """
 
     def _section_api_user(self, r: Router) -> str:
-        # Use the unique auto-generated password from the Router model (secrets.token_urlsafe)
         password = self._escape_ros_string(r.api_password)
         return f"""# ─────────────────────────────────────────────────────────────
 # 2. API USER (Cloud Management Access)
@@ -286,9 +239,7 @@ class MikrotikScriptGenerator:
 """
 
     def _section_openvpn(self, r: Router, cipher: str, auth: str, is_v6: bool) -> str:
-        # --- USE HELPER METHOD TO GET VPN HOST ---
         vpn_host = self._get_vpn_host(r)
-        # -----------------------------------------
 
         ca_fetch = ""
         if r.ca_certificate:
@@ -305,10 +256,8 @@ class MikrotikScriptGenerator:
 """
         
         if is_v6:
-            # V6 with UDP (server configured for UDP)
             ovpn_cmd = f'/interface ovpn-client add name="Netily-VPN" connect-to="{self._escape_ros_string(vpn_host)}" port={r.openvpn_port} user="{self._escape_ros_string(r.openvpn_username)}" password="{self._escape_ros_string(r.openvpn_password)}" cipher={cipher} auth={auth} protocol=udp add-default-route=no comment="Netily Cloud Controller Tunnel"'
         else:
-            # V7 with UDP (server configured for UDP)
             ovpn_cmd = f'/interface ovpn-client add name="Netily-VPN" connect-to="{self._escape_ros_string(vpn_host)}" port={r.openvpn_port} user="{self._escape_ros_string(r.openvpn_username)}" password="{self._escape_ros_string(r.openvpn_password)}" cipher=aes256-cbc auth=sha1 protocol=udp add-default-route=no comment="Netily Cloud Controller Tunnel"'
 
         return f"""# ─────────────────────────────────────────────────────────────
@@ -349,18 +298,13 @@ class MikrotikScriptGenerator:
 """
 
     def _section_bridge_ports(self, r: Router, gateway_cidr: str) -> str:
-        # ARCHITECTURE CHANGE: Single Bridge Strategy (Like Lipanet)
-        # All services (Hotspot, PPPoE, DHCP) will run on this one bridge.
-        
         port_cmds = []
-        # Get all interfaces selected in the dashboard
         ports = r.hotspot_interfaces or []
         
         for port in ports:
             safe_port = port.strip()
             if not safe_port: continue
             
-            # Remove from any old bridge first to prevent errors
             port_cmds.append(f"""
 :do {{ /interface bridge port remove [find interface="{safe_port}"] }} on-error={{}}
 :do {{ 
@@ -405,14 +349,6 @@ class MikrotikScriptGenerator:
 """
 
     def _section_radius(self, r: Router) -> str:
-        """
-        Generate RADIUS configuration with standard ports 1812/1813.
-        
-        ARCHITECTURE CHANGE: Using shared central RADIUS means all tenants
-        use the standard RADIUS ports. No more per-tenant port mapping.
-        """
-        
-        # Hardcode the standard RADIUS ports - all traffic goes to central server
         radius_cmd = (
             f'/radius add address={self.vpn_gateway} secret="{self._escape_ros_string(r.shared_secret)}" '
             f'authentication-port=1812 accounting-port=1813 '
@@ -429,6 +365,7 @@ class MikrotikScriptGenerator:
 """
 
     def _section_hotspot(self, r: Router, gateway_ip: str) -> str:
+        """UPDATED: Hardcoded 3-minute interim updates for automatic accounting"""
         profile_cmd = f'/ip hotspot profile add name="netily-profile" hotspot-address="{gateway_ip}" dns-name="{self._escape_ros_string(r.dns_name)}" login-by=http-pap,mac-cookie use-radius=yes radius-accounting=yes http-cookie-lifetime=1d rate-limit=""'
         server_cmd = f'/ip hotspot add name="netily-hotspot" interface="netily-bridge" address-pool="netily-pool" profile="netily-profile" disabled=no'
         
@@ -441,10 +378,15 @@ class MikrotikScriptGenerator:
 
 # Anti-sharing: one device per account, quick disconnect on idle
 /ip hotspot user profile set [find name="default"] shared-users=1 keepalive-timeout=2m
+
+# Enable RADIUS accounting with 3-minute interim updates
+# The router will automatically send accounting updates every 3 minutes
+# This ensures real-time usage data without requiring backend CoA support
+/ip hotspot profile set [find name="netily-profile"] use-radius=yes radius-accounting=yes radius-interim-update=00:03:00
+:put " + RADIUS accounting enabled with 3-minute interim updates"
 """
 
     def _section_walled_garden(self, r: Router, portal_domain: str) -> str:
-        # Get the specific tenant domain (e.g., pink4.netily.co.ke)
         tenant_domain = urlparse(self.get_tenant_portal_url()).netloc
         
         return f"""# ─────────────────────────────────────────────────────────────
@@ -543,11 +485,7 @@ class MikrotikScriptGenerator:
 """
 
     def _section_pppoe(self, r: Router, pppoe_local: str) -> str:
-        # ARCHITECTURE CHANGE: 
-        # 1. Attach to 'netily-bridge'
-        # 2. Use 'netily-pppoe-pool' (Radius will override this with static IP usually)
-        # 3. Disable encryption to match Lipanet profile
-        
+        """UPDATED: Hardcoded 3-minute interim updates for PPPoE accounting"""
         return f"""# ─────────────────────────────────────────────────────────────
 # 12. PPPoE SERVER (Bridge Mode)
 # ─────────────────────────────────────────────────────────────
@@ -565,16 +503,13 @@ class MikrotikScriptGenerator:
 :do {{ /interface pppoe-server server remove [find service-name="netily-pppoe"] }} on-error={{}}
 /interface pppoe-server server add service-name="netily-pppoe" interface="netily-bridge" default-profile="netily-pppoe-profile" authentication=pap,chap disabled=no
 
-# Enforce RADIUS
-/ppp aaa set use-radius=yes accounting=yes
+# Enforce RADIUS with 3-minute interim updates
+# The router will automatically send accounting updates every 3 minutes
+/ppp aaa set use-radius=yes accounting=yes interim-update=00:03:00
+:put " + PPPoE RADIUS enabled with 3-minute interim updates"
 """
 
     def _section_anti_sharing(self, r: Router, is_v6: bool) -> str:
-        # ARCHITECTURE CHANGE: Smart Bypass Logic
-        # 1. Create a VIP list (allowed-ips).
-        # 2. Mark connections from VIPs.
-        # 3. Apply TTL=1 only to traffic that is NOT marked.
-        
         return f"""# ─────────────────────────────────────────────────────────────
 # 13. SMART ANTI-SHARING
 # ─────────────────────────────────────────────────────────────
@@ -612,15 +547,13 @@ class MikrotikScriptGenerator:
         return ""
 
     def _section_footer(self, r: Router) -> str:
-        # --- USE HELPER METHOD TO GET VPN HOST ---
         vpn_host = self._get_vpn_host(r)
-        # -----------------------------------------
         
         return f"""# ═══════════════════════════════════════════════════════════════
 # PROVISIONING COMPLETE
 # ═══════════════════════════════════════════════════════════════
 :delay 1s
-:log info "Netily Cloud Controller v4.5 provisioning complete for {self._escape_ros_string(r.name)}"
+:log info "Netily Cloud Controller v4.6 provisioning complete for {self._escape_ros_string(r.name)}"
 :put ""
 :put "════════════════════════════════════════════════════"
 :put " NETILY CLOUD CONTROLLER — SETUP COMPLETE"
@@ -633,8 +566,6 @@ class MikrotikScriptGenerator:
 
     def generate_login_html(self) -> str:
         r = self.router
-        
-        # USE THE NEW DYNAMIC URL HERE
         portal_base = self.get_tenant_portal_url().rstrip('/')
         tenant_name = self._escape_ros_string(r.tenant_subdomain or 'public')
         
@@ -747,8 +678,6 @@ class MikrotikScriptGenerator:
 
     def generate_status_html(self) -> str:
         r = self.router
-        
-        # USE THE NEW DYNAMIC URL HERE
         portal_base = self.get_tenant_portal_url().rstrip('/')
         tenant_name = self._escape_ros_string(r.tenant_subdomain or 'public')
         

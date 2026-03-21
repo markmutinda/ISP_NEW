@@ -62,11 +62,12 @@ app.conf.beat_schedule = {
     },
     
     # ────────────────────────────────────────────────────────────────
-    # Cleanup stale RADIUS sessions - Daily at 3 AM
+    # Cleanup stale RADIUS sessions - Runs every 5 minutes
+    # Sweeps all tenant radacct tables for ghost sessions
     # ────────────────────────────────────────────────────────────────
-    'cleanup-stale-sessions-daily': {
+    'cleanup-stale-sessions-every-5-min': {
         'task': 'apps.radius.tasks.cleanup_stale_sessions',
-        'schedule': crontab(hour=3, minute=0),  # Daily at 3 AM
+        'schedule': crontab(minute='*/5'),  # Every 5 minutes
         'options': {'queue': 'radius'}
     },
     

@@ -350,9 +350,71 @@ class Router(AuditMixin):
         self.save(update_fields=['status', 'last_seen', 'updated_at'])
         return self.status
 
+    def _sync_to_global_map(self):
+        """
+        Sync router to the central RADIUS client table (GlobalRouterMap).
+        
+        CRITICAL: RADIUS traffic ONLY happens over the VPN tunnel.
+        Do NOT sync to the global map unless we have a VPN IP.
+        The VPN IP is what the RADIUS server sees as the NAS-IP-Address.
+        
+        FIX: This method explicitly switches to the 'public' schema to query
+        the Tenant table, because the Tenant model lives in the public schema
+        in django-tenants architecture.
+        """
+        import logging
+        logger = logging.getLogger(__name__)
+
+        # 🛡️ GUARD: Only sync if we have a VPN IP
+        if not self.vpn_ip_address:
+            logger.debug(f"[GLOBAL MAP] Skipping {self.name} - No VPN IP assigned yet.")
+            return
+
+        from apps.core.models import GlobalRouterMap, Tenant
+        from django_tenants.utils import schema_context
+        from django.db import connection
+
+        try:
+            # We MUST query the Tenant table from the 'public' schema
+            with schema_context('public'):
+                # We know the current schema from the connection, but we need to find 
+                # the actual Tenant object that corresponds to it in the public table.
+                current_schema = connection.schema_name
+                
+                # Fetch the Tenant object safely from the public schema
+                current_tenant = Tenant.objects.filter(schema_name=current_schema).first()
+                
+                # Fallback: Try using tenant_subdomain if schema_name fails
+                if not current_tenant and self.tenant_subdomain:
+                    current_tenant = Tenant.objects.filter(subdomain=self.tenant_subdomain).first()
+                    if current_tenant:
+                        logger.info(f"[GLOBAL MAP] Found tenant by subdomain: {self.tenant_subdomain}")
+
+                if not current_tenant:
+                    logger.error(f"[GLOBAL MAP] Cannot sync {self.name} - No tenant found for schema '{current_schema}'")
+                    return
+
+                # We only write what the GlobalRouterMap model actually contains
+                obj, created = GlobalRouterMap.objects.update_or_create(
+                    nas_ip=self.vpn_ip_address,
+                    defaults={
+                        'nas_secret': self.shared_secret,
+                        'tenant': current_tenant,  # Pass the actual tenant object
+                        'is_active': self.is_active,
+                    }
+                )
+            
+            action = "Created" if created else "Updated"
+            logger.info(f"[GLOBAL MAP] {action} entry for {self.name} (Tenant: {current_tenant.subdomain}) with VPN IP {self.vpn_ip_address}")
+            
+        except Exception as e:
+            logger.error(f"[GLOBAL MAP] Failed to sync {self.name} ({self.vpn_ip_address}): {e}")
+
     def save(self, *args, **kwargs):
         """Auto-generate credentials and trigger VPN provisioning."""
         from django.utils.text import slugify
+        import logging
+        logger = logging.getLogger(__name__)
         
         # ────────────────────────────────────────────────────────────────
         # SAFETY CHECK: Protect the MikroTik 'admin' account!
@@ -375,7 +437,6 @@ class Router(AuditMixin):
             self.openvpn_password = secrets.token_urlsafe(16)
         
         # 3. API Credentials — always ensure a strong password
-        # Use the new generator function to ensure RouterOS compatibility
         if not self.api_password:
             self.api_password = generate_api_password()
 
@@ -385,7 +446,7 @@ class Router(AuditMixin):
 
         # 5. RADIUS Shared Secret — unique per router
         if not self.shared_secret:
-            self.shared_secret = secrets.token_hex(16)
+            self.shared_secret = generate_shared_secret()
 
         # 6. Radius Server Defaults
         if self.enable_openvpn and not self.radius_server:
@@ -403,52 +464,20 @@ class Router(AuditMixin):
                 service = VPNProvisioningService()
                 # This will assign IP, generate certs, write CCD, and update router
                 service.provision_router(self)
+                # The provision_router method will call save() again with the VPN IP
+                # That second save will trigger the global map sync below
             except Exception as e:
-                import logging
-                logging.getLogger(__name__).error(
-                    f"VPN Auto-Provisioning failed for {self.name}: {e}"
-                )
+                logger.error(f"VPN Auto-Provisioning failed for {self.name}: {e}")
 
+        # ────────────────────────────────────────────────────────────────
         # 9. Update the Central RADIUS Phonebook (GlobalRouterMap)
-        # We must use connection.cursor or switch schema to write to the public schema
-        from django.db import connection
-        from apps.core.models import GlobalRouterMap, Tenant
-        
-        # --- FIX A: Prioritize VPN IP for RADIUS NAS identification ---
-        # RADIUS requests come from the VPN tunnel IP, not the public WAN IP
-        nas_ip = self.vpn_ip_address or self.ip_address
-        # -------------------------------------------------------------
-        
-        if nas_ip and self.tenant_subdomain:
-            try:
-                # Temporarily switch to public schema to save the map
-                current_schema = connection.schema_name
-                connection.set_schema_to_public()
-                
-                tenant_obj = Tenant.objects.get(subdomain=self.tenant_subdomain)
-                
-                GlobalRouterMap.objects.update_or_create(
-                    nas_ip=nas_ip,  # Use the prioritized IP
-                    defaults={
-                        'nas_secret': self.shared_secret,
-                        'tenant': tenant_obj,
-                        'is_active': self.status == 'online' or self.is_active
-                    }
-                )
-                
-                # Switch back to the tenant's schema
-                connection.set_schema(current_schema)
-            except Tenant.DoesNotExist:
-                # Log error but don't break the save operation
-                import logging
-                logging.getLogger(__name__).error(
-                    f"Tenant with subdomain {self.tenant_subdomain} not found for router {self.name}"
-                )
-            except Exception as e:
-                import logging
-                logging.getLogger(__name__).error(
-                    f"Failed to update GlobalRouterMap for router {self.name}: {e}"
-                )
+        #    RADIUS traffic ONLY happens over the VPN.
+        #    Do NOT sync unless we have a VPN IP!
+        # ────────────────────────────────────────────────────────────────
+        if self.vpn_ip_address:
+            self._sync_to_global_map()
+        else:
+            logger.debug(f"[GLOBAL MAP] Skipping sync for {self.name} - No VPN IP yet")
 
     # ────────────────────────────────────────────────────────────────
     # SMART PROPERTIES (The "Brains" for the Script Generator)
