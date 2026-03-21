@@ -411,7 +411,7 @@ class MikrotikScriptGenerator:
         ARCHITECTURE CHANGE: Using shared central RADIUS means all tenants
         use the standard RADIUS ports. No more per-tenant port mapping.
         
-        FIX: Added interim-update=3m for 3-minute heartbeat/accounting updates.
+        FIX: Added interim-update=00:03:00 for 3-minute heartbeat/accounting updates.
         """
         
         # Hardcode the standard RADIUS ports - all traffic goes to central server
@@ -419,7 +419,7 @@ class MikrotikScriptGenerator:
             f'/radius add address={self.vpn_gateway} secret="{self._escape_ros_string(r.shared_secret)}" '
             f'authentication-port=1812 accounting-port=1813 '
             f'service=hotspot,ppp timeout=3000ms '
-            f'interim-update=3m '  # <--- ADDED: 3-minute heartbeat
+            f'interim-update=00:03:00 '  # <--- FIXED: Proper time format
             f'comment="Netily-Cloud-RADIUS"'
         )
         
@@ -434,14 +434,14 @@ class MikrotikScriptGenerator:
 
     def _section_hotspot(self, r: Router, gateway_ip: str) -> str:
         """
-        FIX: Added radius-interim-update=3m to hotspot profile for 3-minute heartbeat.
+        FIX: Added radius-interim-update=00:03:00 to hotspot profile for 3-minute heartbeat.
         """
         profile_cmd = (
             f'/ip hotspot profile add name="netily-profile" '
             f'hotspot-address="{gateway_ip}" '
             f'dns-name="{self._escape_ros_string(r.dns_name)}" '
             f'login-by=http-pap,mac-cookie use-radius=yes '
-            f'radius-accounting=yes radius-interim-update=3m '  # <--- ADDED: 3-minute heartbeat
+            f'radius-accounting=yes radius-interim-update=00:03:00 '  # <--- FIXED: Proper time format
             f'http-cookie-lifetime=1d rate-limit=""'
         )
         server_cmd = f'/ip hotspot add name="netily-hotspot" interface="netily-bridge" address-pool="netily-pool" profile="netily-profile" disabled=no'
@@ -563,7 +563,7 @@ class MikrotikScriptGenerator:
         - Use 'netily-pppoe-pool' (Radius will override this with static IP usually)
         - Disable encryption to match Lipanet profile
         
-        FIX: Added interim-update=3m to PPP AAA configuration.
+        FIX: Added interim-update=00:03:00 to PPP AAA configuration.
         """
         
         return f"""# ─────────────────────────────────────────────────────────────
@@ -584,7 +584,7 @@ class MikrotikScriptGenerator:
 /interface pppoe-server server add service-name="netily-pppoe" interface="netily-bridge" default-profile="netily-pppoe-profile" authentication=pap,chap disabled=no
 
 # Enforce RADIUS and enable heartbeat
-/ppp aaa set use-radius=yes accounting=yes interim-update=3m  # <--- ADDED: 3-minute heartbeat
+/ppp aaa set use-radius=yes accounting=yes interim-update=00:03:00  # <--- FIXED: Proper time format
 """
 
     def _section_anti_sharing(self, r: Router, is_v6: bool) -> str:
@@ -644,7 +644,7 @@ class MikrotikScriptGenerator:
 :put " NETILY CLOUD CONTROLLER — SETUP COMPLETE"
 :put " Router:  {self._escape_ros_string(r.name)}"
 :put " VPN:     {self._escape_ros_string(vpn_host)}:{r.openvpn_port}"
-:put " RADIUS:  {self.vpn_gateway}:1812/1813 (interim-update=3m)"
+:put " RADIUS:  {self.vpn_gateway}:1812/1813 (interim-update=00:03:00)"
 :put " Portal:  {self.get_tenant_portal_url()}"
 :put "════════════════════════════════════════════════════"
 """
