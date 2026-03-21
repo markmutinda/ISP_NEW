@@ -357,42 +357,39 @@ class Router(AuditMixin):
         CRITICAL: RADIUS traffic ONLY happens over the VPN tunnel.
         Do NOT sync to the global map unless we have a VPN IP.
         The VPN IP is what the RADIUS server sees as the NAS-IP-Address.
+        
+        NOTE: This method only writes fields that exist in the GlobalRouterMap model.
+        - nas_ip: The VPN IP address (Primary Key)
+        - nas_secret: The shared secret for RADIUS authentication
+        - tenant_id: Foreign key to the Tenant model
+        - is_active: Whether this router is active in RADIUS
         """
+        import logging
+        logger = logging.getLogger(__name__)
+        
         # 🛡️ GUARD: Only sync if we have a VPN IP
         if not self.vpn_ip_address:
-            import logging
-            logger = logging.getLogger(__name__)
             logger.debug(f"[GLOBAL MAP] Skipping {self.name} - No VPN IP assigned yet.")
             return
 
         from apps.core.models import GlobalRouterMap
         
-        # Use the VPN IP as the primary identifier for RADIUS communication
-        # This is the IP the router will use to talk to the RADIUS server
-        nas_ip = self.vpn_ip_address
-        
-        # Build the secret - must match what's in the router's RADIUS config
-        secret = self.shared_secret
-        
         try:
+            # We only write what the GlobalRouterMap model actually contains
             obj, created = GlobalRouterMap.objects.update_or_create(
-                nas_ip=nas_ip,  # Primary key: the VPN IP
+                nas_ip=self.vpn_ip_address,
                 defaults={
-                    'nas_secret': secret,
-                    'tenant_id': self.tenant_id if hasattr(self, 'tenant_id') else None,
-                    'is_active': self.status == 'online' or self.is_active,
-                    'router_name': self.name,
-                    'tenant_subdomain': self.tenant_subdomain,
+                    'nas_secret': self.shared_secret,
+                    'tenant_id': self.tenant_id,  # FK to Tenant model
+                    'is_active': self.is_active,
                 }
             )
             
             action = "Created" if created else "Updated"
-            logger = logging.getLogger(__name__)
-            logger.info(f"[GLOBAL MAP] {action} entry for {self.name} with VPN IP {nas_ip}")
+            logger.info(f"[GLOBAL MAP] {action} entry for {self.name} with VPN IP {self.vpn_ip_address}")
             
         except Exception as e:
-            logger = logging.getLogger(__name__)
-            logger.error(f"[GLOBAL MAP] Failed to sync {self.name} ({nas_ip}): {e}")
+            logger.error(f"[GLOBAL MAP] Failed to sync {self.name} ({self.vpn_ip_address}): {e}")
 
     def save(self, *args, **kwargs):
         """Auto-generate credentials and trigger VPN provisioning."""
