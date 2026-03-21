@@ -358,11 +358,8 @@ class Router(AuditMixin):
         Do NOT sync to the global map unless we have a VPN IP.
         The VPN IP is what the RADIUS server sees as the NAS-IP-Address.
         
-        NOTE: This method only writes fields that exist in the GlobalRouterMap model.
-        - nas_ip: The VPN IP address (Primary Key)
-        - nas_secret: The shared secret for RADIUS authentication
-        - tenant_id: Foreign key to the Tenant model
-        - is_active: Whether this router is active in RADIUS
+        FIX: Dynamically fetch the Tenant object using the current schema_name.
+        The Router model does NOT have a tenant_id field in multi-tenant architecture.
         """
         import logging
         logger = logging.getLogger(__name__)
@@ -372,21 +369,38 @@ class Router(AuditMixin):
             logger.debug(f"[GLOBAL MAP] Skipping {self.name} - No VPN IP assigned yet.")
             return
 
-        from apps.core.models import GlobalRouterMap
-        
+        from apps.core.models import GlobalRouterMap, Tenant
+        from django.db import connection
+
         try:
+            # Safely fetch the Tenant object using the current database schema
+            # In django-tenants, connection.schema_name tells us which tenant we're in
+            current_tenant = Tenant.objects.filter(schema_name=connection.schema_name).first()
+            
+            if not current_tenant:
+                logger.warning(f"[GLOBAL MAP] No tenant found for schema: {connection.schema_name}")
+                # Fallback: try to find by subdomain if available
+                if self.tenant_subdomain:
+                    current_tenant = Tenant.objects.filter(subdomain=self.tenant_subdomain).first()
+                    if current_tenant:
+                        logger.info(f"[GLOBAL MAP] Found tenant by subdomain: {self.tenant_subdomain}")
+            
+            if not current_tenant:
+                logger.error(f"[GLOBAL MAP] Cannot sync {self.name} - No tenant found")
+                return
+
             # We only write what the GlobalRouterMap model actually contains
             obj, created = GlobalRouterMap.objects.update_or_create(
                 nas_ip=self.vpn_ip_address,
                 defaults={
                     'nas_secret': self.shared_secret,
-                    'tenant_id': self.tenant_id,  # FK to Tenant model
+                    'tenant': current_tenant,  # Pass the actual tenant object, NOT self.tenant_id
                     'is_active': self.is_active,
                 }
             )
             
             action = "Created" if created else "Updated"
-            logger.info(f"[GLOBAL MAP] {action} entry for {self.name} with VPN IP {self.vpn_ip_address}")
+            logger.info(f"[GLOBAL MAP] {action} entry for {self.name} (Tenant: {current_tenant.subdomain}) with VPN IP {self.vpn_ip_address}")
             
         except Exception as e:
             logger.error(f"[GLOBAL MAP] Failed to sync {self.name} ({self.vpn_ip_address}): {e}")
