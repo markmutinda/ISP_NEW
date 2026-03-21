@@ -19,6 +19,7 @@ def sanitize_string(value: str) -> str:
     # Encode to bytes with replacement for any invalid surrogates, then decode back
     return value.encode('utf-8', 'replace').decode('utf-8')
 
+
 @receiver(post_save, sender=Router)
 def handle_router_lifecycle(sender, instance, created, **kwargs):
     """
@@ -73,6 +74,7 @@ def handle_router_lifecycle(sender, instance, created, **kwargs):
     except Exception as e:
         logger.error(f"RADIUS NAS sync failed for {instance.name}: {e}")
 
+
 @receiver(post_delete, sender=Router)
 def cleanup_router_radius_nas(sender, instance, **kwargs):
     """
@@ -86,3 +88,48 @@ def cleanup_router_radius_nas(sender, instance, **kwargs):
             logger.info(f"[RADIUS CLEANUP] Removed {instance.name} from {connection.schema_name} NAS table.")
     except Exception as e:
         logger.error(f"Failed to cleanup RADIUS NAS for {instance.name}: {e}")
+
+
+# ────────────────────────────────────────────────────────────────
+# GLOBAL ROUTER MAP CLEANUP (PUBLIC SCHEMA)
+# ────────────────────────────────────────────────────────────────
+
+@receiver(post_delete, sender=Router)
+def cleanup_global_router_map(sender, instance, **kwargs):
+    """
+    Ensures that when a router is deleted from a tenant, 
+    its entry in the public RADIUS client table is also removed.
+    
+    This is critical for:
+    1. Preventing "ghost" router entries in the global RADIUS client table
+    2. Avoiding IP conflicts when re-using VPN IP addresses
+    3. Keeping the shared RADIUS server's client list clean
+    """
+    # Import here to avoid circular imports
+    try:
+        from apps.core.models import GlobalRouterMap
+    except ImportError:
+        logger.warning("GlobalRouterMap not found - skipping cleanup")
+        return
+
+    # Use the VPN IP to find and kill the entry in the shared RADIUS table
+    # The VPN IP is the primary identifier for the router in the global map
+    nas_ip = instance.vpn_ip_address
+    
+    # Fallback to regular IP address if VPN IP not set (shouldn't happen in prod)
+    if not nas_ip:
+        nas_ip = getattr(instance, 'ip_address', None)
+        if nas_ip:
+            logger.warning(f"[GLOBAL CLEANUP] {instance.name} had no VPN IP, using IP {nas_ip} for cleanup")
+    
+    if nas_ip:
+        try:
+            deleted_count = GlobalRouterMap.objects.filter(nas_ip=nas_ip).delete()[0]
+            if deleted_count > 0:
+                logger.info(f"[GLOBAL CLEANUP] Removed {instance.name} ({nas_ip}) from GlobalRouterMap.")
+            else:
+                logger.debug(f"[GLOBAL CLEANUP] No GlobalRouterMap entry found for {instance.name} ({nas_ip})")
+        except Exception as e:
+            logger.error(f"[GLOBAL CLEANUP] Failed to remove GlobalRouterMap entry for {instance.name} ({nas_ip}): {e}")
+    else:
+        logger.warning(f"[GLOBAL CLEANUP] {instance.name} has no IP address to clean up from GlobalRouterMap")
