@@ -41,13 +41,13 @@ api_urlpatterns = [
     path('api/bandwidth/', include('apps.bandwidth.urls')),  
     
     # Billing app (Phase 5 - Billing & Finance)
-     path('billing/', include('apps.billing.urls')),
+    path('billing/', include('apps.billing.urls')),
     
     # Support app (Phase 6 - Support Ticketing)
-     path('support/', include('apps.support.urls')),
+    path('support/', include('apps.support.urls')),
     
     # Analytics app (Phase 7 - Reports & Analytics)
-     path('analytics/', include('apps.analytics.urls')),  
+    path('analytics/', include('apps.analytics.urls')),  
     
     # Staff app (Phase 8 - Staff Management)
     path('api/staff/', include('apps.staff.urls')),
@@ -56,11 +56,10 @@ api_urlpatterns = [
     path('self-service/', include('apps.self_service.urls')),
     
     # Inventory app (Phase 10 - Inventory Management)
-     path('inventory/', include('apps.inventory.urls')),
+    path('inventory/', include('apps.inventory.urls')),
     
     # Notifications app (Phase 11 - Alerts & Notifications)
-     path('notifications/', include('apps.notifications.urls')),
-
+    path('notifications/', include('apps.notifications.urls')),
 
     # Messaging app (Phase 12 - SMS/Email Messaging) 
     path('messaging/', include('apps.messaging.urls')),
@@ -81,6 +80,9 @@ api_urlpatterns = [
 
     # Superadmin (platform-owner) endpoints — PUBLIC schema only
     path('superadmin/', include('apps.superadmin.urls')),
+    
+    # FUP (Fair Usage Policy) app
+    path('fup/', include('apps.fup.urls')),
 ]
 
 # Hotspot URLs (PUBLIC - no auth required for captive portal)
@@ -111,7 +113,7 @@ urlpatterns = [
     # Hotspot API (PUBLIC - for captive portal) — MUST be before admin so public endpoints match first
     path('api/v1/', include(hotspot_api_urlpatterns)),
     
-    # Hotspot Admin API (AUTHENTICATED - for admin management page)
+    # Hotspot Admin API (AUTHENTICATED - for admin management)
     path('api/v1/', include(hotspot_admin_api_urlpatterns)),
     
     # PayHero Webhooks (PUBLIC - callbacks)
