@@ -214,7 +214,20 @@ class FUPAnalyticsOverviewSerializer(serializers.Serializer):
 
 
 class LinkPlansSerializer(serializers.Serializer):
+    """Serializer for linking both regular plans and hotspot plans to FUP policies"""
+    
     plan_ids = serializers.ListField(
         child=serializers.UUIDField(),
-        allow_empty=False
+        required=False,
+        default=list
     )
+    hotspot_plan_ids = serializers.ListField(
+        child=serializers.UUIDField(),
+        required=False,
+        default=list
+    )
+
+    def validate(self, data):
+        if not data.get('plan_ids') and not data.get('hotspot_plan_ids'):
+            raise serializers.ValidationError("You must provide at least one plan_id or hotspot_plan_id.")
+        return data

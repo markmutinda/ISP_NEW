@@ -5,26 +5,46 @@ from django.db import connection
 from django.utils import timezone
 
 from apps.customers.models import ServiceConnection
-from apps.fup.models import FUPPolicy, FUPPolicyPlan, FUPUsageWindow
+from apps.fup.models import FUPPolicy, FUPPolicyPlan, FUPUsageWindow, FUPPolicyHotspotPlan
 
 
 class FUPUsageService:
     def get_active_policy_for_service(self, service_connection):
-        if not service_connection.plan_id:
+        plan_id = service_connection.plan_id
+        if not plan_id:
             return None
 
+        # Check standard Billing Plans first
         link = (
             FUPPolicyPlan.objects
             .select_related('policy', 'plan')
             .filter(
-                plan_id=service_connection.plan_id,
+                plan_id=plan_id,
                 is_active=True,
                 policy__is_active=True,
                 policy__status='ACTIVE',
             )
             .first()
         )
-        return link.policy if link else None
+        
+        if link:
+            return link.policy
+
+        # Check Hotspot Plans (if the service connection is linked to a HotspotPlan)
+        # The plan_id might be a HotspotPlan ID if this is a hotspot service
+        hotspot_link = (
+            FUPPolicyHotspotPlan.objects
+            .select_related('policy', 'hotspot_plan')
+            .filter(
+                hotspot_plan_id=plan_id,
+                is_active=True,
+                policy__is_active=True,
+                policy__status='ACTIVE',
+            )
+            .first()
+        )
+
+        return hotspot_link.policy if hotspot_link else None
 
     def resolve_window(self, policy, service_connection, now=None):
         now = now or timezone.localtime()
@@ -45,16 +65,30 @@ class FUPUsageService:
                 end = start.replace(month=start.month + 1)
 
         elif policy.reset_period == 'SUBSCRIPTION':
-            # first safe version:
-            activation = service_connection.activation_date or service_connection.created_at
-            if activation is None:
-                activation = now
-            start = activation
-            end = start + timedelta(days=30)
-
-            while end <= now:
-                start = end
-                end = start + timedelta(days=30)
+            # Use the actual service expiration date as the window boundary
+            # This respects the actual subscription period (7-day, 30-day, etc.)
+            start = service_connection.activation_date or service_connection.created_at
+            
+            # Get the subscription duration in days
+            if service_connection.expiration_date and service_connection.activation_date:
+                subscription_duration = (service_connection.expiration_date - service_connection.activation_date).days
+            else:
+                # Fallback to 30 days if dates aren't set properly
+                subscription_duration = 30
+            
+            # Calculate the current window based on activation date
+            # Find the window that contains 'now'
+            if now >= start:
+                # Calculate how many subscription periods have passed
+                days_since_activation = (now - start).days
+                periods_passed = days_since_activation // subscription_duration
+                
+                start = start + timedelta(days=periods_passed * subscription_duration)
+                end = start + timedelta(days=subscription_duration)
+            else:
+                # Shouldn't happen in normal operation
+                end = start + timedelta(days=subscription_duration)
+                
         else:
             raise ValueError(f'Unsupported reset period: {policy.reset_period}')
 

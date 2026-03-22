@@ -17,6 +17,7 @@ from apps.customers.models import ServiceConnection
 from .models import (
     FUPPolicy,
     FUPPolicyPlan,
+    FUPPolicyHotspotPlan,
     FUPViolation,
     FUPThrottleState,
 )
@@ -76,9 +77,29 @@ class FUPPolicyViewSet(viewsets.ModelViewSet):
     @action(detail=True, methods=['get'])
     def linked_plans(self, request, pk=None):
         policy = self.get_object()
-        links = policy.plan_links.select_related('plan').filter(is_active=True)
-        serializer = FUPPolicyPlanSerializer(links, many=True)
-        return Response(serializer.data)
+        
+        # Billing Plans
+        billing_links = policy.plan_links.select_related('plan').filter(is_active=True)
+        # Hotspot Plans
+        hotspot_links = policy.hotspot_plan_links.select_related('hotspot_plan').filter(is_active=True)
+
+        return Response({
+            'billing_plans': [
+                {
+                    'id': link.plan.id, 
+                    'name': link.plan.name,
+                    'plan_type': getattr(link.plan, 'plan_type', None),
+                } 
+                for link in billing_links
+            ],
+            'hotspot_plans': [
+                {
+                    'id': link.hotspot_plan.id, 
+                    'name': link.hotspot_plan.name,
+                } 
+                for link in hotspot_links
+            ]
+        })
 
     @action(detail=True, methods=['get'])
     def available_plans(self, request, pk=None):
@@ -121,10 +142,14 @@ class FUPPolicyViewSet(viewsets.ModelViewSet):
         serializer = LinkPlansSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
 
-        created_count = 0
-        reactivated_count = 0
-        
-        for plan_id in serializer.validated_data['plan_ids']:
+        # Track counts for response
+        billing_created = 0
+        billing_reactivated = 0
+        hotspot_created = 0
+        hotspot_reactivated = 0
+
+        # 1. Process Billing Plans
+        for plan_id in serializer.validated_data.get('plan_ids', []):
             link, created = FUPPolicyPlan.objects.get_or_create(
                 policy=policy,
                 plan_id=plan_id,
@@ -135,18 +160,44 @@ class FUPPolicyViewSet(viewsets.ModelViewSet):
             )
             
             if created:
-                created_count += 1
+                billing_created += 1
             elif not link.is_active:
                 # Reactivate the existing inactive link
                 link.is_active = True
                 link.linked_by = request.user
-                link.save(update_fields=['is_active', 'linked_by', 'updated_at'])
-                reactivated_count += 1
+                link.save(update_fields=['is_active', 'linked_by'])
+                billing_reactivated += 1
+
+        # 2. Process Hotspot Plans
+        for hotspot_id in serializer.validated_data.get('hotspot_plan_ids', []):
+            link, created = FUPPolicyHotspotPlan.objects.get_or_create(
+                policy=policy,
+                hotspot_plan_id=hotspot_id,
+                defaults={
+                    'is_active': True,
+                    'linked_by': request.user,
+                }
+            )
+            
+            if created:
+                hotspot_created += 1
+            elif not link.is_active:
+                # Reactivate the existing inactive link
+                link.is_active = True
+                link.linked_by = request.user
+                link.save(update_fields=['is_active', 'linked_by'])
+                hotspot_reactivated += 1
 
         return Response({
             'message': 'Plans processed successfully.',
-            'created': created_count,
-            'reactivated': reactivated_count
+            'billing_plans': {
+                'created': billing_created,
+                'reactivated': billing_reactivated,
+            },
+            'hotspot_plans': {
+                'created': hotspot_created,
+                'reactivated': hotspot_reactivated,
+            }
         })
 
     @action(detail=True, methods=['post'])
@@ -155,14 +206,28 @@ class FUPPolicyViewSet(viewsets.ModelViewSet):
         serializer = LinkPlansSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
 
-        updated = policy.plan_links.filter(
-            plan_id__in=serializer.validated_data['plan_ids'],
-            is_active=True,
-        ).update(is_active=False)
+        # Track counts for response
+        billing_unlinked = 0
+        hotspot_unlinked = 0
+
+        # Unlink Billing Plans
+        if serializer.validated_data.get('plan_ids'):
+            billing_unlinked = policy.plan_links.filter(
+                plan_id__in=serializer.validated_data['plan_ids'],
+                is_active=True,
+            ).update(is_active=False)
+
+        # Unlink Hotspot Plans
+        if serializer.validated_data.get('hotspot_plan_ids'):
+            hotspot_unlinked = policy.hotspot_plan_links.filter(
+                hotspot_plan_id__in=serializer.validated_data['hotspot_plan_ids'],
+                is_active=True,
+            ).update(is_active=False)
 
         return Response({
             'message': 'Plans unlinked successfully.',
-            'updated': updated,
+            'billing_plans_unlinked': billing_unlinked,
+            'hotspot_plans_unlinked': hotspot_unlinked,
         })
 
     @action(detail=True, methods=['post'])
@@ -189,11 +254,16 @@ class FUPPolicyViewSet(viewsets.ModelViewSet):
         service = FUPEnforcementService()
 
         count = 0
+        # Process regular billing plans
         for link in policy.plan_links.filter(is_active=True).select_related('plan'):
             services = ServiceConnection.objects.filter(status='ACTIVE', plan=link.plan)
             for svc in services:
                 service.evaluate_service(svc)
                 count += 1
+
+        # Process hotspot plans (if hotspot service connections exist)
+        # Note: You may need to add hotspot service connection logic here
+        # This would depend on how hotspot services are linked to customers
 
         return Response({
             'message': 'Policy enforcement completed.',
