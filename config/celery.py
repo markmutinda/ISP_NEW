@@ -130,6 +130,25 @@ app.conf.beat_schedule = {
         'schedule': crontab(hour=0, minute=5),  # Daily at 12:05 AM
         'options': {'queue': 'billing'}
     },
+
+    # ────────────────────────────────────────────────────────────────
+    # FUP Automation - Every 10 minutes
+    # ────────────────────────────────────────────────────────────────
+    'sync-fup-usage-every-10-min': {
+        'task': 'apps.fup.tasks.sync_fup_usage',
+        'schedule': crontab(minute='*/10'),
+        'options': {'queue': 'radius'}
+    },
+    'enforce-fup-policies-every-10-min': {
+        'task': 'apps.fup.tasks.enforce_fup_policies',
+        'schedule': crontab(minute='*/10'),
+        'options': {'queue': 'radius'}
+    },
+    'reconcile-fup-states-hourly': {
+        'task': 'apps.fup.tasks.reconcile_fup_states',
+        'schedule': crontab(minute=15),  # Every hour at :15
+        'options': {'queue': 'radius'}
+    },
 }
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -142,6 +161,7 @@ app.conf.task_routes = {
     'apps.billing.tasks.*': {'queue': 'billing'},
     'apps.subscriptions.tasks.*': {'queue': 'billing'},  # Added subscription routing
     'apps.vpn.tasks.*': {'queue': 'default'},
+    'apps.fup.tasks.*': {'queue': 'radius'},  # FUP tasks use radius queue
 }
 
 # ════════════════════════════════════════════════════════════════════════════
