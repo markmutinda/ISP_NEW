@@ -10,7 +10,7 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from apps.billing.models import Plan
+from apps.billing.models import Plan, HotspotPlan
 from apps.core.permissions import IsAdmin, IsAdminOrStaff
 from apps.customers.models import ServiceConnection
 
@@ -83,25 +83,37 @@ class FUPPolicyViewSet(viewsets.ModelViewSet):
     @action(detail=True, methods=['get'])
     def available_plans(self, request, pk=None):
         policy = self.get_object()
-        linked_ids = set(policy.plan_links.values_list('plan_id', flat=True))
-
-        plans = Plan.objects.filter(is_active=True).annotate(
+        
+        # Existing Billing Plans
+        linked_billing_ids = set(policy.plan_links.values_list('plan_id', flat=True))
+        billing_plans = Plan.objects.filter(is_active=True).annotate(
             subscriber_count=Count('service_connections')
         ).order_by('name')
+        
+        # Hotspot Plans
+        linked_hotspot_ids = set(policy.hotspot_plan_links.values_list('hotspot_plan_id', flat=True))
+        hotspot_plans = HotspotPlan.objects.filter(is_active=True).order_by('name')
 
-        data = [
-            {
-                'id': plan.id,
-                'name': plan.name,
-                'plan_type': plan.plan_type,
-                'subscriber_count': plan.subscriber_count,
-                'already_linked': plan.id in linked_ids,
-            }
-            for plan in plans
-        ]
-
-        serializer = AvailablePlanSerializer(data, many=True)
-        return Response(serializer.data)
+        return Response({
+            'billing_plans': [
+                {
+                    'id': plan.id,
+                    'name': plan.name,
+                    'plan_type': plan.plan_type,
+                    'subscriber_count': plan.subscriber_count,
+                    'already_linked': plan.id in linked_billing_ids,
+                }
+                for plan in billing_plans
+            ],
+            'hotspot_plans': [
+                {
+                    'id': plan.id,
+                    'name': plan.name,
+                    'already_linked': plan.id in linked_hotspot_ids,
+                }
+                for plan in hotspot_plans
+            ]
+        })
 
     @action(detail=True, methods=['post'])
     def link_plans(self, request, pk=None):
@@ -109,9 +121,11 @@ class FUPPolicyViewSet(viewsets.ModelViewSet):
         serializer = LinkPlansSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
 
-        created = 0
+        created_count = 0
+        reactivated_count = 0
+        
         for plan_id in serializer.validated_data['plan_ids']:
-            _, was_created = FUPPolicyPlan.objects.get_or_create(
+            link, created = FUPPolicyPlan.objects.get_or_create(
                 policy=policy,
                 plan_id=plan_id,
                 defaults={
@@ -119,12 +133,20 @@ class FUPPolicyViewSet(viewsets.ModelViewSet):
                     'linked_by': request.user,
                 }
             )
-            if was_created:
-                created += 1
+            
+            if created:
+                created_count += 1
+            elif not link.is_active:
+                # Reactivate the existing inactive link
+                link.is_active = True
+                link.linked_by = request.user
+                link.save(update_fields=['is_active', 'linked_by', 'updated_at'])
+                reactivated_count += 1
 
         return Response({
-            'message': 'Plans linked successfully.',
-            'created': created,
+            'message': 'Plans processed successfully.',
+            'created': created_count,
+            'reactivated': reactivated_count
         })
 
     @action(detail=True, methods=['post'])

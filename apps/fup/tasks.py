@@ -5,7 +5,7 @@ from .services import FUPUsageService, FUPEnforcementService
 
 logger = logging.getLogger(__name__)
 
-@shared_task(name="sync_fup_usage")
+@shared_task
 def sync_fup_usage():
     """Aggregates traffic for ALL tenants."""
     TenantModel = get_tenant_model()
@@ -24,7 +24,7 @@ def sync_fup_usage():
                 
     return {'total_synced': total_synced}
 
-@shared_task(name="enforce_fup_policies")
+@shared_task
 def enforce_fup_policies():
     """Evaluates thresholds and applies throttles for ALL tenants."""
     TenantModel = get_tenant_model()
@@ -44,7 +44,7 @@ def enforce_fup_policies():
 
     return {'total_processed': total_processed}
 
-@shared_task(name="reconcile_fup_states")
+@shared_task
 def reconcile_fup_states():
     """Hourly consistency check for all tenants."""
     logger.info("[FUP] Global Reconciliation complete.")

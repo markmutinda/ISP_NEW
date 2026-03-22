@@ -105,6 +105,42 @@ class FUPPolicyPlan(models.Model):
         return f'{self.policy.name} -> {self.plan.name}'
 
 
+class FUPPolicyHotspotPlan(models.Model):
+    """Link FUP policies to Hotspot plans for hotspot-specific FUP enforcement"""
+    
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    policy = models.ForeignKey(
+        'fup.FUPPolicy',
+        on_delete=models.CASCADE,
+        related_name='hotspot_plan_links'
+    )
+    hotspot_plan = models.ForeignKey(
+        'billing.HotspotPlan',
+        on_delete=models.CASCADE,
+        related_name='fup_policy_links'
+    )
+    is_active = models.BooleanField(default=True)
+    linked_by = models.ForeignKey(
+        'core.User',
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name='fup_hotspot_plan_links',
+    )
+    linked_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        unique_together = [('policy', 'hotspot_plan')]
+        indexes = [
+            models.Index(fields=['is_active']),
+        ]
+        verbose_name = 'FUP Policy Hotspot Plan Link'
+        verbose_name_plural = 'FUP Policy Hotspot Plan Links'
+
+    def __str__(self):
+        return f'{self.policy.name} -> {self.hotspot_plan.name}'
+
+
 class FUPUsageWindow(models.Model):
     STATUS_CHOICES = [
         ('NORMAL', 'Normal'),
@@ -298,6 +334,8 @@ class FUPAuditLog(models.Model):
         ('POLICY_UPDATED', 'Policy Updated'),
         ('PLAN_LINKED', 'Plan Linked'),
         ('PLAN_UNLINKED', 'Plan Unlinked'),
+        ('HOTSPOT_PLAN_LINKED', 'Hotspot Plan Linked'),
+        ('HOTSPOT_PLAN_UNLINKED', 'Hotspot Plan Unlinked'),
         ('USER_THROTTLED', 'User Throttled'),
         ('USER_RELEASED', 'User Released'),
         ('WINDOW_RESET', 'Window Reset'),
