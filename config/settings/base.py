@@ -100,6 +100,7 @@ TENANT_APPS = (
     'apps.bandwidth',
     'apps.vpn',                        # VPN/OpenVPN Management
     'apps.radius',                     # RADIUS/FreeRADIUS Integration
+    'apps.fup',
 )
 
 # ────────────────────────────────────────────────────────────────
