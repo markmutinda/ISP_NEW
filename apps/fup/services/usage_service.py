@@ -48,46 +48,37 @@ class FUPUsageService:
 
     def resolve_window(self, policy, service_connection, now=None):
         now = now or timezone.localtime()
-
+        
         if policy.reset_period == 'DAILY':
             start = now.replace(hour=0, minute=0, second=0, microsecond=0)
             end = start + timedelta(days=1)
-
+            
         elif policy.reset_period == 'WEEKLY':
             start = (now - timedelta(days=now.weekday())).replace(hour=0, minute=0, second=0, microsecond=0)
             end = start + timedelta(days=7)
-
+            
         elif policy.reset_period == 'MONTHLY':
             start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
             if start.month == 12:
                 end = start.replace(year=start.year + 1, month=1)
             else:
                 end = start.replace(month=start.month + 1)
-
-        elif policy.reset_period == 'SUBSCRIPTION':
-            # Use the actual service expiration date as the window boundary
-            # This respects the actual subscription period (7-day, 30-day, etc.)
-            start = service_connection.activation_date or service_connection.created_at
-            
-            # Get the subscription duration in days
-            if service_connection.expiration_date and service_connection.activation_date:
-                subscription_duration = (service_connection.expiration_date - service_connection.activation_date).days
-            else:
-                # Fallback to 30 days if dates aren't set properly
-                subscription_duration = 30
-            
-            # Calculate the current window based on activation date
-            # Find the window that contains 'now'
-            if now >= start:
-                # Calculate how many subscription periods have passed
-                days_since_activation = (now - start).days
-                periods_passed = days_since_activation // subscription_duration
                 
-                start = start + timedelta(days=periods_passed * subscription_duration)
-                end = start + timedelta(days=subscription_duration)
+        elif policy.reset_period == 'SUBSCRIPTION':
+            # FIX: Use activation_date and plan validity instead of non-existent expiration_date
+            activation = service_connection.activation_date or service_connection.created_at
+            
+            # Most plans have a 'validity_days' field. We'll fallback to 30 if not found.
+            plan_duration = getattr(service_connection.plan, 'validity_days', 30)
+            
+            if now >= activation:
+                days_since = (now - activation).days
+                periods_passed = days_since // plan_duration
+                start = activation + timedelta(days=periods_passed * plan_duration)
+                end = start + timedelta(days=plan_duration)
             else:
-                # Shouldn't happen in normal operation
-                end = start + timedelta(days=subscription_duration)
+                start = activation
+                end = start + timedelta(days=plan_duration)
                 
         else:
             raise ValueError(f'Unsupported reset period: {policy.reset_period}')

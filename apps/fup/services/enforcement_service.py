@@ -129,7 +129,7 @@ class FUPEnforcementService:
 
     def enforce_all(self):
         from apps.customers.models import ServiceConnection
-
+        
         services = ServiceConnection.objects.select_related('customer', 'plan').filter(
             status='ACTIVE',
             plan__isnull=False,
@@ -138,7 +138,12 @@ class FUPEnforcementService:
         processed = 0
         throttled = 0
 
+        # 1. Enforce standard Billing/Service connections
         for service in services:
+            # Skip if this plan isn't linked to an FUP policy
+            if not self.usage_service.get_active_policy_for_service(service):
+                continue
+                
             before = FUPThrottleState.objects.filter(service_connection=service, active=True).exists()
             usage_window = self.evaluate_service(service)
             after = FUPThrottleState.objects.filter(service_connection=service, active=True).exists()
@@ -147,6 +152,16 @@ class FUPEnforcementService:
                 processed += 1
             if not before and after:
                 throttled += 1
+
+        # 2. FUTURE: Add HotspotUser loop here once the Hotspot connection model is confirmed.
+        # For now, we'll handle hotspot users through their ServiceConnection if they have one.
+        # If you have a separate HotspotUser model, you can add it here:
+        #
+        # from apps.hotspot.models import HotspotUser
+        # hotspot_users = HotspotUser.objects.filter(is_active=True)
+        # for hotspot_user in hotspot_users:
+        #     # Map hotspot user to a service connection or handle separately
+        #     pass
 
         return {
             'processed': processed,
