@@ -332,6 +332,7 @@ class FUPAuditLog(models.Model):
     EVENT_CHOICES = [
         ('POLICY_CREATED', 'Policy Created'),
         ('POLICY_UPDATED', 'Policy Updated'),
+        ('POLICY_DELETED', 'Policy Deleted'),
         ('PLAN_LINKED', 'Plan Linked'),
         ('PLAN_UNLINKED', 'Plan Unlinked'),
         ('HOTSPOT_PLAN_LINKED', 'Hotspot Plan Linked'),

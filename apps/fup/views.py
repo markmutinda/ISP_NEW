@@ -112,6 +112,47 @@ class FUPPolicyViewSet(viewsets.ModelViewSet):
         
         return {'processed': processed, 'throttled': throttled}
 
+    def _cleanup_policy_before_delete(self, policy):
+        """
+        Full cleanup before hard-deleting a policy:
+        1. Release all throttled users
+        2. Reset any throttled usage windows
+        3. Resolve open violations
+        4. Deactivate/unlink linked plans
+        5. Return a cleanup summary
+        """
+        released_users = self._release_all_throttles_for_policy(
+            policy=policy,
+            reason=f'Policy "{policy.name}" deleted by admin.',
+        )
+
+        reset_windows = FUPUsageWindow.objects.filter(
+            policy=policy,
+            is_throttled=True,
+        ).update(
+            is_throttled=False,
+            status='RESET',
+        )
+
+        resolved_violations = FUPViolation.objects.filter(
+            policy=policy,
+            status='OPEN',
+        ).update(
+            status='RESOLVED',
+            notes='Auto-resolved during policy deletion.',
+        )
+
+        billing_links_removed = policy.plan_links.filter(is_active=True).update(is_active=False)
+        hotspot_links_removed = policy.hotspot_plan_links.filter(is_active=True).update(is_active=False)
+
+        return {
+            'users_released': released_users,
+            'usage_windows_reset': reset_windows,
+            'open_violations_resolved': resolved_violations,
+            'billing_links_removed': billing_links_removed,
+            'hotspot_links_removed': hotspot_links_removed,
+        }
+
     # --- Standard Methods ---
 
     def perform_create(self, serializer):
@@ -121,45 +162,54 @@ class FUPPolicyViewSet(viewsets.ModelViewSet):
         serializer.save(updated_by=self.request.user)
 
     def destroy(self, request, *args, **kwargs):
+        """
+        Destructive-but-safe delete:
+        - release throttled users back to original plan speed
+        - reset throttled usage windows
+        - resolve open violations
+        - unlink all plans
+        - delete the policy
+        """
         policy = self.get_object()
+        policy_name = policy.name
+        policy_id = str(policy.id)
 
-        # Block deletion of active policies
-        if policy.is_active or policy.status == 'ACTIVE':
-            return Response(
-                {'error': 'Cannot delete an active policy. Deactivate it first.'},
-                status=status.HTTP_400_BAD_REQUEST
-            )
-
-        # Block deletion if users are still throttled
-        if FUPThrottleState.objects.filter(policy=policy, active=True).exists():
-            return Response(
-                {'error': 'Cannot delete policy while users are still throttled.'},
-                status=status.HTTP_400_BAD_REQUEST
-            )
-
-        # Block deletion if open violations exist
-        open_violations = FUPViolation.objects.filter(policy=policy, status='OPEN').count()
-        if open_violations > 0:
-            return Response(
-                {'error': f'Cannot delete policy while {open_violations} open violation(s) exist.'},
-                status=status.HTTP_400_BAD_REQUEST
-            )
-
-        # Block deletion if policy still has active linked plans
-        if policy.plan_links.filter(is_active=True).exists() or policy.hotspot_plan_links.filter(is_active=True).exists():
-            return Response(
-                {'error': 'Cannot delete policy while it still has linked plans. Unlink them first.'},
-                status=status.HTTP_400_BAD_REQUEST
-            )
-
-        # Attempt deletion with database-level protection
         try:
-            return super().destroy(request, *args, **kwargs)
+            with transaction.atomic():
+                cleanup_summary = self._cleanup_policy_before_delete(policy)
+
+                # Optional audit attempt before delete.
+                # NOTE: because FUPAuditLog.policy is tied to the policy, this log will
+                # disappear if it cascades with delete. If you later want durable delete
+                # logs, move delete auditing to a global audit model.
+                self._log_policy_event(
+                    policy=policy,
+                    event_type='POLICY_DELETED',
+                    message=f'Policy "{policy.name}" deleted with automatic cleanup.',
+                    metadata={
+                        'action': 'delete',
+                        **cleanup_summary,
+                    },
+                )
+
+                policy.delete()
+
         except ProtectedError:
             return Response(
                 {'error': 'Delete blocked by database protection rules.'},
                 status=status.HTTP_400_BAD_REQUEST
             )
+        except Exception as exc:
+            return Response(
+                {'error': f'Failed to delete policy cleanly: {str(exc)}'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        return Response({
+            'message': f'Policy "{policy_name}" deleted successfully.',
+            'deleted_policy_id': policy_id,
+            **cleanup_summary,
+        }, status=status.HTTP_200_OK)
 
     # --- Custom Actions ---
 
