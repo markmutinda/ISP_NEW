@@ -2,9 +2,10 @@ import csv
 import logging
 
 from django.db import transaction
-from django.db.models import Count
+from django.db.models import Count, Q
 from django.db.models.deletion import ProtectedError
 from django.http import HttpResponse
+from django.utils import timezone
 from rest_framework import status, viewsets
 from rest_framework.decorators import action
 from rest_framework.permissions import IsAuthenticated
@@ -28,6 +29,7 @@ from .serializers import (
     FUPPolicySerializer,
     FUPViolationSerializer,
     FUPThrottleStateSerializer,
+    FUPUsageWindowSerializer,
     FUPAnalyticsOverviewSerializer,
     LinkPlansSerializer,
 )
@@ -365,6 +367,58 @@ class FUPThrottleStateViewSet(viewsets.ReadOnlyModelViewSet):
     queryset = FUPThrottleState.objects.select_related('customer', 'policy').all()
     serializer_class = FUPThrottleStateSerializer
     permission_classes = [IsAuthenticated]
+
+
+class FUPUsageWindowViewSet(viewsets.ReadOnlyModelViewSet):
+    """
+    ViewSet for FUP Usage Windows.
+    This provides the data needed for the "Users Under FUP" tab with progress bars.
+    
+    Query Parameters:
+    - policy_id: Filter by policy ID
+    - status: Filter by status (NORMAL, VIOLATED, THROTTLED, RESET)
+    - throttled: Filter by is_throttled (true/false)
+    - search: Search by customer code, name, or policy name
+    - current_only: Only show current windows (default: true)
+    """
+    queryset = FUPUsageWindow.objects.select_related(
+        'customer', 'policy', 'plan', 'service_connection'
+    ).all()
+    serializer_class = FUPUsageWindowSerializer
+    permission_classes = [IsAuthenticated]
+
+    def get_queryset(self):
+        qs = super().get_queryset()
+
+        policy_id = self.request.query_params.get('policy_id')
+        status_val = self.request.query_params.get('status')
+        throttled = self.request.query_params.get('throttled')
+        search = self.request.query_params.get('search')
+        current_only = self.request.query_params.get('current_only', 'true')
+
+        if policy_id:
+            qs = qs.filter(policy_id=policy_id)
+
+        if status_val:
+            qs = qs.filter(status=status_val)
+
+        if throttled in ('true', 'false'):
+            qs = qs.filter(is_throttled=(throttled == 'true'))
+
+        if search:
+            qs = qs.filter(
+                Q(customer__customer_code__icontains=search) |
+                Q(customer__user__first_name__icontains=search) |
+                Q(customer__user__last_name__icontains=search) |
+                Q(policy__name__icontains=search)
+            )
+
+        if current_only == 'true':
+            now = timezone.now()
+            qs = qs.filter(period_start__lte=now, period_end__gt=now)
+
+        # Order by usage percentage descending (most critical first) and then by customer code
+        return qs.order_by('-usage_percent', 'customer__customer_code')
 
 
 class FUPAnalyticsOverviewView(APIView):
