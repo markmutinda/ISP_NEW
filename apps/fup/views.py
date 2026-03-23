@@ -1,9 +1,10 @@
 import csv
+import logging
 
+from django.db import transaction
 from django.db.models import Count
+from django.db.models.deletion import ProtectedError
 from django.http import HttpResponse
-from django.shortcuts import get_object_or_404
-
 from rest_framework import status, viewsets
 from rest_framework.decorators import action
 from rest_framework.permissions import IsAuthenticated
@@ -20,15 +21,14 @@ from .models import (
     FUPPolicyHotspotPlan,
     FUPViolation,
     FUPThrottleState,
+    FUPUsageWindow,
+    FUPAuditLog,
 )
 from .serializers import (
     FUPPolicySerializer,
-    FUPPolicyPlanSerializer,
     FUPViolationSerializer,
     FUPThrottleStateSerializer,
-    FUPDashboardSummarySerializer,
     FUPAnalyticsOverviewSerializer,
-    AvailablePlanSerializer,
     LinkPlansSerializer,
 )
 from .services import (
@@ -36,16 +36,23 @@ from .services import (
     FUPAnalyticsService,
 )
 
+logger = logging.getLogger(__name__)
+
 
 class FUPDashboardSummaryView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
         active_policies = FUPPolicy.objects.filter(is_active=True, status='ACTIVE').count()
+        
+        # Only count users on ACTIVE policies with ACTIVE links
         users_under_fup = ServiceConnection.objects.filter(
             status='ACTIVE',
-            plan__fup_policy_links__is_active=True
+            plan__fup_policy_links__is_active=True,
+            plan__fup_policy_links__policy__is_active=True,
+            plan__fup_policy_links__policy__status='ACTIVE',
         ).distinct().count()
+        
         active_violations = FUPViolation.objects.filter(status='OPEN').count()
         currently_throttled = FUPThrottleState.objects.filter(active=True).count()
 
@@ -62,74 +69,168 @@ class FUPPolicyViewSet(viewsets.ModelViewSet):
     serializer_class = FUPPolicySerializer
     permission_classes = [IsAuthenticated, IsAdmin | IsAdminOrStaff]
 
+    # --- Helper Methods ---
+
+    def _log_policy_event(self, policy, event_type: str, message: str, metadata=None):
+        try:
+            FUPAuditLog.objects.create(
+                policy=policy,
+                event_type=event_type,
+                message=message,
+                metadata=metadata or {},
+                created_by=self.request.user,
+            )
+        except Exception:
+            pass
+
+    def _release_all_throttles_for_policy(self, policy, reason: str):
+        service = FUPEnforcementService()
+        released = 0
+        throttle_states = FUPThrottleState.objects.filter(policy=policy, active=True).select_related('service_connection')
+        
+        for ts in throttle_states:
+            if service.release_service(ts.service_connection, reason=reason):
+                released += 1
+        return released
+
+    def _evaluate_all_linked_services_for_policy(self, policy):
+        service = FUPEnforcementService()
+        processed = 0
+        throttled = 0
+        
+        for link in policy.plan_links.filter(is_active=True).select_related('plan'):
+            svcs = ServiceConnection.objects.filter(status='ACTIVE', plan=link.plan)
+            for svc in svcs:
+                before = FUPThrottleState.objects.filter(service_connection=svc, active=True).exists()
+                res = service.evaluate_service(svc)
+                after = FUPThrottleState.objects.filter(service_connection=svc, active=True).exists()
+                
+                if res: processed += 1
+                if not before and after: throttled += 1
+        
+        return {'processed': processed, 'throttled': throttled}
+
+    # --- Standard Methods ---
+
     def perform_create(self, serializer):
-        serializer.save(
-            created_by=self.request.user,
-            updated_by=self.request.user,
-        )
+        serializer.save(created_by=self.request.user, updated_by=self.request.user)
 
     def perform_update(self, serializer):
         serializer.save(updated_by=self.request.user)
 
+    def destroy(self, request, *args, **kwargs):
+        policy = self.get_object()
+
+        # Block deletion of active policies
+        if policy.is_active or policy.status == 'ACTIVE':
+            return Response(
+                {'error': 'Cannot delete an active policy. Deactivate it first.'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        # Block deletion if users are still throttled
+        if FUPThrottleState.objects.filter(policy=policy, active=True).exists():
+            return Response(
+                {'error': 'Cannot delete policy while users are still throttled.'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        # Block deletion if open violations exist
+        open_violations = FUPViolation.objects.filter(policy=policy, status='OPEN').count()
+        if open_violations > 0:
+            return Response(
+                {'error': f'Cannot delete policy while {open_violations} open violation(s) exist.'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        # Block deletion if policy still has active linked plans
+        if policy.plan_links.filter(is_active=True).exists() or policy.hotspot_plan_links.filter(is_active=True).exists():
+            return Response(
+                {'error': 'Cannot delete policy while it still has linked plans. Unlink them first.'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        # Attempt deletion with database-level protection
+        try:
+            return super().destroy(request, *args, **kwargs)
+        except ProtectedError:
+            return Response(
+                {'error': 'Delete blocked by database protection rules.'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+    # --- Custom Actions ---
+
+    @action(detail=True, methods=['post'])
+    def activate(self, request, pk=None):
+        policy = self.get_object()
+        with transaction.atomic():
+            policy.status = 'ACTIVE'
+            policy.is_active = True
+            policy.updated_by = request.user
+            policy.save(update_fields=['status', 'is_active', 'updated_by', 'updated_at'])
+        
+        result = self._evaluate_all_linked_services_for_policy(policy)
+        self._log_policy_event(policy, 'POLICY_UPDATED', f'Policy {policy.name} activated.', metadata=result)
+        
+        return Response({
+            'message': 'Policy activated and users evaluated.',
+            'services_processed': result['processed'],
+            'users_throttled': result['throttled']
+        })
+
+    @action(detail=True, methods=['post'])
+    def deactivate(self, request, pk=None):
+        policy = self.get_object()
+        with transaction.atomic():
+            policy.status = 'INACTIVE'
+            policy.is_active = False
+            policy.updated_by = request.user
+            policy.save(update_fields=['status', 'is_active', 'updated_by', 'updated_at'])
+            
+        released = self._release_all_throttles_for_policy(policy, 'Policy Deactivated')
+        
+        # Reset current usage windows for this policy
+        FUPUsageWindow.objects.filter(policy=policy, is_throttled=True).update(is_throttled=False, status='RESET')
+        
+        self._log_policy_event(policy, 'POLICY_UPDATED', f'Policy {policy.name} deactivated.', metadata={'released': released})
+        return Response({'message': 'Policy deactivated and users released.', 'users_released': released})
+
     @action(detail=True, methods=['get'])
     def linked_plans(self, request, pk=None):
         policy = self.get_object()
-        
-        # Billing Plans
         billing_links = policy.plan_links.select_related('plan').filter(is_active=True)
-        # Hotspot Plans
         hotspot_links = policy.hotspot_plan_links.select_related('hotspot_plan').filter(is_active=True)
-
         return Response({
-            'billing_plans': [
-                {
-                    'id': link.plan.id, 
-                    'name': link.plan.name,
-                    'plan_type': getattr(link.plan, 'plan_type', None),
-                } 
-                for link in billing_links
-            ],
-            'hotspot_plans': [
-                {
-                    'id': link.hotspot_plan.id, 
-                    'name': link.hotspot_plan.name,
-                } 
-                for link in hotspot_links
-            ]
+            'billing_plans': [{'id': l.plan.id, 'name': l.plan.name} for l in billing_links],
+            'hotspot_plans': [{'id': l.hotspot_plan.id, 'name': l.hotspot_plan.name} for l in hotspot_links]
         })
 
     @action(detail=True, methods=['get'])
     def available_plans(self, request, pk=None):
         policy = self.get_object()
-        
-        # Existing Billing Plans
         linked_billing_ids = set(policy.plan_links.values_list('plan_id', flat=True))
-        billing_plans = Plan.objects.filter(is_active=True).annotate(
-            total_subs=Count('service_connections')
-        ).order_by('name')
-        
-        # Hotspot Plans
+        billing_plans = Plan.objects.filter(is_active=True).annotate(total_subs=Count('service_connections'))
         linked_hotspot_ids = set(policy.hotspot_plan_links.values_list('hotspot_plan_id', flat=True))
-        hotspot_plans = HotspotPlan.objects.filter(is_active=True).order_by('name')
-
+        hotspot_plans = HotspotPlan.objects.filter(is_active=True)
+        
         return Response({
             'billing_plans': [
                 {
-                    'id': plan.id,
-                    'name': plan.name,
-                    'plan_type': plan.plan_type,
-                    'subscriber_count': plan.total_subs,
-                    'already_linked': plan.id in linked_billing_ids,
+                    'id': p.id,
+                    'name': p.name,
+                    'subscriber_count': p.total_subs,
+                    'already_linked': p.id in linked_billing_ids,
                 }
-                for plan in billing_plans
+                for p in billing_plans
             ],
             'hotspot_plans': [
                 {
-                    'id': plan.id,
-                    'name': plan.name,
-                    'already_linked': plan.id in linked_hotspot_ids,
+                    'id': p.id,
+                    'name': p.name,
+                    'already_linked': p.id in linked_hotspot_ids,
                 }
-                for plan in hotspot_plans
+                for p in hotspot_plans
             ]
         })
 
@@ -138,26 +239,40 @@ class FUPPolicyViewSet(viewsets.ModelViewSet):
         policy = self.get_object()
         serializer = LinkPlansSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
-
-        # Process Billing Plans
-        for plan_id in serializer.validated_data.get('plan_ids', []):
-            link, _ = FUPPolicyPlan.objects.get_or_create(
+        
+        plan_ids = serializer.validated_data.get('plan_ids', [])
+        hotspot_plan_ids = serializer.validated_data.get('hotspot_plan_ids', [])
+        
+        # Link billing plans
+        for p_id in plan_ids:
+            FUPPolicyPlan.objects.update_or_create(
                 policy=policy,
-                plan_id=plan_id,
+                plan_id=p_id,
+                defaults={'is_active': True, 'linked_by': request.user}
             )
-            link.is_active = True
-            link.linked_by = request.user
-            link.save(update_fields=['is_active', 'linked_by'])
-
-        # Process Hotspot Plans
-        for hotspot_id in serializer.validated_data.get('hotspot_plan_ids', []):
-            link, _ = FUPPolicyHotspotPlan.objects.get_or_create(
+        
+        # Link hotspot plans with audit tracking
+        for h_id in hotspot_plan_ids:
+            FUPPolicyHotspotPlan.objects.update_or_create(
                 policy=policy,
-                hotspot_plan_id=hotspot_id,
+                hotspot_plan_id=h_id,
+                defaults={
+                    'is_active': True,
+                    'linked_by': request.user,
+                }
             )
-            link.is_active = True
-            link.save(update_fields=['is_active'])
-
+        
+        # Audit log the linking operation
+        self._log_policy_event(
+            policy,
+            'PLAN_LINKED',
+            f'Plans linked to policy {policy.name}.',
+            metadata={
+                'plan_ids': plan_ids,
+                'hotspot_plan_ids': hotspot_plan_ids,
+            }
+        )
+        
         return Response({'status': 'linked'})
 
     @action(detail=True, methods=['post'])
@@ -165,58 +280,47 @@ class FUPPolicyViewSet(viewsets.ModelViewSet):
         policy = self.get_object()
         serializer = LinkPlansSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
-
-        # Unlink Billing Plans
-        if serializer.validated_data.get('plan_ids'):
-            policy.plan_links.filter(
-                plan_id__in=serializer.validated_data['plan_ids'],
-                is_active=True,
-            ).update(is_active=False)
-
-        # Unlink Hotspot Plans
-        if serializer.validated_data.get('hotspot_plan_ids'):
-            policy.hotspot_plan_links.filter(
-                hotspot_plan_id__in=serializer.validated_data['hotspot_plan_ids'],
-                is_active=True,
-            ).update(is_active=False)
-
+        
+        plan_ids = serializer.validated_data.get('plan_ids', [])
+        hotspot_plan_ids = serializer.validated_data.get('hotspot_plan_ids', [])
+        
+        policy.plan_links.filter(plan_id__in=plan_ids).update(is_active=False)
+        policy.hotspot_plan_links.filter(hotspot_plan_id__in=hotspot_plan_ids).update(is_active=False)
+        
+        # Audit log the unlinking operation
+        self._log_policy_event(
+            policy,
+            'PLAN_UNLINKED',
+            f'Plans unlinked from policy {policy.name}.',
+            metadata={
+                'plan_ids': plan_ids,
+                'hotspot_plan_ids': hotspot_plan_ids,
+            }
+        )
+        
         return Response({'status': 'unlinked'})
-
-    @action(detail=True, methods=['post'])
-    def activate(self, request, pk=None):
-        policy = self.get_object()
-        policy.status = 'ACTIVE'
-        policy.is_active = True
-        policy.updated_by = request.user
-        policy.save(update_fields=['status', 'is_active', 'updated_by', 'updated_at'])
-        return Response({'message': 'Policy activated successfully.'})
-
-    @action(detail=True, methods=['post'])
-    def deactivate(self, request, pk=None):
-        policy = self.get_object()
-        policy.status = 'INACTIVE'
-        policy.is_active = False
-        policy.updated_by = request.user
-        policy.save(update_fields=['status', 'is_active', 'updated_by', 'updated_at'])
-        return Response({'message': 'Policy deactivated successfully.'})
 
     @action(detail=True, methods=['post'])
     def run_enforcement(self, request, pk=None):
         policy = self.get_object()
         service = FUPEnforcementService()
-
         count = 0
-        # Process regular billing plans
+        
         for link in policy.plan_links.filter(is_active=True).select_related('plan'):
-            services = ServiceConnection.objects.filter(status='ACTIVE', plan=link.plan)
-            for svc in services:
+            svcs = ServiceConnection.objects.filter(status='ACTIVE', plan=link.plan)
+            for svc in svcs:
                 service.evaluate_service(svc)
                 count += 1
-
-        return Response({
-            'message': 'Policy enforcement completed.',
-            'services_processed': count,
-        })
+        
+        # Using POLICY_UPDATED instead of MANUAL_ENFORCEMENT to match EVENT_CHOICES
+        self._log_policy_event(
+            policy,
+            'POLICY_UPDATED',
+            f'Manual enforcement run on policy {policy.name}.',
+            metadata={'services_processed': count, 'action': 'manual_enforcement'}
+        )
+                
+        return Response({'message': 'Manual enforcement complete.', 'services_processed': count})
 
 
 class FUPViolationViewSet(viewsets.ReadOnlyModelViewSet):
@@ -226,40 +330,34 @@ class FUPViolationViewSet(viewsets.ReadOnlyModelViewSet):
 
     def get_queryset(self):
         qs = super().get_queryset()
-
         policy_id = self.request.query_params.get('policy_id')
-        status_value = self.request.query_params.get('status')
-        search = self.request.query_params.get('search')
-
+        status_val = self.request.query_params.get('status')
+        
         if policy_id:
             qs = qs.filter(policy_id=policy_id)
-        if status_value:
-            qs = qs.filter(status=status_value)
-        if search:
-            qs = qs.filter(customer__customer_code__icontains=search)
-
+        if status_val:
+            qs = qs.filter(status=status_val)
+            
         return qs.order_by('-occurred_at')
 
     @action(detail=False, methods=['get'])
     def export(self, request):
         queryset = self.get_queryset()
-
         response = HttpResponse(content_type='text/csv')
         response['Content-Disposition'] = 'attachment; filename="fup_violations.csv"'
-
         writer = csv.writer(response)
         writer.writerow(['User', 'Policy', 'Usage(GB)', 'Action', 'Status', 'Occurred'])
-
+        
         for item in queryset:
             writer.writerow([
-                getattr(item.customer, 'customer_code', ''),
+                item.customer.customer_code,
                 item.policy.name,
-                round(item.total_usage_bytes / (1024 ** 3), 2),
+                round(item.total_usage_bytes / (1024**3), 2),
                 item.action_taken,
                 item.status,
-                item.occurred_at.isoformat(),
+                item.occurred_at.isoformat()
             ])
-
+            
         return response
 
 
@@ -271,8 +369,7 @@ class FUPThrottleStateViewSet(viewsets.ReadOnlyModelViewSet):
 
 class FUPAnalyticsOverviewView(APIView):
     permission_classes = [IsAuthenticated]
-
+    
     def get(self, request):
         data = FUPAnalyticsService().overview()
-        serializer = FUPAnalyticsOverviewSerializer(data)
-        return Response(serializer.data)
+        return Response(FUPAnalyticsOverviewSerializer(data).data)
