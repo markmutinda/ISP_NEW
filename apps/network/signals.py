@@ -172,12 +172,14 @@ def upsert_router_tenant_index(sender, instance, **kwargs):
             RouterTenantIndex.objects.update_or_create(
                 router_auth_key=instance.auth_key,
                 defaults={
+                    'router_id': instance.id,  # Store the router UUID for ID-based lookups
                     'tenant': tenant,
                     'tenant_schema': tenant.schema_name,
                     'router_name': instance.name or '',
                     'is_active': instance.is_active,
                 }
             )
+            logger.debug(f"[INDEX UPSERT] Updated index for router {instance.name} (ID: {instance.id})")
     except Exception as e:
         logger.error(f"[INDEX UPSERT] Failed for {instance.name}: {e}")
 
@@ -195,6 +197,11 @@ def cleanup_router_tenant_index(sender, instance, **kwargs):
 
     try:
         with schema_context('public'):
-            RouterTenantIndex.objects.filter(router_auth_key=instance.auth_key).delete()
+            # Clean up by both auth_key and router_id to ensure complete cleanup
+            deleted_count = RouterTenantIndex.objects.filter(
+                router_auth_key=instance.auth_key
+            ).delete()[0]
+            if deleted_count > 0:
+                logger.debug(f"[INDEX CLEANUP] Removed index entry for router {instance.name} (ID: {instance.id})")
     except Exception as e:
         logger.error(f"[INDEX CLEANUP] Failed for {instance.name}: {e}")

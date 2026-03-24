@@ -249,6 +249,7 @@ def disconnect_user_immediately(username: str, router_ip: str = None, connection
         for tenant in tenants:
             tenant_start = time.perf_counter()
             try:
+                result['tenants_searched'] += 1  # Counter added back
                 with schema_context(tenant.schema_name):
                     with connection.cursor() as cursor:
                         cursor.execute("SELECT acctsessionid FROM radacct WHERE username = %s AND acctstoptime IS NULL", [username])

@@ -25,21 +25,25 @@ logger = logging.getLogger(__name__)
 def find_router_across_tenants(router_id=None, auth_key=None, router_name=None):
     """
     Fast tenant resolver using public RouterTenantIndex.
-    Falls back to old O(T) scan only when absolutely necessary.
+    Now supports both ID and Auth Key for O(1) speed.
     """
     from django.db import connection
     from django_tenants.utils import schema_context
-    from apps.core.models import Tenant
+    from apps.core.models import Tenant, RouterTenantIndex
 
-    # 1) Try O(1) indexed lookup
+    # 1) Try O(1) indexed lookup - supports both ID and auth_key
     index_row = None
     try:
-        from apps.core.models import RouterTenantIndex
         with schema_context('public'):
-            if auth_key:
+            # Check index by ID if provided
+            if router_id:
                 index_row = RouterTenantIndex.objects.select_related('tenant').filter(
-                    router_auth_key=auth_key,
-                    is_active=True
+                    router_id=router_id, is_active=True
+                ).first()
+            # Otherwise check by auth_key
+            elif auth_key:
+                index_row = RouterTenantIndex.objects.select_related('tenant').filter(
+                    router_auth_key=auth_key, is_active=True
                 ).first()
     except Exception:
         index_row = None
@@ -48,6 +52,7 @@ def find_router_across_tenants(router_id=None, auth_key=None, router_name=None):
         tenant = index_row.tenant
         try:
             connection.set_tenant(tenant)
+            # Find the actual router object inside the tenant
             if router_id:
                 router = Router.objects.filter(id=router_id).first()
             elif auth_key:
