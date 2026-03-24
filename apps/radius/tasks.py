@@ -9,6 +9,7 @@ These tasks handle:
 """
 
 import logging
+import time
 from datetime import timedelta
 from celery import shared_task
 from django.utils import timezone
@@ -42,6 +43,7 @@ def disconnect_expired_users(self):
     logger.info(f"[DISCONNECT TASK] Starting sweep across {tenants.count()} tenants")
     
     for tenant in tenants:
+        tenant_start = time.perf_counter()
         try:
             stats['tenants_processed'] += 1
             with schema_context(tenant.schema_name):
@@ -109,6 +111,12 @@ def disconnect_expired_users(self):
         except Exception as e:
             stats['errors'] += 1
             logger.error(f"[DISCONNECT TASK] Error processing tenant {tenant.schema_name}: {e}")
+        finally:
+            logger.info(
+                "[RADIUS TASK TIMING] task=disconnect_expired_users tenant=%s duration_ms=%d",
+                tenant.schema_name,
+                int((time.perf_counter() - tenant_start) * 1000)
+            )
     
     logger.info(f"[DISCONNECT TASK] Complete: {stats}")
     return stats
@@ -145,6 +153,7 @@ def cleanup_stale_sessions():
     tenants = TenantModel.objects.exclude(schema_name='public')
     
     for tenant in tenants:
+        tenant_start = time.perf_counter()
         try:
             with schema_context(tenant.schema_name):
                 with connection.cursor() as cursor:
@@ -162,6 +171,12 @@ def cleanup_stale_sessions():
                         logger.info(f"[CLEANUP TASK] Cleaned {cleaned} stale sessions for tenant {tenant.schema_name}")
         except Exception as e:
             logger.error(f"[CLEANUP TASK] Error cleaning tenant {tenant.schema_name}: {e}")
+        finally:
+            logger.info(
+                "[RADIUS TASK TIMING] task=cleanup_stale_sessions tenant=%s duration_ms=%d",
+                tenant.schema_name,
+                int((time.perf_counter() - tenant_start) * 1000)
+            )
 
     # Optional: Still sweep public.radacct
     try:
@@ -194,6 +209,7 @@ def sync_all_radius_users():
     
     tenants = TenantModel.objects.exclude(schema_name='public')
     for tenant in tenants:
+        tenant_start = time.perf_counter()
         try:
             with schema_context(tenant.schema_name):
                 service = RadiusSyncService()
@@ -204,6 +220,12 @@ def sync_all_radius_users():
         except Exception as e:
             stats['errors'] += 1
             logger.error(f"Error syncing tenant {tenant.schema_name}: {e}")
+        finally:
+            logger.info(
+                "[RADIUS TASK TIMING] task=sync_all_radius_users tenant=%s duration_ms=%d",
+                tenant.schema_name,
+                int((time.perf_counter() - tenant_start) * 1000)
+            )
     
     logger.info(f"[SYNC TASK] Complete: {stats}")
     return stats
@@ -225,7 +247,7 @@ def disconnect_user_immediately(username: str, router_ip: str = None, connection
         tenants = TenantModel.objects.exclude(schema_name='public')
 
         for tenant in tenants:
-            result['tenants_searched'] += 1
+            tenant_start = time.perf_counter()
             try:
                 with schema_context(tenant.schema_name):
                     with connection.cursor() as cursor:
@@ -239,8 +261,15 @@ def disconnect_user_immediately(username: str, router_ip: str = None, connection
                         result['disconnected'] = True
             except Exception as e:
                 logger.warning(f"Error checking tenant {tenant.schema_name}: {e}")
+            finally:
+                logger.debug(
+                    "[RADIUS TASK TIMING] task=disconnect_user_immediately tenant=%s duration_ms=%d",
+                    tenant.schema_name,
+                    int((time.perf_counter() - tenant_start) * 1000)
+                )
 
         for router in routers:
+            router_start = time.perf_counter()
             result['routers_checked'] += 1
             try:
                 api = MikrotikAPI(router)
@@ -249,6 +278,12 @@ def disconnect_user_immediately(username: str, router_ip: str = None, connection
                     result['disconnected'] = True
             except Exception as e:
                 logger.warning(f"Error on router {router.name}: {e}")
+            finally:
+                logger.debug(
+                    "[RADIUS TASK TIMING] task=disconnect_user_immediately router=%s duration_ms=%d",
+                    router.name,
+                    int((time.perf_counter() - router_start) * 1000)
+                )
         return result
     except Exception as e:
         result['error'] = str(e)
@@ -265,6 +300,7 @@ def update_user_expiration(username: str, new_expiration: str):
     tenants = TenantModel.objects.exclude(schema_name='public')
     
     for tenant in tenants:
+        tenant_start = time.perf_counter()
         try:
             with schema_context(tenant.schema_name):
                 with connection.cursor() as cursor:
@@ -277,6 +313,12 @@ def update_user_expiration(username: str, new_expiration: str):
                     results['updated_tenants'].append(tenant.schema_name)
         except Exception as e:
             results['errors'].append({'tenant': tenant.schema_name, 'error': str(e)})
+        finally:
+            logger.debug(
+                "[RADIUS TASK TIMING] task=update_user_expiration tenant=%s duration_ms=%d",
+                tenant.schema_name,
+                int((time.perf_counter() - tenant_start) * 1000)
+            )
 
     try:
         with connection.cursor() as cursor:
@@ -333,6 +375,7 @@ def process_expired_subscriptions():
     tenants = TenantModel.objects.exclude(schema_name='public')
     
     for tenant in tenants:
+        tenant_start = time.perf_counter()
         try:
             with schema_context(tenant.schema_name):
                 expired_credentials = CustomerRadiusCredentials.objects.filter(
@@ -357,6 +400,12 @@ def process_expired_subscriptions():
         except Exception as e:
             logger.error(f"Error in process_expired_subscriptions for {tenant.schema_name}: {e}")
             stats['errors'] += 1
+        finally:
+            logger.info(
+                "[RADIUS TASK TIMING] task=process_expired_subscriptions tenant=%s duration_ms=%d",
+                tenant.schema_name,
+                int((time.perf_counter() - tenant_start) * 1000)
+            )
     
     logger.info(f"[EXPIRED CHECK] Complete: {stats}")
     return stats
@@ -377,6 +426,7 @@ def notify_expiring_soon(hours_before: int = 24):
     tenants = TenantModel.objects.exclude(schema_name='public')
     
     for tenant in tenants:
+        tenant_start = time.perf_counter()
         try:
             with schema_context(tenant.schema_name):
                 expiring_soon = CustomerRadiusCredentials.objects.filter(
@@ -407,6 +457,12 @@ def notify_expiring_soon(hours_before: int = 24):
         except Exception as e:
             logger.error(f"Error in notify_expiring_soon for {tenant.schema_name}: {e}")
             stats['errors'] += 1
+        finally:
+            logger.info(
+                "[RADIUS TASK TIMING] task=notify_expiring_soon tenant=%s duration_ms=%d",
+                tenant.schema_name,
+                int((time.perf_counter() - tenant_start) * 1000)
+            )
     
     logger.info(f"[EXPIRY NOTICE] Complete: {stats}")
     return stats

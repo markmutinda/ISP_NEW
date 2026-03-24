@@ -31,6 +31,16 @@ app.autodiscover_tasks()
 
 app.conf.beat_schedule = {
     # ────────────────────────────────────────────────────────────────
+    # Router Status Management - Runs every 5 minutes
+    # Prevents frontend locking by caching API responses
+    # ────────────────────────────────────────────────────────────────
+    'refresh-router-statuses-every-5-min': {
+        'task': 'apps.network.tasks.refresh_router_statuses',
+        'schedule': crontab(minute='*/5'),
+        'options': {'queue': 'default'}
+    },
+    
+    # ────────────────────────────────────────────────────────────────
     # RADIUS Session Management - Runs every 5 minutes
     # Disconnects users whose Expiration attribute has passed
     # ────────────────────────────────────────────────────────────────
@@ -162,6 +172,7 @@ app.conf.task_routes = {
     'apps.subscriptions.tasks.*': {'queue': 'billing'},  # Added subscription routing
     'apps.vpn.tasks.*': {'queue': 'default'},
     'apps.fup.tasks.*': {'queue': 'radius'},  # FUP tasks use radius queue
+    'apps.network.tasks.*': {'queue': 'default'},  # Network tasks (router status)
 }
 
 # ════════════════════════════════════════════════════════════════════════════

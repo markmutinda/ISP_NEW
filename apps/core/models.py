@@ -722,3 +722,33 @@ class FeatureUpvote(models.Model):
 
     def __str__(self):
         return f"{self.tenant.company.name} upvoted {self.feature_request.title}"
+
+
+class RouterTenantIndex(models.Model):
+    """
+    Public-schema index to resolve router -> tenant in O(1).
+    Used to avoid cross-tenant loops for auth_key/router lookups.
+    """
+    router_auth_key = models.CharField(max_length=64, unique=True, db_index=True)
+    tenant = models.ForeignKey(
+        'core.Tenant',
+        on_delete=models.CASCADE,
+        related_name='router_tenant_indexes'
+    )
+    tenant_schema = models.CharField(max_length=63, db_index=True)
+    router_name = models.CharField(max_length=255, blank=True, default='')
+    is_active = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        app_label = 'core'
+        verbose_name = 'Router Tenant Index'
+        verbose_name_plural = 'Router Tenant Indexes'
+        indexes = [
+            models.Index(fields=['tenant_schema']),
+            models.Index(fields=['is_active']),
+        ]
+
+    def __str__(self):
+        return f"{self.router_auth_key} -> {self.tenant_schema}"

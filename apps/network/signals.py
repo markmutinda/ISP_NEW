@@ -4,6 +4,7 @@ from apps.network.models.router_models import Router
 from apps.radius.models import Nas
 from apps.vpn.services.vpn_provisioning_service import VPNProvisioningService
 from django.db import connection
+from django_tenants.utils import schema_context
 import logging
 
 logger = logging.getLogger(__name__)
@@ -133,3 +134,67 @@ def cleanup_global_router_map(sender, instance, **kwargs):
             logger.error(f"[GLOBAL CLEANUP] Failed to remove GlobalRouterMap entry for {instance.name} ({nas_ip}): {e}")
     else:
         logger.warning(f"[GLOBAL CLEANUP] {instance.name} has no IP address to clean up from GlobalRouterMap")
+
+
+# ────────────────────────────────────────────────────────────────
+# ROUTER TENANT INDEX SYNC (PUBLIC SCHEMA)
+# ────────────────────────────────────────────────────────────────
+
+def _get_current_tenant_for_index():
+    """
+    Resolve current tenant object from active schema.
+    """
+    from apps.core.models import Tenant
+    schema_name = getattr(connection, 'schema_name', None)
+    if not schema_name or schema_name == 'public':
+        return None
+    with schema_context('public'):
+        return Tenant.objects.filter(schema_name=schema_name).first()
+
+
+@receiver(post_save, sender=Router)
+def upsert_router_tenant_index(sender, instance, **kwargs):
+    """
+    Keep RouterTenantIndex in sync for O(1) auth_key -> tenant lookup.
+    """
+    try:
+        from apps.core.models import RouterTenantIndex
+    except ImportError:
+        logger.warning("RouterTenantIndex not found - skipping index upsert")
+        return
+
+    tenant = _get_current_tenant_for_index()
+    if not tenant:
+        return
+
+    try:
+        with schema_context('public'):
+            RouterTenantIndex.objects.update_or_create(
+                router_auth_key=instance.auth_key,
+                defaults={
+                    'tenant': tenant,
+                    'tenant_schema': tenant.schema_name,
+                    'router_name': instance.name or '',
+                    'is_active': instance.is_active,
+                }
+            )
+    except Exception as e:
+        logger.error(f"[INDEX UPSERT] Failed for {instance.name}: {e}")
+
+
+@receiver(post_delete, sender=Router)
+def cleanup_router_tenant_index(sender, instance, **kwargs):
+    """
+    Clean up RouterTenantIndex entry when a router is deleted.
+    """
+    try:
+        from apps.core.models import RouterTenantIndex
+    except ImportError:
+        logger.warning("RouterTenantIndex not found - skipping index cleanup")
+        return
+
+    try:
+        with schema_context('public'):
+            RouterTenantIndex.objects.filter(router_auth_key=instance.auth_key).delete()
+    except Exception as e:
+        logger.error(f"[INDEX CLEANUP] Failed for {instance.name}: {e}")

@@ -24,40 +24,63 @@ logger = logging.getLogger(__name__)
 
 def find_router_across_tenants(router_id=None, auth_key=None, router_name=None):
     """
-    Helper function to search for a router across all tenants.
-    Returns (router, tenant) or (None, None) if not found.
+    Fast tenant resolver using public RouterTenantIndex.
+    Falls back to old O(T) scan only when absolutely necessary.
     """
     from django.db import connection
-    connection.set_schema_to_public()
-    
+    from django_tenants.utils import schema_context
     from apps.core.models import Tenant
+
+    # 1) Try O(1) indexed lookup
+    index_row = None
+    try:
+        from apps.core.models import RouterTenantIndex
+        with schema_context('public'):
+            if auth_key:
+                index_row = RouterTenantIndex.objects.select_related('tenant').filter(
+                    router_auth_key=auth_key,
+                    is_active=True
+                ).first()
+    except Exception:
+        index_row = None
+
+    if index_row:
+        tenant = index_row.tenant
+        try:
+            connection.set_tenant(tenant)
+            if router_id:
+                router = Router.objects.filter(id=router_id).first()
+            elif auth_key:
+                router = Router.objects.filter(auth_key=auth_key).first()
+            elif router_name:
+                router = Router.objects.filter(name__icontains=router_name).first()
+            else:
+                router = None
+            return router, tenant
+        except Exception:
+            pass
+
+    # 2) Fallback legacy scan (kept for safety)
+    connection.set_schema_to_public()
     tenants = Tenant.objects.filter(is_active=True)
-    
-    found_router = None
-    found_tenant = None
-    
     for tenant in tenants:
         try:
             connection.set_tenant(tenant)
-            try:
-                if router_id:
-                    found_router = Router.objects.filter(id=router_id).first()
-                elif auth_key:
-                    found_router = Router.objects.filter(auth_key=auth_key).first()
-                elif router_name:
-                    found_router = Router.objects.filter(name__icontains=router_name).first()
-                    if not found_router:
-                        found_router = Router.objects.filter(auth_key=router_name).first()
-                
-                if found_router:
-                    found_tenant = tenant
-                    break
-            except Exception:
-                continue
+            if router_id:
+                found = Router.objects.filter(id=router_id).first()
+            elif auth_key:
+                found = Router.objects.filter(auth_key=auth_key).first()
+            elif router_name:
+                found = Router.objects.filter(name__icontains=router_name).first() or Router.objects.filter(auth_key=router_name).first()
+            else:
+                found = None
+
+            if found:
+                return found, tenant
         except Exception:
             continue
-    
-    return found_router, found_tenant
+
+    return None, None
 
 # ────────────────────────────────────────────────────────────────
 # CERTIFICATE DOWNLOAD VIEW 
@@ -209,104 +232,68 @@ class RouterViewSet(viewsets.ModelViewSet):
 
     def retrieve(self, request, *args, **kwargs):
         """
-        GET /routers/{pk}/  — find router across all tenants and update its real-time status
+        GET /routers/{pk}/  — Instant read. Can force refresh with ?refresh=true
         """
         from django.db import connection as db_conn
 
         pk = kwargs.get('pk') or args[0]
-
-        # Always use cross-tenant search (proven pattern)
         router, tenant = find_router_across_tenants(router_id=pk)
         if not router:
             return Response({'error': 'Router not found'}, status=status.HTTP_404_NOT_FOUND)
         
-        # Switch to the correct tenant context
         db_conn.set_tenant(tenant)
         request.tenant = tenant
         
-        # 🔥 Perform a quick live check before returning the data to the frontend
-        # This makes the "Online/Offline" status real-time on page refresh
-        try:
-            router.sync_status()
-        except Exception as e:
-            # Log the error but don't break the response - just return current DB status
-            logger.warning(f"Failed to sync status for router {router.id}: {e}")
+        # Optional manual refresh for admins
+        refresh = request.query_params.get('refresh', 'false').lower() == 'true'
+        if refresh and (request.user.is_staff or request.user.is_superuser):
+            try:
+                router.sync_status()
+            except Exception as e:
+                logger.warning(f"Refresh failed for router {router.id}: {e}")
 
         serializer = self.get_serializer(router)
-        return Response(serializer.data)
+        data = serializer.data
+        data['status_age_seconds'] = (
+            int((timezone.now() - router.last_seen).total_seconds())
+            if router.last_seen else None
+        )
+        return Response(data)
 
     def list(self, request, *args, **kwargs):
         """
-        GET /routers/  — always scoped to the resolved tenant.
-        Updates status for paginated routers in real-time.
+        GET /routers/  — Returns cached DB state instantly. No more live pings.
         """
         from django.db import connection as db_conn
         logger.info(f"[RouterViewSet.list] tenant={getattr(request, 'tenant', None)}")
 
-        # If tenant was resolved (by middleware or _ensure_tenant_context), use it
         if hasattr(request, 'tenant') and request.tenant:
-            # Get the filtered queryset
             queryset = self.filter_queryset(self.get_queryset())
-            
-            # Paginate the queryset first (important for performance!)
-            # This ensures we only ping the routers visible on this page, 
-            # not every router in the database.
             page = self.paginate_queryset(queryset)
             
             if page is not None:
-                # 🔥 NEW: Sync status for ONLY the routers on this specific page
-                for router in page:
-                    try:
-                        # We use a short timeout inside sync_status logic 
-                        # so the page refresh doesn't take forever.
-                        router.sync_status()
-                    except Exception as e:
-                        logger.debug(f"Failed to sync status for router {router.id} in list: {e}")
-                        pass  # Keep moving if one router hangs
-                
                 serializer = self.get_serializer(page, many=True)
                 return self.get_paginated_response(serializer.data)
 
-            # Fallback for non-paginated requests
-            for router in queryset:
-                try:
-                    router.sync_status()
-                except Exception as e:
-                    logger.debug(f"Failed to sync status for router {router.id} in list: {e}")
-                    pass
-                    
             serializer = self.get_serializer(queryset, many=True)
             return Response(serializer.data)
 
-        # No tenant context — only allow superusers to aggregate across tenants
         if not request.user.is_superuser:
-            logger.warning(
-                "[RouterViewSet.list] No tenant context for user %s — returning empty",
-                request.user,
-            )
             return Response({'count': 0, 'results': []})
 
-        # Superuser: aggregate routers across all tenants (admin overview)
+        # Superuser: aggregate routers across all tenants instantly
         try:
             from apps.core.models import Tenant
             db_conn.set_schema_to_public()
             tenants = list(Tenant.objects.filter(is_active=True).exclude(schema_name='public'))
-            logger.info(f"[RouterViewSet.list] Superuser aggregating {len(tenants)} tenants")
             all_routers = []
             for tenant in tenants:
                 try:
                     db_conn.set_tenant(tenant)
                     for router in Router.objects.all():
-                        # 🔥 Sync status for each router in superuser view
-                        try:
-                            router.sync_status()
-                        except Exception as e:
-                            logger.debug(f"Failed to sync status for router {router.id} in tenant {tenant.subdomain}: {e}")
-                        
                         data = RouterSerializer(router).data
                         all_routers.append(data)
-                except Exception as e:
-                    logger.debug(f"Skipping tenant {tenant.subdomain}: {e}")
+                except Exception:
                     continue
 
             return Response({

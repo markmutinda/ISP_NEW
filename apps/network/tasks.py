@@ -1,0 +1,47 @@
+import logging
+import time
+from celery import shared_task
+from django_tenants.utils import get_tenant_model, schema_context
+from apps.network.models.router_models import Router
+
+logger = logging.getLogger(__name__)
+
+
+@shared_task
+def refresh_router_statuses():
+    """
+    Background refresh of router status for all tenants.
+    Replaces synchronous status checks from API request path.
+    """
+    TenantModel = get_tenant_model()
+    tenants = TenantModel.objects.exclude(schema_name='public')
+
+    total = 0
+    errors = 0
+    started = time.perf_counter()
+
+    for tenant in tenants:
+        tenant_start = time.perf_counter()
+        try:
+            with schema_context(tenant.schema_name):
+                routers = Router.objects.filter(is_active=True).only(
+                    'id', 'name', 'status', 'last_seen', 'ip_address', 'vpn_ip_address', 'api_port', 'vpn_provisioned'
+                )
+
+                for router in routers:
+                    try:
+                        router.sync_status(force=True)
+                        total += 1
+                    except Exception:
+                        errors += 1
+
+            dur_ms = int((time.perf_counter() - tenant_start) * 1000)
+            logger.info(f"[ROUTER STATUS] tenant={tenant.schema_name} duration_ms={dur_ms}")
+
+        except Exception as e:
+            errors += 1
+            logger.error(f"[ROUTER STATUS] tenant={tenant.schema_name} error={e}")
+
+    total_ms = int((time.perf_counter() - started) * 1000)
+    logger.info(f"[ROUTER STATUS] complete refreshed={total} errors={errors} duration_ms={total_ms}")
+    return {"refreshed": total, "errors": errors, "duration_ms": total_ms}
