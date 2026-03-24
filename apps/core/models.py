@@ -729,7 +729,14 @@ class RouterTenantIndex(models.Model):
     Public-schema index to resolve router -> tenant in O(1).
     Used to avoid cross-tenant loops for auth_key or ID lookups.
     """
-    router_id = models.UUIDField(db_index=True, unique=True)  # Store the Router PK
+    # Added default=uuid.uuid4 and editable=False
+    router_id = models.UUIDField(
+        primary_key=False, 
+        default=uuid.uuid4, 
+        editable=False, 
+        unique=True, 
+        db_index=True
+    )  
     router_auth_key = models.CharField(max_length=64, unique=True, db_index=True)
     tenant = models.ForeignKey(
         'core.Tenant',
@@ -749,7 +756,9 @@ class RouterTenantIndex(models.Model):
         indexes = [
             models.Index(fields=['tenant_schema']),
             models.Index(fields=['is_active']),
-            models.Index(fields=['router_id']),  # Optimized for ID lookup
+            # Note: unique=True already creates an index, 
+            # but keeping this doesn't hurt.
+            models.Index(fields=['router_id']),  
         ]
 
     def __str__(self):
