@@ -24,6 +24,9 @@ schema_view = get_schema_view(
     permission_classes=(permissions.AllowAny,),
 )
 
+# Import Tuma URL patterns
+from apps.billing.urls_tuma import tuma_admin_urlpatterns, tuma_public_urlpatterns
+
 # API URL Patterns
 api_urlpatterns = [
     # Core app (Authentication, Users, System)
@@ -83,6 +86,13 @@ api_urlpatterns = [
     
     # FUP (Fair Usage Policy) app
     path('fup/', include('apps.fup.urls')),
+    
+    # ==========================
+    # TUMA ADMIN ENDPOINTS (Protected - requires authentication)
+    # This makes it /api/v1/billing/tuma/...
+    # It will inherit the IsAuthenticated default from your REST_FRAMEWORK settings
+    # ==========================
+    path('billing/tuma/', include(tuma_admin_urlpatterns)),
 ]
 
 # Hotspot URLs (PUBLIC - no auth required for captive portal)
@@ -99,30 +109,18 @@ hotspot_admin_api_urlpatterns = [
 
 # ==========================
 # PayHero Webhooks (DEPRECATED - being phased out in favor of Tuma)
-# These receive callbacks from PayHero
-# NOTE: These will be removed in a future release once Tuma migration is complete
 # ==========================
 webhook_api_urlpatterns = [
     path('webhooks/payhero/', include((webhook_urlpatterns, 'webhooks'))),
 ]
 
 # ==========================
-# Tuma Webhooks (NEW - Phase 5)
-# These receive callbacks from Tuma payment gateway
-# Tuma replaces PayHero as the primary payment gateway
+# TUMA WEBHOOK (PUBLIC - only the callback)
+# This is called by Tuma's servers
 # ==========================
-from apps.billing.urls_tuma import urlpatterns as tuma_urlpatterns
-
 tuma_webhook_api_urlpatterns = [
-    # Tuma webhook endpoints - strictly for Tuma gateway callbacks
-    path('webhooks/tuma/', include((tuma_urlpatterns, 'webhooks-tuma'))),
+    path('webhooks/tuma/', include(tuma_public_urlpatterns)),
 ]
-
-# ==========================
-# M-Pesa Webhooks (PUBLIC - callbacks from Safaricom)
-# These are already included in the billing app's main URLs
-# The M-Pesa webhook endpoint is at: api/v1/billing/mpesa/c2b-callback/
-# ==========================
 
 # Main URL Patterns
 urlpatterns = [
@@ -132,16 +130,16 @@ urlpatterns = [
     # API URLs (versioned)
     path('api/v1/', include(api_urlpatterns)),
     
-    # Hotspot API (PUBLIC - for captive portal) — MUST be before admin so public endpoints match first
+    # Hotspot API (PUBLIC - for captive portal)
     path('api/v1/', include(hotspot_api_urlpatterns)),
     
     # Hotspot Admin API (AUTHENTICATED - for admin management)
     path('api/v1/', include(hotspot_admin_api_urlpatterns)),
     
-    # PayHero Webhooks (DEPRECATED - will be removed)
+    # PayHero Webhooks (DEPRECATED)
     path('api/v1/', include(webhook_api_urlpatterns)),
     
-    # Tuma Webhooks (NEW - replaces PayHero)
+    # TUMA Webhook (PUBLIC - callback only)
     path('api/v1/', include(tuma_webhook_api_urlpatterns)),
     
     # API Documentation
@@ -171,9 +169,3 @@ if settings.DEBUG:
         ] + urlpatterns
     except ImportError:
         pass
-
-# Custom error handlers
-#handler400 = 'apps.core.views.error_handlers.bad_request'
-#handler403 = 'apps.core.views.error_handlers.permission_denied'
-#handler404 = 'apps.core.views.error_handlers.page_not_found'
-#handler500 = 'apps.core.views.error_handlers.server_error'

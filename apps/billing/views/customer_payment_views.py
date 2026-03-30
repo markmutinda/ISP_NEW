@@ -2,14 +2,15 @@
 Customer Payment Views
 
 Endpoints for ISP customers to make payments (recharge, invoice payments).
-These payments go to Netily's PayHero, with 95% settled to the ISP.
+These payments go through the Tuma Payment Gateway.
 """
 
 import logging
+import time
 from decimal import Decimal
 
 from django.conf import settings
-from django.db import transaction
+from django.db import transaction, connection
 from django.utils import timezone
 
 from rest_framework import status
@@ -17,38 +18,35 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from apps.billing.services.payhero import PayHeroClient, PayHeroError, PaymentStatus
-from apps.billing.models.payment_models import Payment, InvoiceItemPayment
+from apps.billing.models.payment_models import Payment, InvoiceItemPayment, TenantTumaConfig
 from apps.billing.models.billing_models import Invoice
+from apps.billing.services.tuma_service import TumaClient, TumaError
 
 logger = logging.getLogger(__name__)
 
 
 class InitiateCustomerPaymentView(APIView):
     """
-    Initiate customer payment via PayHero.
+    Initiate customer payment via Tuma Gateway.
     
     POST /api/v1/billing/payments/initiate/
     {
         "amount": 2000,
         "phone_number": "254712345678",
-        "invoice_id": 456,  // Optional
-        "channel_id": 1     // Optional
+        "invoice_id": 456   // Optional
     }
     """
     
     permission_classes = [IsAuthenticated]
     
-    def _get_or_create_mpesa_payment_method(self):
-        """Get or create M-Pesa STK payment method"""
+    def _get_or_create_tuma_payment_method(self):
+        """Get or create generic STK payment method for Tuma"""
         method, created = InvoiceItemPayment.objects.get_or_create(
-            code='MPESA_STK',
+            code='TUMA_STK',
             defaults={
-                'name': 'M-Pesa STK Push',
+                'name': 'M-Pesa STK Push (Tuma)',
                 'method_type': 'MPESA_STK',
-                'is_payhero_enabled': True,
                 'is_active': True,
-                'channel_id': getattr(settings, 'PAYHERO_CHANNEL_ID', 1180),
             }
         )
         return method
@@ -56,6 +54,7 @@ class InitiateCustomerPaymentView(APIView):
     @transaction.atomic
     def post(self, request):
         user = request.user
+        schema = connection.schema_name
         
         # Get customer profile
         from apps.customers.models import Customer
@@ -71,7 +70,6 @@ class InitiateCustomerPaymentView(APIView):
         amount = request.data.get('amount')
         phone_number = request.data.get('phone_number')
         invoice_id = request.data.get('invoice_id')
-        channel_id = request.data.get('channel_id')
         
         # Validate amount
         if not amount or Decimal(str(amount)) <= 0:
@@ -82,8 +80,7 @@ class InitiateCustomerPaymentView(APIView):
         
         # Validate phone number
         if not phone_number:
-            # Use customer's phone number
-            phone_number = customer.phone_number or user.phone_number
+            phone_number = customer.phone_number or getattr(user, 'phone_number', None)
         
         if not phone_number:
             return Response(
@@ -102,11 +99,25 @@ class InitiateCustomerPaymentView(APIView):
                     status=status.HTTP_404_NOT_FOUND
                 )
         
-        # Get or create M-Pesa payment method
-        payment_method = self._get_or_create_mpesa_payment_method()
+        # Verify Tenant has configured Tuma
+        try:
+            cfg = TenantTumaConfig.objects.get(schema_name=schema, is_active=True)
+        except TenantTumaConfig.DoesNotExist:
+            return Response(
+                {'error': 'Payment gateway is not configured for this ISP.'}, 
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        if not cfg.active_mode:
+            return Response(
+                {'error': 'No active payment collection mode set for this ISP.'}, 
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        # Get or create Tuma payment method
+        payment_method = self._get_or_create_tuma_payment_method()
         
-        # Generate reference
-        import time
+        # Generate internal reference
         reference = f"PAY-{customer.customer_code}-{int(time.time())}"
         
         # Create payment record with proper model fields
@@ -119,54 +130,58 @@ class InitiateCustomerPaymentView(APIView):
             mpesa_phone=phone_number,
             payment_reference=reference,
             status='PENDING',
-            notes=f"Customer initiated payment via dashboard",
+            notes="Customer initiated payment via dashboard",
         )
         
-        # Initiate PayHero STK Push
+        # Initiate Tuma STK Push
         try:
-            client = PayHeroClient()
+            client = TumaClient()
+            
+            # Authenticate using the CHILD credentials specific to this tenant
+            token = client.auth_token(cfg.tuma_business_email, cfg.tuma_business_api_key)
             
             description = f"Account Recharge - {customer.full_name}"
             if invoice:
                 description = f"Invoice #{invoice.invoice_number}"
             
             response = client.stk_push(
-                phone_number=phone_number,
-                amount=int(amount),
-                reference=reference,
-                description=description,
-                callback_url=settings.PAYHERO_BILLING_CALLBACK,
-                channel_id=channel_id or payment_method.channel_id,
+                token=token,
+                amount=int(Decimal(str(amount))),
+                phone=phone_number,
+                callback_url=settings.TUMA_CALLBACK_URL,
+                description=description
             )
             
-            if response.success:
-                # Store checkout ID for status polling
-                payment.transaction_id = response.checkout_request_id or ''
-                payment.payhero_external_reference = reference
+            if response.get("success"):
+                data = response.get("data", {})
+                # Store Tuma tracking IDs
+                payment.tuma_merchant_request_id = data.get("merchant_request_id", "")
+                payment.tuma_checkout_request_id = data.get("checkout_request_id", "")
                 payment.status = 'PROCESSING'
                 payment.save()
                 
                 return Response({
                     'status': 'pending',
                     'payment_id': payment.id,
-                    'payhero_response': {
+                    'tuma_response': {
                         'status': 'pending',
-                        'checkout_request_id': response.checkout_request_id,
-                        'message': 'STK Push sent to your phone',
+                        'merchant_request_id': payment.tuma_merchant_request_id,
+                        'checkout_request_id': payment.tuma_checkout_request_id,
+                        'message': 'STK Push sent to your phone. Please enter your PIN.',
                     }
                 })
             else:
                 payment.status = 'FAILED'
-                payment.failure_reason = response.message
+                payment.failure_reason = response.get("message", "Failed to initiate payment")
                 payment.save()
                 
                 return Response({
                     'status': 'error',
-                    'message': response.message or 'Failed to initiate payment',
+                    'message': payment.failure_reason,
                 }, status=status.HTTP_400_BAD_REQUEST)
         
-        except PayHeroError as e:
-            logger.error(f"Customer payment PayHero error: {e.message}")
+        except TumaError as e:
+            logger.error(f"Customer payment Tuma error: {str(e)}")
             payment.status = 'FAILED'
             payment.failure_reason = str(e)
             payment.save()
@@ -180,6 +195,8 @@ class InitiateCustomerPaymentView(APIView):
 class CustomerPaymentStatusView(APIView):
     """
     Poll customer payment status.
+    Since Tuma operates purely via webhooks for resolution, we check our local database 
+    status which is updated asynchronously by the TumaWebhookView.
     
     GET /api/v1/billing/payments/{id}/status/
     """
@@ -200,72 +217,18 @@ class CustomerPaymentStatusView(APIView):
                 status=status.HTTP_404_NOT_FOUND
             )
         
-        # Return current status if already finalized
-        if payment.status in ['COMPLETED', 'FAILED', 'CANCELLED']:
-            return Response({
-                'payment_id': payment.id,
-                'status': payment.status.lower(),
-                'message': self._get_status_message(payment),
-                'mpesa_receipt': payment.mpesa_receipt,
-                'amount': float(payment.amount),
-                'completed_at': payment.processed_at,
-            })
+        is_finalized = payment.status in ['COMPLETED', 'FAILED', 'CANCELLED']
         
-        # Check with PayHero if pending
-        if payment.transaction_id:
-            try:
-                client = PayHeroClient()
-                status_response = client.get_payment_status(payment.transaction_id)
-                
-                if status_response.status == PaymentStatus.SUCCESS:
-                    payment.status = 'COMPLETED'
-                    payment.mpesa_receipt = status_response.mpesa_receipt
-                    payment.processed_at = timezone.now()
-                    payment.save()
-                    
-                    # Apply to customer balance
-                    customer = payment.customer
-                    if payment.invoice:
-                        payment.invoice.apply_payment(payment)
-                    else:
-                        # Reduce outstanding balance (negative balance = credit)
-                        customer.update_balance(-payment.amount)
-                    
-                    return Response({
-                        'payment_id': payment.id,
-                        'status': 'completed',
-                        'message': 'Payment successful!',
-                        'mpesa_receipt': payment.mpesa_receipt,
-                        'amount': float(payment.amount),
-                        'completed_at': payment.processed_at,
-                        'outstanding_balance': float(customer.outstanding_balance or 0),
-                    })
-                
-                elif status_response.status == PaymentStatus.FAILED:
-                    payment.status = 'FAILED'
-                    payment.failure_reason = status_response.failure_reason
-                    payment.save()
-                    
-                    return Response({
-                        'payment_id': payment.id,
-                        'status': 'failed',
-                        'message': status_response.failure_reason or 'Payment failed',
-                        'mpesa_receipt': None,
-                        'amount': float(payment.amount),
-                        'completed_at': None,
-                    })
-            
-            except PayHeroError as e:
-                logger.error(f"Error checking payment status: {e.message}")
-        
-        # Still pending
+        # Return current local DB status. 
+        # (The webhook is responsible for updating this from PENDING/PROCESSING -> COMPLETED)
         return Response({
             'payment_id': payment.id,
-            'status': 'pending',
-            'message': 'Waiting for payment confirmation...',
-            'mpesa_receipt': None,
+            'status': payment.status.lower(),
+            'message': self._get_status_message(payment),
+            'mpesa_receipt': payment.mpesa_receipt,
             'amount': float(payment.amount),
-            'completed_at': None,
+            'completed_at': payment.processed_at,
+            'outstanding_balance': float(customer.outstanding_balance or 0) if is_finalized else None,
         })
     
     def _get_status_message(self, payment):
@@ -273,8 +236,8 @@ class CustomerPaymentStatusView(APIView):
             'COMPLETED': 'Payment successful!',
             'FAILED': payment.failure_reason or 'Payment failed',
             'CANCELLED': 'Payment was cancelled',
-            'PENDING': 'Waiting for payment...',
-            'PROCESSING': 'Processing payment...',
+            'PENDING': 'Waiting for payment confirmation...',
+            'PROCESSING': 'Processing payment... please check your phone.',
         }
         return messages.get(payment.status, 'Unknown status')
 
@@ -303,8 +266,6 @@ class CustomerPaymentMethodsView(APIView):
                 'name': method.name,
                 'method_type': method.method_type,
                 'description': method.description,
-                'is_payhero_enabled': method.is_payhero_enabled,
-                'channel_id': method.channel_id,
                 'minimum_amount': float(method.minimum_amount),
                 'maximum_amount': float(method.maximum_amount),
                 'transaction_fee': float(method.transaction_fee),
@@ -315,5 +276,5 @@ class CustomerPaymentMethodsView(APIView):
         
         return Response({
             'payment_methods': methods_data,
-            'default_method': 'mpesa_stk',  # STK Push is default
+            'default_method': 'TUMA_STK',  # Updated default identifier
         })

@@ -2,8 +2,10 @@
 from django.conf import settings
 from django.db import transaction, connection
 from django.core.exceptions import ValidationError
+from django.shortcuts import get_object_or_404
 from rest_framework.views import APIView
 from rest_framework.response import Response
+from rest_framework.permissions import IsAuthenticated
 from rest_framework import status
 from django_tenants.utils import schema_context, get_public_schema_name
 
@@ -18,6 +20,8 @@ class TumaBanksView(APIView):
     """
     Get list of available banks from Tuma gateway
     """
+    permission_classes = [IsAuthenticated]  # <--- CRITICAL FIX
+
     def get(self, request):
         try:
             client = TumaClient()
@@ -35,6 +39,8 @@ class TumaCreateChildBusinessView(APIView):
     """
     Create a child business on Tuma for a tenant
     """
+    permission_classes = [IsAuthenticated]  # <--- CRITICAL FIX
+
     def post(self, request):
         schema = connection.schema_name
         with schema_context(get_public_schema_name()):
@@ -96,6 +102,8 @@ class TumaTenantModeView(APIView):
     """
     Get or update tenant's Tuma payment mode (Till/Bank)
     """
+    permission_classes = [IsAuthenticated]  # <--- CRITICAL FIX
+
     def get(self, request):
         """Get current Tuma configuration for the tenant"""
         schema = connection.schema_name
@@ -132,9 +140,15 @@ class TumaInitiatePaymentView(APIView):
     Required fields: customer_id, payment_method_id, amount, phone
     Optional fields: invoice_id, description
     """
+    permission_classes = [IsAuthenticated]  # <--- CRITICAL FIX
+
     @transaction.atomic
     def post(self, request):
         schema = connection.schema_name
+        
+        # FIX: Ensure customer and method belong to THIS tenant
+        customer_id = request.data.get("customer_id")
+        method_id = request.data.get("payment_method_id")
         
         # Validate required fields
         required_fields = ['customer_id', 'payment_method_id', 'amount', 'phone']
@@ -171,36 +185,21 @@ class TumaInitiatePaymentView(APIView):
                 status=status.HTTP_400_BAD_REQUEST
             )
         
-        # Validate and get customer
-        try:
-            customer = Customer.objects.get(id=request.data["customer_id"])
-        except Customer.DoesNotExist:
-            return Response(
-                {"success": False, "error": "Customer not found"},
-                status=status.HTTP_404_NOT_FOUND
-            )
+        # FIX: Validate customer belongs to THIS tenant using schema_name
+        customer = get_object_or_404(Customer, id=customer_id, schema_name=schema)
         
-        # Validate and get payment method
-        try:
-            payment_method = InvoiceItemPayment.objects.get(
-                id=request.data["payment_method_id"],
-                is_active=True
-            )
-        except InvoiceItemPayment.DoesNotExist:
-            return Response(
-                {"success": False, "error": "Payment method not found or inactive"},
-                status=status.HTTP_404_NOT_FOUND
-            )
+        # FIX: Validate payment method belongs to THIS tenant using schema_name
+        method = get_object_or_404(InvoiceItemPayment, id=method_id, schema_name=schema, is_active=True)
         
         # Validate payment method amount limits
-        if not payment_method.is_amount_valid(amount):
+        if not method.is_amount_valid(amount):
             return Response(
-                {"success": False, "error": f"Amount must be between {payment_method.minimum_amount} and {payment_method.maximum_amount}"},
+                {"success": False, "error": f"Amount must be between {method.minimum_amount} and {method.maximum_amount}"},
                 status=status.HTTP_400_BAD_REQUEST
             )
         
         # Calculate fees
-        transaction_fee = payment_method.calculate_fee(amount)
+        transaction_fee = method.calculate_fee(amount)
         net_amount = amount - transaction_fee
         
         try:
@@ -237,10 +236,10 @@ class TumaInitiatePaymentView(APIView):
             
             data = tuma_res["data"]
             
-            # Create Payment record with all required fields
+            # Create Payment record with all required fields using validated objects
             payment = Payment.objects.create(
-                customer=customer,
-                payment_method=payment_method,
+                customer=customer,  # <--- Now using validated customer object
+                payment_method=method,  # <--- Now using validated method object
                 amount=amount,
                 transaction_fee=transaction_fee,
                 net_amount=net_amount,
@@ -259,12 +258,12 @@ class TumaInitiatePaymentView(APIView):
                 schema_name=schema,
             )
             
-            # Link to invoice if provided
+            # Link to invoice if provided (with tenant isolation)
             invoice_id = request.data.get("invoice_id")
             if invoice_id:
                 from apps.billing.models.billing_models import Invoice
                 try:
-                    invoice = Invoice.objects.get(id=invoice_id)
+                    invoice = Invoice.objects.get(id=invoice_id, schema_name=schema)
                     payment.invoice = invoice
                     payment.save()
                 except Invoice.DoesNotExist:
