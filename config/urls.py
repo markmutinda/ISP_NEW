@@ -97,10 +97,32 @@ hotspot_admin_api_urlpatterns = [
     path('hotspot/', include((hotspot_admin_urlpatterns, 'hotspot-admin'))),
 ]
 
-# PayHero Webhooks (PUBLIC - callbacks from PayHero)
+# ==========================
+# PayHero Webhooks (DEPRECATED - being phased out in favor of Tuma)
+# These receive callbacks from PayHero
+# NOTE: These will be removed in a future release once Tuma migration is complete
+# ==========================
 webhook_api_urlpatterns = [
     path('webhooks/payhero/', include((webhook_urlpatterns, 'webhooks'))),
 ]
+
+# ==========================
+# Tuma Webhooks (NEW - Phase 5)
+# These receive callbacks from Tuma payment gateway
+# Tuma replaces PayHero as the primary payment gateway
+# ==========================
+from apps.billing.urls_tuma import urlpatterns as tuma_urlpatterns
+
+tuma_webhook_api_urlpatterns = [
+    # Tuma webhook endpoints - strictly for Tuma gateway callbacks
+    path('webhooks/tuma/', include((tuma_urlpatterns, 'webhooks-tuma'))),
+]
+
+# ==========================
+# M-Pesa Webhooks (PUBLIC - callbacks from Safaricom)
+# These are already included in the billing app's main URLs
+# The M-Pesa webhook endpoint is at: api/v1/billing/mpesa/c2b-callback/
+# ==========================
 
 # Main URL Patterns
 urlpatterns = [
@@ -116,8 +138,11 @@ urlpatterns = [
     # Hotspot Admin API (AUTHENTICATED - for admin management)
     path('api/v1/', include(hotspot_admin_api_urlpatterns)),
     
-    # PayHero Webhooks (PUBLIC - callbacks)
+    # PayHero Webhooks (DEPRECATED - will be removed)
     path('api/v1/', include(webhook_api_urlpatterns)),
+    
+    # Tuma Webhooks (NEW - replaces PayHero)
+    path('api/v1/', include(tuma_webhook_api_urlpatterns)),
     
     # API Documentation
     path('swagger/', schema_view.with_ui('swagger', cache_timeout=0), name='schema-swagger-ui'),

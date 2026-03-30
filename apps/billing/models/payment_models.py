@@ -359,6 +359,74 @@ class MpesaTransaction(models.Model):
         self.save()
 
 
+class TenantTumaConfig(models.Model):
+    """
+    Tenant-specific Tuma (payment gateway) configuration.
+    Supports Till and Bank payment modes exclusively.
+    """
+    MODE_CHOICES = [
+        ("TILL", "Till"),
+        ("BANK", "Bank"),
+    ]
+
+    schema_name = models.SlugField(max_length=63, unique=True, db_index=True)
+    tenant = models.ForeignKey("core.Tenant", on_delete=models.CASCADE, related_name="tuma_configs")
+
+    # Child business details (Created by your backend via master token)
+    tuma_business_id = models.CharField(max_length=64, blank=True)
+    tuma_business_email = models.EmailField(blank=True)
+    tuma_business_api_key = models.CharField(max_length=255, blank=True)
+
+    # Single active method enforcement
+    active_mode = models.CharField(max_length=10, choices=MODE_CHOICES, blank=True)
+
+    # Till Details
+    till_number = models.CharField(max_length=30, blank=True)
+
+    # Bank Details
+    bank_id = models.CharField(max_length=64, blank=True)
+    bank_name = models.CharField(max_length=100, blank=True)
+    bank_account_number = models.CharField(max_length=50, blank=True)
+
+    is_active = models.BooleanField(default=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = 'Tuma Configuration'
+        verbose_name_plural = 'Tuma Configurations'
+        indexes = [
+            models.Index(fields=["schema_name", "is_active"]),
+        ]
+
+    def __str__(self):
+        mode = self.active_mode or "Not configured"
+        return f"Tuma Config - {self.schema_name} ({mode})"
+
+    def clean_mode(self):
+        """Strict mutually exclusive logic for Till vs Bank modes"""
+        # Strict mutually exclusive logic
+        if self.active_mode == "TILL":
+            if not self.till_number:
+                raise ValueError("Till number is required when mode is TILL")
+            # Clear bank fields when mode is TILL
+            self.bank_id = ""
+            self.bank_name = ""
+            self.bank_account_number = ""
+        elif self.active_mode == "BANK":
+            if not self.bank_id or not self.bank_account_number:
+                raise ValueError("Bank ID and Account Number required when mode is BANK")
+            # Clear till field when mode is BANK
+            self.till_number = ""
+
+    def clean(self):
+        """Model-level validation"""
+        self.clean_mode()
+        
+    def save(self, *args, **kwargs):
+        self.full_clean()
+        super().save(*args, **kwargs)
+
+
 class InvoiceItemPayment(models.Model):
     METHOD_TYPES = [
         ('MPESA_STK', 'M-Pesa STK Push'),
@@ -404,6 +472,16 @@ class InvoiceItemPayment(models.Model):
         blank=True,
         related_name='payment_methods',
         help_text="Link to tenant-specific M-Pesa configuration"
+    )
+
+    # Tuma Configuration Link
+    tuma_configuration = models.ForeignKey(
+        'billing.TenantTumaConfig',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='payment_methods',
+        help_text="Link to tenant-specific Tuma configuration"
     )
 
     # Configuration
@@ -456,7 +534,8 @@ class InvoiceItemPayment(models.Model):
     def __str__(self):
         payhero_status = " (PayHero)" if self.is_payhero_enabled else ""
         mpesa_status = " (M-Pesa)" if self.mpesa_configuration else ""
-        return f"{self.name}{payhero_status}{mpesa_status}"
+        tuma_status = " (Tuma)" if self.tuma_configuration else ""
+        return f"{self.name}{payhero_status}{mpesa_status}{tuma_status}"
 
     def calculate_fee(self, amount):
         if self.fee_type == 'PERCENTAGE':
@@ -472,6 +551,12 @@ class InvoiceItemPayment(models.Model):
             return self.mpesa_configuration
         # Fall back to default tenant configuration
         return MpesaConfiguration.get_default_configuration(self.schema_name)
+    
+    def get_tuma_config(self):
+        """Get the Tuma configuration for this payment method"""
+        if self.tuma_configuration and self.tuma_configuration.is_active:
+            return self.tuma_configuration
+        return None
 
 
 class Payment(models.Model):
@@ -511,6 +596,14 @@ class Payment(models.Model):
         blank=True,
         related_name='payment_record'
     )
+
+    # Tuma Transaction Fields
+    tuma_merchant_request_id = models.CharField(max_length=120, blank=True, db_index=True)
+    tuma_checkout_request_id = models.CharField(max_length=120, blank=True, db_index=True)
+    tuma_status = models.CharField(max_length=20, blank=True)  # pending/completed/failed
+    tuma_result_code = models.IntegerField(null=True, blank=True)
+    tuma_result_desc = models.TextField(blank=True)
+    tuma_callback_payload = models.JSONField(null=True, blank=True)
 
     # Tenant schema field
     schema_name = models.SlugField(
@@ -559,6 +652,8 @@ class Payment(models.Model):
             models.Index(fields=['transaction_id']),
             models.Index(fields=['mpesa_receipt']),
             models.Index(fields=['payhero_external_reference']),
+            models.Index(fields=['tuma_merchant_request_id']),
+            models.Index(fields=['tuma_checkout_request_id']),
             models.Index(fields=['schema_name', 'status', 'payment_date']),
         ]
 

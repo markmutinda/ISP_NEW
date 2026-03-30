@@ -452,3 +452,12 @@ CAPTIVE_PORTAL_URL = os.environ.get('CAPTIVE_PORTAL_URL', 'https://portal.netily
 
 # VPN API endpoint (how routers reach Django through the tunnel)
 VPN_API_URL = f"http://{VPN_SERVER_IP}:8000"
+
+# config/settings/base.py
+
+# TUMA PAYMENT GATEWAY CONFIG
+TUMA_API_BASE_URL = os.getenv("TUMA_API_BASE_URL", "https://api.tuma.co.ke")
+TUMA_MASTER_EMAIL = os.getenv("TUMA_MASTER_EMAIL", "")       # Your main Tuma account email
+TUMA_MASTER_API_KEY = os.getenv("TUMA_MASTER_API_KEY", "")   # Your main Tuma API Key
+TUMA_CALLBACK_URL = os.getenv("TUMA_CALLBACK_URL", "https://your-production-domain.com/api/v1/webhooks/tuma/callback/")
+TUMA_DEFAULT_LOGO_URL = os.getenv("TUMA_DEFAULT_LOGO_URL", "https://your-saas.com/default-logo.png")

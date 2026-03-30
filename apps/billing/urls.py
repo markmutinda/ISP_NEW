@@ -1,3 +1,4 @@
+# apps/billing/urls.py
 from django.urls import path, include
 from rest_framework.routers import DefaultRouter
 from .views.InvoiceViews import PlanViewSet, BillingCycleViewSet, InvoiceViewSet, InvoiceItemViewSet
@@ -31,6 +32,17 @@ from .views.webhook_views import (
     MpesaC2BWebhookView,  # ADDED: Import the new M-Pesa C2B webhook view
 )
 
+# ==========================
+# Tuma URLs (New Payment Gateway)
+# ==========================
+from .views.tuma_views import (
+    TumaBanksView, 
+    TumaCreateChildBusinessView, 
+    TumaTenantModeView, 
+    TumaInitiatePaymentView
+)
+from .views.tuma_webhook_views import TumaWebhookView
+
 router = DefaultRouter()
 
 # Invoice URLs
@@ -42,9 +54,13 @@ router.register(r'invoice-items', InvoiceItemViewSet, basename='invoice-item')
 # Payment URLs
 router.register(r'payments', PaymentViewSet, basename='payment')
 
-# M-Pesa Configuration URLs (NEW)
+# M-Pesa Configuration URLs
 router.register(r'mpesa-config', MpesaConfigurationViewSet, basename='mpesa-config')
 router.register(r'mpesa-transactions', MpesaTransactionViewSet, basename='mpesa-transaction')
+
+# Tuma Configuration URLs (NEW)
+# Note: Tuma uses function-based or APIView endpoints, not ViewSets initially
+# router.register(r'tuma-config', TumaConfigurationViewSet, basename='tuma-config')  # Add when ViewSet is created
 
 # Voucher URLs
 router.register(r'voucher-batches', VoucherBatchViewSet, basename='voucher-batch')
@@ -54,13 +70,27 @@ urlpatterns = [
     path('', include(router.urls)),
 
     # ==========================
+    # Tuma Endpoints (NEW - Phase 5)
+    # ==========================
+    # Frontend setup calls
+    path('tuma/banks/', TumaBanksView.as_view(), name='tuma-banks'),
+    path('tuma/child-business/', TumaCreateChildBusinessView.as_view(), name='tuma-child-business'),
+    path('tuma/mode/', TumaTenantModeView.as_view(), name='tuma-mode'),
+    
+    # Payment initiation
+    path('tuma/initiate/', TumaInitiatePaymentView.as_view(), name='tuma-initiate'),
+    
+    # Tuma Webhook (receives callbacks from Tuma gateway)
+    path('tuma/callback/', TumaWebhookView.as_view(), name='tuma-callback'),
+
+    # ==========================
     # M-Pesa Endpoints
     # ==========================
     # Main callback endpoint for Safaricom M-Pesa API
     # UPDATED: Changed from 'mpesa/callback/' to 'mpesa/c2b-callback/' to match Safaricom expectations
     path('mpesa/c2b-callback/', MpesaC2BWebhookView.as_view(), name='mpesa-c2b-callback'),
     
-    # Keep the old callback for backward compatibility if needed
+    # Keep the old callback for backward compatibility if needed (DEPRECATED - will be removed in future)
     path('mpesa/callback/', PaymentViewSet.as_view({'post': 'mpesa_callback'}), name='mpesa-callback-legacy'),
     
     # M-Pesa configuration test endpoint
@@ -96,8 +126,10 @@ urlpatterns = [
          name='mpesa-transaction-status'),
 
     # ==========================
-    # PayHero Endpoints
+    # PayHero Endpoints (DEPRECATED - being phased out)
     # ==========================
+    # NOTE: PayHero is being phased out in favor of Tuma
+    # These endpoints will be removed in a future release
     path('payments/payhero/callback/', PaymentViewSet.as_view({'post': 'payhero_callback'}), name='payhero-callback'),
 
     # ==========================
@@ -186,8 +218,9 @@ hotspot_admin_urlpatterns = [
 ]
 
 # ==========================
-# PayHero Webhook URLs (PUBLIC - no auth)
+# PayHero Webhook URLs (DEPRECATED - being phased out)
 # These receive callbacks from PayHero
+# NOTE: These will be removed once Tuma migration is complete
 # ==========================
 webhook_urlpatterns = [
     path('subscription/', PayHeroSubscriptionWebhookView.as_view(), name='payhero-subscription-webhook'),
@@ -203,10 +236,18 @@ mpesa_webhook_urlpatterns = [
     path('c2b-callback/', MpesaC2BWebhookView.as_view(), name='mpesa-c2b-callback'),
 ]
 
+# ==========================
+# Tuma Webhook URLs (PUBLIC - no auth)
+# These receive callbacks from Tuma Gateway
+# ==========================
+tuma_webhook_urlpatterns = [
+    path('tuma/callback/', TumaWebhookView.as_view(), name='tuma-callback'),
+]
+
 # Combine all URL patterns for easy inclusion in main urls.py
 hotspot_all_urlpatterns = hotspot_urlpatterns + hotspot_admin_urlpatterns
 
-# Combine all webhook URL patterns
-webhook_all_urlpatterns = webhook_urlpatterns + mpesa_webhook_urlpatterns
+# Combine all webhook URL patterns (including Tuma)
+webhook_all_urlpatterns = webhook_urlpatterns + mpesa_webhook_urlpatterns + tuma_webhook_urlpatterns
 
 app_name = 'billing'
