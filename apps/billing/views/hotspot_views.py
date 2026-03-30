@@ -25,7 +25,7 @@ from django_tenants.utils import schema_context, get_public_schema_name
 
 from apps.billing.models.hotspot_models import HotspotPlan, HotspotSession, HotspotBranding
 from apps.billing.models.billing_models import Plan
-from apps.billing.services.payhero import PayHeroClient, PayHeroError
+from apps.billing.models.payment_models import Payment  # ADDED: Import Payment for Tuma status checks
 from apps.network.models.router_models import Router
 from apps.subscriptions.models import CommissionLedger
 
@@ -462,7 +462,7 @@ class HotspotPurchaseView(APIView):
                 amount=plan.price,
                 status='paid',          # <--- SIMULATION: Marked as paid instantly
                 access_code=friendly_username,  # Uses either the old one or the new one!
-                payhero_checkout_id='SIMULATED_' + friendly_username,
+                payhero_checkout_id='SIMULATED_' + friendly_username,  # Keeping for backward compat
                 is_roaming=is_roaming,            # <--- SAVED TO DB
                 roamed_from=roamed_from_name      # <--- SAVED TO DB
             )
@@ -515,6 +515,53 @@ class HotspotPurchaseStatusView(APIView):
     permission_classes = [AllowAny]
     authentication_classes = []  # No auth required
     
+    def _check_tuma_payment_status(self, session, tenant_schema):
+        """
+        Check Tuma payment status for a hotspot session.
+        
+        Returns:
+            tuple: (status, message, data) where status is one of:
+                - 'completed': Payment successful
+                - 'failed': Payment failed
+                - 'pending': Still pending
+        """
+        # Look for Payment records linked to this session via phone_number or other identifiers
+        # For hotspot, we match by phone_number (customer's phone) and amount
+        payments = Payment.objects.filter(
+            payer_phone=session.phone_number,
+            amount=session.amount,
+            status__in=['PROCESSING', 'COMPLETED', 'FAILED']
+        ).order_by('-created_at')
+        
+        # Try to find by Tuma checkout ID if stored in session
+        if hasattr(session, 'tuma_checkout_request_id') and session.tuma_checkout_request_id:
+            payments = payments.filter(tuma_checkout_request_id=session.tuma_checkout_request_id)
+        elif hasattr(session, 'tuma_merchant_request_id') and session.tuma_merchant_request_id:
+            payments = payments.filter(tuma_merchant_request_id=session.tuma_merchant_request_id)
+        
+        payment = payments.first()
+        
+        if not payment:
+            return ('pending', 'No payment record found', None)
+        
+        # Check payment status
+        if payment.status == 'COMPLETED':
+            return ('completed', 'Payment successful', payment)
+        elif payment.status == 'FAILED':
+            return ('failed', payment.failure_reason or 'Payment failed', None)
+        else:
+            # Check Tuma-specific status if available
+            if payment.tuma_status == 'completed' or str(payment.tuma_result_code) == '0':
+                # Update payment status if Tuma says completed but our status is still PROCESSING
+                if payment.status == 'PROCESSING':
+                    payment.status = 'COMPLETED'
+                    payment.save()
+                return ('completed', 'Payment successful', payment)
+            elif payment.tuma_status == 'failed' or (payment.tuma_result_code and str(payment.tuma_result_code) != '0'):
+                return ('failed', payment.tuma_result_desc or 'Payment failed', None)
+            else:
+                return ('pending', 'Waiting for payment confirmation...', None)
+    
     def get(self, request, session_id):
         tenant_subdomain = request.query_params.get('tenant')
         if not tenant_subdomain:
@@ -565,7 +612,7 @@ class HotspotPurchaseStatusView(APIView):
             elif session.status == 'paid':
                 # Payment received but not yet activated — activate now
                 # Ensure we don't generate a NEW code if one exists
-                session.activate(session.access_code) # <--- Pass current code!
+                session.activate(session.access_code)  # <--- Pass current code!
                 
                 # Create RADIUS credentials
                 try:
@@ -573,7 +620,7 @@ class HotspotPurchaseStatusView(APIView):
                     
                     radius_service = HotspotRadiusService()
                     radius_service.create_hotspot_credentials(
-                        username=session.access_code, # <--- Use session.access_code
+                        username=session.access_code,  # <--- Use session.access_code
                         password=session.access_code,
                         router=session.router,
                         plan=session.plan,
@@ -594,61 +641,69 @@ class HotspotPurchaseStatusView(APIView):
                     'login_url': request.query_params.get('login_url', ''),
                 })
             
-            # Still pending - check with PayHero
-            if session.payhero_checkout_id:
-                try:
-                    from apps.billing.services.payhero import PayHeroClient, PaymentStatus
-                    
-                    client = PayHeroClient()
-                    status_response = client.get_payment_status(session.payhero_checkout_id)
-                    
-                    if status_response.status == PaymentStatus.SUCCESS:
-                        # Payment successful - activate session
-                        session.mark_paid(status_response.mpesa_receipt)
-                        
-                        # Activate session (generates access code + expiry)
-                        session.activate(session.access_code) # <--- Pass current code!
-                        
-                        # ── CLOUD CONTROLLER: Create RADIUS credentials ──
-                        try:
-                            from apps.billing.services.hotspot_radius_service import HotspotRadiusService
-                            
-                            radius_service = HotspotRadiusService()
-                            radius_service.create_hotspot_credentials(
-                                username=session.access_code,
-                                password=session.access_code,
-                                router=session.router,
-                                plan=session.plan,
-                                expires_at=session.expires_at,
-                                mac_address=session.mac_address or '',
-                            )
-                        except Exception as e:
-                            logger.error(
-                                f"Failed to create RADIUS credentials for session "
-                                f"{session.session_id}: {e}",
-                                exc_info=True
-                            )
-                        # ── END CLOUD CONTROLLER ──
-                        
-                        return Response({
-                            'status': 'success',
-                            'message': 'Payment received! You are now connected.',
-                            'access_code': session.access_code,
-                            'expires_at': session.expires_at,
-                            'duration_display': session.plan.duration_display,
-                            'data_remaining_mb': session.data_remaining_mb,
-                            'speed': f"{session.plan.speed_limit_mbps}Mbps",
-                        })
-                    
-                    elif status_response.status == PaymentStatus.FAILED:
-                        session.mark_failed(status_response.failure_reason)
-                        return Response({
-                            'status': 'failed',
-                            'message': status_response.failure_reason or 'Payment failed. Please try again.',
-                        })
+            # ============================================================
+            # REPLACED: PayHero status check with Tuma status check
+            # Instead of calling PayHero API, we read our own Payment rows
+            # ============================================================
+            if session.phone_number:
+                # Check Tuma payment status
+                status, message, payment = self._check_tuma_payment_status(session, tenant.schema_name)
                 
-                except PayHeroError as e:
-                    logger.error(f"Error checking hotspot payment status: {e.message}")
+                if status == 'completed':
+                    # Payment successful - activate session
+                    mpesa_receipt = payment.mpesa_receipt if payment else ''
+                    session.mark_paid(mpesa_receipt)
+                    
+                    # Store Tuma reference IDs on session for future lookups
+                    if payment:
+                        session.tuma_checkout_request_id = payment.tuma_checkout_request_id
+                        session.tuma_merchant_request_id = payment.tuma_merchant_request_id
+                        session.save(update_fields=['tuma_checkout_request_id', 'tuma_merchant_request_id'])
+                    
+                    # Activate session (generates access code + expiry)
+                    session.activate(session.access_code)
+                    
+                    # ── CLOUD CONTROLLER: Create RADIUS credentials ──
+                    try:
+                        from apps.billing.services.hotspot_radius_service import HotspotRadiusService
+                        
+                        radius_service = HotspotRadiusService()
+                        radius_service.create_hotspot_credentials(
+                            username=session.access_code,
+                            password=session.access_code,
+                            router=session.router,
+                            plan=session.plan,
+                            expires_at=session.expires_at,
+                            mac_address=session.mac_address or '',
+                        )
+                    except Exception as e:
+                        logger.error(
+                            f"Failed to create RADIUS credentials for session "
+                            f"{session.session_id}: {e}",
+                            exc_info=True
+                        )
+                    # ── END CLOUD CONTROLLER ──
+                    
+                    return Response({
+                        'status': 'success',
+                        'message': 'Payment received! You are now connected.',
+                        'access_code': session.access_code,
+                        'expires_at': session.expires_at,
+                        'duration_display': session.plan.duration_display,
+                        'data_remaining_mb': session.data_remaining_mb,
+                        'speed': f"{session.plan.speed_limit_mbps}Mbps",
+                    })
+                
+                elif status == 'failed':
+                    session.mark_failed(message)
+                    return Response({
+                        'status': 'failed',
+                        'message': message or 'Payment failed. Please try again.',
+                    })
+                
+                elif status == 'pending':
+                    # Still pending - keep waiting
+                    logger.debug(f"Hotspot payment pending for session {session_id}: {message}")
             
             # Still pending
             return Response({

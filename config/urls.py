@@ -96,7 +96,7 @@ api_urlpatterns = [
 ]
 
 # Hotspot URLs (PUBLIC - no auth required for captive portal)
-from apps.billing.urls import hotspot_urlpatterns, hotspot_admin_urlpatterns, webhook_urlpatterns
+from apps.billing.urls import hotspot_urlpatterns, hotspot_admin_urlpatterns
 
 hotspot_api_urlpatterns = [
     path('hotspot/', include((hotspot_urlpatterns, 'hotspot'))),
@@ -108,11 +108,10 @@ hotspot_admin_api_urlpatterns = [
 ]
 
 # ==========================
-# PayHero Webhooks (DEPRECATED - being phased out in favor of Tuma)
+# PAYHERO WEBHOOKS - REMOVED (Phase 5 - Migration to Tuma)
+# PayHero is being phased out. All payment processing now uses Tuma.
 # ==========================
-webhook_api_urlpatterns = [
-    path('webhooks/payhero/', include((webhook_urlpatterns, 'webhooks'))),
-]
+# webhook_api_urlpatterns = []  # REMOVED - PayHero webhooks no longer needed
 
 # ==========================
 # TUMA WEBHOOK (PUBLIC - only the callback)
@@ -136,8 +135,11 @@ urlpatterns = [
     # Hotspot Admin API (AUTHENTICATED - for admin management)
     path('api/v1/', include(hotspot_admin_api_urlpatterns)),
     
-    # PayHero Webhooks (DEPRECATED)
-    path('api/v1/', include(webhook_api_urlpatterns)),
+    # ==========================
+    # PAYHERO WEBHOOKS - REMOVED FROM MAIN URLPATTERNS
+    # These endpoints are no longer available. Use Tuma instead.
+    # ==========================
+    # path('api/v1/', include(webhook_api_urlpatterns)),  # REMOVED
     
     # TUMA Webhook (PUBLIC - callback only)
     path('api/v1/', include(tuma_webhook_api_urlpatterns)),
