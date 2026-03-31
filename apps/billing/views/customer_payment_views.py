@@ -51,6 +51,33 @@ class InitiateCustomerPaymentView(APIView):
         )
         return method
     
+    def _validate_tuma_configuration(self, cfg):
+        """
+        Validate that the Tuma configuration has complete child business credentials.
+        
+        Returns:
+            tuple: (is_valid, error_message)
+        """
+        if not cfg.is_active:
+            return False, "Tuma payment gateway is not active for this ISP."
+        
+        if not cfg.tuma_business_id:
+            return False, "Tuma business profile not created. Please contact support to complete setup."
+        
+        if not cfg.tuma_business_email:
+            return False, "Tuma business email missing. Please reconfigure your payment settings."
+        
+        if not cfg.tuma_business_api_key:
+            return False, "Tuma business API key missing. Please reconfigure your payment settings."
+        
+        if not cfg.active_mode:
+            return False, "No active payment collection mode set (Till/Bank). Please configure your payment method."
+        
+        if not cfg.collection_account_number:
+            return False, "Collection account number missing. Please reconfigure your payment settings."
+        
+        return True, None
+    
     @transaction.atomic
     def post(self, request):
         user = request.user
@@ -99,18 +126,24 @@ class InitiateCustomerPaymentView(APIView):
                     status=status.HTTP_404_NOT_FOUND
                 )
         
-        # Verify Tenant has configured Tuma
+        # ============================================================
+        # CRITICAL: Validate Tuma configuration BEFORE initiating payment
+        # Ensure child business exists and has all required credentials
+        # ============================================================
         try:
             cfg = TenantTumaConfig.objects.get(schema_name=schema, is_active=True)
         except TenantTumaConfig.DoesNotExist:
             return Response(
-                {'error': 'Payment gateway is not configured for this ISP.'}, 
+                {'error': 'Payment gateway is not configured for this ISP. Please contact support.'}, 
                 status=status.HTTP_400_BAD_REQUEST
             )
-
-        if not cfg.active_mode:
+        
+        # Validate configuration completeness
+        is_valid, error_message = self._validate_tuma_configuration(cfg)
+        if not is_valid:
+            logger.error(f"Tuma configuration invalid for tenant {schema}: {error_message}")
             return Response(
-                {'error': 'No active payment collection mode set for this ISP.'}, 
+                {'error': error_message},
                 status=status.HTTP_400_BAD_REQUEST
             )
 
@@ -131,18 +164,30 @@ class InitiateCustomerPaymentView(APIView):
             payment_reference=reference,
             status='PENDING',
             notes="Customer initiated payment via dashboard",
+            schema_name=schema,
         )
         
-        # Initiate Tuma STK Push
+        # ============================================================
+        # Initiate Tuma STK Push using CHILD credentials
+        # These credentials are specific to this tenant's child business
+        # ============================================================
         try:
             client = TumaClient()
             
             # Authenticate using the CHILD credentials specific to this tenant
+            logger.info(f"Initiating Tuma payment for tenant {schema} using business {cfg.tuma_business_id}")
+            
             token = client.auth_token(cfg.tuma_business_email, cfg.tuma_business_api_key)
             
             description = f"Account Recharge - {customer.full_name}"
             if invoice:
                 description = f"Invoice #{invoice.invoice_number}"
+            
+            # Add collection mode info to description for better tracking
+            if cfg.active_mode == "TILL":
+                description = f"[Till] {description}"
+            else:
+                description = f"[Bank] {description}"
             
             response = client.stk_push(
                 token=token,
@@ -157,12 +202,16 @@ class InitiateCustomerPaymentView(APIView):
                 # Store Tuma tracking IDs
                 payment.tuma_merchant_request_id = data.get("merchant_request_id", "")
                 payment.tuma_checkout_request_id = data.get("checkout_request_id", "")
+                payment.tuma_status = "pending"
                 payment.status = 'PROCESSING'
                 payment.save()
+                
+                logger.info(f"Tuma STK Push initiated successfully: {payment.tuma_merchant_request_id}")
                 
                 return Response({
                     'status': 'pending',
                     'payment_id': payment.id,
+                    'payment_number': payment.payment_number,
                     'tuma_response': {
                         'status': 'pending',
                         'merchant_request_id': payment.tuma_merchant_request_id,
@@ -173,7 +222,10 @@ class InitiateCustomerPaymentView(APIView):
             else:
                 payment.status = 'FAILED'
                 payment.failure_reason = response.get("message", "Failed to initiate payment")
+                payment.tuma_status = "failed"
                 payment.save()
+                
+                logger.error(f"Tuma STK Push failed: {payment.failure_reason}")
                 
                 return Response({
                     'status': 'error',
@@ -184,11 +236,23 @@ class InitiateCustomerPaymentView(APIView):
             logger.error(f"Customer payment Tuma error: {str(e)}")
             payment.status = 'FAILED'
             payment.failure_reason = str(e)
+            payment.tuma_status = "failed"
             payment.save()
             
             return Response({
                 'status': 'error',
                 'message': 'Payment service unavailable. Please try again.',
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        
+        except Exception as e:
+            logger.exception(f"Unexpected error in customer payment: {str(e)}")
+            payment.status = 'FAILED'
+            payment.failure_reason = f"Unexpected error: {str(e)}"
+            payment.save()
+            
+            return Response({
+                'status': 'error',
+                'message': 'An unexpected error occurred. Please try again.',
             }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
@@ -223,7 +287,9 @@ class CustomerPaymentStatusView(APIView):
         # (The webhook is responsible for updating this from PENDING/PROCESSING -> COMPLETED)
         return Response({
             'payment_id': payment.id,
+            'payment_number': payment.payment_number,
             'status': payment.status.lower(),
+            'tuma_status': payment.tuma_status,
             'message': self._get_status_message(payment),
             'mpesa_receipt': payment.mpesa_receipt,
             'amount': float(payment.amount),

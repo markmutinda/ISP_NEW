@@ -380,10 +380,36 @@ class TenantTumaConfig(models.Model):
     # Single active method enforcement
     active_mode = models.CharField(max_length=10, choices=MODE_CHOICES, blank=True)
 
-    # Till Details
-    till_number = models.CharField(max_length=30, blank=True)
+    # ============================================================
+    # UNIFIED REFERENCE FIELDS (NEW)
+    # Bank/Paybill/Till all come from Tuma reference list
+    # Cache selected reference metadata for quick display
+    # ============================================================
+    collection_reference_id = models.CharField(
+        max_length=64, 
+        blank=True, 
+        db_index=True,
+        help_text="Tuma reference ID for the selected bank/till/paybill"
+    )
+    collection_reference_code = models.CharField(
+        max_length=30, 
+        blank=True,
+        help_text="Reference code (e.g., BUYGOODS, PAYBILL, EQUITY, TILL_NUMBER)"
+    )
+    collection_reference_name = models.CharField(
+        max_length=120, 
+        blank=True,
+        help_text="Display name of the selected bank or payment method"
+    )
+    collection_account_number = models.CharField(
+        max_length=50, 
+        blank=True,
+        help_text="Account number (till number, paybill number, or bank account)"
+    )
 
-    # Bank Details
+    # DEPRECATED: These fields are being replaced by the unified reference fields
+    # Keep for backward compatibility during migration
+    till_number = models.CharField(max_length=30, blank=True)
     bank_id = models.CharField(max_length=64, blank=True)
     bank_name = models.CharField(max_length=100, blank=True)
     bank_account_number = models.CharField(max_length=50, blank=True)
@@ -396,35 +422,88 @@ class TenantTumaConfig(models.Model):
         verbose_name_plural = 'Tuma Configurations'
         indexes = [
             models.Index(fields=["schema_name", "is_active"]),
+            models.Index(fields=["collection_reference_id"]),
+            models.Index(fields=["collection_reference_code"]),
         ]
 
     def __str__(self):
         mode = self.active_mode or "Not configured"
-        return f"Tuma Config - {self.schema_name} ({mode})"
+        ref_display = ""
+        if self.collection_reference_name:
+            ref_display = f" - {self.collection_reference_name}"
+        return f"Tuma Config - {self.schema_name} ({mode}){ref_display}"
 
     def clean_mode(self):
         """Strict mutually exclusive logic for Till vs Bank modes"""
-        # Strict mutually exclusive logic
         if self.active_mode == "TILL":
-            if not self.till_number:
-                raise ValueError("Till number is required when mode is TILL")
+            if not self.collection_reference_id or not self.collection_account_number:
+                raise ValidationError({
+                    'collection_reference_id': 'Reference is required when mode is TILL',
+                    'collection_account_number': 'Account number is required when mode is TILL'
+                })
             # Clear bank fields when mode is TILL
             self.bank_id = ""
             self.bank_name = ""
             self.bank_account_number = ""
+            # Sync deprecated fields for backward compatibility
+            self.till_number = self.collection_account_number
+            
         elif self.active_mode == "BANK":
-            if not self.bank_id or not self.bank_account_number:
-                raise ValueError("Bank ID and Account Number required when mode is BANK")
+            if not self.collection_reference_id or not self.collection_account_number:
+                raise ValidationError({
+                    'collection_reference_id': 'Bank selection is required when mode is BANK',
+                    'collection_account_number': 'Account number is required when mode is BANK'
+                })
             # Clear till field when mode is BANK
             self.till_number = ""
+            # Sync deprecated fields for backward compatibility
+            self.bank_id = self.collection_reference_id
+            self.bank_name = self.collection_reference_name
+            self.bank_account_number = self.collection_account_number
+            
+        elif self.active_mode == "":
+            # No mode selected - clear everything
+            self.collection_reference_id = ""
+            self.collection_reference_code = ""
+            self.collection_reference_name = ""
+            self.collection_account_number = ""
+            self.till_number = ""
+            self.bank_id = ""
+            self.bank_name = ""
+            self.bank_account_number = ""
 
     def clean(self):
         """Model-level validation"""
         self.clean_mode()
         
     def save(self, *args, **kwargs):
+        # Auto-sync collection fields when using deprecated fields (backward compat)
+        if self.active_mode == "TILL" and self.till_number and not self.collection_account_number:
+            self.collection_account_number = self.till_number
+        if self.active_mode == "BANK" and self.bank_id and not self.collection_reference_id:
+            self.collection_reference_id = self.bank_id
+            self.collection_reference_name = self.bank_name
+            self.collection_account_number = self.bank_account_number
+            
         self.full_clean()
         super().save(*args, **kwargs)
+    
+    def get_collection_display(self):
+        """
+        Get human-readable display of the selected collection method.
+        Returns a dictionary with formatted display information.
+        """
+        if not self.active_mode:
+            return None
+            
+        return {
+            'mode': self.active_mode,
+            'reference_id': self.collection_reference_id,
+            'reference_code': self.collection_reference_code,
+            'reference_name': self.collection_reference_name,
+            'account_number': self.collection_account_number,
+            'display': f"{self.collection_reference_name} - {self.collection_account_number}" if self.collection_reference_name else self.collection_account_number
+        }
 
 
 class InvoiceItemPayment(models.Model):
@@ -454,7 +533,7 @@ class InvoiceItemPayment(models.Model):
     method_type = models.CharField(max_length=20, choices=METHOD_TYPES)
     description = models.TextField(blank=True)
 
-    # PayHero Integration Fields
+    # PayHero Integration Fields (DEPRECATED - being phased out)
     channel_id = models.IntegerField(null=True, blank=True, help_text="PayHero channel ID")
     is_payhero_enabled = models.BooleanField(default=False, help_text="Route payments via PayHero")
     till_number = models.CharField(max_length=20, null=True, blank=True)
@@ -583,7 +662,7 @@ class Payment(models.Model):
     payment_reference = models.CharField(max_length=100, blank=True)
     transaction_id = models.CharField(max_length=100, blank=True)
 
-    # PayHero-specific fields
+    # PayHero-specific fields (DEPRECATED - being phased out)
     payhero_external_reference = models.CharField(max_length=255, blank=True, null=True, unique=True)
     raw_callback = models.JSONField(null=True, blank=True)
     

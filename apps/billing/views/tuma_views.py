@@ -20,7 +20,7 @@ class TumaBanksView(APIView):
     """
     Get list of available banks from Tuma gateway
     """
-    permission_classes = [IsAuthenticated]  # <--- CRITICAL FIX
+    permission_classes = [IsAuthenticated]
 
     def get(self, request):
         try:
@@ -39,7 +39,7 @@ class TumaCreateChildBusinessView(APIView):
     """
     Create a child business on Tuma for a tenant
     """
-    permission_classes = [IsAuthenticated]  # <--- CRITICAL FIX
+    permission_classes = [IsAuthenticated]
 
     def post(self, request):
         schema = connection.schema_name
@@ -101,8 +101,32 @@ class TumaCreateChildBusinessView(APIView):
 class TumaTenantModeView(APIView):
     """
     Get or update tenant's Tuma payment mode (Till/Bank)
+    When updating, automatically creates or updates the child business on Tuma.
     """
-    permission_classes = [IsAuthenticated]  # <--- CRITICAL FIX
+    permission_classes = [IsAuthenticated]
+
+    def _resolve_tenant_identity(self, schema_name):
+        """
+        Resolve tenant identity information for Tuma child business creation.
+        
+        Args:
+            schema_name: The tenant's schema name
+            
+        Returns:
+            tuple: (tenant, name, email, mobile)
+        """
+        with schema_context(get_public_schema_name()):
+            tenant = Tenant.objects.get(schema_name=schema_name)
+
+        # Choose business name - prefer tenant name, fallback to schema_name
+        name = getattr(tenant, "name", None) or getattr(tenant, "schema_name", "Tenant Business")
+        
+        # Get admin user (tenant owner) contact info
+        admin_user = getattr(tenant, "owner", None)
+        email = getattr(admin_user, "email", "") if admin_user else ""
+        mobile = getattr(admin_user, "phone_number", "") if admin_user else ""
+        
+        return tenant, name, email, mobile
 
     def get(self, request):
         """Get current Tuma configuration for the tenant"""
@@ -117,21 +141,108 @@ class TumaTenantModeView(APIView):
                 status=status.HTTP_404_NOT_FOUND
             )
 
+    @transaction.atomic
     def put(self, request):
-        """Update tenant's Tuma payment mode"""
+        """
+        Update tenant's Tuma payment mode.
+        Automatically creates or updates the child business on Tuma.
+        
+        Expected input:
+        {
+            "collection_reference_id": "bank_equity_123",
+            "collection_account_number": "0123456789"
+        }
+        """
         schema = connection.schema_name
-        with schema_context(get_public_schema_name()):
-            tenant = Tenant.objects.get(schema_name=schema)
-
+        
+        # Resolve tenant identity
+        tenant, name, email, mobile = self._resolve_tenant_identity(schema)
+        
+        # Get or create configuration
         cfg, created = TenantTumaConfig.objects.get_or_create(
             schema_name=schema,
             defaults={"tenant": tenant}
         )
         
+        # Validate and save the simplified input
         serializer = TenantTumaConfigSerializer(cfg, data=request.data, partial=True)
         serializer.is_valid(raise_exception=True)
-        serializer.save()
-        return Response(serializer.data)
+        cfg = serializer.save()
+        
+        # Initialize Tuma client and authenticate as master
+        client = TumaClient()
+        master_token = client.auth_token(settings.TUMA_MASTER_EMAIL, settings.TUMA_MASTER_API_KEY)
+        
+        # Resolve selected reference details from Tuma reference list
+        banks_map = client.get_banks_map(master_token)
+        ref = banks_map.get(cfg.collection_reference_id)
+        
+        if not ref:
+            return Response(
+                {"success": False, "error": "Invalid reference_id. Please select a valid bank/till option."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        # Populate reference details from Tuma
+        cfg.collection_reference_code = ref.get("code", "")
+        cfg.collection_reference_name = ref.get("name", "")
+        
+        # Determine active_mode based on reference type
+        ref_code = cfg.collection_reference_code.upper()
+        if ref_code in ["TILL", "PAYBILL", "BUYGOODS"]:
+            cfg.active_mode = "TILL"
+        else:
+            cfg.active_mode = "BANK"
+        
+        # Prepare payload for Tuma child business
+        payload = {
+            "name": name,
+            "email": email or f"{tenant.schema_name}@netily.co.ke",
+            "mobile": mobile or "254700000000",
+            "bank_id": cfg.collection_reference_id,
+            "account_number": cfg.collection_account_number,
+            "logo": getattr(settings, 'TUMA_DEFAULT_LOGO_URL', ''),
+            "description": f"{tenant.schema_name} payment profile - {cfg.collection_reference_name}",
+        }
+        
+        # Create or update child business on Tuma
+        if not cfg.tuma_business_id:
+            # Create new child business
+            res = client.create_business(master_token, payload)
+            if not res.get("success"):
+                return Response(
+                    {"success": False, "error": res.get("message", "Failed to create child business on Tuma")},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+            data = res["data"]
+            cfg.tuma_business_id = data.get("id", "")
+            cfg.tuma_business_email = data.get("email", "")
+            cfg.tuma_business_api_key = data.get("api_key", "")
+        else:
+            # Update existing child business
+            res = client.update_business(master_token, cfg.tuma_business_id, payload)
+            if not res.get("success"):
+                return Response(
+                    {"success": False, "error": res.get("message", "Failed to update child business on Tuma")},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+        
+        # Activate configuration
+        cfg.is_active = True
+        cfg.save()
+        
+        # Return success response with details
+        return Response({
+            "success": True,
+            "business_id": cfg.tuma_business_id,
+            "reference": {
+                "id": cfg.collection_reference_id,
+                "code": cfg.collection_reference_code,
+                "name": cfg.collection_reference_name,
+            },
+            "account_number": cfg.collection_account_number,
+            "active_mode": cfg.active_mode,
+        })
 
 
 class TumaInitiatePaymentView(APIView):
@@ -140,13 +251,13 @@ class TumaInitiatePaymentView(APIView):
     Required fields: customer_id, payment_method_id, amount, phone
     Optional fields: invoice_id, description
     """
-    permission_classes = [IsAuthenticated]  # <--- CRITICAL FIX
+    permission_classes = [IsAuthenticated]
 
     @transaction.atomic
     def post(self, request):
         schema = connection.schema_name
         
-        # FIX: Ensure customer and method belong to THIS tenant
+        # Ensure customer and method belong to THIS tenant
         customer_id = request.data.get("customer_id")
         method_id = request.data.get("payment_method_id")
         
@@ -185,10 +296,10 @@ class TumaInitiatePaymentView(APIView):
                 status=status.HTTP_400_BAD_REQUEST
             )
         
-        # FIX: Validate customer belongs to THIS tenant using schema_name
+        # Validate customer belongs to THIS tenant using schema_name
         customer = get_object_or_404(Customer, id=customer_id, schema_name=schema)
         
-        # FIX: Validate payment method belongs to THIS tenant using schema_name
+        # Validate payment method belongs to THIS tenant using schema_name
         method = get_object_or_404(InvoiceItemPayment, id=method_id, schema_name=schema, is_active=True)
         
         # Validate payment method amount limits
@@ -215,7 +326,7 @@ class TumaInitiatePaymentView(APIView):
             
             token = client.auth_token(cfg.tuma_business_email, cfg.tuma_business_api_key)
             
-            # Prepare callback URL (you may want to make this configurable)
+            # Prepare callback URL
             callback_url = getattr(settings, 'TUMA_CALLBACK_URL', None)
             if not callback_url:
                 # Construct default callback URL based on tenant schema
@@ -228,7 +339,7 @@ class TumaInitiatePaymentView(APIView):
                 amount=amount,
                 phone=request.data["phone"],
                 callback_url=callback_url,
-                description=request.data.get("description", f"Payment via {cfg.active_mode}"),
+                description=request.data.get("description", f"Payment via {cfg.active_mode} - {cfg.collection_reference_name}"),
             )
             
             if not tuma_res.get("success"):
@@ -238,8 +349,8 @@ class TumaInitiatePaymentView(APIView):
             
             # Create Payment record with all required fields using validated objects
             payment = Payment.objects.create(
-                customer=customer,  # <--- Now using validated customer object
-                payment_method=method,  # <--- Now using validated method object
+                customer=customer,
+                payment_method=method,
                 amount=amount,
                 transaction_fee=transaction_fee,
                 net_amount=net_amount,
