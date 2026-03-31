@@ -184,8 +184,8 @@ class InitiateCustomerPaymentView(APIView):
         # Get or create Tuma payment method
         payment_method = self._get_or_create_tuma_payment_method()
         
-        # Generate internal reference
-        reference = f"PAY-{customer.customer_code}-{int(time.time())}"
+        # Generate internal reference - ensure no spaces
+        reference = f"PAY-{customer.customer_code}-{int(time.time())}".replace(" ", "-")
         
         # Create payment record
         payment = Payment.objects.create(
@@ -211,16 +211,17 @@ class InitiateCustomerPaymentView(APIView):
             
             token = client.auth_token(cfg.tuma_business_email, cfg.tuma_business_api_key)
             
-            # Create a short description (Max 20 chars)
+            # Create a short description (Max 20 chars) - ensure no spaces in customer_code
             short_desc = f"Pay {customer.customer_code}"[:20]
             
+            # Pass the raw amount, the service will clean it (convert to integer)
             response = client.stk_push(
                 token=token,
-                amount=float(amount),
+                amount=amount,  # Pass the raw amount, service will clean it
                 phone=phone_number,
                 callback_url=settings.TUMA_CALLBACK_URL,
                 description=short_desc,
-                reference=reference  # Pass the generated PAY-CUST-XXX string
+                reference=reference  # Pass the sanitized reference
             )
             
             if response.get("success"):
