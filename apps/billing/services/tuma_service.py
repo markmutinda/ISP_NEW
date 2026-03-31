@@ -149,7 +149,7 @@ class TumaClient:
         
         Args:
             token: Child business authentication token
-            amount: Payment amount
+            amount: Payment amount (will be converted to integer for Safaricom)
             phone: Customer phone number (format: 2547XXXXXXXX)
             callback_url: Webhook URL for payment confirmation
             description: Truncated to 20 chars for Safaricom compatibility
@@ -158,15 +158,21 @@ class TumaClient:
         Returns:
             dict: Contains merchant_request_id and checkout_request_id
         """
+        # Safaricom strictly requires WHOLE numbers (integers). No decimals.
+        clean_amount = int(float(amount))
+        
+        # Ensure reference has NO spaces (replace with hyphens)
+        clean_reference = str(reference).replace(" ", "-")
+
         response = requests.post(
             f"{self.base}/payment/stk-push",
             headers={"Authorization": f"Bearer {token}"},
             json={
-                "amount": float(amount),
+                "amount": clean_amount, 
                 "phone": phone,
                 "callback_url": callback_url,
-                "description": description[:20],  # Ensure max 20 characters
-                "external_reference": reference,   # Crucial fix: link payment
+                "description": description[:20],  # Max 20 chars for Safaricom
+                "external_reference": clean_reference,  # Link payment to DB record
             },
             timeout=20
         )
