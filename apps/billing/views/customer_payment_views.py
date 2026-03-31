@@ -22,7 +22,7 @@ from apps.billing.models.payment_models import (
     Payment, 
     InvoiceItemPayment, 
     TenantTumaConfig,
-    StkCancellationTracker   # ← NEW IMPORT
+    StkCancellationTracker
 )
 from apps.billing.models.billing_models import Invoice
 from apps.billing.services.tuma_service import TumaClient, TumaError
@@ -211,27 +211,16 @@ class InitiateCustomerPaymentView(APIView):
             
             token = client.auth_token(cfg.tuma_business_email, cfg.tuma_business_api_key)
             
-            # Create a short, safe description (Max 20 chars)
-            # Use customer code for recharge, or invoice number for invoice payments
-            if invoice:
-                short_desc = f"Inv {invoice.invoice_number}"[:20]
-            else:
-                short_desc = f"Recharge {customer.customer_code}"[:20]
+            # Create a short description (Max 20 chars)
+            short_desc = f"Pay {customer.customer_code}"[:20]
             
-            # Add payment mode prefix if needed (keep within 20 char limit)
-            if cfg.active_mode == "TILL":
-                short_desc = f"T-{short_desc}"[:20]
-            else:
-                short_desc = f"B-{short_desc}"[:20]
-            
-            # Initiate STK Push with reference
             response = client.stk_push(
                 token=token,
-                amount=int(Decimal(str(amount))),
+                amount=float(amount),
                 phone=phone_number,
                 callback_url=settings.TUMA_CALLBACK_URL,
-                description=short_desc,          # Shortened description (max 20 chars)
-                reference=reference              # Pass the internal reference
+                description=short_desc,
+                reference=reference  # Pass the generated PAY-CUST-XXX string
             )
             
             if response.get("success"):
