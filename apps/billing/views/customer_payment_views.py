@@ -18,7 +18,12 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from apps.billing.models.payment_models import Payment, InvoiceItemPayment, TenantTumaConfig
+from apps.billing.models.payment_models import (
+    Payment, 
+    InvoiceItemPayment, 
+    TenantTumaConfig,
+    StkCancellationTracker   # ← NEW IMPORT
+)
 from apps.billing.models.billing_models import Invoice
 from apps.billing.services.tuma_service import TumaClient, TumaError
 
@@ -77,7 +82,30 @@ class InitiateCustomerPaymentView(APIView):
             return False, "Collection account number missing. Please reconfigure your payment settings."
         
         return True, None
-    
+
+    def _check_stk_cancellation_block(self, schema_name: str, phone_number: str):
+        """
+        Check if the user has been blocked due to consecutive STK cancellations (result_code 1032).
+        Raises 429 Too Many Requests if blocked.
+        """
+        tracker = StkCancellationTracker.get_or_create_tracker(schema_name, phone_number)
+        
+        if tracker.is_currently_blocked() or tracker.consecutive_1032_count >= 3:
+            logger.warning(
+                f"STK Push blocked for phone {phone_number} under schema {schema_name}. "
+                f"Consecutive 1032 count: {tracker.consecutive_1032_count}"
+            )
+            return Response(
+                {
+                    "error": "STK requests blocked due to multiple cancellations. "
+                             "Please contact support to unblock your number.",
+                    "detail": "You have cancelled the payment prompt too many times. "
+                              "Try again later or contact support."
+                },
+                status=429  # Too Many Requests
+            )
+        return None  # No block
+
     @transaction.atomic
     def post(self, request):
         user = request.user
@@ -114,7 +142,14 @@ class InitiateCustomerPaymentView(APIView):
                 {'error': 'Phone number is required'},
                 status=status.HTTP_400_BAD_REQUEST
             )
-        
+
+        # ====================== NEW: ANTI-ABUSE CHECK ======================
+        # Block before STK Push if user has too many consecutive cancellations
+        block_response = self._check_stk_cancellation_block(schema, phone_number)
+        if block_response:
+            return block_response
+        # ===================================================================
+
         # Get invoice if specified
         invoice = None
         if invoice_id:
@@ -128,7 +163,6 @@ class InitiateCustomerPaymentView(APIView):
         
         # ============================================================
         # CRITICAL: Validate Tuma configuration BEFORE initiating payment
-        # Ensure child business exists and has all required credentials
         # ============================================================
         try:
             cfg = TenantTumaConfig.objects.get(schema_name=schema, is_active=True)
@@ -153,7 +187,7 @@ class InitiateCustomerPaymentView(APIView):
         # Generate internal reference
         reference = f"PAY-{customer.customer_code}-{int(time.time())}"
         
-        # Create payment record with proper model fields
+        # Create payment record
         payment = Payment.objects.create(
             customer=customer,
             invoice=invoice,
@@ -169,12 +203,10 @@ class InitiateCustomerPaymentView(APIView):
         
         # ============================================================
         # Initiate Tuma STK Push using CHILD credentials
-        # These credentials are specific to this tenant's child business
         # ============================================================
         try:
             client = TumaClient()
             
-            # Authenticate using the CHILD credentials specific to this tenant
             logger.info(f"Initiating Tuma payment for tenant {schema} using business {cfg.tuma_business_id}")
             
             token = client.auth_token(cfg.tuma_business_email, cfg.tuma_business_api_key)
@@ -183,7 +215,6 @@ class InitiateCustomerPaymentView(APIView):
             if invoice:
                 description = f"Invoice #{invoice.invoice_number}"
             
-            # Add collection mode info to description for better tracking
             if cfg.active_mode == "TILL":
                 description = f"[Till] {description}"
             else:
@@ -199,7 +230,6 @@ class InitiateCustomerPaymentView(APIView):
             
             if response.get("success"):
                 data = response.get("data", {})
-                # Store Tuma tracking IDs
                 payment.tuma_merchant_request_id = data.get("merchant_request_id", "")
                 payment.tuma_checkout_request_id = data.get("checkout_request_id", "")
                 payment.tuma_status = "pending"
@@ -270,7 +300,6 @@ class CustomerPaymentStatusView(APIView):
     def get(self, request, payment_id):
         user = request.user
         
-        # Get customer's payment
         try:
             from apps.customers.models import Customer
             customer = Customer.objects.get(user=user)
@@ -283,8 +312,6 @@ class CustomerPaymentStatusView(APIView):
         
         is_finalized = payment.status in ['COMPLETED', 'FAILED', 'CANCELLED']
         
-        # Return current local DB status. 
-        # (The webhook is responsible for updating this from PENDING/PROCESSING -> COMPLETED)
         return Response({
             'payment_id': payment.id,
             'payment_number': payment.payment_number,
@@ -320,7 +347,6 @@ class CustomerPaymentMethodsView(APIView):
     def get(self, request):
         from apps.billing.models.payment_models import InvoiceItemPayment
         
-        # Get active payment methods
         methods = InvoiceItemPayment.objects.filter(
             is_active=True,
         ).order_by('name')
@@ -342,5 +368,5 @@ class CustomerPaymentMethodsView(APIView):
         
         return Response({
             'payment_methods': methods_data,
-            'default_method': 'TUMA_STK',  # Updated default identifier
+            'default_method': 'TUMA_STK',
         })

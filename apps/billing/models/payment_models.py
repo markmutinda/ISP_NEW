@@ -16,11 +16,9 @@ class MpesaConfiguration(AuditMixin):
     Each tenant (ISP) configures their own Paybill here.
     """
     # Tenant schema field to isolate configurations
-    # REMOVED dangerous default - will fail loudly if schema_name not set
     schema_name = models.SlugField(
         max_length=63,
         editable=False
-        # default="default_schema"  # REMOVED - this was dangerous
     )
 
     # Core Paybill Details
@@ -122,7 +120,7 @@ class MpesaConfiguration(AuditMixin):
             models.Index(fields=['business_shortcode', 'shortcode_type']),
         ]
         unique_together = [
-            ['schema_name', 'business_shortcode', 'shortcode_type'],  # Unique shortcode per tenant
+            ['schema_name', 'business_shortcode', 'shortcode_type'],
         ]
         
     def __str__(self):
@@ -133,7 +131,6 @@ class MpesaConfiguration(AuditMixin):
     
     def clean(self):
         """Validate configuration before saving"""
-        # Validate transaction amount limits
         if self.min_transaction_amount < Decimal('0.01'):
             raise ValidationError({'min_transaction_amount': 'Minimum amount must be at least 0.01'})
             
@@ -144,34 +141,27 @@ class MpesaConfiguration(AuditMixin):
             raise ValidationError('Minimum amount cannot exceed maximum amount')
     
     def save(self, *args, **kwargs):
-        # Ensure only one active configuration per tenant
         if self.is_active:
             MpesaConfiguration.objects.filter(
                 schema_name=self.schema_name, 
                 is_active=True
             ).exclude(pk=self.pk).update(is_active=False)
         
-        # Ensure only one default configuration per tenant
         if self.is_default:
             MpesaConfiguration.objects.filter(
                 schema_name=self.schema_name,
                 is_default=True
             ).exclude(pk=self.pk).update(is_default=False)
         
-        # If this is the first configuration for this tenant, make it default and active
         if not self.pk and not MpesaConfiguration.objects.filter(schema_name=self.schema_name).exists():
             self.is_default = True
             self.is_active = True
         
-        self.full_clean()  # Run validations
+        self.full_clean()
         super().save(*args, **kwargs)
     
     @classmethod
     def get_active_configuration(cls, schema_name):
-        """
-        Get the active M-Pesa configuration for a tenant.
-        Returns the active config or None.
-        """
         return cls.objects.filter(
             schema_name=schema_name,
             is_active=True
@@ -179,10 +169,6 @@ class MpesaConfiguration(AuditMixin):
     
     @classmethod
     def get_default_configuration(cls, schema_name):
-        """
-        Get the default M-Pesa configuration for a tenant.
-        Falls back to active if no default is set.
-        """
         config = cls.objects.filter(
             schema_name=schema_name,
             is_default=True
@@ -194,38 +180,20 @@ class MpesaConfiguration(AuditMixin):
         return config
     
     def get_api_environment(self):
-        """Return the appropriate API environment settings"""
-        if self.is_sandbox:
-            return "sandbox"
-        else:
-            return "production"
+        return "sandbox" if self.is_sandbox else "production"
     
     def get_callback_url(self, request=None):
-        """
-        Generate the callback URL for this configuration.
-        Uses tenant-specific override if provided, otherwise generates dynamically
-        using subdomain-based URL structure for better M-Pesa compatibility.
-        """
         if self.callback_url:
             return self.callback_url
         
-        # Extract subdomain from schema (tenant_pink4 -> pink4)
-        # Remove 'tenant_' prefix if it exists to get the subdomain
         sub_domain = self.schema_name.replace('tenant_', '')
-        
-        # Use subdomain-based URL structure for better M-Pesa API compatibility
-        # This avoids path-based parameters that can cause issues with callbacks
         return f"https://{sub_domain}.netily.co.ke/api/v1/billing/mpesa/c2b-callback/"
     
     def get_timeout_url(self, request=None):
-        """Generate the timeout URL for this configuration"""
         if self.timeout_url:
             return self.timeout_url
         
-        # Extract subdomain from schema (tenant_pink4 -> pink4)
         sub_domain = self.schema_name.replace('tenant_', '')
-        
-        # Use subdomain-based URL structure for timeout URL as well
         return f"https://{sub_domain}.netily.co.ke/api/v1/billing/mpesa/timeout/"
 
 
@@ -250,8 +218,6 @@ class MpesaTransaction(models.Model):
         ('REVERSAL', 'Transaction Reversal'),
     ]
     
-    # Link to payment if created
-    # FIXED: Changed related_name from 'mpesa_transaction' to 'payment_log' to avoid conflict
     payment = models.OneToOneField(
         'billing.Payment', 
         on_delete=models.SET_NULL, 
@@ -260,49 +226,40 @@ class MpesaTransaction(models.Model):
         related_name='payment_log'
     )
     
-    # Link to configuration
     configuration = models.ForeignKey(
         'billing.MpesaConfiguration', 
         on_delete=models.PROTECT,
         related_name='transactions'
     )
     
-    # Tenant schema field
-    # REMOVED dangerous default - will fail loudly if schema_name not set
     schema_name = models.SlugField(max_length=63, editable=False)
     
-    # Transaction identifiers
     merchant_request_id = models.CharField(max_length=100, unique=True)
     checkout_request_id = models.CharField(max_length=100, unique=True)
     transaction_id = models.CharField(
         max_length=50, 
         blank=True, 
         db_index=True, 
-        unique=True,  # <--- CRITICAL: DB-level idempotency to prevent duplicate payments
+        unique=True,
         help_text="M-Pesa Receipt Number (unique)"
     )
     
-    # Transaction details
     transaction_type = models.CharField(max_length=20, choices=TRANSACTION_TYPE, default='STK_PUSH')
     amount = models.DecimalField(max_digits=12, decimal_places=2)
     phone_number = models.CharField(max_length=20)
     account_reference = models.CharField(max_length=50, blank=True)
     transaction_desc = models.CharField(max_length=200, blank=True)
     
-    # Status
     status = models.CharField(max_length=20, choices=TRANSACTION_STATUS, default='PENDING')
     result_code = models.IntegerField(null=True, blank=True)
     result_desc = models.TextField(blank=True)
     
-    # Callback data
     callback_data = models.JSONField(null=True, blank=True)
     callback_received_at = models.DateTimeField(null=True, blank=True)
     
-    # Request/Response logging
     request_payload = models.JSONField(null=True, blank=True)
     response_payload = models.JSONField(null=True, blank=True)
     
-    # Timestamps
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
     
@@ -320,11 +277,9 @@ class MpesaTransaction(models.Model):
         return f"{self.transaction_id or 'Pending'} - {self.amount} - {self.status}"
     
     def save(self, *args, **kwargs):
-        # Auto-set schema_name from configuration if not set
         if not self.schema_name and self.configuration:
             self.schema_name = self.configuration.schema_name
         
-        # If still no schema_name after trying configuration, validate
         if not self.schema_name:
             from django.core.exceptions import ValidationError
             raise ValidationError("schema_name must be set for MpesaTransaction")
@@ -332,7 +287,6 @@ class MpesaTransaction(models.Model):
         super().save(*args, **kwargs)
     
     def mark_completed(self, transaction_id, callback_data=None):
-        """Mark transaction as completed"""
         self.status = 'COMPLETED'
         self.transaction_id = transaction_id
         self.result_code = 0
@@ -343,7 +297,6 @@ class MpesaTransaction(models.Model):
         self.save()
     
     def mark_failed(self, result_code, result_desc, callback_data=None):
-        """Mark transaction as failed"""
         self.status = 'FAILED'
         self.result_code = result_code
         self.result_desc = result_desc
@@ -353,9 +306,102 @@ class MpesaTransaction(models.Model):
         self.save()
     
     def mark_timeout(self):
-        """Mark transaction as timed out"""
         self.status = 'TIMEOUT'
         self.result_desc = "Transaction timed out - no callback received"
+        self.save()
+
+
+class StkCancellationTracker(models.Model):
+    """
+    Tracks consecutive STK Push cancellations (result_code 1032) per tenant + phone number
+    to prevent abuse (users repeatedly cancelling STK pushes).
+    """
+    schema_name = models.SlugField(max_length=63, db_index=True)
+    phone_number = models.CharField(max_length=20, db_index=True)
+    
+    consecutive_1032_count = models.PositiveIntegerField(default=0)
+    is_blocked = models.BooleanField(default=False)
+    blocked_at = models.DateTimeField(null=True, blank=True)
+    
+    last_result_code = models.IntegerField(null=True, blank=True)
+    last_checkout_request_id = models.CharField(max_length=120, blank=True)
+    
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = 'STK Cancellation Tracker'
+        verbose_name_plural = 'STK Cancellation Trackers'
+        unique_together = [('schema_name', 'phone_number')]
+        indexes = [
+            models.Index(fields=['schema_name', 'phone_number']),
+            models.Index(fields=['schema_name', 'is_blocked']),
+            models.Index(fields=['schema_name', 'consecutive_1032_count']),
+        ]
+
+    def __str__(self):
+        status = "BLOCKED" if self.is_blocked else f"{self.consecutive_1032_count} cancellations"
+        return f"{self.phone_number} [{self.schema_name}] - {status}"
+
+    @classmethod
+    def get_or_create_tracker(cls, schema_name, phone_number):
+        """Get or create tracker for a phone number under a tenant"""
+        tracker, created = cls.objects.get_or_create(
+            schema_name=schema_name,
+            phone_number=phone_number
+        )
+        return tracker
+
+    def record_result_code(self, result_code: int, checkout_request_id: str = ""):
+        """
+        Record a callback result code and update cancellation streak.
+        Especially handles result_code 1032 (User cancelled STK Push).
+        """
+        self.last_result_code = result_code
+        self.last_checkout_request_id = checkout_request_id
+        self.updated_at = timezone.now()
+
+        if result_code == 1032:  # User cancelled
+            self.consecutive_1032_count += 1
+            
+            # Block after 3 or more consecutive cancellations (customizable threshold)
+            if self.consecutive_1032_count >= 3 and not self.is_blocked:
+                self.is_blocked = True
+                self.blocked_at = timezone.now()
+        else:
+            # Any successful or different failure resets the counter
+            if result_code in [0, 1037]:  # Success or "Transaction in progress"
+                self.consecutive_1032_count = 0
+                self.is_blocked = False
+                self.blocked_at = None
+            else:
+                # Other failures may or may not reset - here we reset on non-1032
+                self.consecutive_1032_count = 0
+
+        self.save()
+        return self
+
+    def is_currently_blocked(self) -> bool:
+        """Check if this phone is currently blocked from STK Push"""
+        if not self.is_blocked:
+            return False
+        
+        # Optional: Auto-unblock after 24 hours (you can adjust or remove)
+        if self.blocked_at and timezone.now() - self.blocked_at > timezone.timedelta(hours=24):
+            self.is_blocked = False
+            self.consecutive_1032_count = 0
+            self.blocked_at = None
+            self.save()
+            return False
+        
+        return True
+
+    def reset(self):
+        """Manually reset tracker (e.g. after admin intervention)"""
+        self.consecutive_1032_count = 0
+        self.is_blocked = False
+        self.blocked_at = None
+        self.last_result_code = None
+        self.last_checkout_request_id = ""
         self.save()
 
 
@@ -372,19 +418,12 @@ class TenantTumaConfig(models.Model):
     schema_name = models.SlugField(max_length=63, unique=True, db_index=True)
     tenant = models.ForeignKey("core.Tenant", on_delete=models.CASCADE, related_name="tuma_configs")
 
-    # Child business details (Created by your backend via master token)
     tuma_business_id = models.CharField(max_length=64, blank=True)
     tuma_business_email = models.EmailField(blank=True)
     tuma_business_api_key = models.CharField(max_length=255, blank=True)
 
-    # Single active method enforcement
     active_mode = models.CharField(max_length=10, choices=MODE_CHOICES, blank=True)
 
-    # ============================================================
-    # UNIFIED REFERENCE FIELDS (NEW)
-    # Bank/Paybill/Till all come from Tuma reference list
-    # Cache selected reference metadata for quick display
-    # ============================================================
     collection_reference_id = models.CharField(
         max_length=64, 
         blank=True, 
@@ -407,8 +446,7 @@ class TenantTumaConfig(models.Model):
         help_text="Account number (till number, paybill number, or bank account)"
     )
 
-    # DEPRECATED: These fields are being replaced by the unified reference fields
-    # Keep for backward compatibility during migration
+    # DEPRECATED fields kept for backward compatibility
     till_number = models.CharField(max_length=30, blank=True)
     bank_id = models.CharField(max_length=64, blank=True)
     bank_name = models.CharField(max_length=100, blank=True)
@@ -428,24 +466,19 @@ class TenantTumaConfig(models.Model):
 
     def __str__(self):
         mode = self.active_mode or "Not configured"
-        ref_display = ""
-        if self.collection_reference_name:
-            ref_display = f" - {self.collection_reference_name}"
+        ref_display = f" - {self.collection_reference_name}" if self.collection_reference_name else ""
         return f"Tuma Config - {self.schema_name} ({mode}){ref_display}"
 
     def clean_mode(self):
-        """Strict mutually exclusive logic for Till vs Bank modes"""
         if self.active_mode == "TILL":
             if not self.collection_reference_id or not self.collection_account_number:
                 raise ValidationError({
                     'collection_reference_id': 'Reference is required when mode is TILL',
                     'collection_account_number': 'Account number is required when mode is TILL'
                 })
-            # Clear bank fields when mode is TILL
             self.bank_id = ""
             self.bank_name = ""
             self.bank_account_number = ""
-            # Sync deprecated fields for backward compatibility
             self.till_number = self.collection_account_number
             
         elif self.active_mode == "BANK":
@@ -454,15 +487,12 @@ class TenantTumaConfig(models.Model):
                     'collection_reference_id': 'Bank selection is required when mode is BANK',
                     'collection_account_number': 'Account number is required when mode is BANK'
                 })
-            # Clear till field when mode is BANK
             self.till_number = ""
-            # Sync deprecated fields for backward compatibility
             self.bank_id = self.collection_reference_id
             self.bank_name = self.collection_reference_name
             self.bank_account_number = self.collection_account_number
             
         elif self.active_mode == "":
-            # No mode selected - clear everything
             self.collection_reference_id = ""
             self.collection_reference_code = ""
             self.collection_reference_name = ""
@@ -473,11 +503,9 @@ class TenantTumaConfig(models.Model):
             self.bank_account_number = ""
 
     def clean(self):
-        """Model-level validation"""
         self.clean_mode()
         
     def save(self, *args, **kwargs):
-        # Auto-sync collection fields when using deprecated fields (backward compat)
         if self.active_mode == "TILL" and self.till_number and not self.collection_account_number:
             self.collection_account_number = self.till_number
         if self.active_mode == "BANK" and self.bank_id and not self.collection_reference_id:
@@ -489,10 +517,6 @@ class TenantTumaConfig(models.Model):
         super().save(*args, **kwargs)
     
     def get_collection_display(self):
-        """
-        Get human-readable display of the selected collection method.
-        Returns a dictionary with formatted display information.
-        """
         if not self.active_mode:
             return None
             
@@ -533,17 +557,15 @@ class InvoiceItemPayment(models.Model):
     method_type = models.CharField(max_length=20, choices=METHOD_TYPES)
     description = models.TextField(blank=True)
 
-    # PayHero Integration Fields (DEPRECATED - being phased out)
-    channel_id = models.IntegerField(null=True, blank=True, help_text="PayHero channel ID")
-    is_payhero_enabled = models.BooleanField(default=False, help_text="Route payments via PayHero")
+    channel_id = models.IntegerField(null=True, blank=True)
+    is_payhero_enabled = models.BooleanField(default=False)
     till_number = models.CharField(max_length=20, null=True, blank=True)
     paybill_number = models.CharField(max_length=20, null=True, blank=True)
     account_number = models.CharField(max_length=50, null=True, blank=True)
     bank_name = models.CharField(max_length=100, null=True, blank=True)
     custom_link = models.URLField(null=True, blank=True)
-    is_default = models.BooleanField(default=False, help_text="Default payment method for this company")
+    is_default = models.BooleanField(default=False)
 
-    # M-Pesa Configuration Link
     mpesa_configuration = models.ForeignKey(
         'billing.MpesaConfiguration',
         on_delete=models.SET_NULL,
@@ -553,7 +575,6 @@ class InvoiceItemPayment(models.Model):
         help_text="Link to tenant-specific M-Pesa configuration"
     )
 
-    # Tuma Configuration Link
     tuma_configuration = models.ForeignKey(
         'billing.TenantTumaConfig',
         on_delete=models.SET_NULL,
@@ -563,37 +584,28 @@ class InvoiceItemPayment(models.Model):
         help_text="Link to tenant-specific Tuma configuration"
     )
 
-    # Configuration
     is_active = models.BooleanField(default=True)
     requires_confirmation = models.BooleanField(default=False)
     confirmation_timeout = models.PositiveIntegerField(help_text="Timeout in minutes", default=30)
 
-    # Fees
     transaction_fee = models.DecimalField(max_digits=5, decimal_places=2, default=0)
     fee_type = models.CharField(max_length=10, choices=[('PERCENTAGE', 'Percentage'), ('FIXED', 'Fixed')], default='FIXED')
 
-    # Limits
     minimum_amount = models.DecimalField(max_digits=10, decimal_places=2, default=1)
     maximum_amount = models.DecimalField(max_digits=10, decimal_places=2, default=1000000)
 
-    # Integration
     integration_class = models.CharField(max_length=100, blank=True)
     config_json = models.JSONField(default=dict, blank=True)
 
-    # Tenant schema field
     schema_name = models.SlugField(
         max_length=63,
         editable=False,
-        # Keeping default here as InvoiceItemPayment might be created in various contexts
-        # but should ideally be set explicitly as well
         default="default_schema"
     )
     
-    # Status
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='ACTIVE')
     last_used = models.DateTimeField(null=True, blank=True)
 
-    # Metadata
     created_by = models.ForeignKey('core.User', on_delete=models.SET_NULL, null=True, related_name='created_payment_methods')
     updated_by = models.ForeignKey('core.User', on_delete=models.SET_NULL, null=True, related_name='updated_payment_methods')
     created_at = models.DateTimeField(auto_now_add=True)
@@ -625,14 +637,11 @@ class InvoiceItemPayment(models.Model):
         return self.minimum_amount <= amount <= self.maximum_amount
     
     def get_mpesa_config(self):
-        """Get the M-Pesa configuration for this payment method"""
         if self.mpesa_configuration and self.mpesa_configuration.is_active:
             return self.mpesa_configuration
-        # Fall back to default tenant configuration
         return MpesaConfiguration.get_default_configuration(self.schema_name)
     
     def get_tuma_config(self):
-        """Get the Tuma configuration for this payment method"""
         if self.tuma_configuration and self.tuma_configuration.is_active:
             return self.tuma_configuration
         return None
@@ -662,12 +671,9 @@ class Payment(models.Model):
     payment_reference = models.CharField(max_length=100, blank=True)
     transaction_id = models.CharField(max_length=100, blank=True)
 
-    # PayHero-specific fields (DEPRECATED - being phased out)
     payhero_external_reference = models.CharField(max_length=255, blank=True, null=True, unique=True)
     raw_callback = models.JSONField(null=True, blank=True)
     
-    # M-Pesa Transaction Link
-    # FIXED: Changed related_name from 'related_payment' to 'payment_record' for clarity
     mpesa_transaction = models.OneToOneField(
         'billing.MpesaTransaction',
         on_delete=models.SET_NULL,
@@ -676,19 +682,16 @@ class Payment(models.Model):
         related_name='payment_record'
     )
 
-    # Tuma Transaction Fields
     tuma_merchant_request_id = models.CharField(max_length=120, blank=True, db_index=True)
     tuma_checkout_request_id = models.CharField(max_length=120, blank=True, db_index=True)
-    tuma_status = models.CharField(max_length=20, blank=True)  # pending/completed/failed
+    tuma_status = models.CharField(max_length=20, blank=True)
     tuma_result_code = models.IntegerField(null=True, blank=True)
     tuma_result_desc = models.TextField(blank=True)
     tuma_callback_payload = models.JSONField(null=True, blank=True)
 
-    # Tenant schema field
     schema_name = models.SlugField(
         max_length=63,
         editable=False,
-        # Keeping default here as Payment might be created in various contexts
         default="default_schema"
     )
     
@@ -824,47 +827,36 @@ class Receipt(models.Model):
         ('CANCELLED', 'Cancelled'),
     ]
 
-    # Basic Information
     receipt_number = models.CharField(max_length=50, unique=True)
     customer = models.ForeignKey('customers.Customer', on_delete=models.CASCADE, related_name='receipts')
     
-    # Payment Reference
     payment = models.OneToOneField(Payment, on_delete=models.CASCADE, related_name='receipt')
     
-    # Amount
     amount = models.DecimalField(max_digits=12, decimal_places=2)
     amount_in_words = models.CharField(max_length=500)
     currency = models.CharField(max_length=3, default='KES')
     
-    # Payment Details
     payment_method = models.CharField(max_length=100)
     payment_reference = models.CharField(max_length=100, blank=True)
     
-    # Tenant schema field
     schema_name = models.SlugField(
         max_length=63,
         editable=False,
         default="default_schema"
     )
     
-    # Status
     status = models.CharField(max_length=20, choices=RECEIPT_STATUS, default='DRAFT')
     
-    # Dates
     receipt_date = models.DateTimeField(default=timezone.now)
     issued_at = models.DateTimeField(null=True, blank=True)
     
-    # Issuer
     issued_by = models.ForeignKey('core.User', on_delete=models.SET_NULL, null=True, blank=True, related_name='issued_receipts')
     
-    # Notes
     notes = models.TextField(blank=True)
     
-    # Digital Signature
     digital_signature = models.TextField(blank=True)
     qr_code = models.TextField(blank=True)
     
-    # Metadata
     created_by = models.ForeignKey('core.User', on_delete=models.SET_NULL, null=True, related_name='created_receipts')
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -883,7 +875,6 @@ class Receipt(models.Model):
 
     def save(self, *args, **kwargs):
         if not self.receipt_number:
-            # Generate receipt number: RCPT-YYYY-XXXXX
             year = timezone.now().year
             last_receipt = Receipt.objects.filter(
                 receipt_number__startswith=f'RCPT-{year}'
@@ -900,19 +891,15 @@ class Receipt(models.Model):
             
             self.receipt_number = f"RCPT-{year}-{new_num:05d}"
         
-        # Set amount from payment if not set
         if not self.amount and self.payment:
             self.amount = self.payment.amount
         
-        # Set payment method from payment if not set
         if not self.payment_method and self.payment:
             self.payment_method = self.payment.payment_method.name
         
-        # Set payment reference from payment if not set
         if not self.payment_reference and self.payment:
             self.payment_reference = self.payment.payment_reference
         
-        # Set schema_name from payment if not set
         if not self.schema_name and self.payment:
             self.schema_name = self.payment.schema_name
         
@@ -924,14 +911,12 @@ class Receipt(models.Model):
             self.issued_by = user
             self.issued_at = timezone.now()
             
-            # Generate amount in words
             try:
                 from utils.helpers import number_to_words
                 self.amount_in_words = number_to_words(self.amount)
             except ImportError:
                 self.amount_in_words = f"{self.amount} only"
             
-            # Generate QR code
             try:
                 from utils.helpers import generate_qr_code
                 receipt_data = {

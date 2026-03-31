@@ -1,8 +1,11 @@
 # apps/billing/views/tuma_webhook_views.py
 from django.db import transaction
 from django.http import JsonResponse
+from django.utils import timezone
+
 from rest_framework.views import APIView
-from apps.billing.models.payment_models import Payment
+
+from apps.billing.models.payment_models import Payment, StkCancellationTracker
 
 
 class TumaWebhookView(APIView):
@@ -59,6 +62,11 @@ class TumaWebhookView(APIView):
                 status=404
             )
 
+        # ====================== NEW: UPDATE STK CANCELLATION TRACKER ======================
+        # Track consecutive 1032 cancellations (user cancelling STK prompt)
+        self._update_stk_cancellation_tracker(payment, data, result_code)
+        # =================================================================================
+
         # Idempotency check: Don't process twice
         if payment.status == "COMPLETED":
             return JsonResponse(
@@ -74,15 +82,12 @@ class TumaWebhookView(APIView):
 
         # ============================================================
         # Senior Dev Fix: Trust result_code 0 primarily
-        # Don't be too strict with the string "completed"
-        # According to Tuma docs: result_code == 0 means success
         # ============================================================
         is_success = str(result_code) == "0"
 
         if is_success:
             payment.status = "COMPLETED"
-            payment.processed_at = data.get("processed_at")  # Use Tuma's timestamp if provided
-            # Store M-Pesa receipt number if provided (for M-Pesa payments)
+            payment.processed_at = data.get("processed_at")
             payment.mpesa_receipt = data.get("mpesa_receipt_number", "")
             payment.transaction_id = data.get("transaction_id", "") or data.get("mpesa_receipt_number", "")
             payment.is_reconciled = True
@@ -92,19 +97,6 @@ class TumaWebhookView(APIView):
             
             # ========================================================
             # TODO: Add your logic here to activate the Hotspot or PPPoE session
-            # This is where you'd integrate with your service activation system
-            # ========================================================
-            # Example:
-            # from apps.network.services.radius_sync_service import activate_service
-            # activate_service(payment.customer, payment.amount, payment.invoice)
-            #
-            # Or for hotspot:
-            # from apps.hotspot.services.hotspot_activation import activate_hotspot_voucher
-            # activate_hotspot_voucher(payment.customer, payment.amount)
-            #
-            # Or for PPPoE:
-            # from apps.radius.services.pppoe_activation import activate_pppoe_session
-            # activate_pppoe_session(payment.customer, payment.invoice)
             # ========================================================
             
         else:
@@ -113,3 +105,40 @@ class TumaWebhookView(APIView):
             payment.save()
 
         return JsonResponse({"success": True, "payment_id": payment.id}, status=200)
+
+    def _update_stk_cancellation_tracker(self, payment, data, result_code):
+        """
+        Update the STK cancellation tracker for this phone number.
+        Especially handles result_code 1032 (User cancelled the STK Push prompt).
+        """
+        schema = payment.schema_name
+        phone = payment.payer_phone or payment.mpesa_phone or ""
+
+        if not phone:
+            return  # No phone number to track
+
+        # Get or create tracker
+        tracker = StkCancellationTracker.get_or_create_tracker(schema, phone)
+
+        # Idempotency guard: don't count the same checkout request twice
+        incoming_checkout = data.get("checkout_request_id", "") or ""
+        if incoming_checkout and tracker.last_checkout_request_id == incoming_checkout:
+            return  # Already processed this callback
+
+        # Update tracker based on result_code
+        if str(result_code) == "1032":  # User cancelled STK prompt
+            tracker.consecutive_1032_count += 1
+            
+            if tracker.consecutive_1032_count >= 3 and not tracker.is_blocked:
+                tracker.is_blocked = True
+                tracker.blocked_at = timezone.now()
+        else:
+            # Any successful payment or other failure resets the cancellation streak
+            tracker.consecutive_1032_count = 0
+            tracker.is_blocked = False
+            tracker.blocked_at = None
+
+        # Always update last known values
+        tracker.last_result_code = int(result_code) if str(result_code).isdigit() else None
+        tracker.last_checkout_request_id = incoming_checkout
+        tracker.save()
