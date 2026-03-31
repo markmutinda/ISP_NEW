@@ -253,15 +253,6 @@ class PaymentMethodSerializer(serializers.ModelSerializer):
         if data.get('is_payhero_enabled') and not data.get('channel_id'):
             raise serializers.ValidationError({"channel_id": "This field is required when PayHero is enabled."})
         
-        # Validate M-Pesa configuration for M-Pesa payment methods
-        method_type = data.get('method_type')
-        mpesa_config = data.get('mpesa_configuration')
-        
-        if method_type and method_type.startswith('MPESA_') and not mpesa_config:
-            raise serializers.ValidationError({
-                "mpesa_configuration": f"M-Pesa configuration is required for {method_type} payment methods."
-            })
-        
         return data
 
 

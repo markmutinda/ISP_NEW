@@ -332,7 +332,7 @@ class CustomerPaymentStatusView(APIView):
 
 class CustomerPaymentMethodsView(APIView):
     """
-    Get available payment methods for customer.
+    Get available payment methods for customer (read-only, customer-facing).
     
     GET /api/v1/billing/payment-methods/
     """
@@ -342,9 +342,13 @@ class CustomerPaymentMethodsView(APIView):
     def get(self, request):
         from apps.billing.models.payment_models import InvoiceItemPayment
         
+        # Support paginated response expected by admin-api.ts
+        is_active = request.query_params.get('is_active')
         methods = InvoiceItemPayment.objects.filter(
-            is_active=True,
+            schema_name=connection.schema_name,
         ).order_by('name')
+        if is_active is not None:
+            methods = methods.filter(is_active=is_active.lower() == 'true')
         
         methods_data = [
             {
@@ -353,15 +357,102 @@ class CustomerPaymentMethodsView(APIView):
                 'name': method.name,
                 'method_type': method.method_type,
                 'description': method.description,
+                'is_active': method.is_active,
+                'is_default': method.is_default,
+                'is_payhero_enabled': method.is_payhero_enabled,
+                'channel_id': method.channel_id,
+                'till_number': method.till_number,
+                'paybill_number': method.paybill_number,
+                'account_number': method.account_number,
+                'bank_name': method.bank_name,
+                'custom_link': method.custom_link,
+                'config_json': method.config_json,
                 'minimum_amount': float(method.minimum_amount),
                 'maximum_amount': float(method.maximum_amount),
                 'transaction_fee': float(method.transaction_fee),
                 'fee_type': method.fee_type,
+                'status': method.status,
+                'created_at': method.created_at.isoformat() if method.created_at else None,
+                'updated_at': method.updated_at.isoformat() if method.updated_at else None,
             }
             for method in methods
         ]
         
         return Response({
-            'payment_methods': methods_data,
-            'default_method': 'TUMA_STK',
+            'count': len(methods_data),
+            'results': methods_data,
         })
+
+    def post(self, request):
+        """Create a new payment method (admin only)."""
+        from apps.billing.models.payment_models import InvoiceItemPayment
+        from apps.billing.serializers.payment_serializers import PaymentMethodSerializer
+
+        serializer = PaymentMethodSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        serializer.save(
+            schema_name=connection.schema_name,
+            created_by=request.user,
+            updated_by=request.user,
+        )
+        return Response(serializer.data, status=status.HTTP_201_CREATED)
+
+
+class PaymentMethodDetailView(APIView):
+    """
+    Retrieve, update or delete a single payment method.
+
+    GET/PATCH/DELETE /api/v1/billing/payment-methods/<id>/
+    """
+    permission_classes = [IsAuthenticated]
+
+    def _get_method(self, pk):
+        from apps.billing.models.payment_models import InvoiceItemPayment
+        return InvoiceItemPayment.objects.get(
+            pk=pk, schema_name=connection.schema_name,
+        )
+
+    def get(self, request, pk):
+        try:
+            method = self._get_method(pk)
+        except InvoiceItemPayment.DoesNotExist:
+            return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
+        from apps.billing.serializers.payment_serializers import PaymentMethodSerializer
+        return Response(PaymentMethodSerializer(method).data)
+
+    def patch(self, request, pk):
+        from apps.billing.serializers.payment_serializers import PaymentMethodSerializer
+        try:
+            method = self._get_method(pk)
+        except InvoiceItemPayment.DoesNotExist:
+            return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
+        serializer = PaymentMethodSerializer(method, data=request.data, partial=True)
+        serializer.is_valid(raise_exception=True)
+        serializer.save(updated_by=request.user)
+        return Response(serializer.data)
+
+    def delete(self, request, pk):
+        try:
+            method = self._get_method(pk)
+        except InvoiceItemPayment.DoesNotExist:
+            return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
+        method.delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+class PaymentMethodToggleActiveView(APIView):
+    """Toggle active state of a payment method."""
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, pk):
+        from apps.billing.models.payment_models import InvoiceItemPayment
+        try:
+            method = InvoiceItemPayment.objects.get(
+                pk=pk, schema_name=connection.schema_name,
+            )
+        except InvoiceItemPayment.DoesNotExist:
+            return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
+        method.is_active = not method.is_active
+        method.save(update_fields=['is_active', 'updated_at'])
+        from apps.billing.serializers.payment_serializers import PaymentMethodSerializer
+        return Response(PaymentMethodSerializer(method).data)

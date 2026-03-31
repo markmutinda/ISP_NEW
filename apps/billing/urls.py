@@ -24,6 +24,8 @@ from .views.customer_payment_views import (
     InitiateCustomerPaymentView,
     CustomerPaymentStatusView,
     CustomerPaymentMethodsView,
+    PaymentMethodDetailView,
+    PaymentMethodToggleActiveView,
 )
 from .views.webhook_views import (
     PayHeroSubscriptionWebhookView,
@@ -154,6 +156,8 @@ urlpatterns = [
     path('payments/initiate/', InitiateCustomerPaymentView.as_view(), name='initiate-payment'),
     path('payments/<int:payment_id>/status/', CustomerPaymentStatusView.as_view(), name='payment-status'),
     path('payment-methods/', CustomerPaymentMethodsView.as_view(), name='payment-methods'),
+    path('payment-methods/<int:pk>/', PaymentMethodDetailView.as_view(), name='payment-method-detail'),
+    path('payment-methods/<int:pk>/toggle_active/', PaymentMethodToggleActiveView.as_view(), name='payment-method-toggle-active'),
 ]
 
 # ==========================
