@@ -143,7 +143,7 @@ class TumaClient:
         response.raise_for_status()
         return response.json()
 
-    def stk_push(self, token, amount, phone, callback_url, description):
+    def stk_push(self, token, amount, phone, callback_url, description, reference):
         """
         Initiate an STK Push payment to a customer's phone.
         
@@ -152,7 +152,8 @@ class TumaClient:
             amount: Payment amount
             phone: Customer phone number (format: 2547XXXXXXXX)
             callback_url: Webhook URL for payment confirmation
-            description: Payment description
+            description: Payment description (will be truncated to 20 chars for Safaricom)
+            reference: External reference ID for linking payment to database record
             
         Returns:
             dict: Contains merchant_request_id and checkout_request_id
@@ -164,7 +165,8 @@ class TumaClient:
                 "amount": float(amount),
                 "phone": phone,
                 "callback_url": callback_url,
-                "description": description,
+                "description": description[:20],  # Truncate to 20 chars for Safaricom
+                "external_reference": reference,   # Link payment to database ID
             },
             timeout=20
         )

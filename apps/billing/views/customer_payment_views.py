@@ -211,21 +211,27 @@ class InitiateCustomerPaymentView(APIView):
             
             token = client.auth_token(cfg.tuma_business_email, cfg.tuma_business_api_key)
             
-            description = f"Account Recharge - {customer.full_name}"
+            # Create a short, safe description (Max 20 chars)
+            # Use customer code for recharge, or invoice number for invoice payments
             if invoice:
-                description = f"Invoice #{invoice.invoice_number}"
-            
-            if cfg.active_mode == "TILL":
-                description = f"[Till] {description}"
+                short_desc = f"Inv {invoice.invoice_number}"[:20]
             else:
-                description = f"[Bank] {description}"
+                short_desc = f"Recharge {customer.customer_code}"[:20]
             
+            # Add payment mode prefix if needed (keep within 20 char limit)
+            if cfg.active_mode == "TILL":
+                short_desc = f"T-{short_desc}"[:20]
+            else:
+                short_desc = f"B-{short_desc}"[:20]
+            
+            # Initiate STK Push with reference
             response = client.stk_push(
                 token=token,
                 amount=int(Decimal(str(amount))),
                 phone=phone_number,
                 callback_url=settings.TUMA_CALLBACK_URL,
-                description=description
+                description=short_desc,          # Shortened description (max 20 chars)
+                reference=reference              # Pass the internal reference
             )
             
             if response.get("success"):
