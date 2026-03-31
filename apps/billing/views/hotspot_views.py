@@ -26,6 +26,7 @@ from django_tenants.utils import schema_context, get_public_schema_name
 from apps.billing.models.hotspot_models import HotspotPlan, HotspotSession, HotspotBranding
 from apps.billing.models.billing_models import Plan
 from apps.billing.models.payment_models import Payment  # ADDED: Import Payment for Tuma status checks
+from apps.billing.models.voucher_models import Voucher
 from apps.network.models.router_models import Router
 from apps.subscriptions.models import CommissionLedger
 
@@ -709,4 +710,154 @@ class HotspotPurchaseStatusView(APIView):
             return Response({
                 'status': 'pending',
                 'message': 'Waiting for payment confirmation...',
+            })
+
+
+class HotspotVoucherRedeemView(APIView):
+    """
+    Redeem a voucher code on the hotspot captive portal.
+
+    PUBLIC ENDPOINT - No authentication required.
+    The user enters a voucher code (and optional PIN) received from the ISP.
+    If valid, a hotspot session is created and RADIUS credentials returned.
+
+    POST /api/v1/hotspot/voucher-redeem/
+    {
+        "code": "ABC123",
+        "pin": "1234",           // optional
+        "router_id": 5,
+        "plan_id": "uuid-...",
+        "mac_address": "AA:BB:CC:DD:EE:FF",
+        "tenant": "indigo3"
+    }
+    """
+
+    permission_classes = [AllowAny]
+    authentication_classes = []
+
+    def _generate_code(self):
+        chars = string.ascii_uppercase + string.digits
+        while True:
+            part1 = ''.join(random.choices(chars, k=4))
+            part2 = ''.join(random.choices(chars, k=4))
+            code = f"{part1}-{part2}"
+            if not HotspotSession.objects.filter(access_code=code).exists():
+                return code
+
+    @transaction.atomic
+    def post(self, request):
+        tenant_subdomain = request.data.get('tenant') or request.query_params.get('tenant')
+        if not tenant_subdomain:
+            return Response({'error': 'Tenant is required'}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            from apps.core.models import Tenant
+            with schema_context(get_public_schema_name()):
+                tenant = Tenant.objects.get(subdomain=tenant_subdomain, is_active=True)
+        except Exception:
+            return Response({'error': 'Invalid tenant'}, status=status.HTTP_400_BAD_REQUEST)
+
+        with schema_context(tenant.schema_name):
+            voucher_code = (request.data.get('code') or '').strip()
+            pin = (request.data.get('pin') or '').strip()
+            router_id = request.data.get('router_id')
+            plan_id = request.data.get('plan_id')
+            mac_address = (request.data.get('mac_address') or '00:00:00:00:00:00').upper().replace('-', ':')
+
+            if not voucher_code:
+                return Response({'error': 'Voucher code is required'}, status=status.HTTP_400_BAD_REQUEST)
+            if not router_id or not plan_id:
+                return Response({'error': 'Router and plan are required'}, status=status.HTTP_400_BAD_REQUEST)
+
+            # 1. Find and validate voucher
+            try:
+                voucher = Voucher.objects.select_related('batch').get(code__iexact=voucher_code)
+            except Voucher.DoesNotExist:
+                return Response({'error': 'Invalid voucher code'}, status=status.HTTP_404_NOT_FOUND)
+
+            if pin and voucher.pin and voucher.pin != pin:
+                return Response({'error': 'Invalid PIN'}, status=status.HTTP_400_BAD_REQUEST)
+
+            if not voucher.is_valid():
+                reason = 'Voucher has expired' if voucher.status == 'EXPIRED' else \
+                         'Voucher has already been used' if voucher.status in ('USED', 'REDEEMED') else \
+                         'Voucher is not available'
+                return Response({'error': reason}, status=status.HTTP_400_BAD_REQUEST)
+
+            # 2. Find Router & Plan
+            try:
+                router = Router.objects.get(id=router_id, is_active=True)
+            except (Router.DoesNotExist, ValueError):
+                return Response({'error': 'Router not found'}, status=status.HTTP_404_NOT_FOUND)
+
+            try:
+                plan = HotspotPlan.objects.get(id=plan_id, router=router, is_active=True)
+            except HotspotPlan.DoesNotExist:
+                return Response({'error': 'Plan not found'}, status=status.HTTP_404_NOT_FOUND)
+
+            # 3. Check voucher value covers the plan price
+            if voucher.remaining_value is not None and voucher.remaining_value < plan.price:
+                return Response({
+                    'error': f'Voucher balance (KES {voucher.remaining_value}) is insufficient for this plan (KES {plan.price})'
+                }, status=status.HTTP_400_BAD_REQUEST)
+
+            # 4. Persistent identity (same pattern as purchase flow)
+            existing_user = HotspotSession.objects.filter(
+                mac_address=mac_address
+            ).exclude(access_code__isnull=True).order_by('-created_at').first()
+
+            if existing_user and existing_user.access_code:
+                friendly_username = existing_user.access_code
+            else:
+                friendly_username = self._generate_code()
+
+            # 5. Mark voucher as used
+            voucher.use_count = (voucher.use_count or 0) + 1
+            if voucher.remaining_value is not None:
+                voucher.remaining_value = max(Decimal('0'), voucher.remaining_value - plan.price)
+            if not voucher.is_reusable or voucher.use_count >= (voucher.max_uses or 1):
+                voucher.status = 'USED'
+            voucher.save()
+
+            # 6. Create hotspot session
+            session_id = HotspotSession.generate_session_id()
+            session = HotspotSession.objects.create(
+                session_id=session_id,
+                router=router,
+                plan=plan,
+                phone_number='VOUCHER',
+                mac_address=mac_address,
+                amount=plan.price,
+                status='paid',
+                access_code=friendly_username,
+                payhero_checkout_id=f'VOUCHER_{voucher.code}',
+            )
+
+            # 7. Activate & create RADIUS credentials
+            try:
+                session.activate(friendly_username)
+                from apps.billing.services.hotspot_radius_service import HotspotRadiusService
+                radius_service = HotspotRadiusService()
+                radius_service.create_hotspot_credentials(
+                    username=friendly_username,
+                    password=friendly_username,
+                    router=session.router,
+                    plan=session.plan,
+                    expires_at=session.expires_at,
+                    mac_address=mac_address,
+                )
+                logger.info(f"VOUCHER REDEEM: {voucher.code} -> user {friendly_username} at {router.name}")
+            except Exception as e:
+                logger.error(f"RADIUS activation failed for voucher: {e}")
+                return Response({'error': 'Activation failed'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+            return Response({
+                'status': 'success',
+                'message': 'Voucher redeemed! You are connected.',
+                'access_code': friendly_username,
+                'username': friendly_username,
+                'password': friendly_username,
+                'expires_at': session.expires_at,
+                'plan_name': plan.name,
+                'remaining_voucher_value': str(voucher.remaining_value) if voucher.remaining_value is not None else None,
             })

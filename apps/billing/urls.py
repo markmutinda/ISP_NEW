@@ -5,7 +5,7 @@ from .views.InvoiceViews import PlanViewSet, BillingCycleViewSet, InvoiceViewSet
 from .views.PaymentViews import PaymentViewSet, MpesaConfigurationViewSet, MpesaTransactionViewSet
 from .views.VoucherViews import VoucherBatchViewSet, VoucherViewSet
 
-from .views.hotspot_views import CaptivePortalView, HotspotPlansView, HotspotPurchaseView, HotspotPurchaseStatusView
+from .views.hotspot_views import CaptivePortalView, HotspotPlansView, HotspotPurchaseView, HotspotPurchaseStatusView, HotspotVoucherRedeemView
 
 from .views.cloud_portal_views import (
     HotspotLoginPageView,
@@ -173,6 +173,7 @@ hotspot_urlpatterns = [
     path('device-auth/request/', HotspotDeviceAuthView.as_view(), name='hotspot-device-auth-request'),
     path('device-auth/authorize/', HotspotDeviceAuthView.as_view(), name='hotspot-device-auth-authorize'),
     path('device-auth/status/', HotspotDeviceAuthStatusView.as_view(), name='hotspot-device-auth-status'),
+    path('voucher-redeem/', HotspotVoucherRedeemView.as_view(), name='hotspot-voucher-redeem'),
 ]
 
 # ==========================
