@@ -211,8 +211,8 @@ class InitiateCustomerPaymentView(APIView):
             
             token = client.auth_token(cfg.tuma_business_email, cfg.tuma_business_api_key)
             
-            # Create a short description (Max 20 chars) - ensure no spaces in customer_code
-            short_desc = f"Pay {customer.customer_code}"[:20]
+            # Create a simple description with the payment reference (will be cleaned in service)
+            description = f"PAY-{customer.customer_code}"
             
             # Pass the raw amount, the service will clean it (convert to integer)
             response = client.stk_push(
@@ -220,8 +220,7 @@ class InitiateCustomerPaymentView(APIView):
                 amount=amount,  # Pass the raw amount, service will clean it
                 phone=phone_number,
                 callback_url=settings.TUMA_CALLBACK_URL,
-                description=short_desc,
-                reference=reference  # Pass the sanitized reference
+                description=description  # Only 5 arguments now
             )
             
             if response.get("success"):

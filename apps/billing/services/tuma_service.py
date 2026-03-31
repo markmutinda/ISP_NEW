@@ -1,5 +1,6 @@
 # apps/billing/services/tuma_service.py
 import requests
+import logging
 from django.conf import settings
 
 
@@ -143,7 +144,7 @@ class TumaClient:
         response.raise_for_status()
         return response.json()
 
-    def stk_push(self, token, amount, phone, callback_url, description, reference):
+    def stk_push(self, token, amount, phone, callback_url, description):
         """
         Initiates an STK Push.
         
@@ -152,17 +153,19 @@ class TumaClient:
             amount: Payment amount (will be converted to integer for Safaricom)
             phone: Customer phone number (format: 2547XXXXXXXX)
             callback_url: Webhook URL for payment confirmation
-            description: Truncated to 20 chars for Safaricom compatibility
-            reference: Required by Tuma to link the payment to database record
+            description: Original description that will be cleaned and used as unique reference
             
         Returns:
             dict: Contains merchant_request_id and checkout_request_id
         """
-        # Safaricom strictly requires WHOLE numbers (integers). No decimals.
+        # 1. Clean Amount: Safaricom wants an integer
         clean_amount = int(float(amount))
         
-        # Ensure reference has NO spaces (replace with hyphens)
-        clean_reference = str(reference).replace(" ", "-")
+        # 2. Clean Description/Reference: Tuma maps this to PayHero's external_reference.
+        # It MUST NOT have spaces, and must be short. We append a timestamp to ensure it's always unique.
+        import time
+        safe_desc = str(description).replace(" ", "-").replace("/", "-")[:10]
+        unique_reference = f"{safe_desc}-{int(time.time())}"
 
         response = requests.post(
             f"{self.base}/payment/stk-push",
@@ -171,11 +174,15 @@ class TumaClient:
                 "amount": clean_amount, 
                 "phone": phone,
                 "callback_url": callback_url,
-                "description": description[:20],  # Max 20 chars for Safaricom
-                "external_reference": clean_reference,  # Link payment to DB record
+                "description": unique_reference,  # This is now perfectly safe
             },
             timeout=20
         )
+        
+        # If Tuma returns 400, this helps us see exactly why in the logs
+        if response.status_code != 200:
+            logging.error(f"TUMA API ERROR: {response.text}")
+            
         response.raise_for_status()
         return response.json()
 
