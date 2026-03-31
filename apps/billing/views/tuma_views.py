@@ -7,7 +7,7 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework import status
 from django_tenants.utils import schema_context, get_public_schema_name
 
-from apps.core.models import Tenant
+from apps.core.models import Tenant, Company
 from apps.billing.models.payment_models import (
     TenantTumaConfig,
     Payment,
@@ -80,18 +80,24 @@ class TumaTenantModeView(APIView):
     permission_classes = [IsAuthenticated]
 
     def _resolve_tenant_identity(self, schema_name):
+        """
+        Safely resolve tenant and company details without crashing if profile is missing.
+        """
+        from apps.core.models import Company
+        
         with schema_context(get_public_schema_name()):
             tenant = Tenant.objects.get(schema_name=schema_name)
-
-        company = getattr(tenant, "company", None)
-        if company:
-            name = company.name or tenant.schema_name
-            email = company.email or ""
-            mobile = company.phone_number or ""
-        else:
-            name = tenant.schema_name
-            email = ""
-            mobile = ""
+            try:
+                # FIX: Safely try to get the company, catch the error if it doesn't exist
+                company = tenant.company 
+                name = company.name or tenant.schema_name
+                email = company.email or f"{tenant.schema_name}@netily.co.ke"
+                mobile = company.phone_number or "254700000000"
+            except (Company.DoesNotExist, AttributeError):
+                # FALLBACK: If no company profile, use the schema name
+                name = tenant.schema_name
+                email = f"{tenant.schema_name}@netily.co.ke"
+                mobile = "254700000000"
 
         return tenant, name, email, mobile
 
@@ -228,18 +234,26 @@ class TumaInitiatePaymentView(APIView):
                 sub_domain = schema.replace("tenant_", "")
                 callback_url = f"https://{sub_domain}.netily.co.ke/api/v1/webhooks/tuma/callback/"
 
+            # Create a simple description that will be cleaned in the service
+            description = f"PAY-{customer.customer_code}"
+
             tuma_res = client.stk_push(
                 token=token,
                 amount=amount,
                 phone=phone,
                 callback_url=callback_url,
-                description=request.data.get("description", f"Payment via {cfg.active_mode} - {cfg.collection_reference_name}"),
+                description=description,
             )
 
             if not tuma_res.get("success"):
                 return Response(tuma_res, status=400)
 
             d = tuma_res["data"]
+            
+            # Generate internal payment reference
+            import time
+            payment_reference = f"PAY-{customer.customer_code}-{int(time.time())}".replace(" ", "-")
+            
             payment = Payment.objects.create(
                 customer=customer,
                 payment_method=method,
@@ -248,7 +262,7 @@ class TumaInitiatePaymentView(APIView):
                 net_amount=net_amount,
                 currency=request.data.get("currency", "KES"),
                 status="PROCESSING",
-                payment_reference=request.data.get("payment_reference", ""),
+                payment_reference=payment_reference,
                 tuma_status="pending",
                 tuma_merchant_request_id=d.get("merchant_request_id", ""),
                 tuma_checkout_request_id=d.get("checkout_request_id", ""),
