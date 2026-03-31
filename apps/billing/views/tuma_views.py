@@ -108,6 +108,7 @@ class TumaTenantModeView(APIView):
     def _resolve_tenant_identity(self, schema_name):
         """
         Resolve tenant identity information for Tuma child business creation.
+        Uses company information from the tenant's company profile.
         
         Args:
             schema_name: The tenant's schema name
@@ -118,13 +119,26 @@ class TumaTenantModeView(APIView):
         with schema_context(get_public_schema_name()):
             tenant = Tenant.objects.get(schema_name=schema_name)
 
-        # Choose business name - prefer tenant name, fallback to schema_name
-        name = getattr(tenant, "name", None) or getattr(tenant, "schema_name", "Tenant Business")
+        # Get company information from tenant's company
+        # This provides clean mapping for Tuma business registration
+        company = getattr(tenant, 'company', None)
         
-        # Get admin user (tenant owner) contact info
-        admin_user = getattr(tenant, "owner", None)
-        email = getattr(admin_user, "email", "") if admin_user else ""
-        mobile = getattr(admin_user, "phone_number", "") if admin_user else ""
+        if company:
+            # Use company information for clean mapping
+            name = getattr(company, 'name', None) or getattr(tenant, "name", None) or tenant.schema_name
+            email = getattr(company, 'email', '')
+            mobile = getattr(company, 'phone_number', '')
+        else:
+            # Fallback to tenant attributes if company not available
+            name = getattr(tenant, "name", None) or tenant.schema_name
+            # Get admin user (tenant owner) contact info as fallback
+            admin_user = getattr(tenant, "owner", None)
+            email = getattr(admin_user, "email", "") if admin_user else ""
+            mobile = getattr(admin_user, "phone_number", "") if admin_user else ""
+        
+        # Ensure we have valid values (no empty strings for required fields)
+        if not name:
+            name = tenant.schema_name.replace('tenant_', '').title()
         
         return tenant, name, email, mobile
 
@@ -155,7 +169,7 @@ class TumaTenantModeView(APIView):
         """
         schema = connection.schema_name
         
-        # Resolve tenant identity
+        # Resolve tenant identity using company information
         tenant, name, email, mobile = self._resolve_tenant_identity(schema)
         
         # Get or create configuration
@@ -194,7 +208,7 @@ class TumaTenantModeView(APIView):
         else:
             cfg.active_mode = "BANK"
         
-        # Prepare payload for Tuma child business
+        # Prepare payload for Tuma child business using company information
         payload = {
             "name": name,
             "email": email or f"{tenant.schema_name}@netily.co.ke",
@@ -235,6 +249,8 @@ class TumaTenantModeView(APIView):
         return Response({
             "success": True,
             "business_id": cfg.tuma_business_id,
+            "business_name": name,
+            "business_email": email,
             "reference": {
                 "id": cfg.collection_reference_id,
                 "code": cfg.collection_reference_code,
