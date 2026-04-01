@@ -115,19 +115,24 @@ class TumaTenantModeView(APIView):
         schema = connection.schema_name
         tenant, name, email, mobile = self._resolve_tenant_identity(schema)
 
+        # 1. Fetch or create using ONLY schema_name as the canonical key
         cfg, _ = TenantTumaConfig.objects.get_or_create(schema_name=schema)
 
-        # 1. Manually extract fields from request to bypass outdated serializers
         new_mode = request.data.get("active_mode") or cfg.active_mode
         new_ref_id = request.data.get("collection_reference_id") or cfg.collection_reference_id
         new_acc_num = request.data.get("collection_account_number") or cfg.collection_account_number
 
         if not new_ref_id:
             return Response({"success": False, "error": "collection_reference_id is required"}, status=400)
+        if not new_acc_num:
+            return Response({"success": False, "error": "collection_account_number is required"}, status=400)
 
         # 2. Validate against Tuma API
         client = TumaClient()
-        master_token = client.auth_token(settings.TUMA_MASTER_EMAIL, settings.TUMA_MASTER_API_KEY)
+        try:
+            master_token = client.auth_token(settings.TUMA_MASTER_EMAIL, settings.TUMA_MASTER_API_KEY)
+        except Exception as e:
+            return Response({"success": False, "error": f"Tuma Master Auth failed: {str(e)}"}, status=500)
 
         banks_res = client.list_banks(master_token)
         banks_list = banks_res.get("data", [])
@@ -136,7 +141,7 @@ class TumaTenantModeView(APIView):
         if not ref:
             return Response({"success": False, "error": f"Invalid reference_id: {new_ref_id}"}, status=400)
 
-        # 3. Update configuration object
+        # 3. Update configuration object locally
         cfg.active_mode = new_mode
         cfg.collection_reference_id = new_ref_id
         cfg.collection_account_number = new_acc_num
@@ -148,7 +153,7 @@ class TumaTenantModeView(APIView):
         if not request.data.get("active_mode"):
             cfg.active_mode = "TILL" if code in ["TILL", "PAYBILL", "BUYGOODS"] else "BANK"
 
-        # 4. Sync updates to Tuma Servers
+        # 4. Sync updates to Tuma Servers with STRICT failure handling
         payload = {
             "name": name,
             "email": email,
@@ -160,18 +165,34 @@ class TumaTenantModeView(APIView):
         }
 
         if not cfg.tuma_business_id:
-            res = client.create_business(master_token, payload)
-            if not res.get("success"):
-                return Response({"success": False, "error": res.get("message")}, status=400)
-            d = res["data"]
-            cfg.tuma_business_id, cfg.tuma_business_email, cfg.tuma_business_api_key = d["id"], d["email"], d["api_key"]
-        else:
+            # CREATE NEW BUSINESS
             try:
-                client.update_business(master_token, cfg.tuma_business_id, payload)
+                res = client.create_business(master_token, payload)
+                if not res.get("success"):
+                    return Response({"success": False, "error": res.get("message", "Failed to create business")}, status=400)
+                
+                d = res.get("data", {})
+                cfg.tuma_business_id = d.get("id", "")
+                cfg.tuma_business_api_key = d.get("api_key", "")
+                cfg.tuma_business_email = email 
+                
+            except Exception as e:
+                # STRICT FAILURE: Do not save local config if remote creation fails
+                return Response({"success": False, "error": f"API Error creating business: {str(e)}"}, status=500)
+        else:
+            # UPDATE EXISTING BUSINESS
+            try:
+                res = client.update_business(master_token, cfg.tuma_business_id, payload)
+                if not res.get("success"):
+                    return Response({"success": False, "error": res.get("message", "Failed to update business")}, status=400)
+                
+                cfg.tuma_business_email = email
             except Exception as e:
                 logger.error(f"Failed to update remote business: {str(e)}")
-                # We continue even if update fails so the local DB stays in sync
+                # STRICT FAILURE: Do not save local config if remote update fails
+                return Response({"success": False, "error": f"Failed to sync update to Tuma servers. Gateway not saved. Error: {str(e)}"}, status=500)
 
+        # 5. Only save to DB if Tuma succeeded
         cfg.is_active = True
         cfg.save()
 
