@@ -396,7 +396,7 @@ class PaymentMethodViewSet(viewsets.ModelViewSet):
 
     def perform_create(self, serializer):
         from ..models.payment_models import InvoiceItemPayment
-        from ..services.tuma_service import ensure_child_business, TumaError
+        from ..services.tuma_service import ensure_child_business, sync_active_method_to_tuma, TumaError
         user = self.request.user
         schema = connection.schema_name
 
@@ -414,18 +414,22 @@ class PaymentMethodViewSet(viewsets.ModelViewSet):
             is_active=is_first,
         )
 
-        # Auto-provision Tuma child business on first payment method
+        # Auto-provision Tuma child business with real method data
         try:
             cfg = ensure_child_business(schema, method=method)
             if not method.tuma_configuration:
                 method.tuma_configuration = cfg
                 method.save(update_fields=['tuma_configuration'])
+            # First method is auto-active → sync its settlement details to Tuma
+            if is_first:
+                sync_active_method_to_tuma(schema, method)
         except TumaError as e:
-            logger.warning(f"Tuma child business provisioning failed for {schema}: {e}")
-            # Method is still saved — provisioning can be retried later
+            logger.warning(f"Tuma provisioning/sync failed for {schema}: {e}")
 
     def destroy(self, request, *args, **kwargs):
-        from ..services.tuma_service import deactivate_tuma_collections, TumaError
+        from ..services.tuma_service import (
+            deactivate_tuma_collections, delete_tuma_business, TumaError,
+        )
         method = self.get_object()
         force = request.query_params.get('force', '').lower() == 'true'
 
@@ -452,19 +456,30 @@ class PaymentMethodViewSet(viewsets.ModelViewSet):
             Payment.objects.filter(payment_method=method).update(payment_method=None)
             method.delete()
 
-        # If deleted method was active, deactivate on Tuma
-        if was_active:
-            from ..models.payment_models import InvoiceItemPayment
-            has_remaining_active = InvoiceItemPayment.objects.filter(
-                schema_name=schema, is_active=True,
-            ).exists()
-            if not has_remaining_active:
-                try:
+        # Tuma sync after delete
+        tuma_action = None
+        from ..models.payment_models import InvoiceItemPayment
+        remaining = InvoiceItemPayment.objects.filter(schema_name=schema).count()
+        try:
+            if remaining == 0:
+                # Last method deleted → delete the Tuma business entirely
+                if delete_tuma_business(schema):
+                    tuma_action = 'business_deleted'
+            elif was_active:
+                # Active method deleted but others remain → deactivate Tuma
+                has_remaining_active = InvoiceItemPayment.objects.filter(
+                    schema_name=schema, is_active=True,
+                ).exists()
+                if not has_remaining_active:
                     deactivate_tuma_collections(schema)
-                except TumaError as e:
-                    logger.warning(f"Tuma deactivation after delete failed for {schema}: {e}")
+                    tuma_action = 'deactivated'
+        except TumaError as e:
+            logger.warning(f"Tuma sync after delete failed for {schema}: {e}")
 
-        return Response(status=status.HTTP_204_NO_CONTENT)
+        return Response(
+            {'tuma_action': tuma_action},
+            status=status.HTTP_200_OK,
+        )
 
     @action(detail=True, methods=['post'])
     def toggle_active(self, request, pk=None):
@@ -482,25 +497,27 @@ class PaymentMethodViewSet(viewsets.ModelViewSet):
         method.is_active = new_state
         method.save()
 
-        # Sync to Tuma
-        tuma_synced = False
+        # Sync to Tuma — return detailed feedback
+        sync_details = {'tuma_synced': False}
         try:
             if new_state:
-                sync_active_method_to_tuma(connection.schema_name, method)
+                result = sync_active_method_to_tuma(connection.schema_name, method)
+                sync_details = result or {'tuma_synced': True}
             else:
                 has_active = InvoiceItemPayment.objects.filter(
                     schema_name=connection.schema_name, is_active=True,
                 ).exists()
                 if not has_active:
                     deactivate_tuma_collections(connection.schema_name)
-            tuma_synced = True
+                sync_details = {'tuma_synced': True, 'settlement_channel': 'None (all deactivated)'}
         except TumaError as e:
             logger.warning(f"Tuma sync on toggle failed for {connection.schema_name}: {e}")
+            sync_details = {'tuma_synced': False, 'tuma_error': str(e)}
 
         return Response({
             'status': 'success',
             'is_active': method.is_active,
-            'tuma_synced': tuma_synced,
+            **sync_details,
         })
 
     @action(detail=True, methods=['post'])

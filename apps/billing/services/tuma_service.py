@@ -254,7 +254,10 @@ class TumaClient:
 # ======================================================================
 
 def _resolve_tenant_identity(schema_name):
-    """Resolve company name, email, mobile from the tenant's Company model."""
+    """
+    Resolve company name, email, mobile from the tenant's Company model.
+    Returns (name, email, mobile) with best-effort values.
+    """
     from apps.core.models import Tenant, Company
     from django_tenants.utils import schema_context, get_public_schema_name
 
@@ -274,35 +277,72 @@ def _resolve_tenant_identity(schema_name):
 
 def _resolve_bank_for_method(method, banks_list):
     """
-    Map a payment method's type + config_json to a Tuma bank reference.
-    Returns (bank_id, account_number) or (None, None) if not mappable.
+    Map a payment method (settlement account) to a Tuma bank reference.
+
+    Every payment method type represents a real settlement channel:
+      - MOBILE_MONEY       → M-Pesa Paybill reference (phone is the account)
+      - MPESA_PAYBILL      → Paybill reference + paybill_number
+      - MPESA_TILL         → Buy Goods reference + till_number
+      - BANK_TRANSFER      → Matched bank reference + account_number
+      - PAYMENT_LINK       → Not a Tuma settlement channel (returns None)
+
+    Returns:
+        (bank_id, account_number, description) or (None, None, None)
     """
     config = method.config_json or {}
     mtype = method.method_type
 
-    if mtype == 'MPESA_PAYBILL':
-        ref = next(
-            (b for b in banks_list
-             if 'paybill' in (b.get('code', '') + ' ' + b.get('name', '')).lower()),
-            None,
-        )
-        if ref and config.get('paybill_number'):
-            return str(ref['id']), config['paybill_number']
+    if mtype == 'MOBILE_MONEY':
+        # Mobile Money → route through M-Pesa Paybill reference on Tuma
+        # The phone_number IS the settlement target
+        phone = config.get('phone_number', '')
+        if phone:
+            ref = next(
+                (b for b in banks_list
+                 if 'paybill' in (b.get('code', '') + ' ' + b.get('name', '')).lower()),
+                None,
+            )
+            if ref:
+                provider = config.get('mobile_provider', 'SAFARICOM')
+                desc = f"Mobile Money ({provider}): {phone}"
+                return str(ref['id']), phone, desc
+            # Fallback: try any M-Pesa related reference
+            ref = next(
+                (b for b in banks_list
+                 if 'mpesa' in (b.get('code', '') + ' ' + b.get('name', '')).lower()),
+                None,
+            )
+            if ref:
+                return str(ref['id']), phone, f"Mobile Money: {phone}"
+
+    elif mtype == 'MPESA_PAYBILL':
+        paybill = config.get('paybill_number', '')
+        if paybill:
+            ref = next(
+                (b for b in banks_list
+                 if 'paybill' in (b.get('code', '') + ' ' + b.get('name', '')).lower()),
+                None,
+            )
+            if ref:
+                return str(ref['id']), paybill, f"M-Pesa Paybill: {paybill}"
 
     elif mtype == 'MPESA_TILL':
-        ref = next(
-            (b for b in banks_list
-             if any(k in (b.get('code', '') + ' ' + b.get('name', '')).lower()
-                    for k in ['buygoods', 'buy goods', 'till'])),
-            None,
-        )
-        if ref and config.get('till_number'):
-            return str(ref['id']), config['till_number']
+        till = config.get('till_number', '')
+        if till:
+            ref = next(
+                (b for b in banks_list
+                 if any(k in (b.get('code', '') + ' ' + b.get('name', '')).lower()
+                        for k in ['buygoods', 'buy goods', 'till'])),
+                None,
+            )
+            if ref:
+                return str(ref['id']), till, f"M-Pesa Till: {till}"
 
     elif mtype == 'BANK_TRANSFER':
         bank_name = config.get('bank_name', '')
         account = config.get('account_number', '')
         if bank_name and account:
+            # Try exact-ish match against Tuma reference names
             ref = next(
                 (b for b in banks_list
                  if bank_name.lower() in b.get('name', '').lower()
@@ -310,27 +350,25 @@ def _resolve_bank_for_method(method, banks_list):
                 None,
             )
             if ref:
-                return str(ref['id']), account
+                return str(ref['id']), account, f"{bank_name}: {account}"
 
-    return None, None
+    # PAYMENT_LINK or unmappable — not a direct Tuma settlement channel
+    return None, None, None
 
 
 def ensure_child_business(schema_name, method=None):
     """
-    Ensure the tenant identified by *schema_name* has a Tuma child business.
+    Ensure the tenant has a Tuma child business, provisioned with real data.
 
-    If a TenantTumaConfig with a populated ``tuma_business_id`` already
-    exists, it is returned immediately (no remote call).
+    If a TenantTumaConfig with a populated ``tuma_business_id`` already exists,
+    this returns it immediately (no remote call).
 
-    Otherwise the function:
-      1. Resolves the tenant's company identity (name, email, mobile).
-      2. If *method* is provided, enriches the payload with real config
-         (phone number, bank, account) from the payment method.
-      3. Creates the child business on Tuma with real data.
-      4. Persists credentials in a TenantTumaConfig row.
+    On first creation, the method's real settlement details (bank_id,
+    account_number, phone) are sent to Tuma so the child business has
+    correct data from day one.
 
     Returns:
-        TenantTumaConfig instance (created or existing)
+        TenantTumaConfig instance
 
     Raises:
         TumaError on remote failures.
@@ -338,41 +376,47 @@ def ensure_child_business(schema_name, method=None):
     from apps.billing.models.payment_models import TenantTumaConfig
 
     # 1. Return early if already provisioned
-    cfg, created = TenantTumaConfig.objects.get_or_create(schema_name=schema_name)
+    cfg, _ = TenantTumaConfig.objects.get_or_create(schema_name=schema_name)
     if cfg.tuma_business_id:
         return cfg
 
     # 2. Resolve tenant identity from Company model
     name, email, mobile = _resolve_tenant_identity(schema_name)
 
-    # 3. Enrich from payment method config when available
-    method_config = (method.config_json or {}) if method else {}
-    if method_config.get('phone_number'):
-        mobile = method_config['phone_number']
-
-    # 4. Auth with master credentials (cached)
+    # 3. Auth with master credentials (cached)
     client = TumaClient()
     master_token = client.get_master_token()
 
-    # 5. Resolve bank_id + account_number from method config or defaults
+    # 4. Resolve bank_id + account_number from payment method config
     banks_data = client.list_banks(master_token)
     banks_list = banks_data.get("data", [])
 
-    bank_id, account_number = None, None
+    bank_id, account_number, desc = None, None, None
     if method:
-        bank_id, account_number = _resolve_bank_for_method(method, banks_list)
+        bank_id, account_number, desc = _resolve_bank_for_method(method, banks_list)
+        # Enrich mobile from method config
+        method_config = method.config_json or {}
+        if method_config.get('phone_number'):
+            mobile = method_config['phone_number']
 
-    # Fall back to existing config or first available bank
+    # Fallback chain for bank_id
     if not bank_id:
         bank_id = cfg.collection_reference_id or cfg.bank_id
     if not bank_id and banks_list:
-        bank_id = banks_list[0]["id"]
+        bank_id = str(banks_list[0]["id"])
+
+    # Fallback for account_number — use mobile or placeholder only as last resort
     if not account_number:
-        account_number = cfg.collection_account_number or cfg.bank_account_number or mobile or "0000000000"
+        account_number = cfg.collection_account_number or cfg.bank_account_number or mobile
+    if not account_number:
+        account_number = "0000000000"
+
+    # Ensure mobile is always populated
     if not mobile:
         mobile = "254700000000"
 
-    # 6. Create on Tuma
+    # 5. Create on Tuma with real data
+    description = desc or f"{name} ISP payment profile"
     payload = {
         "name": name,
         "email": email,
@@ -380,7 +424,7 @@ def ensure_child_business(schema_name, method=None):
         "bank_id": bank_id,
         "account_number": account_number,
         "logo": getattr(settings, "TUMA_DEFAULT_LOGO_URL", "https://placehold.co/400x400.png"),
-        "description": f"{schema_name} ISP payment profile",
+        "description": description,
     }
 
     res = client.create_business(master_token, payload)
@@ -392,21 +436,36 @@ def ensure_child_business(schema_name, method=None):
     cfg.tuma_business_api_key = data.get("api_key", "")
     cfg.tuma_business_email = email
     cfg.is_active = True
-    cfg.save()
 
-    logger.info(f"Tuma child business created for {schema_name}: id={cfg.tuma_business_id}")
+    # Store collection reference details from the bank we used
+    ref = next((b for b in banks_list if str(b.get("id")) == str(bank_id)), None)
+    if ref:
+        cfg.collection_reference_id = str(ref["id"])
+        cfg.collection_reference_code = ref.get("code", "")
+        cfg.collection_reference_name = ref.get("name", "")
+        code = cfg.collection_reference_code.upper()
+        cfg.active_mode = "TILL" if code in ["TILL", "PAYBILL", "BUYGOODS"] else "BANK"
+    cfg.collection_account_number = account_number
+
+    cfg.save()
+    logger.info(
+        f"Tuma child business created for {schema_name}: "
+        f"id={cfg.tuma_business_id}, bank_ref={cfg.collection_reference_name}, "
+        f"account={account_number}"
+    )
     return cfg
 
 
 def sync_active_method_to_tuma(schema_name, method):
     """
-    Sync an activated payment method's collection details to the Tuma business.
+    Sync an activated payment method (settlement account) to the Tuma business.
 
     Updates the remote Tuma business with the correct bank_id + account_number
-    derived from the method's type and config, and sets is_active=True.
-    Also updates the local TenantTumaConfig with collection reference details.
+    derived from the method's type and config. This is what determines WHERE
+    customer payments actually settle.
 
-    Called when a payment method is activated via toggle.
+    Returns:
+        dict with sync details for frontend feedback, or None if no config.
     """
     from apps.billing.models.payment_models import TenantTumaConfig
 
@@ -414,11 +473,11 @@ def sync_active_method_to_tuma(schema_name, method):
         cfg = TenantTumaConfig.objects.get(schema_name=schema_name)
     except TenantTumaConfig.DoesNotExist:
         logger.warning(f"sync_active_method_to_tuma: no TenantTumaConfig for {schema_name}")
-        return
+        return None
 
     if not cfg.tuma_business_id:
         logger.warning(f"sync_active_method_to_tuma: no tuma_business_id for {schema_name}")
-        return
+        return None
 
     client = TumaClient()
     master_token = client.get_master_token()
@@ -426,7 +485,7 @@ def sync_active_method_to_tuma(schema_name, method):
     # Resolve bank reference from method config
     banks_data = client.list_banks(master_token)
     banks_list = banks_data.get("data", [])
-    bank_id, account_number = _resolve_bank_for_method(method, banks_list)
+    bank_id, account_number, desc = _resolve_bank_for_method(method, banks_list)
 
     # Build update payload
     name, email, mobile = _resolve_tenant_identity(schema_name)
@@ -437,13 +496,21 @@ def sync_active_method_to_tuma(schema_name, method):
         mobile = "254700000000"
 
     update_payload = {
-        "is_active": True,
+        "name": name,
+        "email": email,
         "mobile": mobile,
+        "is_active": True,
+    }
+
+    sync_details = {
+        "tuma_synced": True,
+        "settlement_channel": desc or method.name,
     }
 
     if bank_id and account_number:
         update_payload["bank_id"] = bank_id
         update_payload["account_number"] = account_number
+        update_payload["description"] = desc or f"{name} - {method.name}"
 
         # Update local config with collection reference details
         ref = next((b for b in banks_list if str(b.get("id")) == str(bank_id)), None)
@@ -453,7 +520,12 @@ def sync_active_method_to_tuma(schema_name, method):
             cfg.collection_reference_name = ref.get("name", "")
             code = cfg.collection_reference_code.upper()
             cfg.active_mode = "TILL" if code in ["TILL", "PAYBILL", "BUYGOODS"] else "BANK"
+            sync_details["tuma_reference"] = cfg.collection_reference_name
         cfg.collection_account_number = account_number
+        sync_details["account_number"] = account_number
+    else:
+        # Method type not directly mappable (e.g. PAYMENT_LINK) — just activate
+        sync_details["note"] = "Payment link is not a Tuma settlement channel"
 
     res = client.update_business(master_token, cfg.tuma_business_id, update_payload)
     if not res.get("success"):
@@ -461,13 +533,17 @@ def sync_active_method_to_tuma(schema_name, method):
 
     cfg.is_active = True
     cfg.save()
-    logger.info(f"Tuma business synced for {schema_name}: method={method.name}, type={method.method_type}")
+    logger.info(
+        f"Tuma business synced for {schema_name}: "
+        f"method={method.name}, type={method.method_type}, "
+        f"bank_ref={cfg.collection_reference_name}, account={cfg.collection_account_number}"
+    )
+    return sync_details
 
 
 def deactivate_tuma_collections(schema_name):
     """
     Deactivate the Tuma business when no payment methods are active.
-
     Sets is_active=False on the remote Tuma business and the local config.
     """
     from apps.billing.models.payment_models import TenantTumaConfig
@@ -490,3 +566,42 @@ def deactivate_tuma_collections(schema_name):
     cfg.is_active = False
     cfg.save(update_fields=['is_active', 'updated_at'])
     logger.info(f"Tuma business deactivated for {schema_name}")
+
+
+def delete_tuma_business(schema_name):
+    """
+    Delete the Tuma business entirely when the last payment method is removed.
+    Clears the local TenantTumaConfig credentials.
+
+    Returns True if deleted, False if nothing to delete.
+    """
+    from apps.billing.models.payment_models import TenantTumaConfig
+
+    try:
+        cfg = TenantTumaConfig.objects.get(schema_name=schema_name)
+    except TenantTumaConfig.DoesNotExist:
+        return False
+
+    if not cfg.tuma_business_id:
+        return False
+
+    client = TumaClient()
+    master_token = client.get_master_token()
+
+    res = client.delete_business(master_token, cfg.tuma_business_id)
+    if not res.get("success"):
+        raise TumaError(res.get("message", "Failed to delete Tuma business"))
+
+    old_id = cfg.tuma_business_id
+    cfg.tuma_business_id = ""
+    cfg.tuma_business_api_key = ""
+    cfg.tuma_business_email = ""
+    cfg.is_active = False
+    cfg.collection_reference_id = ""
+    cfg.collection_reference_code = ""
+    cfg.collection_reference_name = ""
+    cfg.collection_account_number = ""
+    cfg.active_mode = ""
+    cfg.save()
+    logger.info(f"Tuma business deleted for {schema_name}: was id={old_id}")
+    return True
