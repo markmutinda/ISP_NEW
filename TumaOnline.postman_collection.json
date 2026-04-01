@@ -1,0 +1,367 @@
+{
+  "info": {
+    "_postman_id": "18bc2c29-1081-4fb7-b8a0-849070557263",
+    "name": "Tuma Online",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json",
+    "_exporter_id": "10466645",
+    "_collection_link": "https://go.postman.co/collection/10466645-18bc2c29-1081-4fb7-b8a0-849070557263?source=collection_link"
+  },
+  "item": [
+    {
+      "name": "STK PUSH",
+      "request": {
+        "auth": {
+          "type": "bearer",
+          "bearer": [
+            {
+              "key": "token",
+              "value": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzaG9wX2lkIjoiZjYyOTk1ODMtYzA1My00ZmJkLTk2YWYtNmFhNzNmM2QyNWFhIiwidXNlcl9pZCI6ImQyYTY5NWVkLTg1MWUtNGZiYy1iOTU5LTk1YjgwYjFhOTM1ZiIsImVtYWlsIjoiaGlsbHNob3AyMzU2QGdtYWlsLmNvbSIsImlwcnNfYWNjZXNzIjp0cnVlLCJpYXQiOjE3NTg1MTcxNTYsImV4cCI6MTc1ODYwMzU1Nn0.xRzBAuExzpVC2L0KowZZQCV3YX-C2UTYx5cZ0u_Rxz4",
+              "type": "string"
+            }
+          ]
+        },
+        "method": "POST",
+        "header": [],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"amount\": 10.00,\n  \"phone\": \"254712345678\",\n  \"callback_url\": \"https://your-webhook.co.ke/callabck\",\n  \"description\": \"Payment for order #123\"\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        },
+        "url": {
+          "raw": "https://api.tuma.co.ke/payment/stk-push",
+          "protocol": "https",
+          "host": [
+            "api",
+            "tuma",
+            "co",
+            "ke"
+          ],
+          "path": [
+            "payment",
+            "stk-push"
+          ]
+        }
+      },
+      "response": []
+    },
+    {
+      "name": "Generate Token",
+      "request": {
+        "method": "POST",
+        "header": [],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"email\": \"your-busiess@email.com\",\n  \"api_key\": \"your-tuma-api-kay\"\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        },
+        "url": {
+          "raw": "https://api.tuma.co.ke/auth/token",
+          "protocol": "https",
+          "host": [
+            "api",
+            "tuma",
+            "co",
+            "ke"
+          ],
+          "path": [
+            "auth",
+            "token"
+          ]
+        }
+      },
+      "response": []
+    },
+    {
+      "name": "IPRS Check",
+      "request": {
+        "auth": {
+          "type": "bearer",
+          "bearer": [
+            {
+              "key": "token",
+              "value": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzaG9wX2lkIjoiZjYyOTk1ODMtYzA1My00ZmJkLTk2YWYtNmFhNzNmM2QyNWFhIiwidXNlcl9pZCI6ImQyYTY5NWVkLTg1MWUtNGZiYy1iOTU5LTk1YjgwYjFhOTM1ZiIsImVtYWlsIjoiaGlsbHNob3AyMzU2QGdtYWlsLmNvbSIsImlwcnNfYWNjZXNzIjpmYWxzZSwiaWF0IjoxNzU4NDczMzg1LCJleHAiOjE3NTg1NTk3ODV9.2WFu1rHnKnKdzG4rLTVL7DV9VslBEFxs4DezFOorWEU",
+              "type": "string"
+            }
+          ]
+        },
+        "method": "POST",
+        "header": [],
+        "body": {
+          "mode": "raw",
+          "raw": "{\"id_number\": \"12345678\", \"yob_name\": \"2000\"}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        },
+        "url": {
+          "raw": "https://api.tuma.co.ke/iprs/unified-validate",
+          "protocol": "https",
+          "host": [
+            "api",
+            "tuma",
+            "co",
+            "ke"
+          ],
+          "path": [
+            "iprs",
+            "unified-validate"
+          ]
+        }
+      },
+      "response": []
+    },
+    {
+      "name": "List Invoices",
+      "request": {
+        "auth": {
+          "type": "bearer",
+          "bearer": [
+            {
+              "key": "token",
+              "value": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzaG9wX2lkIjoiZjYyOTk1ODMtYzA1My00ZmJkLTk2YWYtNmFhNzNmM2QyNWFhIiwidXNlcl9pZCI6ImQyYTY5NWVkLTg1MWUtNGZiYy1iOTU5LTk1YjgwYjFhOTM1ZiIsImVtYWlsIjoiaGlsbHNob3AyMzU2QGdtYWlsLmNvbSIsImlwcnNfYWNjZXNzIjp0cnVlLCJpYXQiOjE3NTk4MzAxODgsImV4cCI6MTc1OTkxNjU4OH0.wnRtVUc56EQgikOg4ep3eRLxT83GEnv0nQ_PdVnQApg",
+              "type": "string"
+            }
+          ]
+        },
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "http://localhost:5004/invoices",
+          "protocol": "http",
+          "host": [
+            "localhost"
+          ],
+          "port": "5004",
+          "path": [
+            "invoices"
+          ]
+        }
+      },
+      "response": []
+    },
+    {
+      "name": "List Products",
+      "request": {
+        "auth": {
+          "type": "bearer",
+          "bearer": [
+            {
+              "key": "token",
+              "value": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzaG9wX2lkIjoiZjYyOTk1ODMtYzA1My00ZmJkLTk2YWYtNmFhNzNmM2QyNWFhIiwidXNlcl9pZCI6ImQyYTY5NWVkLTg1MWUtNGZiYy1iOTU5LTk1YjgwYjFhOTM1ZiIsImVtYWlsIjoiaGlsbHNob3AyMzU2QGdtYWlsLmNvbSIsImlwcnNfYWNjZXNzIjp0cnVlLCJpYXQiOjE3NTk4MzAxODgsImV4cCI6MTc1OTkxNjU4OH0.wnRtVUc56EQgikOg4ep3eRLxT83GEnv0nQ_PdVnQApg",
+              "type": "string"
+            }
+          ]
+        },
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "https://api.tuma.co.ke/products",
+          "protocol": "https",
+          "host": [
+            "api",
+            "tuma",
+            "co",
+            "ke"
+          ],
+          "path": [
+            "products"
+          ]
+        }
+      },
+      "response": []
+    },
+    {
+      "name": "Create Invoice",
+      "request": {
+        "auth": {
+          "type": "bearer",
+          "bearer": [
+            {
+              "key": "token",
+              "value": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzaG9wX2lkIjoiNzg3ZTI0NGQtOTRhOC00ODgxLWJjNzctNDc2ZGZkNjA3ZGJlIiwidXNlcl9pZCI6ImQyYTY5NWVkLTg1MWUtNGZiYy1iOTU5LTk1YjgwYjFhOTM1ZiIsImVtYWlsIjoic2hhZHJhY2subWF0YXRhQGljbG91ZC5jb20iLCJpcHJzX2FjY2VzcyI6ZmFsc2UsImlhdCI6MTc2MDE3MDcwOSwiZXhwIjoxNzYwMjU3MTA5fQ.OzQz4g1C0VY927JSGyPIjZLk-YuHzzqqu8H9yO7CyTI",
+              "type": "string"
+            }
+          ]
+        },
+        "method": "POST",
+        "header": [],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"customer_name\": \"Kisamba Jnr\",\n  \"customer_email\": \"matatashadrack45@gmail.com\",\n  \"customer_phone\": \"254722854082\",\n  \"customer_address\": \"Kinoo, Waiyaki Way\",\n  \"items\": [\n    {\n      \"item_name\": \"New ervice\",\n      \"item_description\": \"Strategic business consulting for Q1 2024\",\n      \"quantity\": 2,\n      \"unit_price\": 10.00\n    },\n    {\n      \"name\": \"Final Website \",\n      \"description\": \"Monthly website maintenance and updates\",\n      \"quantity\": 4,\n      \"price\": 20.00\n    }\n  ],\n  \"tax_rate\": 10,\n  \"discount_amount\": 10.00,\n  \"due_date\": \"2025-12-01\",\n  \"notes\": \"Payment terms: Net 30 days\",\n  \"callback_url\":\"https://digitalcomrade.co.ke/dc-stk-status.php\",\n  \"currency\": \"KES\"\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        },
+        "url": {
+          "raw": "https://api.tuma.co.ke/invoices",
+          "protocol": "https",
+          "host": [
+            "api",
+            "tuma",
+            "co",
+            "ke"
+          ],
+          "path": [
+            "invoices"
+          ]
+        }
+      },
+      "response": []
+    },
+    {
+      "name": "Create Sale",
+      "request": {
+        "auth": {
+          "type": "bearer",
+          "bearer": [
+            {
+              "key": "token",
+              "value": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzaG9wX2lkIjoiZjYyOTk1ODMtYzA1My00ZmJkLTk2YWYtNmFhNzNmM2QyNWFhIiwidXNlcl9pZCI6ImQyYTY5NWVkLTg1MWUtNGZiYy1iOTU5LTk1YjgwYjFhOTM1ZiIsImVtYWlsIjoiaGlsbHNob3AyMzU2QGdtYWlsLmNvbSIsImlwcnNfYWNjZXNzIjp0cnVlLCJpYXQiOjE3NTk4MzAxODgsImV4cCI6MTc1OTkxNjU4OH0.wnRtVUc56EQgikOg4ep3eRLxT83GEnv0nQ_PdVnQApg",
+              "type": "string"
+            }
+          ]
+        },
+        "method": "POST",
+        "header": [],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n\"items\": [\n     {\n      \"product_id\": \"5381b837-b026-48f5-9fd4-b660c780c933\",\n      \"quantity\": 1\n    }\n    ],\n  \"customer_name\":\"Mumaitha\",\n  \"customer_email\": \"kisamba@gmail.com\",\n  \"customer_phone\": \"254729590095\",\n  \"payment_method\": \"mpesa\",\n  \"callback_url\":\"https://digitalcomrade.co.ke/dc-stk-status.php\"\n    }",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        },
+        "url": {
+          "raw": "https://beta.tuma.co.ke/sales",
+          "protocol": "https",
+          "host": [
+            "beta",
+            "tuma",
+            "co",
+            "ke"
+          ],
+          "path": [
+            "sales"
+          ]
+        }
+      },
+      "response": []
+    },
+    {
+      "name": "create business",
+      "request": {
+        "auth": {
+          "type": "bearer",
+          "bearer": [
+            {
+              "key": "token",
+              "value": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzaG9wX2lkIjoiNzg3ZTI0NGQtOTRhOC00ODgxLWJjNzctNDc2ZGZkNjA3ZGJlIiwidXNlcl9pZCI6ImQyYTY5NWVkLTg1MWUtNGZiYy1iOTU5LTk1YjgwYjFhOTM1ZiIsImVtYWlsIjoic2hhZHJhY2subWF0YXRhQGljbG91ZC5jb20iLCJpcHJzX2FjY2VzcyI6ZmFsc2UsImlhdCI6MTc2MjUzNzA2NSwiZXhwIjoxNzYyNjIzNDY1fQ.Vhuad5LNnoQGxJeJkQN_C_TjWkzcQnaxWC7YS4pLxDY",
+              "type": "string"
+            }
+          ]
+        },
+        "method": "POST",
+        "header": [],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"name\": \"My Business Name\",\n  \"email\": \"business@example.com\",\n  \"mobile\": \"254712345678\",\n  \"bank_id\": \"650e8400-e29b-41d4-a716-446655440007\",\n  \"account_number\": \"1234567890\",\n  \"logo\": \"https://example.com/logo.png\",\n  \"description\": \"Business description\"\n}\n",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        },
+        "url": {
+          "raw": "https://api.tuma.co.ke/businesses",
+          "protocol": "https",
+          "host": [
+            "api",
+            "tuma",
+            "co",
+            "ke"
+          ],
+          "path": [
+            "businesses"
+          ]
+        }
+      },
+      "response": []
+    },
+    {
+      "name": "List banks",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "https://api.tuma.co.ke/reference/banks",
+          "protocol": "https",
+          "host": [
+            "api",
+            "tuma",
+            "co",
+            "ke"
+          ],
+          "path": [
+            "reference",
+            "banks"
+          ]
+        }
+      },
+      "response": []
+    },
+    {
+      "name": "Name check",
+      "request": {
+        "auth": {
+          "type": "bearer",
+          "bearer": [
+            {
+              "key": "token",
+              "value": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzaG9wX2lkIjoiNzg3ZTI0NGQtOTRhOC00ODgxLWJjNzctNDc2ZGZkNjA3ZGJlIiwidXNlcl9pZCI6ImQyYTY5NWVkLTg1MWUtNGZiYy1iOTU5LTk1YjgwYjFhOTM1ZiIsImVtYWlsIjoic3VwcG9ydEB0dW1hLmNvLmtlIiwiaXByc19hY2Nlc3MiOmZhbHNlLCJpYXQiOjE3NjgzOTMxMTMsImV4cCI6MTc2ODQ3OTUxM30._wkm-QQHXFSu5SKzikbMWLTNA8s9Li2crSKTDw4KfY8",
+              "type": "string"
+            }
+          ]
+        },
+        "method": "POST",
+        "header": [],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n    \"phone\": \"07012345678\"\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        },
+        "url": {
+          "raw": "https://api.tuma.co.ke/namecheck/",
+          "protocol": "https",
+          "host": [
+            "api",
+            "tuma",
+            "co",
+            "ke"
+          ],
+          "path": [
+            "namecheck",
+            ""
+          ]
+        }
+      },
+      "response": []
+    }
+  ]
+}

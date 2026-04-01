@@ -14,6 +14,7 @@ from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
 from django_filters.rest_framework import DjangoFilterBackend
 from django.db.models import Q, Sum, Count, F
+from django.db.models import ProtectedError
 
 # Custom permissions
 from ..models.payment_models import Payment
@@ -394,17 +395,62 @@ class PaymentMethodViewSet(viewsets.ModelViewSet):
         return PaymentMethodSerializer
 
     def perform_create(self, serializer):
+        from ..models.payment_models import InvoiceItemPayment
+        from ..services.tuma_service import ensure_child_business, TumaError
         user = self.request.user
-        
-        serializer.save(
+        schema = connection.schema_name
+
+        # Enforce max 3 payment methods per tenant
+        existing_count = InvoiceItemPayment.objects.filter(schema_name=schema).count()
+        if existing_count >= 3:
+            from rest_framework.exceptions import ValidationError
+            raise ValidationError('Maximum 3 payment methods allowed. Delete or deactivate one to add another.')
+
+        method = serializer.save(
             created_by=user,
-            schema_name=connection.schema_name
+            schema_name=schema
         )
+
+        # Auto-provision Tuma child business on first payment method
+        try:
+            cfg = ensure_child_business(schema)
+            if not method.tuma_configuration:
+                method.tuma_configuration = cfg
+                method.save(update_fields=['tuma_configuration'])
+        except TumaError as e:
+            logger.warning(f"Tuma child business provisioning failed for {schema}: {e}")
+            # Method is still saved — provisioning can be retried later
+
+    def destroy(self, request, *args, **kwargs):
+        method = self.get_object()
+        try:
+            method.delete()
+        except ProtectedError:
+            payment_count = method.payments.count()
+            return Response(
+                {
+                    'detail': f'Cannot delete \u2014 {payment_count} payment(s) linked to this method. '
+                              'Deactivate it instead.',
+                    'payment_count': payment_count,
+                    'can_deactivate': True,
+                },
+                status=status.HTTP_409_CONFLICT,
+            )
+        return Response(status=status.HTTP_204_NO_CONTENT)
 
     @action(detail=True, methods=['post'])
     def toggle_active(self, request, pk=None):
+        from ..models.payment_models import InvoiceItemPayment
         method = self.get_object()
-        method.is_active = not method.is_active
+        new_state = not method.is_active
+
+        if new_state:
+            # Only one active at a time — deactivate all others for this tenant
+            InvoiceItemPayment.objects.filter(
+                schema_name=connection.schema_name, is_active=True,
+            ).exclude(pk=method.pk).update(is_active=False)
+
+        method.is_active = new_state
         method.save()
         return Response({'status': 'success', 'is_active': method.is_active})
 

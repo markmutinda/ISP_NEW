@@ -11,6 +11,7 @@ from decimal import Decimal
 
 from django.conf import settings
 from django.db import transaction, connection
+from django.db.models import ProtectedError
 from django.utils import timezone
 
 from rest_framework import status
@@ -209,7 +210,7 @@ class InitiateCustomerPaymentView(APIView):
             
             logger.info(f"Initiating Tuma payment for tenant {schema} using business {cfg.tuma_business_id}")
             
-            token = client.auth_token(cfg.tuma_business_email, cfg.tuma_business_api_key)
+            token = client.get_token(cfg.tuma_business_email, cfg.tuma_business_api_key)
             
             # Create a simple description with the payment reference (will be cleaned in service)
             description = f"PAY-{customer.customer_code}"
@@ -384,17 +385,36 @@ class CustomerPaymentMethodsView(APIView):
         })
 
     def post(self, request):
-        """Create a new payment method (admin only)."""
+        """Create a new payment method (admin only). Max 3 per tenant."""
         from apps.billing.models.payment_models import InvoiceItemPayment
         from apps.billing.serializers.payment_serializers import PaymentMethodSerializer
 
+        schema = connection.schema_name
+        existing_count = InvoiceItemPayment.objects.filter(schema_name=schema).count()
+        if existing_count >= 3:
+            return Response(
+                {'detail': 'Maximum 3 payment methods allowed. Delete or deactivate one to add another.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
         serializer = PaymentMethodSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
-        serializer.save(
-            schema_name=connection.schema_name,
+        method = serializer.save(
+            schema_name=schema,
             created_by=request.user,
             updated_by=request.user,
         )
+
+        # Auto-provision Tuma child business on first payment method
+        from apps.billing.services.tuma_service import ensure_child_business, TumaError
+        try:
+            cfg = ensure_child_business(schema)
+            if not method.tuma_configuration:
+                method.tuma_configuration = cfg
+                method.save(update_fields=['tuma_configuration'])
+        except TumaError as e:
+            logger.warning(f"Tuma child business provisioning failed for {schema}: {e}")
+
         return Response(serializer.data, status=status.HTTP_201_CREATED)
 
 
@@ -436,7 +456,19 @@ class PaymentMethodDetailView(APIView):
             method = self._get_method(pk)
         except InvoiceItemPayment.DoesNotExist:
             return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
-        method.delete()
+        try:
+            method.delete()
+        except ProtectedError:
+            payment_count = method.payments.count()
+            return Response(
+                {
+                    'detail': f'Cannot delete — {payment_count} payment(s) linked to this method. '
+                              'Deactivate it instead.',
+                    'payment_count': payment_count,
+                    'can_deactivate': True,
+                },
+                status=status.HTTP_409_CONFLICT,
+            )
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 
@@ -452,7 +484,16 @@ class PaymentMethodToggleActiveView(APIView):
             )
         except InvoiceItemPayment.DoesNotExist:
             return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
-        method.is_active = not method.is_active
+
+        new_state = not method.is_active
+
+        if new_state:
+            # Only one active at a time — deactivate all others
+            InvoiceItemPayment.objects.filter(
+                schema_name=connection.schema_name, is_active=True,
+            ).exclude(pk=pk).update(is_active=False)
+
+        method.is_active = new_state
         method.save(update_fields=['is_active', 'updated_at'])
         from apps.billing.serializers.payment_serializers import PaymentMethodSerializer
         return Response(PaymentMethodSerializer(method).data)

@@ -16,7 +16,7 @@ from apps.billing.models.payment_models import (
 )
 from apps.customers.models import Customer
 from apps.billing.serializers.tuma_serializers import TenantTumaConfigSerializer
-from apps.billing.services.tuma_service import TumaClient
+from apps.billing.services.tuma_service import TumaClient, ensure_child_business
 
 import logging
 logger = logging.getLogger(__name__)
@@ -28,7 +28,7 @@ class TumaBanksView(APIView):
     def get(self, request):
         try:
             client = TumaClient()
-            token = client.auth_token(settings.TUMA_MASTER_EMAIL, settings.TUMA_MASTER_API_KEY)
+            token = client.get_master_token()
             return Response(client.list_banks(token))
         except Exception as e:
             return Response({"success": False, "error": str(e)}, status=500)
@@ -57,7 +57,7 @@ class TumaCreateChildBusinessView(APIView):
 
         try:
             client = TumaClient()
-            master_token = client.auth_token(settings.TUMA_MASTER_EMAIL, settings.TUMA_MASTER_API_KEY)
+            master_token = client.get_master_token()
             res = client.create_business(master_token, payload)
             if not res.get("success"):
                 return Response(res, status=400)
@@ -130,7 +130,7 @@ class TumaTenantModeView(APIView):
         # 2. Validate against Tuma API
         client = TumaClient()
         try:
-            master_token = client.auth_token(settings.TUMA_MASTER_EMAIL, settings.TUMA_MASTER_API_KEY)
+            master_token = client.get_master_token()
         except Exception as e:
             return Response({"success": False, "error": f"Tuma Master Auth failed: {str(e)}"}, status=500)
 
@@ -258,7 +258,7 @@ class TumaInitiatePaymentView(APIView):
             if not cfg.tuma_business_email or not cfg.tuma_business_api_key:
                 return Response({"success": False, "error": "Tuma business not fully configured."}, status=400)
 
-            token = client.auth_token(cfg.tuma_business_email, cfg.tuma_business_api_key)
+            token = client.get_token(cfg.tuma_business_email, cfg.tuma_business_api_key)
 
             callback_url = getattr(settings, "TUMA_CALLBACK_URL", None)
             if not callback_url:

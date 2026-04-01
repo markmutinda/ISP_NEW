@@ -1,7 +1,12 @@
 # apps/billing/services/tuma_service.py
+import hashlib
 import requests
 import logging
 from django.conf import settings
+from django.core.cache import cache
+
+
+logger = logging.getLogger(__name__)
 
 
 class TumaError(Exception):
@@ -9,19 +14,20 @@ class TumaError(Exception):
 
 
 class TumaClient:
+    TOKEN_CACHE_PREFIX = "tuma_token:"
+    TOKEN_SAFETY_MARGIN = 300  # 5 minutes before actual expiry
+
     def __init__(self):
         self.base = settings.TUMA_API_BASE_URL.rstrip("/")
+
+    # ------------------------------------------------------------------
+    # Authentication with caching
+    # ------------------------------------------------------------------
 
     def auth_token(self, email, api_key):
         """
         Authenticate with Tuma API and get access token.
-        
-        Args:
-            email: Business email (master or child)
-            api_key: API key for the business
-            
-        Returns:
-            str: Access token
+        Raw call — prefer get_token() which adds caching.
         """
         response = requests.post(
             f"{self.base}/auth/token",
@@ -32,7 +38,32 @@ class TumaClient:
         payload = response.json()
         if not payload.get("success"):
             raise TumaError(payload.get("message", "Authentication failed"))
-        return payload["data"]["token"]
+        return payload
+
+    def get_token(self, email, api_key):
+        """
+        Get a cached Tuma JWT token or authenticate if cache miss / expired.
+        Returns the token string.
+        """
+        cache_key = f"{self.TOKEN_CACHE_PREFIX}{hashlib.sha256(email.encode()).hexdigest()[:16]}"
+        cached = cache.get(cache_key)
+        if cached:
+            return cached
+
+        payload = self.auth_token(email, api_key)
+        token = payload.get("data", {}).get("token") or payload.get("token")
+        if not token:
+            raise TumaError("No token in auth response")
+
+        expires_in = payload.get("expires_in", 86400)
+        ttl = max(expires_in - self.TOKEN_SAFETY_MARGIN, 60)
+        cache.set(cache_key, token, ttl)
+        logger.info(f"Tuma token cached for {email} (TTL={ttl}s)")
+        return token
+
+    def get_master_token(self):
+        """Convenience: get cached token using master credentials from settings."""
+        return self.get_token(settings.TUMA_MASTER_EMAIL, settings.TUMA_MASTER_API_KEY)
 
     def list_banks(self, token):
         """
@@ -216,3 +247,90 @@ class TumaClient:
         )
         response.raise_for_status()
         return response.json()
+
+
+# ======================================================================
+# Tenant-level helper: ensure a Tuma child business exists for an ISP
+# ======================================================================
+
+def ensure_child_business(schema_name):
+    """
+    Ensure the tenant identified by *schema_name* has a Tuma child business.
+
+    If a TenantTumaConfig with a populated ``tuma_business_id`` already
+    exists, it is returned immediately (no remote call).
+
+    Otherwise the function:
+      1. Resolves the tenant's company identity (name, email, mobile).
+      2. Authenticates with the Tuma master account.
+      3. Fetches the first available bank from the Tuma reference list to
+         use as a default ``bank_id`` (required by the Create Business API).
+      4. Creates the child business on Tuma.
+      5. Persists ``tuma_business_id``, ``tuma_business_api_key`` and
+         ``tuma_business_email`` in a TenantTumaConfig row.
+
+    Returns:
+        TenantTumaConfig instance (created or existing)
+
+    Raises:
+        TumaError on remote failures.
+    """
+    from apps.billing.models.payment_models import TenantTumaConfig
+    from apps.core.models import Tenant, Company
+    from django_tenants.utils import schema_context, get_public_schema_name
+
+    # 1. Return early if already provisioned
+    cfg, created = TenantTumaConfig.objects.get_or_create(schema_name=schema_name)
+    if cfg.tuma_business_id:
+        return cfg
+
+    # 2. Resolve tenant identity
+    with schema_context(get_public_schema_name()):
+        tenant = Tenant.objects.get(schema_name=schema_name)
+        try:
+            company = tenant.company
+            name = company.name or tenant.schema_name
+            email = company.email or f"{tenant.schema_name}@netily.co.ke"
+            mobile = company.phone_number or "254700000000"
+        except (Company.DoesNotExist, AttributeError):
+            name = tenant.schema_name
+            email = f"{tenant.schema_name}@netily.co.ke"
+            mobile = "254700000000"
+
+    # 3. Auth with master credentials (cached)
+    client = TumaClient()
+    master_token = client.get_master_token()
+
+    # 4. Pick default bank_id from reference list
+    banks_data = client.list_banks(master_token)
+    banks_list = banks_data.get("data", [])
+    default_bank_id = banks_list[0]["id"] if banks_list else ""
+
+    # If the config already has a bank reference, prefer that
+    bank_id = cfg.collection_reference_id or cfg.bank_id or default_bank_id
+    account_number = cfg.collection_account_number or cfg.bank_account_number or "0000000000"
+
+    # 5. Create on Tuma
+    payload = {
+        "name": name,
+        "email": email,
+        "mobile": mobile,
+        "bank_id": bank_id,
+        "account_number": account_number,
+        "logo": getattr(settings, "TUMA_DEFAULT_LOGO_URL", "https://placehold.co/400x400.png"),
+        "description": f"{schema_name} ISP payment profile",
+    }
+
+    res = client.create_business(master_token, payload)
+    if not res.get("success"):
+        raise TumaError(res.get("message", "Failed to create Tuma child business"))
+
+    data = res["data"]
+    cfg.tuma_business_id = data.get("id", "")
+    cfg.tuma_business_api_key = data.get("api_key", "")
+    cfg.tuma_business_email = email
+    cfg.is_active = True
+    cfg.save()
+
+    logger.info(f"Tuma child business created for {schema_name}: {cfg.tuma_business_id}")
+    return cfg
