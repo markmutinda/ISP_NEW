@@ -457,8 +457,21 @@ class PaymentMethodDetailView(APIView):
             return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
         serializer = PaymentMethodSerializer(method, data=request.data, partial=True)
         serializer.is_valid(raise_exception=True)
-        serializer.save(updated_by=request.user)
-        return Response(serializer.data)
+        method = serializer.save(updated_by=request.user)
+
+        # If the active method's settlement details changed, sync to Tuma
+        tuma_synced = False
+        if method.is_active:
+            from apps.billing.services.tuma_service import sync_active_method_to_tuma, TumaError
+            try:
+                result = sync_active_method_to_tuma(method.schema_name, method)
+                tuma_synced = bool(result)
+            except TumaError as e:
+                logger.warning(f"Tuma sync on update failed for {method.schema_name}: {e}")
+
+        data = serializer.data
+        data['tuma_synced'] = tuma_synced
+        return Response(data)
 
     def delete(self, request, pk):
         try:

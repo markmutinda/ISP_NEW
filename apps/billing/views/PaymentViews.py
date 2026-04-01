@@ -426,6 +426,17 @@ class PaymentMethodViewSet(viewsets.ModelViewSet):
         except TumaError as e:
             logger.warning(f"Tuma provisioning/sync failed for {schema}: {e}")
 
+    def perform_update(self, serializer):
+        from ..services.tuma_service import sync_active_method_to_tuma, TumaError
+        method = serializer.save()
+
+        # If the active method's settlement details changed, sync to Tuma
+        if method.is_active:
+            try:
+                sync_active_method_to_tuma(method.schema_name, method)
+            except TumaError as e:
+                logger.warning(f"Tuma sync on update failed for {method.schema_name}: {e}")
+
     def destroy(self, request, *args, **kwargs):
         from ..services.tuma_service import (
             deactivate_tuma_collections, delete_tuma_business, TumaError,
