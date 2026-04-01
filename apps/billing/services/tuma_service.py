@@ -13,6 +13,11 @@ class TumaError(Exception):
     pass
 
 
+class TumaNotFound(TumaError):
+    """Raised when the Tuma business no longer exists (404)."""
+    pass
+
+
 class TumaClient:
     TOKEN_CACHE_PREFIX = "tuma_token:"
     TOKEN_SAFETY_MARGIN = 300  # 5 minutes before actual expiry
@@ -152,26 +157,24 @@ class TumaClient:
             json=body,
             timeout=20
         )
+        if response.status_code == 404:
+            raise TumaNotFound(f"Tuma business {business_id} no longer exists")
         response.raise_for_status()
         return response.json()
 
     def delete_business(self, token, business_id):
         """
-        Delete a child business (soft delete or hard delete per Tuma API).
-        Called when a tenant is deactivated or removed from the platform.
-        
-        Args:
-            token: Master authentication token
-            business_id: ID of the business to delete
-            
-        Returns:
-            dict: Deletion confirmation
+        Delete a child business.
+        Returns the response dict, or a synthetic success if already gone (404).
         """
         response = requests.delete(
             f"{self.base}/businesses/{business_id}",
             headers={"Authorization": f"Bearer {token}"},
             timeout=20
         )
+        if response.status_code == 404:
+            logger.info(f"Tuma business {business_id} already deleted (404)")
+            return {"success": True, "already_gone": True}
         response.raise_for_status()
         return response.json()
 
@@ -252,6 +255,20 @@ class TumaClient:
 # ======================================================================
 # Tenant-level helpers
 # ======================================================================
+
+def _clear_tuma_config(cfg):
+    """Reset all Tuma-related fields on a TenantTumaConfig to blank/inactive."""
+    cfg.tuma_business_id = ""
+    cfg.tuma_business_api_key = ""
+    cfg.tuma_business_email = ""
+    cfg.is_active = False
+    cfg.collection_reference_id = ""
+    cfg.collection_reference_code = ""
+    cfg.collection_reference_name = ""
+    cfg.collection_account_number = ""
+    cfg.active_mode = ""
+    cfg.save()
+
 
 def _resolve_tenant_identity(schema_name):
     """
@@ -375,7 +392,7 @@ def ensure_child_business(schema_name, method=None):
     """
     from apps.billing.models.payment_models import TenantTumaConfig
 
-    # 1. Return early if already provisioned
+    # 1. Check if already provisioned — but verify the remote business still exists
     cfg, _ = TenantTumaConfig.objects.get_or_create(schema_name=schema_name)
     if cfg.tuma_business_id:
         return cfg
@@ -476,8 +493,11 @@ def sync_active_method_to_tuma(schema_name, method):
         return None
 
     if not cfg.tuma_business_id:
-        logger.warning(f"sync_active_method_to_tuma: no tuma_business_id for {schema_name}")
-        return None
+        # No business yet — provision one now
+        cfg = ensure_child_business(schema_name, method=method)
+        if not cfg.tuma_business_id:
+            logger.warning(f"sync_active_method_to_tuma: could not provision for {schema_name}")
+            return None
 
     client = TumaClient()
     master_token = client.get_master_token()
@@ -527,7 +547,17 @@ def sync_active_method_to_tuma(schema_name, method):
         # Method type not directly mappable (e.g. PAYMENT_LINK) — just activate
         sync_details["note"] = "Payment link is not a Tuma settlement channel"
 
-    res = client.update_business(master_token, cfg.tuma_business_id, update_payload)
+    try:
+        res = client.update_business(master_token, cfg.tuma_business_id, update_payload)
+    except TumaNotFound:
+        # Business was deleted externally — re-provision and retry
+        logger.warning(f"Tuma business gone for {schema_name}, re-provisioning...")
+        _clear_tuma_config(cfg)
+        cfg = ensure_child_business(schema_name, method=method)
+        if not cfg.tuma_business_id:
+            raise TumaError("Failed to re-provision Tuma business")
+        res = client.update_business(master_token, cfg.tuma_business_id, update_payload)
+
     if not res.get("success"):
         raise TumaError(res.get("message", "Failed to sync method to Tuma"))
 
@@ -559,9 +589,15 @@ def deactivate_tuma_collections(schema_name):
     client = TumaClient()
     master_token = client.get_master_token()
 
-    res = client.update_business(master_token, cfg.tuma_business_id, {"is_active": False})
-    if not res.get("success"):
-        raise TumaError(res.get("message", "Failed to deactivate Tuma business"))
+    try:
+        res = client.update_business(master_token, cfg.tuma_business_id, {"is_active": False})
+        if not res.get("success"):
+            raise TumaError(res.get("message", "Failed to deactivate Tuma business"))
+    except TumaNotFound:
+        # Business was already deleted on Tuma — clear local config
+        logger.warning(f"Tuma business gone for {schema_name} during deactivate, clearing local config")
+        _clear_tuma_config(cfg)
+        return
 
     cfg.is_active = False
     cfg.save(update_fields=['is_active', 'updated_at'])
@@ -589,19 +625,11 @@ def delete_tuma_business(schema_name):
     master_token = client.get_master_token()
 
     res = client.delete_business(master_token, cfg.tuma_business_id)
+    # delete_business handles 404 gracefully (already_gone)
     if not res.get("success"):
         raise TumaError(res.get("message", "Failed to delete Tuma business"))
 
     old_id = cfg.tuma_business_id
-    cfg.tuma_business_id = ""
-    cfg.tuma_business_api_key = ""
-    cfg.tuma_business_email = ""
-    cfg.is_active = False
-    cfg.collection_reference_id = ""
-    cfg.collection_reference_code = ""
-    cfg.collection_reference_name = ""
-    cfg.collection_account_number = ""
-    cfg.active_mode = ""
-    cfg.save()
+    _clear_tuma_config(cfg)
     logger.info(f"Tuma business deleted for {schema_name}: was id={old_id}")
     return True
