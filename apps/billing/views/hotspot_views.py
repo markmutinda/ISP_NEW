@@ -29,7 +29,7 @@ from apps.billing.models.billing_models import Plan
 from apps.billing.models.payment_models import Payment, TenantTumaConfig, InvoiceItemPayment
 from apps.billing.models.voucher_models import Voucher
 from apps.billing.services.tuma_service import TumaClient
-from apps.core.models import TumaCallbackMap  # ADDED: For public schema callback mapping
+from apps.core.models import TumaCallbackMap
 from apps.network.models.router_models import Router
 from apps.subscriptions.models import CommissionLedger
 
@@ -68,21 +68,17 @@ def _serialize_plan(plan):
         'description': plan.description or '',
         'price': float(plan.base_price),
         'currency': 'KES',
-        # Validity
         'validity_type': plan.validity_type or 'DAYS',
         'validity_value': _plan_validity_value(plan),
         'duration_display': plan.validity_display,
-        # Speed
         'download_speed': plan.download_speed or 0,
         'upload_speed': plan.upload_speed or 0,
         'speed_unit': plan.speed_unit or 'MBPS',
         'speed_display': plan.speed_display,
-        # Data limits
         'limitation_type': 'UNLIMITED' if plan.data_limit is None else 'DATA',
         'data_limit_value': plan.data_limit,
         'data_limit_unit': 'GB',
         'data_limit_display': _plan_data_limit_display(plan),
-        # Display flags
         'is_popular': plan.is_popular,
     }
 
@@ -95,23 +91,18 @@ def _serialize_hotspot_plan(plan):
         'description': plan.description or '',
         'price': float(plan.price),
         'currency': plan.currency,
-        # Validity
         'validity_type': plan.validity_type,
         'validity_value': plan.validity_value,
         'duration_display': plan.duration_display,
-        # Speed
         'download_speed': plan.download_speed,
         'upload_speed': plan.upload_speed,
         'speed_unit': plan.speed_unit,
         'speed_display': plan.speed_display,
-        # Data limits
         'limitation_type': plan.limitation_type,
         'data_limit_value': plan.data_limit_value,
         'data_limit_unit': plan.data_limit_unit,
         'data_limit_display': plan.data_limit_display,
-        # Device limits
         'simultaneous_devices': plan.simultaneous_devices,
-        # Display flags
         'is_popular': plan.is_popular,
     }
 
@@ -148,7 +139,6 @@ class CaptivePortalView(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        # ── Resolve the tenant from the public schema ──
         try:
             from apps.core.models import Tenant
             with schema_context(get_public_schema_name()):
@@ -157,10 +147,8 @@ class CaptivePortalView(APIView):
             logger.error(f"Tenant '{tenant_subdomain}' not found: {e}")
             return Response({'status': 'error', 'message': 'Tenant not found'}, status=status.HTTP_400_BAD_REQUEST)
 
-        # ── Query router + plans inside the tenant schema ──
         try:
             with schema_context(tenant.schema_name):
-                # ── Find the Router ──
                 router = None
                 try:
                     router = Router.objects.get(id=router_id, is_active=True)
@@ -171,12 +159,9 @@ class CaptivePortalView(APIView):
                     except Router.DoesNotExist:
                         logger.warning(f"Router '{router_id}' does not exist in tenant {tenant_subdomain}")
                 except ProgrammingError:
-                    # Table doesn't exist yet — tenant schema not fully migrated
                     logger.warning("CaptivePortal: network_router table missing for tenant %s", tenant_subdomain)
 
                 if router is None:
-                    # Even without a router, we can still serve tenant-wide
-                    # Plan records so the portal shows *something*.
                     portal_config = {
                         'template_id': 1,
                         'hotspot_name': tenant_subdomain,
@@ -194,7 +179,6 @@ class CaptivePortalView(APIView):
                         'gateway_ip': router.gateway_ip,
                     }
 
-                    # ── Load branding for this router ──
                     branding_data = None
                     try:
                         branding = getattr(router, 'hotspot_branding', None)
@@ -214,14 +198,11 @@ class CaptivePortalView(APIView):
                                 'support_phone': branding.support_phone,
                                 'support_email': branding.support_email,
                             }
-                            # Merge branding support_phone into portal_config if not set on router
                             if not portal_config['support_phone'] and branding.support_phone:
                                 portal_config['support_phone'] = branding.support_phone
                     except Exception:
                         logger.debug("CaptivePortal: no branding found for router %s", router_id)
 
-                # ── Resolve Plans ──
-                # Priority 1: HotspotPlan records for this router
                 plans_data = []
                 if router is not None:
                     try:
@@ -233,7 +214,6 @@ class CaptivePortalView(APIView):
                     except ProgrammingError:
                         logger.warning("CaptivePortal: billing_hotspotplan table missing for tenant %s", tenant_subdomain)
 
-                # Priority 2: Fallback to Plan(plan_type='HOTSPOT') — tenant-wide
                 if not plans_data:
                     try:
                         generic_plans = Plan.objects.filter(
@@ -271,10 +251,9 @@ class HotspotPlansView(APIView):
     """
     
     permission_classes = [AllowAny]
-    authentication_classes = []  # No auth required
+    authentication_classes = []
     
     def get(self, request, router_id):
-        # BULLETPROOF: Try by ID, fallback to Name
         try:
             router = Router.objects.get(id=router_id, is_active=True)
         except (Router.DoesNotExist, ValueError):
@@ -287,17 +266,14 @@ class HotspotPlansView(APIView):
                     status=status.HTTP_404_NOT_FOUND
                 )
         
-        # Get active plans for this router
         plans = HotspotPlan.objects.filter(
             router=router,
             is_active=True
         ).order_by('sort_order', 'price')
         
-        # Get branding
         try:
             branding = router.hotspot_branding
         except HotspotBranding.DoesNotExist:
-            # Try to get default branding
             branding = HotspotBranding.objects.filter(
                 is_default=True
             ).first()
@@ -335,7 +311,6 @@ class HotspotPlansView(APIView):
                 'support_email': branding.support_email,
             }
         
-        # Portal customisation stored on the Router model
         portal_config = {
             'template_id': router.template_id or 1,
             'hotspot_name': router.hotspot_name or router.name,
@@ -362,7 +337,7 @@ class HotspotPurchaseView(APIView):
     """
     
     permission_classes = [AllowAny]
-    authentication_classes = []  # No auth required
+    authentication_classes = []
     
     def generate_unique_code(self):
         """
@@ -376,7 +351,6 @@ class HotspotPurchaseView(APIView):
             part2 = ''.join(random.choices(chars, k=4))
             code = f"{part1}-{part2}"
             
-            # Ensure strictly unique in this tenant's database
             if not HotspotSession.objects.filter(access_code=code).exists():
                 return code
 
@@ -393,20 +367,17 @@ class HotspotPurchaseView(APIView):
         except Exception:
             return Response({'error': 'Invalid tenant'}, status=status.HTTP_400_BAD_REQUEST)
 
-        # Run inside the tenant's schema
         with schema_context(tenant.schema_name):
             router_id = request.data.get('router_id')
             plan_id = request.data.get('plan_id')
             phone_number = request.data.get('phone_number')
             mac_address = request.data.get('mac_address', '')
             
-            # Validate required fields
             if not all([router_id, plan_id, phone_number]):
                 return Response({
                     'error': 'Missing required fields: router_id, plan_id, phone_number'
                 }, status=status.HTTP_400_BAD_REQUEST)
             
-            # 1. Find Router & Plan
             try:
                 router = Router.objects.get(id=router_id, is_active=True)
             except (Router.DoesNotExist, ValueError):
@@ -420,10 +391,8 @@ class HotspotPurchaseView(APIView):
             except HotspotPlan.DoesNotExist:
                 return Response({'error': 'Plan not found'}, status=status.HTTP_404_NOT_FOUND)
             
-            # 2. Normalize MAC (Format: AA:BB:CC:DD:EE:FF)
             mac_address = mac_address.upper().replace('-', ':')
             
-            # 3. PERSISTENT IDENTITY & ROAMING DETECTOR
             existing_user = HotspotSession.objects.filter(
                 mac_address=mac_address
             ).exclude(
@@ -434,10 +403,8 @@ class HotspotPurchaseView(APIView):
             roamed_from_name = None
 
             if existing_user and existing_user.access_code:
-                # RETURNING CUSTOMER
                 friendly_username = existing_user.access_code
                 
-                # ROAMING CHECK
                 if existing_user.router_id != router.id:
                     is_roaming = True
                     roamed_from_name = existing_user.router.name
@@ -446,13 +413,9 @@ class HotspotPurchaseView(APIView):
                     logger.info(f"🏠 HOME ROUTER: User {friendly_username} returning to {router.name}")
                     
             else:
-                # BRAND NEW CUSTOMER
                 friendly_username = self.generate_unique_code()
                 logger.info(f"✨ NEW USER: {mac_address} -> {friendly_username} at {router.name}")
 
-            # ═══════════════════════════════════════════════════════════
-            # 4. CREATE PENDING HOTSPOT SESSION (before payment)
-            # ═══════════════════════════════════════════════════════════
             session_id = HotspotSession.generate_session_id()
             session = HotspotSession.objects.create(
                 session_id=session_id,
@@ -461,23 +424,17 @@ class HotspotPurchaseView(APIView):
                 phone_number=phone_number,
                 mac_address=mac_address,
                 amount=plan.price,
-                status='pending',  # NOT paid yet - waiting for STK
+                status='pending',
                 access_code=friendly_username,
                 is_roaming=is_roaming,
                 roamed_from=roamed_from_name
             )
 
-            # ═══════════════════════════════════════════════════════════
-            # 5. RESOLVE TUMA CONFIGURATION
-            # ═══════════════════════════════════════════════════════════
             cfg = TenantTumaConfig.objects.filter(schema_name=tenant.schema_name, is_active=True).first()
             if not cfg or not cfg.tuma_business_email or not cfg.tuma_business_api_key:
                 session.mark_failed("Tuma gateway not configured")
                 return Response({'error': 'Payment gateway not configured'}, status=status.HTTP_400_BAD_REQUEST)
 
-            # ═══════════════════════════════════════════════════════════
-            # 6. GET OR CREATE PAYMENT METHOD FOR HOTSPOT STK
-            # ═══════════════════════════════════════════════════════════
             payment_method, _ = InvoiceItemPayment.objects.get_or_create(
                 schema_name=tenant.schema_name,
                 code='HOTSPOT_TUMA_STK',
@@ -491,78 +448,53 @@ class HotspotPurchaseView(APIView):
                 }
             )
 
-            # ═══════════════════════════════════════════════════════════
-            # 7. CREATE PAYMENT ROW LINKED TO HOTSPOT SESSION
-            # ═══════════════════════════════════════════════════════════
             payment_ref = f"HS-{session.session_id}-{int(time.time())}".replace(" ", "-")
             
-            # ───────────────────────────────────────────────────────────
-            # FIXED: Use email and phone_number instead of username
-            # ───────────────────────────────────────────────────────────
+            # ============================================================
+            # FIX: Reuse same hotspot account on repeat purchases
+            # ============================================================
             from django.contrib.auth import get_user_model
             from apps.customers.models import Customer
             import hashlib
             import secrets
-            import string
             
-            User = get_user_model()  # This gets core.User
+            User = get_user_model()
             
-            # Generate identity seed from phone or MAC
+            # Build deterministic identity from phone (preferred) or MAC hash
             if phone_number and phone_number != 'VOUCHER':
-                identity_seed = phone_number
                 safe_seed = ''.join(ch for ch in phone_number if ch.isdigit()) or 'guest'
+                base_email = f"hotspot_{safe_seed}@hotspot.local"
+                identity_phone = phone_number
             else:
-                identity_seed = hashlib.md5(mac_address.encode()).hexdigest()[:12]
-                safe_seed = identity_seed
+                mac_seed = hashlib.md5(mac_address.encode()).hexdigest()[:12]
+                base_email = f"hotspot_{mac_seed}@hotspot.local"
+                identity_phone = f"+999{''.join(ch for ch in mac_seed if ch.isdigit())[:12]}"
             
-            # Generate unique email
-            base_local_part = f"hotspot_{safe_seed}"
-            email_local_part = base_local_part
-            counter = 1
-            while User.objects.filter(email=f"{email_local_part}@hotspot.local").exists():
-                email_local_part = f"{base_local_part}_{counter}"
-                counter += 1
+            # 1) Reuse existing user first
+            user = User.objects.filter(email=base_email).first()
+            if not user and identity_phone:
+                user = User.objects.filter(phone_number=identity_phone).first()
             
-            hotspot_email = f"{email_local_part}@hotspot.local"
-            
-            # Generate unique phone number
-            if phone_number and phone_number != 'VOUCHER':
-                hotspot_phone = phone_number
+            # 2) Only create if not found
+            if not user:
+                random_password = ''.join(secrets.choice(string.ascii_letters + string.digits) for _ in range(16))
+                user = User.objects.create_user(
+                    email=base_email,
+                    password=random_password,
+                    phone_number=identity_phone,
+                    first_name="Hotspot",
+                    last_name="Customer",
+                    role='customer',
+                    tenant_subdomain=getattr(tenant, 'subdomain', tenant_subdomain),
+                )
+                logger.info(f"Created new hotspot user: {user.email}")
             else:
-                # Generate a dummy phone number for voucher users
-                digits_only = ''.join(ch for ch in identity_seed if ch.isdigit())
-                hotspot_phone = f"+999{digits_only[:12]}" if digits_only else "+999000000000"
+                logger.info(f"Reusing existing hotspot user: {user.email} (phone: {user.phone_number})")
             
-            # Ensure phone number uniqueness
-            phone_counter = 1
-            original_phone = hotspot_phone
-            while User.objects.filter(phone_number=hotspot_phone).exists():
-                suffix = str(phone_counter)
-                hotspot_phone = f"{original_phone[:17-len(suffix)]}{suffix}"
-                phone_counter += 1
-            
-            # Create random password
-            random_password = ''.join(secrets.choice(string.ascii_letters + string.digits) for _ in range(16))
-            
-            # FIXED: Use tenant_subdomain instead of tenant FK to avoid FK violation
-            # Do NOT pass tenant=tenant here - use tenant_subdomain only
-            user = User.objects.create_user(
-                email=hotspot_email,
-                password=random_password,
-                phone_number=hotspot_phone,
-                first_name="Hotspot",
-                last_name="Customer",
-                role='customer',
-                tenant_subdomain=getattr(tenant, 'subdomain', tenant_subdomain),
-            )
-            
-            # Now create Customer linked to the User with valid Customer fields only
-            # NOTE: Customer model does NOT have a schema_name field. It's identified by user (OneToOne)
-            # and has fields: customer_code, status, customer_type, category, etc.
+            # 3) Get or create Customer - 1:1 with User
             hotspot_customer, created = Customer.objects.get_or_create(
-                user=user,  # Customer is uniquely identified by its OneToOne relation to User
+                user=user,
                 defaults={
-                    'customer_code': f"HS_{email_local_part[:20]}",
                     'status': 'ACTIVE',
                     'customer_type': 'RESIDENTIAL',
                     'category': 'PREPAID',
@@ -570,12 +502,12 @@ class HotspotPurchaseView(APIView):
             )
             
             if created:
-                logger.info(f"Created new hotspot customer: {hotspot_customer.customer_code} (User email: {user.email})")
+                logger.info(f"Created new hotspot customer for user: {user.email}")
             else:
-                logger.debug(f"Using existing hotspot customer: {hotspot_customer.customer_code}")
+                logger.debug(f"Using existing hotspot customer for user: {user.email}")
             
             payment = Payment.objects.create(
-                customer=hotspot_customer,  # Required field - now properly linked to a User
+                customer=hotspot_customer,
                 payment_method=payment_method,
                 amount=plan.price,
                 transaction_fee=0,
@@ -589,18 +521,13 @@ class HotspotPurchaseView(APIView):
                 tuma_status='pending',
             )
 
-            # ═══════════════════════════════════════════════════════════
-            # 8. INITIATE STK PUSH VIA TUMA
-            # ═══════════════════════════════════════════════════════════
             try:
                 client = TumaClient()
                 token = client.get_token(cfg.tuma_business_email, cfg.tuma_business_api_key)
                 description = f"HS-{session.session_id}"
                 
-                # Get callback URL from settings or use default
                 callback_url = getattr(settings, 'TUMA_CALLBACK_URL', None)
                 if not callback_url:
-                    # Construct default callback URL based on tenant
                     callback_url = f"https://{tenant_subdomain}.netily.co.ke/api/v1/billing/tuma/callback/"
                 
                 tuma_res = client.stk_push(
@@ -619,15 +546,11 @@ class HotspotPurchaseView(APIView):
                     session.mark_failed(payment.failure_reason)
                     return Response({'error': payment.failure_reason}, status=status.HTTP_400_BAD_REQUEST)
                 
-                # Update payment with Tuma request IDs
                 d = tuma_res.get("data", {})
                 payment.tuma_merchant_request_id = d.get("merchant_request_id", "")
                 payment.tuma_checkout_request_id = d.get("checkout_request_id", "")
                 payment.save(update_fields=['tuma_merchant_request_id', 'tuma_checkout_request_id'])
                 
-                # ============================================================
-                # Store callback routing in public schema for O(1) webhook lookup
-                # ============================================================
                 with schema_context(get_public_schema_name()):
                     TumaCallbackMap.objects.update_or_create(
                         merchant_request_id=payment.tuma_merchant_request_id,
@@ -638,7 +561,6 @@ class HotspotPurchaseView(APIView):
                         },
                     )
                 
-                # Link payment to session
                 session.tuma_merchant_request_id = payment.tuma_merchant_request_id
                 session.tuma_checkout_request_id = payment.tuma_checkout_request_id
                 session.payment = payment
@@ -655,9 +577,6 @@ class HotspotPurchaseView(APIView):
                 session.mark_failed(payment.failure_reason)
                 return Response({'error': 'Failed to initiate payment'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
-            # ═══════════════════════════════════════════════════════════
-            # 9. RETURN PENDING RESPONSE - WAITING FOR STK COMPLETION
-            # ═══════════════════════════════════════════════════════════
             return Response({
                 'status': 'pending',
                 'session_id': session.session_id,
@@ -678,26 +597,11 @@ class HotspotPurchaseStatusView(APIView):
     """
     
     permission_classes = [AllowAny]
-    authentication_classes = []  # No auth required
+    authentication_classes = []
     
     def _check_tuma_payment_status(self, session, tenant_schema):
-        """
-        Check Tuma payment status for a hotspot session.
-        
-        Priority order:
-            1. Explicit payment FK (most reliable)
-            2. Tuma request IDs (if stored in session)
-            3. Phone number + amount (legacy fallback)
-        
-        Returns:
-            tuple: (status, message, data) where status is one of:
-                - 'completed': Payment successful
-                - 'failed': Payment failed
-                - 'pending': Still pending
-        """
         payment = None
         
-        # 0) STRONGEST MATCH: Explicit relation via payment FK
         if getattr(session, 'payment_id', None):
             try:
                 payment = Payment.objects.filter(id=session.payment_id).first()
@@ -706,7 +610,6 @@ class HotspotPurchaseStatusView(APIView):
             except Exception as e:
                 logger.warning(f"Error fetching payment by FK: {e}")
         
-        # 1) SECONDARY MATCH: Tuma request IDs stored in session
         if not payment:
             if hasattr(session, 'tuma_checkout_request_id') and session.tuma_checkout_request_id:
                 payment = Payment.objects.filter(
@@ -722,7 +625,6 @@ class HotspotPurchaseStatusView(APIView):
                 if payment:
                     logger.debug(f"Found payment via merchant_request_id: {session.tuma_merchant_request_id}")
         
-        # 2) FALLBACK: Phone number + amount (legacy, least reliable)
         if not payment:
             payments = Payment.objects.filter(
                 payer_phone=session.phone_number,
@@ -736,15 +638,12 @@ class HotspotPurchaseStatusView(APIView):
         if not payment:
             return ('pending', 'No payment record found', None)
         
-        # Check payment status
         if payment.status == 'COMPLETED':
             return ('completed', 'Payment successful', payment)
         elif payment.status == 'FAILED':
             return ('failed', payment.failure_reason or 'Payment failed', None)
         else:
-            # Check Tuma-specific status if available
             if payment.tuma_status == 'completed' or str(payment.tuma_result_code) == '0':
-                # Update payment status if Tuma says completed but our status is still PROCESSING
                 if payment.status == 'PROCESSING':
                     payment.status = 'COMPLETED'
                     payment.save()
@@ -766,7 +665,6 @@ class HotspotPurchaseStatusView(APIView):
         except Exception:
             return Response({'error': 'Invalid tenant'}, status=status.HTTP_400_BAD_REQUEST)
 
-        # Run the entire status check inside the specific ISP's database context
         with schema_context(tenant.schema_name):
             try:
                 session = HotspotSession.objects.get(session_id=session_id)
@@ -776,7 +674,6 @@ class HotspotPurchaseStatusView(APIView):
                     status=status.HTTP_404_NOT_FOUND
                 )
             
-            # Return current status
             if session.status == 'active':
                 return Response({
                     'status': 'success',
@@ -802,17 +699,14 @@ class HotspotPurchaseStatusView(APIView):
                 })
             
             elif session.status == 'paid':
-                # Payment received but not yet activated — activate now
-                # Ensure we don't generate a NEW code if one exists
-                session.activate(session.access_code)  # <--- Pass current code!
+                session.activate(session.access_code)
                 
-                # Create RADIUS credentials
                 try:
                     from apps.billing.services.hotspot_radius_service import HotspotRadiusService
                     
                     radius_service = HotspotRadiusService()
                     radius_service.create_hotspot_credentials(
-                        username=session.access_code,  # <--- Use session.access_code
+                        username=session.access_code,
                         password=session.access_code,
                         router=session.router,
                         plan=session.plan,
@@ -833,27 +727,21 @@ class HotspotPurchaseStatusView(APIView):
                     'login_url': request.query_params.get('login_url', ''),
                 })
             
-            # Check Tuma payment status for pending sessions
             if session.phone_number:
-                # Check Tuma payment status
                 status, message, payment = self._check_tuma_payment_status(session, tenant.schema_name)
                 
                 if status == 'completed':
-                    # Payment successful - activate session
                     mpesa_receipt = payment.mpesa_receipt if payment else ''
                     session.mark_paid(mpesa_receipt)
                     
-                    # Store Tuma reference IDs on session for future lookups
                     if payment:
                         session.tuma_checkout_request_id = payment.tuma_checkout_request_id
                         session.tuma_merchant_request_id = payment.tuma_merchant_request_id
                         session.payment = payment
                         session.save(update_fields=['tuma_checkout_request_id', 'tuma_merchant_request_id', 'payment'])
                     
-                    # Activate session (generates access code + expiry)
                     session.activate(session.access_code)
                     
-                    # ── CLOUD CONTROLLER: Create RADIUS credentials ──
                     try:
                         from apps.billing.services.hotspot_radius_service import HotspotRadiusService
                         
@@ -872,7 +760,6 @@ class HotspotPurchaseStatusView(APIView):
                             f"{session.session_id}: {e}",
                             exc_info=True
                         )
-                    # ── END CLOUD CONTROLLER ──
                     
                     return Response({
                         'status': 'success',
@@ -892,10 +779,8 @@ class HotspotPurchaseStatusView(APIView):
                     })
                 
                 elif status == 'pending':
-                    # Still pending - keep waiting
                     logger.debug(f"Hotspot payment pending for session {session_id}: {message}")
             
-            # Still pending
             return Response({
                 'status': 'pending',
                 'message': 'Waiting for payment confirmation on your phone...',
@@ -914,7 +799,7 @@ class HotspotVoucherRedeemView(APIView):
     POST /api/v1/hotspot/voucher-redeem/
     {
         "code": "ABC123",
-        "pin": "1234",           // optional
+        "pin": "1234",
         "router_id": 5,
         "plan_id": "uuid-...",
         "mac_address": "AA:BB:CC:DD:EE:FF",
@@ -959,7 +844,6 @@ class HotspotVoucherRedeemView(APIView):
             if not router_id or not plan_id:
                 return Response({'error': 'Router and plan are required'}, status=status.HTTP_400_BAD_REQUEST)
 
-            # 1. Find and validate voucher
             try:
                 voucher = Voucher.objects.select_related('batch').get(code__iexact=voucher_code)
             except Voucher.DoesNotExist:
@@ -974,7 +858,6 @@ class HotspotVoucherRedeemView(APIView):
                          'Voucher is not available'
                 return Response({'error': reason}, status=status.HTTP_400_BAD_REQUEST)
 
-            # 2. Find Router & Plan
             try:
                 router = Router.objects.get(id=router_id, is_active=True)
             except (Router.DoesNotExist, ValueError):
@@ -985,13 +868,11 @@ class HotspotVoucherRedeemView(APIView):
             except HotspotPlan.DoesNotExist:
                 return Response({'error': 'Plan not found'}, status=status.HTTP_404_NOT_FOUND)
 
-            # 3. Check voucher value covers the plan price
             if voucher.remaining_value is not None and voucher.remaining_value < plan.price:
                 return Response({
                     'error': f'Voucher balance (KES {voucher.remaining_value}) is insufficient for this plan (KES {plan.price})'
                 }, status=status.HTTP_400_BAD_REQUEST)
 
-            # 4. Persistent identity (same pattern as purchase flow)
             existing_user = HotspotSession.objects.filter(
                 mac_address=mac_address
             ).exclude(access_code__isnull=True).order_by('-created_at').first()
@@ -1001,7 +882,6 @@ class HotspotVoucherRedeemView(APIView):
             else:
                 friendly_username = self._generate_code()
 
-            # 5. Mark voucher as used
             voucher.use_count = (voucher.use_count or 0) + 1
             if voucher.remaining_value is not None:
                 voucher.remaining_value = max(Decimal('0'), voucher.remaining_value - plan.price)
@@ -1009,7 +889,6 @@ class HotspotVoucherRedeemView(APIView):
                 voucher.status = 'USED'
             voucher.save()
 
-            # 6. Create hotspot session
             session_id = HotspotSession.generate_session_id()
             session = HotspotSession.objects.create(
                 session_id=session_id,
@@ -1023,7 +902,6 @@ class HotspotVoucherRedeemView(APIView):
                 payhero_checkout_id=f'VOUCHER_{voucher.code}',
             )
 
-            # 7. Activate & create RADIUS credentials
             try:
                 session.activate(friendly_username)
                 from apps.billing.services.hotspot_radius_service import HotspotRadiusService
