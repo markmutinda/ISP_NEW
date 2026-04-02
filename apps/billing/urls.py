@@ -20,6 +20,10 @@ from .views.hotspot_admin_views import (
     HotspotBrandingView,
     HotspotDashboardView,
 )
+from .views.hotspot_voucher_admin_views import (  # ADDED: Hotspot Voucher Admin Views
+    HotspotVoucherGenerateView,
+    HotspotVoucherListView,
+)
 from .views.customer_payment_views import (
     InitiateCustomerPaymentView,
     CustomerPaymentStatusView,
@@ -220,6 +224,19 @@ hotspot_admin_urlpatterns = [
     path('admin/routers/<int:router_id>/branding/', 
          HotspotBrandingView.as_view(), 
          name='hotspot-admin-branding'),
+    
+    # ============================================================
+    # HOTSPOT VOUCHER ADMIN ROUTES (ADDED)
+    # ============================================================
+    # Generate vouchers for a specific hotspot plan
+    path('admin/vouchers/generate/', 
+         HotspotVoucherGenerateView.as_view(), 
+         name='hotspot-admin-voucher-generate'),
+    
+    # List vouchers with filtering by plan, status, etc.
+    path('admin/vouchers/', 
+         HotspotVoucherListView.as_view(), 
+         name='hotspot-admin-voucher-list'),
 ]
 
 # ==========================

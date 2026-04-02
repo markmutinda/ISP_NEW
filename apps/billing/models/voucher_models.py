@@ -72,6 +72,16 @@ class VoucherBatch(models.Model):
     customer_restriction = models.BooleanField(default=False)
     plan_restriction = models.BooleanField(default=False)
     
+    # ADDED: Hotspot Plan restriction for voucher batch
+    # This allows vouchers to be restricted to a specific hotspot plan
+    hotspot_plan = models.ForeignKey(
+        'billing.HotspotPlan',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='voucher_batches'
+    )
+    
     # Metadata
     created_by = models.ForeignKey('core.User', on_delete=models.SET_NULL, null=True, related_name='created_voucher_batches')
     approved_by = models.ForeignKey('core.User', on_delete=models.SET_NULL, null=True, blank=True, related_name='approved_voucher_batches')
@@ -85,6 +95,7 @@ class VoucherBatch(models.Model):
             models.Index(fields=['batch_number']),
             models.Index(fields=['status']),
             models.Index(fields=['valid_from', 'valid_to']),
+            models.Index(fields=['hotspot_plan']),  # ADDED: Index for hotspot plan lookups
         ]
 
     def __str__(self):
@@ -250,6 +261,19 @@ class Voucher(models.Model):
             (self.is_reusable or self.use_count < self.max_uses) and
             self.remaining_value > 0
         )
+
+    def get_hotspot_plan_restriction(self):
+        """Return the hotspot plan this voucher is restricted to, if any."""
+        if self.batch and self.batch.hotspot_plan:
+            return self.batch.hotspot_plan
+        return None
+
+    def is_valid_for_hotspot_plan(self, hotspot_plan):
+        """Check if this voucher can be used for a specific hotspot plan."""
+        restriction = self.get_hotspot_plan_restriction()
+        if restriction is None:
+            return True  # No restriction, valid for any plan
+        return restriction.id == hotspot_plan.id
 
     def use_voucher(self, customer, amount, description=""):
         from .payment_models import Payment, PaymentMethod

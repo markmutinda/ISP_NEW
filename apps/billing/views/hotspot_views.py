@@ -868,6 +868,21 @@ class HotspotVoucherRedeemView(APIView):
             except HotspotPlan.DoesNotExist:
                 return Response({'error': 'Plan not found'}, status=status.HTTP_404_NOT_FOUND)
 
+            # ============================================================
+            # FIX 5: Enforce voucher plan restriction
+            # Check if voucher is restricted to a specific hotspot plan
+            # ============================================================
+            voucher_plan_id = getattr(voucher.batch, 'hotspot_plan_id', None)
+            if voucher_plan_id and str(voucher_plan_id) != str(plan.id):
+                logger.warning(
+                    f"Voucher {voucher.code} is restricted to plan {voucher_plan_id} "
+                    f"but user tried to redeem for plan {plan.id}"
+                )
+                return Response(
+                    {'error': 'This voucher is not valid for the selected plan'},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+
             if voucher.remaining_value is not None and voucher.remaining_value < plan.price:
                 return Response({
                     'error': f'Voucher balance (KES {voucher.remaining_value}) is insufficient for this plan (KES {plan.price})'
