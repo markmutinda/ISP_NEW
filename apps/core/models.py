@@ -763,3 +763,22 @@ class RouterTenantIndex(models.Model):
 
     def __str__(self):
         return f"{self.router_auth_key} -> {self.tenant_schema}"
+
+
+class TumaCallbackMap(models.Model):
+    """
+    Shared/public lookup: maps Tuma request IDs to tenant schema.
+    This model must live in a SHARED app (core) so it's accessible in public schema.
+    """
+    merchant_request_id = models.CharField(max_length=120, db_index=True, unique=True)
+    checkout_request_id = models.CharField(max_length=120, db_index=True, unique=True)
+    schema_name = models.CharField(max_length=63, db_index=True)
+    payment_reference = models.CharField(max_length=120, blank=True, default="")
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        app_label = "core"
+        ordering = ["-created_at"]
+
+    def __str__(self):
+        return f"{self.schema_name} | {self.checkout_request_id}"

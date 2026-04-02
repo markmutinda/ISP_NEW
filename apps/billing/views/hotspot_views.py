@@ -29,6 +29,7 @@ from apps.billing.models.billing_models import Plan
 from apps.billing.models.payment_models import Payment, TenantTumaConfig, InvoiceItemPayment
 from apps.billing.models.voucher_models import Voucher
 from apps.billing.services.tuma_service import TumaClient
+from apps.core.models import TumaCallbackMap  # ADDED: For public schema callback mapping
 from apps.network.models.router_models import Router
 from apps.subscriptions.models import CommissionLedger
 
@@ -326,6 +327,8 @@ class HotspotPlansView(APIView):
                 'background_image_url': branding.background_image.url if branding.background_image else None,
                 'primary_color': branding.primary_color,
                 'secondary_color': branding.secondary_color,
+                'text_color': branding.text_color,
+                'background_color': branding.background_color,
                 'welcome_title': branding.welcome_title,
                 'welcome_message': branding.welcome_message,
                 'support_phone': branding.support_phone,
@@ -621,6 +624,19 @@ class HotspotPurchaseView(APIView):
                 payment.tuma_merchant_request_id = d.get("merchant_request_id", "")
                 payment.tuma_checkout_request_id = d.get("checkout_request_id", "")
                 payment.save(update_fields=['tuma_merchant_request_id', 'tuma_checkout_request_id'])
+                
+                # ============================================================
+                # Store callback routing in public schema for O(1) webhook lookup
+                # ============================================================
+                with schema_context(get_public_schema_name()):
+                    TumaCallbackMap.objects.update_or_create(
+                        merchant_request_id=payment.tuma_merchant_request_id,
+                        defaults={
+                            "checkout_request_id": payment.tuma_checkout_request_id,
+                            "schema_name": tenant.schema_name,
+                            "payment_reference": payment.payment_number,
+                        },
+                    )
                 
                 # Link payment to session
                 session.tuma_merchant_request_id = payment.tuma_merchant_request_id
