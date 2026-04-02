@@ -298,10 +298,14 @@ def _resolve_bank_for_method(method, banks_list):
 
     Every payment method type represents a real settlement channel:
       - MOBILE_MONEY       → M-Pesa Paybill reference (phone is the account)
+      - MPESA_STK          → M-Pesa STK Push (uses paybill or till as settlement)
       - MPESA_PAYBILL      → Paybill reference + paybill_number
       - MPESA_TILL         → Buy Goods reference + till_number
       - BANK_TRANSFER      → Matched bank reference + account_number
       - PAYMENT_LINK       → Not a Tuma settlement channel (returns None)
+
+    Data can live in config_json OR direct model fields (dual-storage).
+    We check both sources to ensure we always pick up the value.
 
     Returns:
         (bank_id, account_number, description) or (None, None, None)
@@ -309,10 +313,15 @@ def _resolve_bank_for_method(method, banks_list):
     config = method.config_json or {}
     mtype = method.method_type
 
+    # Helper: read from config_json first, fall back to direct model field
+    def _get(config_key, model_attr=None):
+        val = config.get(config_key, '') or ''
+        if not val and model_attr:
+            val = getattr(method, model_attr, '') or ''
+        return str(val).strip()
+
     if mtype == 'MOBILE_MONEY':
-        # Mobile Money → route through M-Pesa Paybill reference on Tuma
-        # The phone_number IS the settlement target
-        phone = config.get('phone_number', '')
+        phone = _get('phone_number')
         if phone:
             ref = next(
                 (b for b in banks_list
@@ -320,10 +329,9 @@ def _resolve_bank_for_method(method, banks_list):
                 None,
             )
             if ref:
-                provider = config.get('mobile_provider', 'SAFARICOM')
+                provider = _get('mobile_provider') or 'SAFARICOM'
                 desc = f"Mobile Money ({provider}): {phone}"
                 return str(ref['id']), phone, desc
-            # Fallback: try any M-Pesa related reference
             ref = next(
                 (b for b in banks_list
                  if 'mpesa' in (b.get('code', '') + ' ' + b.get('name', '')).lower()),
@@ -332,8 +340,30 @@ def _resolve_bank_for_method(method, banks_list):
             if ref:
                 return str(ref['id']), phone, f"Mobile Money: {phone}"
 
+    elif mtype == 'MPESA_STK':
+        # STK Push — settlement goes to paybill or till; check both
+        paybill = _get('paybill_number', 'paybill_number') or _get('shortcode')
+        till = _get('till_number', 'till_number')
+        if paybill:
+            ref = next(
+                (b for b in banks_list
+                 if 'paybill' in (b.get('code', '') + ' ' + b.get('name', '')).lower()),
+                None,
+            )
+            if ref:
+                return str(ref['id']), paybill, f"M-Pesa STK (Paybill): {paybill}"
+        if till:
+            ref = next(
+                (b for b in banks_list
+                 if any(k in (b.get('code', '') + ' ' + b.get('name', '')).lower()
+                        for k in ['buygoods', 'buy goods', 'till'])),
+                None,
+            )
+            if ref:
+                return str(ref['id']), till, f"M-Pesa STK (Till): {till}"
+
     elif mtype == 'MPESA_PAYBILL':
-        paybill = config.get('paybill_number', '')
+        paybill = _get('paybill_number', 'paybill_number')
         if paybill:
             ref = next(
                 (b for b in banks_list
@@ -344,7 +374,7 @@ def _resolve_bank_for_method(method, banks_list):
                 return str(ref['id']), paybill, f"M-Pesa Paybill: {paybill}"
 
     elif mtype == 'MPESA_TILL':
-        till = config.get('till_number', '')
+        till = _get('till_number', 'till_number')
         if till:
             ref = next(
                 (b for b in banks_list
@@ -356,10 +386,9 @@ def _resolve_bank_for_method(method, banks_list):
                 return str(ref['id']), till, f"M-Pesa Till: {till}"
 
     elif mtype == 'BANK_TRANSFER':
-        bank_name = config.get('bank_name', '')
-        account = config.get('account_number', '')
+        bank_name = _get('bank_name', 'bank_name')
+        account = _get('account_number', 'account_number')
         if bank_name and account:
-            # Try exact-ish match against Tuma reference names
             ref = next(
                 (b for b in banks_list
                  if bank_name.lower() in b.get('name', '').lower()
@@ -370,6 +399,13 @@ def _resolve_bank_for_method(method, banks_list):
                 return str(ref['id']), account, f"{bank_name}: {account}"
 
     # PAYMENT_LINK or unmappable — not a direct Tuma settlement channel
+    logger.debug(
+        f"_resolve_bank_for_method: no match for type={mtype}, "
+        f"config_json={config}, till={getattr(method, 'till_number', None)}, "
+        f"paybill={getattr(method, 'paybill_number', None)}, "
+        f"account={getattr(method, 'account_number', None)}, "
+        f"bank={getattr(method, 'bank_name', None)}"
+    )
     return None, None, None
 
 
@@ -506,6 +542,12 @@ def sync_active_method_to_tuma(schema_name, method):
     banks_data = client.list_banks(master_token)
     banks_list = banks_data.get("data", [])
     bank_id, account_number, desc = _resolve_bank_for_method(method, banks_list)
+
+    logger.info(
+        f"sync_active_method_to_tuma [{schema_name}]: "
+        f"method={method.name}, type={method.method_type}, "
+        f"resolved bank_id={bank_id}, account={account_number}, desc={desc}"
+    )
 
     # Build update payload
     name, email, mobile = _resolve_tenant_identity(schema_name)
