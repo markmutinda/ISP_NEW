@@ -494,56 +494,78 @@ class HotspotPurchaseView(APIView):
             payment_ref = f"HS-{session.session_id}-{int(time.time())}".replace(" ", "-")
             
             # ───────────────────────────────────────────────────────────
-            # FIXED: Use correct User model (core.User, not django.contrib.auth.models.User)
+            # FIXED: Use email and phone_number instead of username
             # ───────────────────────────────────────────────────────────
             from django.contrib.auth import get_user_model
             from apps.customers.models import Customer
             import hashlib
+            import secrets
+            import string
             
             User = get_user_model()  # This gets core.User
             
-            # Generate a deterministic username from phone number or MAC
+            # Generate identity seed from phone or MAC
             if phone_number and phone_number != 'VOUCHER':
-                base_username = f"hotspot_{phone_number}"
+                identity_seed = phone_number
+                safe_seed = ''.join(ch for ch in phone_number if ch.isdigit()) or 'guest'
             else:
-                # For voucher or no phone, use MAC address hash
-                base_username = f"hotspot_{hashlib.md5(mac_address.encode()).hexdigest()[:12]}"
+                identity_seed = hashlib.md5(mac_address.encode()).hexdigest()[:12]
+                safe_seed = identity_seed
             
-            # Ensure username is unique
-            username = base_username
+            # Generate unique email
+            base_local_part = f"hotspot_{safe_seed}"
+            email_local_part = base_local_part
             counter = 1
-            while User.objects.filter(username=username).exists():
-                username = f"{base_username}_{counter}"
+            while User.objects.filter(email=f"{email_local_part}@hotspot.local").exists():
+                email_local_part = f"{base_local_part}_{counter}"
                 counter += 1
             
-            # Create User with a random password (customer won't use password login)
-            import secrets
-            import string
+            hotspot_email = f"{email_local_part}@hotspot.local"
+            
+            # Generate unique phone number
+            if phone_number and phone_number != 'VOUCHER':
+                hotspot_phone = phone_number
+            else:
+                # Generate a dummy phone number for voucher users
+                digits_only = ''.join(ch for ch in identity_seed if ch.isdigit())
+                hotspot_phone = f"+999{digits_only[:12]}" if digits_only else "+999000000000"
+            
+            # Ensure phone number uniqueness
+            phone_counter = 1
+            original_phone = hotspot_phone
+            while User.objects.filter(phone_number=hotspot_phone).exists():
+                suffix = str(phone_counter)
+                hotspot_phone = f"{original_phone[:17-len(suffix)]}{suffix}"
+                phone_counter += 1
+            
+            # Create random password
             random_password = ''.join(secrets.choice(string.ascii_letters + string.digits) for _ in range(16))
             
+            # Create User with email and phone_number (no username)
             user = User.objects.create_user(
-                username=username,
+                email=hotspot_email,
                 password=random_password,
-                email=f"{username}@hotspot.local",
+                phone_number=hotspot_phone,
                 first_name="Hotspot",
-                last_name="Customer"
+                last_name="Customer",
+                role='customer',
+                tenant=tenant,
             )
             
-            # Now create Customer linked to the User
+            # Now create Customer linked to the User with valid Customer fields only
             hotspot_customer, created = Customer.objects.get_or_create(
                 schema_name=tenant.schema_name,
                 user=user,
                 defaults={
-                    'customer_code': f"HS_{username[:20]}",
-                    'full_name': f"Hotspot Customer - {phone_number or mac_address[:8]}",
-                    'phone': phone_number if phone_number != 'VOUCHER' else '',
-                    'email': f"{username}@hotspot.local",
-                    'is_active': True,
+                    'customer_code': f"HS_{email_local_part[:20]}",
+                    'status': 'ACTIVE',
+                    'customer_type': 'RESIDENTIAL',
+                    'category': 'PREPAID',
                 }
             )
             
             if created:
-                logger.info(f"Created new hotspot customer: {hotspot_customer.customer_code} (User: {user.username})")
+                logger.info(f"Created new hotspot customer: {hotspot_customer.customer_code} (User email: {user.email})")
             else:
                 logger.debug(f"Using existing hotspot customer: {hotspot_customer.customer_code}")
             
