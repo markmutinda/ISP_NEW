@@ -17,15 +17,22 @@ class HotspotVoucherGenerateView(APIView):
     def post(self, request):
         plan_id = request.data.get('plan_id')
         quantity = int(request.data.get('quantity') or 0)
-        valid_days = int(request.data.get('valid_days') or 30)
+        
+        # ============================================================
+        # FIX: Support "never expires" vouchers (start when redeemed)
+        # ============================================================
+        # Check if voucher should never expire (10 year expiry)
+        never_expires = str(request.data.get('never_expires', 'true')).lower() == 'true'
+        
+        # Only read valid_days if not in "never expires" mode
+        valid_days_str = request.data.get('valid_days')
+        
         prefix = (request.data.get('prefix') or 'VCH').strip()[:10] or 'VCH'
 
         if not plan_id:
             return Response({'error': 'plan_id is required'}, status=status.HTTP_400_BAD_REQUEST)
         if quantity <= 0:
             return Response({'error': 'quantity must be greater than 0'}, status=status.HTTP_400_BAD_REQUEST)
-        if valid_days <= 0:
-            return Response({'error': 'valid_days must be greater than 0'}, status=status.HTTP_400_BAD_REQUEST)
 
         try:
             plan = HotspotPlan.objects.get(id=plan_id, is_active=True)
@@ -33,14 +40,35 @@ class HotspotVoucherGenerateView(APIView):
             return Response({'error': 'Hotspot plan not found'}, status=status.HTTP_404_NOT_FOUND)
 
         now = timezone.now()
+        
+        # ============================================================
+        # Set expiry based on never_expires flag
+        # ============================================================
+        if never_expires:
+            # ~10 years from now (effectively never expires)
+            voucher_valid_to = now + timedelta(days=3650)
+            valid_days = 3650  # For logging/display
+        else:
+            # Use provided valid_days, default to 30
+            if valid_days_str is None:
+                valid_days = 30
+            else:
+                valid_days = int(valid_days_str)
+            
+            if valid_days <= 0:
+                return Response({'error': 'valid_days must be greater than 0'}, status=status.HTTP_400_BAD_REQUEST)
+            
+            voucher_valid_to = now + timedelta(days=valid_days)
+        
         batch = VoucherBatch.objects.create(
             name=f"{plan.name} Voucher Batch",
-            description=f"Auto-generated vouchers for hotspot plan: {plan.name}",
+            description=f"Auto-generated vouchers for hotspot plan: {plan.name}" + 
+                        (" (never expires)" if never_expires else f" (valid for {valid_days} days)"),
             voucher_type='PREPAID',
             face_value=plan.price,
             sale_price=plan.price,
             valid_from=now,
-            valid_to=now + timedelta(days=valid_days),
+            valid_to=voucher_valid_to,
             is_reusable=False,
             max_uses=1,
             quantity=quantity,
@@ -56,12 +84,15 @@ class HotspotVoucherGenerateView(APIView):
 
         return Response({
             'message': f'Generated {len(vouchers)} vouchers for plan {plan.name}',
+            'never_expires': never_expires,
+            'valid_days': valid_days if not never_expires else None,
             'batch': {
                 'id': batch.id,
                 'batch_number': batch.batch_number,
                 'plan_id': str(plan.id),
                 'plan_name': plan.name,
                 'price': str(plan.price),
+                'valid_from': batch.valid_from,
                 'valid_to': batch.valid_to,
             },
             'vouchers': [
@@ -104,6 +135,7 @@ class HotspotVoucherListView(APIView):
             unused=Count('id', filter=Q(status='ACTIVE', use_count=0)),
         )
 
+        now = timezone.now()
         data = [
             {
                 'id': v.id,
@@ -112,6 +144,7 @@ class HotspotVoucherListView(APIView):
                 'status': v.status,
                 'use_count': v.use_count,
                 'is_valid': v.is_valid(),
+                'is_expired': v.valid_to < now if v.valid_to else False,
                 'expires_at': v.valid_to,
                 'plan_id': str(v.batch.hotspot_plan_id) if v.batch.hotspot_plan_id else None,
                 'plan_name': v.batch.hotspot_plan.name if v.batch.hotspot_plan_id else None,
