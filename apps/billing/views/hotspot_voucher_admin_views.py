@@ -3,6 +3,7 @@ import uuid
 from django.core.exceptions import ValidationError
 from django.db.models import Count, Q
 from django.utils import timezone
+from django.utils.crypto import get_random_string
 from rest_framework import permissions, status
 from rest_framework.response import Response
 from rest_framework.views import APIView
@@ -114,7 +115,36 @@ class HotspotVoucherGenerateView(APIView):
             created_by=request.user,
         )
 
-        vouchers = batch.generate_vouchers(quantity)
+        # ============================================================
+        # OVERRIDE THE generate_vouchers METHOD TO USE 5-DIGIT CODES AND NO PIN
+        # ============================================================
+        # We need to manually generate vouchers with 5-digit codes and no PIN
+        vouchers = []
+        for i in range(quantity):
+            # Generate 5-digit numeric code (with optional prefix)
+            random_digits = get_random_string(length=5, allowed_chars='0123456789')
+            code = f"{prefix}{random_digits}"
+            
+            # Create voucher with empty PIN (no PIN needed)
+            voucher = Voucher.objects.create(
+                batch=batch,
+                code=code,
+                pin="",  # Empty string for PIN - no longer needed
+                face_value=plan.price,
+                sale_price=plan.price,
+                valid_from=now,
+                valid_to=voucher_valid_to,
+                status='ACTIVE',
+                is_reusable=False,
+                max_uses=1,
+                plan_restriction=True,
+                hotspot_plan=plan,
+            )
+            vouchers.append(voucher)
+        
+        # Update batch's generated_count
+        batch.generated_count = quantity
+        batch.save(update_fields=['generated_count'])
 
         return Response({
             'message': f'Generated {len(vouchers)} vouchers for plan {plan.name}',
