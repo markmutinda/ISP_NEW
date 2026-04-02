@@ -19,6 +19,7 @@ from .views.hotspot_admin_views import (
     HotspotSessionViewSet,
     HotspotBrandingView,
     HotspotDashboardView,
+    GlobalHotspotPlanListView,  # <--- ADD THIS
 )
 from .views.hotspot_voucher_admin_views import (  # ADDED: Hotspot Voucher Admin Views
     HotspotVoucherGenerateView,
@@ -191,6 +192,9 @@ hotspot_urlpatterns = [
 hotspot_admin_urlpatterns = [
     # Dashboard
     path('dashboard/', HotspotDashboardView.as_view(), name='hotspot-dashboard'),
+    
+    # Global Plans (ADDED for Vouchers Dropdown)
+    path('admin/plans/', GlobalHotspotPlanListView.as_view(), name='hotspot-admin-all-plans'),
     
     # Plans CRUD (per-router) — prefixed with "admin/" to avoid collision with public plans endpoint
     path('admin/routers/<int:router_id>/plans/', 

@@ -5,7 +5,7 @@ These are AUTHENTICATED endpoints for ISP staff to manage hotspot configuration.
 """
 
 import logging
-from rest_framework import viewsets, status, filters
+from rest_framework import viewsets, status, filters, generics  # Add generics here
 from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
@@ -339,3 +339,16 @@ class HotspotDashboardView(APIView):
                 'total': total_plans,
             }
         })
+
+
+class GlobalHotspotPlanListView(generics.ListAPIView):
+    """
+    Get all active hotspot plans across all routers for dropdowns (like the Vouchers page).
+    GET /api/v1/hotspot/admin/plans/
+    """
+    serializer_class = HotspotPlanSerializer
+    permission_classes = [IsAuthenticated, IsAdminOrStaff]
+    queryset = HotspotPlan.objects.filter(is_active=True).select_related('router')
+    pagination_class = None
+    filter_backends = [filters.OrderingFilter]
+    ordering = ['router__name', 'price']
