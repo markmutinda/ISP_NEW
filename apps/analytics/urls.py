@@ -1,5 +1,6 @@
 from django.urls import path
 from .views_v1 import AnalyticsDashboardView
+from .views_reports import ReportsDataView
 from .individual_views import (
     AnalyticsKPIsView,
     AnalyticsRevenueView,
@@ -22,6 +23,9 @@ app_name = 'analytics'
 urlpatterns = [
     # Main dashboard endpoint (recommended)
     path('dashboard/', AnalyticsDashboardView.as_view(), name='analytics-dashboard'),
+    
+    # Reports & Analytics (4-tab page)
+    path('reports/', ReportsDataView.as_view(), name='analytics-reports'),
     
     # Individual endpoints
     path('kpis/', AnalyticsKPIsView.as_view(), name='analytics-kpis'),

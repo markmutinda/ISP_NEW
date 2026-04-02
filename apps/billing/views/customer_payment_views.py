@@ -344,9 +344,12 @@ class CustomerPaymentMethodsView(APIView):
         from apps.billing.models.payment_models import InvoiceItemPayment
         
         # Support paginated response expected by admin-api.ts
+        # Exclude hotspot-internal methods (auto-created by captive portal flow)
         is_active = request.query_params.get('is_active')
         methods = InvoiceItemPayment.objects.filter(
             schema_name=connection.schema_name,
+        ).exclude(
+            code__startswith='HOTSPOT_',
         ).order_by('name')
         if is_active is not None:
             methods = methods.filter(is_active=is_active.lower() == 'true')
@@ -390,7 +393,9 @@ class CustomerPaymentMethodsView(APIView):
         from apps.billing.serializers.payment_serializers import PaymentMethodSerializer
 
         schema = connection.schema_name
-        existing_count = InvoiceItemPayment.objects.filter(schema_name=schema).count()
+        existing_count = InvoiceItemPayment.objects.filter(
+            schema_name=schema,
+        ).exclude(code__startswith='HOTSPOT_').count()
         if existing_count >= 3:
             return Response(
                 {'detail': 'Maximum 3 payment methods allowed. Delete or deactivate one to add another.'},

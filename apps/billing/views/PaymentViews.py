@@ -1165,6 +1165,12 @@ class PaymentViewSet(viewsets.ModelViewSet):
         
         # M-Pesa stats
         mpesa_stats = self.get_mpesa_stats(queryset)
+
+        # Flat totals for frontend stat cards
+        completed_qs = queryset.filter(status='COMPLETED')
+        pending_qs = queryset.filter(status='PENDING')
+        total_collected = float(completed_qs.aggregate(s=Sum('amount'))['s'] or 0)
+        total_pending = float(pending_qs.aggregate(s=Sum('amount'))['s'] or 0)
         
         stats = {
             'today': {'count': today_count, 'amount': today_amount},
@@ -1173,7 +1179,13 @@ class PaymentViewSet(viewsets.ModelViewSet):
             'status_distribution': status_counts,
             'method_distribution': formatted_distribution,
             'top_payers': formatted_top_payers,
-            'mpesa_stats': mpesa_stats
+            'mpesa_stats': mpesa_stats,
+            # Flat keys for frontend cards
+            'total_collected': total_collected,
+            'total_pending': total_pending,
+            'completed_count': status_counts.get('COMPLETED', 0),
+            'pending_count': status_counts.get('PENDING', 0),
+            'failed_count': status_counts.get('FAILED', 0),
         }
         
         return Response(stats)
