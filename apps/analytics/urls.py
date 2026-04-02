@@ -17,6 +17,13 @@ from .individual_views import (
     AnalyticsNetworkStatsView,
     AnalyticsExportView,
 )
+from .frontend_contract_views import (
+    AnalyticsReportsView,
+    AnalyticsChurnView,
+    AnalyticsCustomersView,
+    AnalyticsRevenueView as AnalyticsRevenueContractView,
+    AnalyticsUsageView,
+)
 
 app_name = 'analytics'
 
@@ -42,4 +49,14 @@ urlpatterns = [
     path('revenue-target/', AnalyticsRevenueTargetView.as_view(), name='analytics-revenue-target'),
     path('network-stats/', AnalyticsNetworkStatsView.as_view(), name='analytics-network-stats'),
     path('export/', AnalyticsExportView.as_view(), name='analytics-export'),
+    
+    # ============================================================
+    # NEW: Frontend Contract Endpoints
+    # These endpoints follow the exact contract expected by the frontend
+    # ============================================================
+    path('reports-contract/', AnalyticsReportsView.as_view(), name='analytics-reports-contract'),
+    path('churn/', AnalyticsChurnView.as_view(), name='analytics-churn'),
+    path('customers/', AnalyticsCustomersView.as_view(), name='analytics-customers'),
+    path('revenue-contract/', AnalyticsRevenueContractView.as_view(), name='analytics-revenue-contract'),
+    path('usage/', AnalyticsUsageView.as_view(), name='analytics-usage'),
 ]
