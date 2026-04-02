@@ -663,6 +663,17 @@ class Payment(models.Model):
     payment_reference = models.CharField(max_length=100, blank=True)
     transaction_id = models.CharField(max_length=100, blank=True)
 
+    # NEW FIELD: Explicit link to HotspotSession for STK payments
+    hotspot_session = models.ForeignKey(
+        'billing.HotspotSession',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='payments',
+        db_index=True,
+        help_text="Explicit link to the hotspot session that initiated this payment (for STK Push)"
+    )
+
     payhero_external_reference = models.CharField(max_length=255, blank=True, null=True, unique=True)
     raw_callback = models.JSONField(null=True, blank=True)
     
@@ -728,13 +739,98 @@ class Payment(models.Model):
             models.Index(fields=['payhero_external_reference']),
             models.Index(fields=['tuma_merchant_request_id']),
             models.Index(fields=['tuma_checkout_request_id']),
+            models.Index(fields=['hotspot_session']),  # Added index for the new field
             models.Index(fields=['schema_name', 'status', 'payment_date']),
         ]
 
     def __str__(self):
         return f"Payment #{self.payment_number} - {self.customer.customer_code}"
 
-    # ... (save, mark_as_completed, mark_as_failed, refund methods unchanged - kept as is)
+    def save(self, *args, **kwargs):
+        if not self.payment_number:
+            year = timezone.now().year
+            month = timezone.now().month
+            
+            last_payment = Payment.objects.filter(
+                payment_number__startswith=f'PAY-{year}-{month:02d}-'
+            ).order_by('-payment_number').first()
+            
+            if last_payment and last_payment.payment_number:
+                try:
+                    last_num = int(last_payment.payment_number.split('-')[-1])
+                    new_num = last_num + 1
+                except (IndexError, ValueError):
+                    new_num = Payment.objects.count() + 1
+            else:
+                new_num = 1
+            
+            self.payment_number = f"PAY-{year}-{month:02d}-{new_num:05d}"
+        
+        if self.net_amount == 0 and self.amount:
+            self.net_amount = self.amount - self.transaction_fee
+        
+        if not self.schema_name:
+            self.schema_name = self.customer.schema_name
+            
+        super().save(*args, **kwargs)
+    
+    def mark_as_completed(self, transaction_id=None, receipt_number=None, processed_by=None):
+        """Mark payment as completed"""
+        self.status = 'COMPLETED'
+        self.processed_at = timezone.now()
+        
+        if transaction_id:
+            self.transaction_id = transaction_id
+        
+        if processed_by:
+            self.processed_by = processed_by
+        
+        self.save()
+        
+        if self.invoice:
+            from .billing_models import Invoice
+            Invoice.objects.filter(pk=self.invoice.pk).update(
+                paid_amount=models.F('paid_amount') + self.net_amount
+            )
+    
+    def mark_as_failed(self, failure_reason, processed_by=None):
+        """Mark payment as failed"""
+        self.status = 'FAILED'
+        self.failure_reason = failure_reason
+        
+        if processed_by:
+            self.processed_by = processed_by
+        
+        self.save()
+    
+    def refund(self, amount=None, reason=None, refunded_by=None):
+        """Process refund for this payment"""
+        if self.status != 'COMPLETED':
+            raise ValidationError("Only completed payments can be refunded")
+        
+        refund_amount = amount or self.net_amount
+        
+        if refund_amount > self.net_amount:
+            raise ValidationError("Refund amount cannot exceed paid amount")
+        
+        from .billing_models import PaymentRefund
+        refund = PaymentRefund.objects.create(
+            payment=self,
+            amount=refund_amount,
+            reason=reason,
+            refunded_by=refunded_by,
+            refund_date=timezone.now(),
+            status='PROCESSED'
+        )
+        
+        if refund_amount == self.net_amount:
+            self.status = 'REFUNDED'
+        else:
+            self.status = 'PARTIALLY_REFUNDED'
+        
+        self.save()
+        
+        return refund
 
 
 class Receipt(models.Model):

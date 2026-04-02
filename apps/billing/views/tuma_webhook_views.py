@@ -2,6 +2,8 @@
 from django.db import transaction
 from django.http import JsonResponse
 from django.utils import timezone
+import logging
+logger = logging.getLogger(__name__)
 
 from rest_framework.views import APIView
 
@@ -87,22 +89,76 @@ class TumaWebhookView(APIView):
 
         if is_success:
             payment.status = "COMPLETED"
-            payment.processed_at = data.get("processed_at")
+            payment.processed_at = data.get("processed_at") or timezone.now()
             payment.mpesa_receipt = data.get("mpesa_receipt_number", "")
             payment.transaction_id = data.get("transaction_id", "") or data.get("mpesa_receipt_number", "")
             payment.is_reconciled = True
-            payment.reconciled_at = data.get("completed_at") or data.get("processed_at")
+            payment.reconciled_at = data.get("completed_at") or data.get("processed_at") or timezone.now()
             payment.failure_reason = ""  # Clear any previous failure reasons
             payment.save()
             
-            # ========================================================
-            # TODO: Add your logic here to activate the Hotspot or PPPoE session
-            # ========================================================
+            # ═══════════════════════════════════════════════════════════════════
+            # ACTIVATE HOTSPOT SESSION (Idempotent)
+            # ═══════════════════════════════════════════════════════════════════
+            # If linked hotspot session exists, mark as paid (idempotent)
+            hotspot_session = getattr(payment, 'hotspot_session', None)
+            if hotspot_session:
+                # Only mark as paid if not already paid or active
+                if hotspot_session.status not in ['paid', 'active']:
+                    logger.info(
+                        f"Webhook: Marking hotspot session {hotspot_session.session_id} "
+                        f"as paid for payment {payment.payment_number}"
+                    )
+                    hotspot_session.mark_paid(payment.mpesa_receipt or payment.transaction_id or "")
+                    
+                    # Option 1: Activate immediately (recommended)
+                    # This ensures the session is activated as soon as payment is confirmed
+                    # The activate() method already has idempotency guards
+                    hotspot_session.activate(hotspot_session.access_code)
+                    
+                    # Create RADIUS credentials for immediate connectivity
+                    try:
+                        from apps.billing.services.hotspot_radius_service import HotspotRadiusService
+                        
+                        radius_service = HotspotRadiusService()
+                        radius_service.create_hotspot_credentials(
+                            username=hotspot_session.access_code,
+                            password=hotspot_session.access_code,
+                            router=hotspot_session.router,
+                            plan=hotspot_session.plan,
+                            expires_at=hotspot_session.expires_at,
+                            mac_address=hotspot_session.mac_address or '',
+                        )
+                        logger.info(
+                            f"Webhook: RADIUS credentials created for session "
+                            f"{hotspot_session.session_id} (user: {hotspot_session.access_code})"
+                        )
+                    except Exception as e:
+                        logger.error(
+                            f"Webhook: Failed to create RADIUS credentials for session "
+                            f"{hotspot_session.session_id}: {e}",
+                            exc_info=True
+                        )
+                    
+            # ================================================================
+            # TODO: Add your logic here to activate other session types
+            # (e.g., PPPoE sessions, prepaid plans, etc.)
+            # ================================================================
             
         else:
             payment.status = "FAILED"
             payment.failure_reason = data.get("failure_reason") or data.get("result_desc") or "Transaction failed"
             payment.save()
+            
+            # If linked hotspot session exists, mark as failed
+            hotspot_session = getattr(payment, 'hotspot_session', None)
+            if hotspot_session:
+                if hotspot_session.status not in ['failed', 'cancelled']:
+                    logger.info(
+                        f"Webhook: Marking hotspot session {hotspot_session.session_id} "
+                        f"as failed for payment {payment.payment_number}"
+                    )
+                    hotspot_session.mark_failed(payment.failure_reason)
 
         return JsonResponse({"success": True, "payment_id": payment.id}, status=200)
 

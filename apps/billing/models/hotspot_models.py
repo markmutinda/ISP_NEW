@@ -300,6 +300,164 @@ class HotspotPlan(models.Model):
         return self.duration_minutes
 
 
+# ═══════════════════════════════════════════════════════════════════
+# NEW: CLIENT IDENTITY MODELS FOR MAC RANDOMIZATION RESILIENCE
+# ═══════════════════════════════════════════════════════════════════
+
+class HotspotClient(models.Model):
+    """
+    First-class client identity for hotspot users.
+    Tracks a real human across multiple devices and MAC randomization.
+    """
+    schema_name = models.SlugField(max_length=63, db_index=True, editable=False)
+    
+    # Primary identity - phone number is the stable identifier
+    canonical_phone = models.CharField(
+        max_length=15, 
+        blank=True, 
+        null=True, 
+        db_index=True,
+        help_text="Primary phone number for this client (stable across devices)"
+    )
+    
+    # Timestamps
+    first_seen_at = models.DateTimeField(auto_now_add=True)
+    last_seen_at = models.DateTimeField(auto_now=True)
+    
+    # Analytics
+    total_sessions = models.PositiveIntegerField(default=0)
+    total_spend = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    
+    # Optional: Email as secondary identifier
+    email = models.EmailField(blank=True, null=True, db_index=True)
+    
+    # Optional: Custom client ID from external systems
+    external_client_id = models.CharField(max_length=100, blank=True, null=True, db_index=True)
+    
+    class Meta:
+        verbose_name = 'Hotspot Client'
+        verbose_name_plural = 'Hotspot Clients'
+        indexes = [
+            models.Index(fields=['schema_name', 'canonical_phone']),
+            models.Index(fields=['schema_name', 'email']),
+            models.Index(fields=['schema_name', 'external_client_id']),
+            models.Index(fields=['schema_name', 'last_seen_at']),
+        ]
+        unique_together = [
+            ['schema_name', 'canonical_phone'],
+            ['schema_name', 'email'],
+        ]
+    
+    def __str__(self):
+        return f"{self.canonical_phone or self.email or 'Anonymous'} - {self.total_sessions} sessions"
+    
+    def update_analytics(self, session_amount: Decimal = None):
+        """Update analytics after a session completes"""
+        self.total_sessions = HotspotSession.objects.filter(hotspot_client=self).count()
+        if session_amount:
+            self.total_spend += session_amount
+        self.last_seen_at = timezone.now()
+        self.save(update_fields=['total_sessions', 'total_spend', 'last_seen_at'])
+    
+    @classmethod
+    def get_or_create_by_phone(cls, schema_name: str, phone_number: str):
+        """Get or create a client by phone number"""
+        if not phone_number:
+            return None
+        
+        client, created = cls.objects.get_or_create(
+            schema_name=schema_name,
+            canonical_phone=phone_number,
+            defaults={'first_seen_at': timezone.now()}
+        )
+        if not created:
+            client.last_seen_at = timezone.now()
+            client.save(update_fields=['last_seen_at'])
+        return client
+
+
+class HotspotClientDevice(models.Model):
+    """
+    Tracks devices belonging to a hotspot client.
+    Handles MAC randomization by linking multiple MACs to same client.
+    """
+    client = models.ForeignKey(
+        HotspotClient, 
+        on_delete=models.CASCADE, 
+        related_name='devices'
+    )
+    
+    mac_address = models.CharField(
+        max_length=17, 
+        db_index=True,
+        help_text="Device MAC address (may change due to randomization)"
+    )
+    
+    # Device token for push notifications (optional)
+    device_token = models.CharField(
+        max_length=128, 
+        blank=True, 
+        null=True, 
+        db_index=True,
+        help_text="Push notification token for this device"
+    )
+    
+    # Device info
+    device_name = models.CharField(max_length=100, blank=True, null=True)
+    device_model = models.CharField(max_length=100, blank=True, null=True)
+    os_version = models.CharField(max_length=50, blank=True, null=True)
+    
+    # Timestamps
+    first_seen_at = models.DateTimeField(auto_now_add=True)
+    last_seen_at = models.DateTimeField(auto_now=True)
+    
+    # Metadata
+    user_agent = models.TextField(blank=True, null=True)
+    
+    class Meta:
+        verbose_name = 'Hotspot Client Device'
+        verbose_name_plural = 'Hotspot Client Devices'
+        unique_together = [('client', 'mac_address')]
+        indexes = [
+            models.Index(fields=['mac_address']),
+            models.Index(fields=['device_token']),
+            models.Index(fields=['client', 'last_seen_at']),
+        ]
+    
+    def __str__(self):
+        return f"{self.client.canonical_phone or self.client.id} - {self.mac_address}"
+    
+    @classmethod
+    def record_device(cls, client: HotspotClient, mac_address: str, **kwargs):
+        """Record or update a device for a client"""
+        if not mac_address:
+            return None
+        
+        device, created = cls.objects.get_or_create(
+            client=client,
+            mac_address=mac_address,
+            defaults={
+                'device_name': kwargs.get('device_name'),
+                'device_model': kwargs.get('device_model'),
+                'os_version': kwargs.get('os_version'),
+                'user_agent': kwargs.get('user_agent'),
+            }
+        )
+        if not created:
+            # Update last_seen and any provided fields
+            device.last_seen_at = timezone.now()
+            if kwargs.get('device_name'):
+                device.device_name = kwargs['device_name']
+            if kwargs.get('device_model'):
+                device.device_model = kwargs['device_model']
+            if kwargs.get('os_version'):
+                device.os_version = kwargs['os_version']
+            if kwargs.get('user_agent'):
+                device.user_agent = kwargs['user_agent']
+            device.save()
+        return device
+
+
 class HotspotSession(models.Model):
     """
     Tracks a hotspot purchase/session from payment to activation.
@@ -336,6 +494,16 @@ class HotspotSession(models.Model):
         related_name='sessions'
     )
     
+    # ── NEW: Client Identity (for MAC randomization resilience) ──
+    hotspot_client = models.ForeignKey(
+        'billing.HotspotClient',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='sessions',
+        help_text="The client who owns this session (stable across MAC randomization)"
+    )
+    
     # User Details (no auth required for hotspot)
     phone_number = models.CharField(max_length=15)
     mac_address = models.CharField(
@@ -347,6 +515,32 @@ class HotspotSession(models.Model):
     amount = models.DecimalField(max_digits=10, decimal_places=2)
     payhero_checkout_id = models.CharField(max_length=100, blank=True, null=True)
     mpesa_receipt = models.CharField(max_length=50, blank=True, null=True)
+    
+    # ── NEW: Tuma Payment Request IDs for tracking ──
+    tuma_merchant_request_id = models.CharField(
+        max_length=120,
+        blank=True,
+        null=True,
+        db_index=True,
+        help_text="Tuma merchant request ID for this session's payment"
+    )
+    tuma_checkout_request_id = models.CharField(
+        max_length=120,
+        blank=True,
+        null=True,
+        db_index=True,
+        help_text="Tuma checkout request ID for this session's payment"
+    )
+    
+    # ── NEW: Explicit Payment Link (replaces unsafe writes) ──
+    payment = models.ForeignKey(
+        'billing.Payment',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='hotspot_sessions',
+        help_text="The payment record associated with this hotspot session"
+    )
     
     # Session Details
     access_code = models.CharField(
@@ -393,10 +587,15 @@ class HotspotSession(models.Model):
             models.Index(fields=['phone_number']),
             models.Index(fields=['mac_address']),
             models.Index(fields=['status']),
+            models.Index(fields=['tuma_merchant_request_id']),  # Index for Tuma tracking
+            models.Index(fields=['tuma_checkout_request_id']),  # Index for Tuma tracking
+            models.Index(fields=['payment']),  # Index for payment lookup
+            models.Index(fields=['hotspot_client']),  # Index for client lookup
         ]
     
     def __str__(self):
-        return f"{self.session_id} - {self.phone_number} ({self.status})"
+        client_info = f" - Client:{self.hotspot_client.canonical_phone}" if self.hotspot_client else ""
+        return f"{self.session_id} - {self.phone_number}{client_info} ({self.status})"
     
     @classmethod
     def generate_session_id(cls) -> str:
@@ -409,6 +608,31 @@ class HotspotSession(models.Model):
     def generate_access_code(cls) -> str:
         """Generate WiFi access code"""
         return f"WIFI-{secrets.token_hex(2).upper()}"
+    
+    def link_to_client(self, client: 'HotspotClient'):
+        """Link this session to a client"""
+        self.hotspot_client = client
+        self.save(update_fields=['hotspot_client'])
+        
+        # Update client analytics
+        client.update_analytics(self.amount)
+    
+    def get_or_create_client(self) -> 'HotspotClient':
+        """Get or create a client for this session based on phone number"""
+        if self.hotspot_client:
+            return self.hotspot_client
+        
+        if self.phone_number:
+            client = HotspotClient.get_or_create_by_phone(
+                schema_name=self._state.db or 'default',  # Gets schema from connection
+                phone_number=self.phone_number
+            )
+            if client:
+                self.hotspot_client = client
+                self.save(update_fields=['hotspot_client'])
+                return client
+        
+        return None
     
     def activate(self, access_code: str = None):
         """
@@ -425,6 +649,10 @@ class HotspotSession(models.Model):
         self.activated_at = timezone.now()
         self.expires_at = timezone.now() + timedelta(minutes=self.plan.duration_minutes)
         self.save()
+        
+        # Update client analytics if client exists
+        if self.hotspot_client:
+            self.hotspot_client.update_analytics(self.amount)
         
         # ── FIX 2.1: METERED BILLING HOOK (Hotspot Revenue) ──
         try:
@@ -464,6 +692,11 @@ class HotspotSession(models.Model):
         self.save()
 
         if was_active:
+            # Decrease client spend if client exists
+            if self.hotspot_client:
+                self.hotspot_client.total_spend -= self.amount
+                self.hotspot_client.save(update_fields=['total_spend'])
+            
             try:
                 from django.db import connection
                 from django_tenants.utils import schema_context, get_public_schema_name
@@ -504,6 +737,19 @@ class HotspotSession(models.Model):
     def mark_expired(self):
         """Mark session as expired"""
         self.status = 'expired'
+        self.save()
+    
+    def link_payment(self, payment):
+        """Link a payment record to this hotspot session"""
+        self.payment = payment
+        self.save()
+    
+    def set_tuma_request_ids(self, merchant_request_id: str = None, checkout_request_id: str = None):
+        """Set Tuma request IDs for tracking"""
+        if merchant_request_id:
+            self.tuma_merchant_request_id = merchant_request_id
+        if checkout_request_id:
+            self.tuma_checkout_request_id = checkout_request_id
         self.save()
     
     @property
