@@ -589,8 +589,11 @@ class HotspotSession(models.Model):
             models.Index(fields=['status']),
             models.Index(fields=['tuma_merchant_request_id']),  # Index for Tuma tracking
             models.Index(fields=['tuma_checkout_request_id']),  # Index for Tuma tracking
-            models.Index(fields=['payment']),  # Index for payment lookup
-            models.Index(fields=['hotspot_client']),  # Index for client lookup
+            # NOTE: ForeignKey fields (payment, hotspot_client) are automatically indexed by Django.
+            # Explicitly adding them here would create redundant indexes and cause migration errors.
+            # Remove these lines if they exist:
+            # models.Index(fields=['payment']),
+            # models.Index(fields=['hotspot_client']),
         ]
     
     def __str__(self):

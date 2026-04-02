@@ -494,11 +494,13 @@ class HotspotPurchaseView(APIView):
             payment_ref = f"HS-{session.session_id}-{int(time.time())}".replace(" ", "-")
             
             # ───────────────────────────────────────────────────────────
-            # FIXED: Create User first, then Customer
+            # FIXED: Use correct User model (core.User, not django.contrib.auth.models.User)
             # ───────────────────────────────────────────────────────────
-            from django.contrib.auth.models import User
+            from django.contrib.auth import get_user_model
             from apps.customers.models import Customer
             import hashlib
+            
+            User = get_user_model()  # This gets core.User
             
             # Generate a deterministic username from phone number or MAC
             if phone_number and phone_number != 'VOUCHER':
