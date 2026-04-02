@@ -1,5 +1,6 @@
 from datetime import timedelta
-
+import uuid
+from django.core.exceptions import ValidationError
 from django.db.models import Count, Q
 from django.utils import timezone
 from rest_framework import permissions, status
@@ -16,6 +17,18 @@ class HotspotVoucherGenerateView(APIView):
 
     def post(self, request):
         plan_id = request.data.get('plan_id')
+        
+        # ============================================================
+        # FIX: Validate UUID first and return clean 400
+        # ============================================================
+        try:
+            plan_uuid = uuid.UUID(str(plan_id))
+        except (ValueError, TypeError, ValidationError):
+            return Response(
+                {'error': 'plan_id must be a valid hotspot plan UUID'}, 
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
         quantity = int(request.data.get('quantity') or 0)
         
         # ============================================================
@@ -30,14 +43,26 @@ class HotspotVoucherGenerateView(APIView):
         prefix = (request.data.get('prefix') or 'VCH').strip()[:10] or 'VCH'
 
         if not plan_id:
-            return Response({'error': 'plan_id is required'}, status=status.HTTP_400_BAD_REQUEST)
+            return Response(
+                {'error': 'plan_id is required'}, 
+                status=status.HTTP_400_BAD_REQUEST
+            )
         if quantity <= 0:
-            return Response({'error': 'quantity must be greater than 0'}, status=status.HTTP_400_BAD_REQUEST)
+            return Response(
+                {'error': 'quantity must be greater than 0'}, 
+                status=status.HTTP_400_BAD_REQUEST
+            )
 
+        # ============================================================
+        # FIX: Use plan_uuid for lookup
+        # ============================================================
         try:
-            plan = HotspotPlan.objects.get(id=plan_id, is_active=True)
+            plan = HotspotPlan.objects.get(id=plan_uuid, is_active=True)
         except HotspotPlan.DoesNotExist:
-            return Response({'error': 'Hotspot plan not found'}, status=status.HTTP_404_NOT_FOUND)
+            return Response(
+                {'error': 'Hotspot plan not found'}, 
+                status=status.HTTP_404_NOT_FOUND
+            )
 
         now = timezone.now()
         
@@ -53,10 +78,19 @@ class HotspotVoucherGenerateView(APIView):
             if valid_days_str is None:
                 valid_days = 30
             else:
-                valid_days = int(valid_days_str)
+                try:
+                    valid_days = int(valid_days_str)
+                except (ValueError, TypeError):
+                    return Response(
+                        {'error': 'valid_days must be a valid integer'}, 
+                        status=status.HTTP_400_BAD_REQUEST
+                    )
             
             if valid_days <= 0:
-                return Response({'error': 'valid_days must be greater than 0'}, status=status.HTTP_400_BAD_REQUEST)
+                return Response(
+                    {'error': 'valid_days must be greater than 0'}, 
+                    status=status.HTTP_400_BAD_REQUEST
+                )
             
             voucher_valid_to = now + timedelta(days=valid_days)
         
@@ -116,6 +150,18 @@ class HotspotVoucherListView(APIView):
     def get(self, request):
         status_filter = (request.query_params.get('status') or 'all').lower()
         plan_id = request.query_params.get('plan_id')
+        
+        # ============================================================
+        # FIX: Validate UUID for plan_id filter
+        # ============================================================
+        if plan_id:
+            try:
+                uuid.UUID(str(plan_id))
+            except (ValueError, TypeError, ValidationError):
+                return Response(
+                    {'error': 'plan_id must be a valid UUID'}, 
+                    status=status.HTTP_400_BAD_REQUEST
+                )
 
         qs = Voucher.objects.select_related('batch', 'batch__hotspot_plan').filter(
             batch__hotspot_plan__isnull=False
