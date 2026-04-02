@@ -8,6 +8,7 @@ End users access these when connecting to WiFi hotspots.
 import logging
 import random
 import string
+import time
 from decimal import Decimal
 
 from django.conf import settings
@@ -25,8 +26,9 @@ from django_tenants.utils import schema_context, get_public_schema_name
 
 from apps.billing.models.hotspot_models import HotspotPlan, HotspotSession, HotspotBranding
 from apps.billing.models.billing_models import Plan
-from apps.billing.models.payment_models import Payment  # ADDED: Import Payment for Tuma status checks
+from apps.billing.models.payment_models import Payment, TenantTumaConfig, InvoiceItemPayment
 from apps.billing.models.voucher_models import Voucher
+from apps.billing.services.tuma_service import TumaClient
 from apps.network.models.router_models import Router
 from apps.subscriptions.models import CommissionLedger
 
@@ -352,10 +354,8 @@ class HotspotPlansView(APIView):
 
 class HotspotPurchaseView(APIView):
     """
-    Initiate hotspot purchase (SIMULATION MODE).
-    Generates a unique short code (e.g., MXTV-827S) and binds it to the device's MAC.
-    Now with persistent identity - returning customers keep their username!
-    Also tracks roaming patterns across the network.
+    Initiate hotspot purchase with REAL STK Push via Tuma.
+    Creates pending session, initiates STK payment, and returns pending status.
     """
     
     permission_classes = [AllowAny]
@@ -418,13 +418,9 @@ class HotspotPurchaseView(APIView):
                 return Response({'error': 'Plan not found'}, status=status.HTTP_404_NOT_FOUND)
             
             # 2. Normalize MAC (Format: AA:BB:CC:DD:EE:FF)
-            # This logic is critical for device locking
             mac_address = mac_address.upper().replace('-', ':')
             
-            # ─────────────────────────────────────────────────────────────────
             # 3. PERSISTENT IDENTITY & ROAMING DETECTOR
-            # ─────────────────────────────────────────────────────────────────
-            # Search the ENTIRE network for this MAC address
             existing_user = HotspotSession.objects.filter(
                 mac_address=mac_address
             ).exclude(
@@ -438,7 +434,7 @@ class HotspotPurchaseView(APIView):
                 # RETURNING CUSTOMER
                 friendly_username = existing_user.access_code
                 
-                # ── ROAMING CHECK ──
+                # ROAMING CHECK
                 if existing_user.router_id != router.id:
                     is_roaming = True
                     roamed_from_name = existing_user.router.name
@@ -451,57 +447,183 @@ class HotspotPurchaseView(APIView):
                 friendly_username = self.generate_unique_code()
                 logger.info(f"✨ NEW USER: {mac_address} -> {friendly_username} at {router.name}")
 
-            # 4. Create Session (Now with roaming data!)
+            # ═══════════════════════════════════════════════════════════
+            # 4. CREATE PENDING HOTSPOT SESSION (before payment)
+            # ═══════════════════════════════════════════════════════════
             session_id = HotspotSession.generate_session_id()
-            
             session = HotspotSession.objects.create(
                 session_id=session_id,
                 router=router,
                 plan=plan,
-                phone_number=phone_number,  # Important for financial analytics
+                phone_number=phone_number,
                 mac_address=mac_address,
                 amount=plan.price,
-                status='paid',          # <--- SIMULATION: Marked as paid instantly
-                access_code=friendly_username,  # Uses either the old one or the new one!
-                payhero_checkout_id='SIMULATED_' + friendly_username,  # Keeping for backward compat
-                is_roaming=is_roaming,            # <--- SAVED TO DB
-                roamed_from=roamed_from_name      # <--- SAVED TO DB
+                status='pending',  # NOT paid yet - waiting for STK
+                access_code=friendly_username,
+                is_roaming=is_roaming,
+                roamed_from=roamed_from_name
             )
 
-            # 5. Activate & Update Radius Credentials
+            # ═══════════════════════════════════════════════════════════
+            # 5. RESOLVE TUMA CONFIGURATION
+            # ═══════════════════════════════════════════════════════════
+            cfg = TenantTumaConfig.objects.filter(schema_name=tenant.schema_name, is_active=True).first()
+            if not cfg or not cfg.tuma_business_email or not cfg.tuma_business_api_key:
+                session.mark_failed("Tuma gateway not configured")
+                return Response({'error': 'Payment gateway not configured'}, status=status.HTTP_400_BAD_REQUEST)
+
+            # ═══════════════════════════════════════════════════════════
+            # 6. GET OR CREATE PAYMENT METHOD FOR HOTSPOT STK
+            # ═══════════════════════════════════════════════════════════
+            payment_method, _ = InvoiceItemPayment.objects.get_or_create(
+                schema_name=tenant.schema_name,
+                code='HOTSPOT_TUMA_STK',
+                defaults={
+                    'name': 'Hotspot M-Pesa STK (Tuma)',
+                    'method_type': 'MPESA_STK',
+                    'is_active': True,
+                    'minimum_amount': 1,
+                    'maximum_amount': 1000000,
+                    'tuma_configuration': cfg,
+                }
+            )
+
+            # ═══════════════════════════════════════════════════════════
+            # 7. CREATE PAYMENT ROW LINKED TO HOTSPOT SESSION
+            # ═══════════════════════════════════════════════════════════
+            payment_ref = f"HS-{session.session_id}-{int(time.time())}".replace(" ", "-")
+            
+            # ───────────────────────────────────────────────────────────
+            # FIXED: Create User first, then Customer
+            # ───────────────────────────────────────────────────────────
+            from django.contrib.auth.models import User
+            from apps.customers.models import Customer
+            import hashlib
+            
+            # Generate a deterministic username from phone number or MAC
+            if phone_number and phone_number != 'VOUCHER':
+                base_username = f"hotspot_{phone_number}"
+            else:
+                # For voucher or no phone, use MAC address hash
+                base_username = f"hotspot_{hashlib.md5(mac_address.encode()).hexdigest()[:12]}"
+            
+            # Ensure username is unique
+            username = base_username
+            counter = 1
+            while User.objects.filter(username=username).exists():
+                username = f"{base_username}_{counter}"
+                counter += 1
+            
+            # Create User with a random password (customer won't use password login)
+            import secrets
+            import string
+            random_password = ''.join(secrets.choice(string.ascii_letters + string.digits) for _ in range(16))
+            
+            user = User.objects.create_user(
+                username=username,
+                password=random_password,
+                email=f"{username}@hotspot.local",
+                first_name="Hotspot",
+                last_name="Customer"
+            )
+            
+            # Now create Customer linked to the User
+            hotspot_customer, created = Customer.objects.get_or_create(
+                schema_name=tenant.schema_name,
+                user=user,
+                defaults={
+                    'customer_code': f"HS_{username[:20]}",
+                    'full_name': f"Hotspot Customer - {phone_number or mac_address[:8]}",
+                    'phone': phone_number if phone_number != 'VOUCHER' else '',
+                    'email': f"{username}@hotspot.local",
+                    'is_active': True,
+                }
+            )
+            
+            if created:
+                logger.info(f"Created new hotspot customer: {hotspot_customer.customer_code} (User: {user.username})")
+            else:
+                logger.debug(f"Using existing hotspot customer: {hotspot_customer.customer_code}")
+            
+            payment = Payment.objects.create(
+                customer=hotspot_customer,  # Required field - now properly linked to a User
+                payment_method=payment_method,
+                amount=plan.price,
+                transaction_fee=0,
+                net_amount=plan.price,
+                currency='KES',
+                status='PROCESSING',
+                payment_reference=payment_ref,
+                payer_phone=phone_number,
+                schema_name=tenant.schema_name,
+                hotspot_session=session,
+                tuma_status='pending',
+            )
+
+            # ═══════════════════════════════════════════════════════════
+            # 8. INITIATE STK PUSH VIA TUMA
+            # ═══════════════════════════════════════════════════════════
             try:
-                # Pass the friendly_username to activate method
-                session.activate(friendly_username)
+                client = TumaClient()
+                token = client.get_token(cfg.tuma_business_email, cfg.tuma_business_api_key)
+                description = f"HS-{session.session_id}"
                 
-                from apps.billing.services.hotspot_radius_service import HotspotRadiusService
-                radius_service = HotspotRadiusService()
+                # Get callback URL from settings or use default
+                callback_url = getattr(settings, 'TUMA_CALLBACK_URL', None)
+                if not callback_url:
+                    # Construct default callback URL based on tenant
+                    callback_url = f"https://{tenant_subdomain}.netily.co.ke/api/v1/billing/tuma/callback/"
                 
-                # This service should use `update_or_create` logic under the hood. 
-                # If the user exists, it just updates the Expiration and Speed.
-                radius_service.create_hotspot_credentials(
-                    username=friendly_username,
-                    password=friendly_username,
-                    router=session.router,
-                    plan=session.plan,
-                    expires_at=session.expires_at,
-                    mac_address=mac_address  # <--- LOCKS CODE TO THIS DEVICE
+                tuma_res = client.stk_push(
+                    token=token,
+                    amount=float(plan.price),
+                    phone=phone_number,
+                    callback_url=callback_url,
+                    description=description,
                 )
-                logger.info(f"✅ SIMULATION: Created/Updated RADIUS user {friendly_username} locked to {mac_address}")
+                
+                if not tuma_res.get("success"):
+                    payment.status = 'FAILED'
+                    payment.tuma_status = 'failed'
+                    payment.failure_reason = tuma_res.get("message", "STK initiation failed")
+                    payment.save(update_fields=['status', 'tuma_status', 'failure_reason'])
+                    session.mark_failed(payment.failure_reason)
+                    return Response({'error': payment.failure_reason}, status=status.HTTP_400_BAD_REQUEST)
+                
+                # Update payment with Tuma request IDs
+                d = tuma_res.get("data", {})
+                payment.tuma_merchant_request_id = d.get("merchant_request_id", "")
+                payment.tuma_checkout_request_id = d.get("checkout_request_id", "")
+                payment.save(update_fields=['tuma_merchant_request_id', 'tuma_checkout_request_id'])
+                
+                # Link payment to session
+                session.tuma_merchant_request_id = payment.tuma_merchant_request_id
+                session.tuma_checkout_request_id = payment.tuma_checkout_request_id
+                session.payment = payment
+                session.save(update_fields=['tuma_merchant_request_id', 'tuma_checkout_request_id', 'payment'])
+                
+                logger.info(f"STK Push initiated for session {session.session_id}, payment {payment.payment_number}")
                 
             except Exception as e:
-                logger.error(f"RADIUS activation failed: {e}")
-                return Response({'error': 'Activation failed'}, status=500)
+                logger.error(f"STK initiation failed for session {session.session_id}: {e}")
+                payment.status = 'FAILED'
+                payment.tuma_status = 'failed'
+                payment.failure_reason = str(e)
+                payment.save(update_fields=['status', 'tuma_status', 'failure_reason'])
+                session.mark_failed(payment.failure_reason)
+                return Response({'error': 'Failed to initiate payment'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
-            # 6. Return Success (Frontend should auto-login)
+            # ═══════════════════════════════════════════════════════════
+            # 9. RETURN PENDING RESPONSE - WAITING FOR STK COMPLETION
+            # ═══════════════════════════════════════════════════════════
             return Response({
-                'status': 'success',
-                'message': 'Payment Simulated! You are connected.',
-                'access_code': friendly_username,
-                'redirect_url': request.data.get('login_url', 'http://google.com'),
-                'username': friendly_username,
-                'password': friendly_username,
-                'expires_at': session.expires_at
-            })
+                'status': 'pending',
+                'session_id': session.session_id,
+                'message': 'STK push sent to your phone. Please complete payment on your M-Pesa.',
+                'payment_reference': payment.payment_number,
+                'amount': float(plan.price),
+                'phone_number': phone_number,
+            }, status=status.HTTP_202_ACCEPTED)
 
 
 class HotspotPurchaseStatusView(APIView):
@@ -520,27 +642,54 @@ class HotspotPurchaseStatusView(APIView):
         """
         Check Tuma payment status for a hotspot session.
         
+        Priority order:
+            1. Explicit payment FK (most reliable)
+            2. Tuma request IDs (if stored in session)
+            3. Phone number + amount (legacy fallback)
+        
         Returns:
             tuple: (status, message, data) where status is one of:
                 - 'completed': Payment successful
                 - 'failed': Payment failed
                 - 'pending': Still pending
         """
-        # Look for Payment records linked to this session via phone_number or other identifiers
-        # For hotspot, we match by phone_number (customer's phone) and amount
-        payments = Payment.objects.filter(
-            payer_phone=session.phone_number,
-            amount=session.amount,
-            status__in=['PROCESSING', 'COMPLETED', 'FAILED']
-        ).order_by('-created_at')
+        payment = None
         
-        # Try to find by Tuma checkout ID if stored in session
-        if hasattr(session, 'tuma_checkout_request_id') and session.tuma_checkout_request_id:
-            payments = payments.filter(tuma_checkout_request_id=session.tuma_checkout_request_id)
-        elif hasattr(session, 'tuma_merchant_request_id') and session.tuma_merchant_request_id:
-            payments = payments.filter(tuma_merchant_request_id=session.tuma_merchant_request_id)
+        # 0) STRONGEST MATCH: Explicit relation via payment FK
+        if getattr(session, 'payment_id', None):
+            try:
+                payment = Payment.objects.filter(id=session.payment_id).first()
+                if payment:
+                    logger.debug(f"Found payment via explicit FK: {payment.payment_number}")
+            except Exception as e:
+                logger.warning(f"Error fetching payment by FK: {e}")
         
-        payment = payments.first()
+        # 1) SECONDARY MATCH: Tuma request IDs stored in session
+        if not payment:
+            if hasattr(session, 'tuma_checkout_request_id') and session.tuma_checkout_request_id:
+                payment = Payment.objects.filter(
+                    tuma_checkout_request_id=session.tuma_checkout_request_id
+                ).first()
+                if payment:
+                    logger.debug(f"Found payment via checkout_request_id: {session.tuma_checkout_request_id}")
+            
+            if not payment and hasattr(session, 'tuma_merchant_request_id') and session.tuma_merchant_request_id:
+                payment = Payment.objects.filter(
+                    tuma_merchant_request_id=session.tuma_merchant_request_id
+                ).first()
+                if payment:
+                    logger.debug(f"Found payment via merchant_request_id: {session.tuma_merchant_request_id}")
+        
+        # 2) FALLBACK: Phone number + amount (legacy, least reliable)
+        if not payment:
+            payments = Payment.objects.filter(
+                payer_phone=session.phone_number,
+                amount=session.amount,
+                status__in=['PROCESSING', 'COMPLETED', 'FAILED']
+            ).order_by('-created_at')
+            payment = payments.first()
+            if payment:
+                logger.debug(f"Found payment via phone+amount fallback: {payment.payment_number}")
         
         if not payment:
             return ('pending', 'No payment record found', None)
@@ -642,10 +791,7 @@ class HotspotPurchaseStatusView(APIView):
                     'login_url': request.query_params.get('login_url', ''),
                 })
             
-            # ============================================================
-            # REPLACED: PayHero status check with Tuma status check
-            # Instead of calling PayHero API, we read our own Payment rows
-            # ============================================================
+            # Check Tuma payment status for pending sessions
             if session.phone_number:
                 # Check Tuma payment status
                 status, message, payment = self._check_tuma_payment_status(session, tenant.schema_name)
@@ -659,7 +805,8 @@ class HotspotPurchaseStatusView(APIView):
                     if payment:
                         session.tuma_checkout_request_id = payment.tuma_checkout_request_id
                         session.tuma_merchant_request_id = payment.tuma_merchant_request_id
-                        session.save(update_fields=['tuma_checkout_request_id', 'tuma_merchant_request_id'])
+                        session.payment = payment
+                        session.save(update_fields=['tuma_checkout_request_id', 'tuma_merchant_request_id', 'payment'])
                     
                     # Activate session (generates access code + expiry)
                     session.activate(session.access_code)
@@ -709,7 +856,8 @@ class HotspotPurchaseStatusView(APIView):
             # Still pending
             return Response({
                 'status': 'pending',
-                'message': 'Waiting for payment confirmation...',
+                'message': 'Waiting for payment confirmation on your phone...',
+                'session_id': session.session_id,
             })
 
 

@@ -2,6 +2,8 @@
 from django.db import transaction
 from django.http import JsonResponse
 from django.utils import timezone
+import logging
+logger = logging.getLogger(__name__)
 
 from rest_framework.views import APIView
 
@@ -12,6 +14,11 @@ class TumaWebhookView(APIView):
     """
     Webhook endpoint for Tuma payment gateway callbacks.
     This endpoint is PUBLIC (no authentication) because Tuma's servers call it.
+    
+    NOTE: This webhook ONLY updates payment status. It does NOT activate
+    hotspot sessions or create RADIUS credentials. That responsibility
+    belongs to the polling endpoint (HotspotPurchaseStatusView) to ensure
+    idempotency and proper error handling.
     """
     authentication_classes = []
     permission_classes = []
@@ -62,10 +69,10 @@ class TumaWebhookView(APIView):
                 status=404
             )
 
-        # ====================== NEW: UPDATE STK CANCELLATION TRACKER ======================
+        # ====================== UPDATE STK CANCELLATION TRACKER ======================
         # Track consecutive 1032 cancellations (user cancelling STK prompt)
         self._update_stk_cancellation_tracker(payment, data, result_code)
-        # =================================================================================
+        # ============================================================================
 
         # Idempotency check: Don't process twice
         if payment.status == "COMPLETED":
@@ -81,28 +88,62 @@ class TumaWebhookView(APIView):
         payment.tuma_status = data.get("status", "").lower()
 
         # ============================================================
-        # Senior Dev Fix: Trust result_code 0 primarily
+        # Trust result_code 0 primarily
         # ============================================================
         is_success = str(result_code) == "0"
 
         if is_success:
             payment.status = "COMPLETED"
-            payment.processed_at = data.get("processed_at")
+            payment.processed_at = data.get("processed_at") or timezone.now()
             payment.mpesa_receipt = data.get("mpesa_receipt_number", "")
             payment.transaction_id = data.get("transaction_id", "") or data.get("mpesa_receipt_number", "")
             payment.is_reconciled = True
-            payment.reconciled_at = data.get("completed_at") or data.get("processed_at")
+            payment.reconciled_at = data.get("completed_at") or data.get("processed_at") or timezone.now()
             payment.failure_reason = ""  # Clear any previous failure reasons
             payment.save()
             
-            # ========================================================
-            # TODO: Add your logic here to activate the Hotspot or PPPoE session
-            # ========================================================
+            # ═══════════════════════════════════════════════════════════════════
+            # WEBHOOK ONLY MARKS PAYMENT AS COMPLETED
+            # Activation is handled by HotspotPurchaseStatusView polling
+            # ═══════════════════════════════════════════════════════════════════
+            # If linked hotspot session exists, just mark it as paid (not active)
+            # The polling endpoint will handle activation and RADIUS creation
+            hotspot_session = getattr(payment, 'hotspot_session', None)
+            if hotspot_session:
+                # Only mark as paid if not already paid or active
+                if hotspot_session.status not in ['paid', 'active']:
+                    logger.info(
+                        f"Webhook: Marking hotspot session {hotspot_session.session_id} "
+                        f"as paid for payment {payment.payment_number} (activation deferred to polling)"
+                    )
+                    # Just mark as paid - don't activate yet
+                    hotspot_session.mark_paid(payment.mpesa_receipt or payment.transaction_id or "")
+                else:
+                    logger.debug(
+                        f"Webhook: Hotspot session {hotspot_session.session_id} already "
+                        f"in status {hotspot_session.status}, skipping mark_paid"
+                    )
+            
+            # ================================================================
+            # TODO: Add your logic here for other session types
+            # (e.g., PPPoE sessions, prepaid plans, etc.)
+            # For non-hotspot payments, you may want immediate activation here
+            # ================================================================
             
         else:
             payment.status = "FAILED"
             payment.failure_reason = data.get("failure_reason") or data.get("result_desc") or "Transaction failed"
             payment.save()
+            
+            # If linked hotspot session exists, mark as failed
+            hotspot_session = getattr(payment, 'hotspot_session', None)
+            if hotspot_session:
+                if hotspot_session.status not in ['failed', 'cancelled']:
+                    logger.info(
+                        f"Webhook: Marking hotspot session {hotspot_session.session_id} "
+                        f"as failed for payment {payment.payment_number}"
+                    )
+                    hotspot_session.mark_failed(payment.failure_reason)
 
         return JsonResponse({"success": True, "payment_id": payment.id}, status=200)
 
