@@ -541,7 +541,8 @@ class HotspotPurchaseView(APIView):
             # Create random password
             random_password = ''.join(secrets.choice(string.ascii_letters + string.digits) for _ in range(16))
             
-            # Create User with email and phone_number (no username)
+            # FIXED: Use tenant_subdomain instead of tenant FK to avoid FK violation
+            # Do NOT pass tenant=tenant here - use tenant_subdomain only
             user = User.objects.create_user(
                 email=hotspot_email,
                 password=random_password,
@@ -549,7 +550,7 @@ class HotspotPurchaseView(APIView):
                 first_name="Hotspot",
                 last_name="Customer",
                 role='customer',
-                tenant=tenant,
+                tenant_subdomain=getattr(tenant, 'subdomain', tenant_subdomain),
             )
             
             # Now create Customer linked to the User with valid Customer fields only
