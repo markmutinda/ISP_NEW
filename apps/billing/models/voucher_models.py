@@ -50,10 +50,10 @@ class VoucherBatch(models.Model):
     used_count = models.PositiveIntegerField(default=0)
     available_count = models.PositiveIntegerField(default=0)
     
-    # Tenant schema field
+    # Tenant schema field - REMOVED unique=True
     schema_name = models.SlugField(
         max_length=63,
-        unique=True,
+        # FIX: Removed unique=True to allow multiple tenants with same batch_number
         editable=False,
         default="default_schema"
     )
@@ -91,11 +91,14 @@ class VoucherBatch(models.Model):
 
     class Meta:
         ordering = ['-created_at']
+        # FIX: Added unique_together constraint to ensure batch_number is unique per tenant
+        unique_together = [['schema_name', 'batch_number']]
         indexes = [
             models.Index(fields=['batch_number']),
             models.Index(fields=['status']),
             models.Index(fields=['valid_from', 'valid_to']),
             models.Index(fields=['hotspot_plan']),  # ADDED: Index for hotspot plan lookups
+            models.Index(fields=['schema_name']),  # ADDED: Index for tenant filtering
         ]
 
     def __str__(self):
@@ -106,6 +109,7 @@ class VoucherBatch(models.Model):
             # Generate batch number: BATCH-YYYYMM-XXXX
             year_month = timezone.now().strftime('%Y%m')
             last_batch = VoucherBatch.objects.filter(
+                schema_name=self.schema_name,  # FIX: Filter by tenant
                 batch_number__startswith=f'BATCH-{year_month}'
             ).order_by('-batch_number').first()
             
@@ -142,12 +146,14 @@ class VoucherBatch(models.Model):
                     length=self.length - len(self.prefix),
                     allowed_chars=self.charset
                 )
-                if not Voucher.objects.filter(code=code).exists():
+                # FIX: Filter by tenant when checking uniqueness
+                if not Voucher.objects.filter(code=code, schema_name=self.schema_name).exists():
                     break
             
             voucher = Voucher.objects.create(
                 batch=self,
                 code=code,
+                schema_name=self.schema_name,  # FIX: Pass the schema_name to voucher
                 face_value=self.face_value,
                 sale_price=self.sale_price,
                 valid_from=self.valid_from,
@@ -201,10 +207,10 @@ class Voucher(models.Model):
     max_uses = models.PositiveIntegerField(default=1)
     use_count = models.PositiveIntegerField(default=0)
     
-    # Tenant schema field
+    # Tenant schema field - REMOVED unique=True
     schema_name = models.SlugField(
         max_length=63,
-        unique=True,
+        # FIX: Removed unique=True to allow multiple tenants with same code
         editable=False,
         default="default_schema"
     )
@@ -224,11 +230,14 @@ class Voucher(models.Model):
 
     class Meta:
         ordering = ['-created_at']
+        # FIX: Added unique_together constraint to ensure code is unique per tenant
+        unique_together = [['schema_name', 'code']]
         indexes = [
             models.Index(fields=['code']),
             models.Index(fields=['batch', 'status']),
             models.Index(fields=['valid_from', 'valid_to']),
             models.Index(fields=['sold_to']),
+            models.Index(fields=['schema_name']),  # ADDED: Index for tenant filtering
         ]
 
     def __str__(self):
@@ -351,10 +360,10 @@ class VoucherUsage(models.Model):
     payment = models.ForeignKey('Payment', on_delete=models.SET_NULL, null=True, blank=True, related_name='voucher_usages')
     invoice = models.ForeignKey(Invoice, on_delete=models.SET_NULL, null=True, blank=True, related_name='voucher_usages')
     
-    # Tenant schema field
+    # Tenant schema field - REMOVED unique=True
     schema_name = models.SlugField(
         max_length=63,
-        unique=True,
+        # FIX: Removed unique=True
         editable=False,
         default="default_schema"
     )
@@ -368,6 +377,7 @@ class VoucherUsage(models.Model):
         indexes = [
             models.Index(fields=['voucher', 'customer']),
             models.Index(fields=['created_at']),
+            models.Index(fields=['schema_name']),  # ADDED: Index for tenant filtering
         ]
 
     def __str__(self):
