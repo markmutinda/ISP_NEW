@@ -493,22 +493,60 @@ class HotspotPurchaseView(APIView):
             # ═══════════════════════════════════════════════════════════
             payment_ref = f"HS-{session.session_id}-{int(time.time())}".replace(" ", "-")
             
-            # Create or get a system "Hotspot Walk-in" customer
+            # ───────────────────────────────────────────────────────────
+            # FIXED: Create User first, then Customer
+            # ───────────────────────────────────────────────────────────
+            from django.contrib.auth.models import User
             from apps.customers.models import Customer
-            hotspot_customer, _ = Customer.objects.get_or_create(
+            import hashlib
+            
+            # Generate a deterministic username from phone number or MAC
+            if phone_number and phone_number != 'VOUCHER':
+                base_username = f"hotspot_{phone_number}"
+            else:
+                # For voucher or no phone, use MAC address hash
+                base_username = f"hotspot_{hashlib.md5(mac_address.encode()).hexdigest()[:12]}"
+            
+            # Ensure username is unique
+            username = base_username
+            counter = 1
+            while User.objects.filter(username=username).exists():
+                username = f"{base_username}_{counter}"
+                counter += 1
+            
+            # Create User with a random password (customer won't use password login)
+            import secrets
+            import string
+            random_password = ''.join(secrets.choice(string.ascii_letters + string.digits) for _ in range(16))
+            
+            user = User.objects.create_user(
+                username=username,
+                password=random_password,
+                email=f"{username}@hotspot.local",
+                first_name="Hotspot",
+                last_name="Customer"
+            )
+            
+            # Now create Customer linked to the User
+            hotspot_customer, created = Customer.objects.get_or_create(
                 schema_name=tenant.schema_name,
-                email__iexact='hotspot@system.local',
+                user=user,
                 defaults={
-                    'customer_code': 'HOTSPOT_WALKIN',
-                    'full_name': 'Hotspot Walk-in Customer',
-                    'phone': phone_number,  # Use the provided phone number
-                    'email': 'hotspot@system.local',
+                    'customer_code': f"HS_{username[:20]}",
+                    'full_name': f"Hotspot Customer - {phone_number or mac_address[:8]}",
+                    'phone': phone_number if phone_number != 'VOUCHER' else '',
+                    'email': f"{username}@hotspot.local",
                     'is_active': True,
                 }
             )
             
+            if created:
+                logger.info(f"Created new hotspot customer: {hotspot_customer.customer_code} (User: {user.username})")
+            else:
+                logger.debug(f"Using existing hotspot customer: {hotspot_customer.customer_code}")
+            
             payment = Payment.objects.create(
-                customer=hotspot_customer,  # Required field
+                customer=hotspot_customer,  # Required field - now properly linked to a User
                 payment_method=payment_method,
                 amount=plan.price,
                 transaction_fee=0,

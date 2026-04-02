@@ -618,13 +618,23 @@ class HotspotSession(models.Model):
         client.update_analytics(self.amount)
     
     def get_or_create_client(self) -> 'HotspotClient':
-        """Get or create a client for this session based on phone number"""
+        """
+        Get or create a client for this session based on phone number.
+        
+        FIXED: Uses connection.schema_name instead of self._state.db
+        which was causing schema resolution issues in multi-tenant context.
+        """
         if self.hotspot_client:
             return self.hotspot_client
         
         if self.phone_number:
+            # Get the current schema from the database connection
+            from django.db import connection
+            current_schema = connection.schema_name
+            
+            # Use the current schema name for client lookup/creation
             client = HotspotClient.get_or_create_by_phone(
-                schema_name=self._state.db or 'default',  # Gets schema from connection
+                schema_name=current_schema,
                 phone_number=self.phone_number
             )
             if client:
