@@ -553,9 +553,10 @@ class HotspotPurchaseView(APIView):
             )
             
             # Now create Customer linked to the User with valid Customer fields only
+            # NOTE: Customer model does NOT have a schema_name field. It's identified by user (OneToOne)
+            # and has fields: customer_code, status, customer_type, category, etc.
             hotspot_customer, created = Customer.objects.get_or_create(
-                schema_name=tenant.schema_name,
-                user=user,
+                user=user,  # Customer is uniquely identified by its OneToOne relation to User
                 defaults={
                     'customer_code': f"HS_{email_local_part[:20]}",
                     'status': 'ACTIVE',
