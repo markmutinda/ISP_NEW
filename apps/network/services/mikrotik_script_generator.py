@@ -18,6 +18,9 @@ class MikrotikScriptGenerator:
         # ── VPN Gateway Logic ─────────────────────────────────────────
         self.vpn_gateway = getattr(settings, 'VPN_GATEWAY_IP', '10.8.0.1')
         
+        # ── FIX 1A: Dedicated RADIUS container IP ─────────────────────
+        self.radius_server_ip = getattr(settings, 'RADIUS_SERVER_IP', '10.10.0.3')
+        
         # ── Production URLs Logic ─────────────────────────────────────
         self.base_url = getattr(settings, 'BASE_URL', 'https://api.netily.co.ke').rstrip('/')
         self.portal_url = getattr(settings, 'FRONTEND_URL', 'https://netily.co.ke').rstrip('/')
@@ -109,7 +112,7 @@ class MikrotikScriptGenerator:
 # ─── Detect RouterOS Version ────────────────────────────────
 :local rosVersion "7"
 :local verStr [/system resource get version]
-:if ([:pick $verStr 0 1] = "6") do={{
+if ([:pick $verStr 0 1] = "6") do={{
     :set rosVersion "6"
 }}
 :put ("RouterOS version detected: v" . $rosVersion)
@@ -165,14 +168,14 @@ class MikrotikScriptGenerator:
             self._section_firewall(r),
             self._section_bridge_ports(r, r_gateway_cidr),
             self._section_dhcp(r, gateway_ip, pool_range, dhcp_network),
-            self._section_radius(r),
-            self._section_hotspot(r, gateway_ip),  # UPDATED with 3-minute interval
+            self._section_radius(r),  # UPDATED with src-address and route
+            self._section_hotspot(r, gateway_ip),
             self._section_walled_garden(r, portal_domain),
             self._section_ssl_certs(r),
             self._section_hotspot_html(r),
-            self._section_pppoe(r, pppoe_local) if r.enable_pppoe else "",  # UPDATED with 3-minute interval
+            self._section_pppoe(r, pppoe_local) if r.enable_pppoe else "",  # UPDATED with anchored local-address
             self._section_anti_sharing(r, is_v6),
-            self._section_nat(r),
+            self._section_nat(r),  # UPDATED with RADIUS bypass
             self._section_schedulers(r),
             self._section_footer(r),
         ]
@@ -348,24 +351,39 @@ class MikrotikScriptGenerator:
 /ip dhcp-server network add address="{dhcp_network}" gateway="{gateway_ip}" dns-server=8.8.8.8,1.1.1.1 comment="Netily DHCP Network"
 """
 
+    # ============================================================
+    # FIX 1B: UPDATED RADIUS with src-address and forced route
+    # ============================================================
     def _section_radius(self, r: Router) -> str:
+        """UPDATED: RADIUS with src-address from VPN IP and forced route via VPN tunnel"""
+        radius_src = r.vpn_ip_address or "0.0.0.0"
         radius_cmd = (
-            f'/radius add address={self.vpn_gateway} secret="{self._escape_ros_string(r.shared_secret)}" '
+            f'/radius add address={self.radius_server_ip} '
+            f'src-address={radius_src} '
+            f'secret="{self._escape_ros_string(r.shared_secret)}" '
             f'authentication-port=1812 accounting-port=1813 '
             f'service=hotspot,ppp timeout=3000ms comment="Netily-Cloud-RADIUS"'
         )
-        
+
         return f"""# ─────────────────────────────────────────────────────────────
 # 7. RADIUS (Cloud RADIUS via VPN Tunnel)
 # ─────────────────────────────────────────────────────────────
-:put "Configuring Cloud RADIUS with standard ports (1812/1813)..."
+:put "Configuring Cloud RADIUS..."
 :do {{ /radius remove [find comment~"Netily"] }} on-error={{}}
 {radius_cmd}
+
 /radius incoming set accept=yes port=3799
+
+# Force RADIUS host through VPN tunnel
+:do {{ /ip route remove [find comment="Netily-RADIUS-Route"] }} on-error={{}}
+/ip route add dst-address={self.radius_server_ip}/32 gateway="Netily-VPN" comment="Netily-RADIUS-Route"
+
+# Allow return RADIUS packets from server
+:do {{ /ip firewall filter remove [find comment="Netily-RADIUS-Input"] }} on-error={{}}
+/ip firewall filter add chain=input src-address={self.radius_server_ip} action=accept place-before=0 comment="Netily-RADIUS-Input"
 """
 
     def _section_hotspot(self, r: Router, gateway_ip: str) -> str:
-        """UPDATED: Hardcoded 3-minute interim updates for automatic accounting"""
         profile_cmd = f'/ip hotspot profile add name="netily-profile" hotspot-address="{gateway_ip}" dns-name="{self._escape_ros_string(r.dns_name)}" login-by=http-pap,mac-cookie use-radius=yes radius-accounting=yes http-cookie-lifetime=1d rate-limit=""'
         server_cmd = f'/ip hotspot add name="netily-hotspot" interface="netily-bridge" address-pool="netily-pool" profile="netily-profile" disabled=no'
         
@@ -380,8 +398,6 @@ class MikrotikScriptGenerator:
 /ip hotspot user profile set [find name="default"] shared-users=1 keepalive-timeout=2m
 
 # Enable RADIUS accounting with 3-minute interim updates
-# The router will automatically send accounting updates every 3 minutes
-# This ensures real-time usage data without requiring backend CoA support
 /ip hotspot profile set [find name="netily-profile"] use-radius=yes radius-accounting=yes radius-interim-update=00:03:00
 :put " + RADIUS accounting enabled with 3-minute interim updates"
 """
@@ -484,8 +500,10 @@ class MikrotikScriptGenerator:
 }} on-error={{ :put ">>> ERROR: Failed to download status.html" }}
 """
 
+    # ============================================================
+    # FIX 3: UPDATED PPPoE with anchored default profile local-address
+    # ============================================================
     def _section_pppoe(self, r: Router, pppoe_local: str) -> str:
-        """UPDATED: Hardcoded 3-minute interim updates for PPPoE accounting"""
         return f"""# ─────────────────────────────────────────────────────────────
 # 12. PPPoE SERVER (Bridge Mode)
 # ─────────────────────────────────────────────────────────────
@@ -499,12 +517,14 @@ class MikrotikScriptGenerator:
 :do {{ /ppp profile remove [find name="netily-pppoe-profile"] }} on-error={{}}
 /ppp profile add name="netily-pppoe-profile" local-address={pppoe_local} remote-address=netily-pppoe-pool dns-server=8.8.8.8,1.1.1.1 use-encryption=no change-tcp-mss=yes only-one=default
 
+# ANCHOR: Also set local-address on default profile (prevents PPP teardown/629 errors)
+/ppp profile set [find name="default"] local-address={pppoe_local}
+
 # Create Server on the BRIDGE
 :do {{ /interface pppoe-server server remove [find service-name="netily-pppoe"] }} on-error={{}}
 /interface pppoe-server server add service-name="netily-pppoe" interface="netily-bridge" default-profile="netily-pppoe-profile" authentication=pap,chap disabled=no
 
 # Enforce RADIUS with 3-minute interim updates
-# The router will automatically send accounting updates every 3 minutes
 /ppp aaa set use-radius=yes accounting=yes interim-update=00:03:00
 :put " + PPPoE RADIUS enabled with 3-minute interim updates"
 """
@@ -530,12 +550,20 @@ class MikrotikScriptGenerator:
 /ip firewall mangle add chain=postrouting connection-mark=!allowed-con out-interface="netily-bridge" action=change-ttl new-ttl=set:1 passthrough=no comment="Netily-AntiShare-Enforce"
 """
 
+    # ============================================================
+    # FIX 2: UPDATED NAT with RADIUS bypass
+    # ============================================================
     def _section_nat(self, r: Router) -> str:
         return f"""# ─────────────────────────────────────────────────────────────
 # 14. MASQUERADE & NAT
 # ─────────────────────────────────────────────────────────────
 :put "Configuring NAT..."
 
+# Do NOT NAT traffic to RADIUS server (important for reply tracking)
+:do {{ /ip firewall nat remove [find comment="Netily-RADIUS-NoNAT"] }} on-error={{}}
+/ip firewall nat add chain=srcnat dst-address={self.radius_server_ip} action=accept place-before=0 comment="Netily-RADIUS-NoNAT"
+
+# General internet masquerade
 :do {{
     :if ([:len [/ip firewall nat find comment="Netily-Masquerade"]] = 0) do={{
         /ip firewall nat add chain=srcnat action=masquerade comment="Netily-Masquerade"
@@ -559,7 +587,7 @@ class MikrotikScriptGenerator:
 :put " NETILY CLOUD CONTROLLER — SETUP COMPLETE"
 :put " Router:  {self._escape_ros_string(r.name)}"
 :put " VPN:     {self._escape_ros_string(vpn_host)}:{r.openvpn_port}"
-:put " RADIUS:  {self.vpn_gateway}:1812/1813"
+:put " RADIUS:  {self.radius_server_ip}:1812/1813 (src-addr: {r.vpn_ip_address or 'auto'})"
 :put " Portal:  {self.get_tenant_portal_url()}"
 :put "════════════════════════════════════════════════════"
 """
