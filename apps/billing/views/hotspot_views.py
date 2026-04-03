@@ -16,6 +16,7 @@ from django.db import transaction, ProgrammingError
 from django.db.models import Q
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
+from django.core.cache import cache  # ADDED: For TV code support
 
 from rest_framework import status
 from rest_framework.permissions import AllowAny
@@ -334,6 +335,8 @@ class HotspotPurchaseView(APIView):
     """
     Initiate hotspot purchase with REAL STK Push via Tuma.
     Creates pending session, initiates STK payment, and returns pending status.
+    
+    Supports TV pairing: if tv_code is provided, resolves MAC address server-side.
     """
     
     permission_classes = [AllowAny]
@@ -372,11 +375,34 @@ class HotspotPurchaseView(APIView):
             plan_id = request.data.get('plan_id')
             phone_number = request.data.get('phone_number')
             mac_address = request.data.get('mac_address', '')
+            tv_code = (request.data.get('tv_code') or '').strip().upper()  # ADDED: TV code support
             
             if not all([router_id, plan_id, phone_number]):
                 return Response({
                     'error': 'Missing required fields: router_id, plan_id, phone_number'
                 }, status=status.HTTP_400_BAD_REQUEST)
+            
+            # ============================================================
+            # TV CODE RESOLUTION: If tv_code provided, resolve MAC server-side
+            # ============================================================
+            if tv_code:
+                tv_cache_key = f"tv_code:{tenant.schema_name}:{tv_code}"
+                tv_payload = cache.get(tv_cache_key)
+                
+                if not tv_payload:
+                    return Response(
+                        {'error': 'Invalid or expired TV code. Please refresh the TV screen and try again.'},
+                        status=status.HTTP_400_BAD_REQUEST
+                    )
+                
+                # Bind purchase to the TV identity from cache
+                mac_address = tv_payload.get('mac_address', '')
+                router_id_from_code = tv_payload.get('router_id')
+                
+                if router_id_from_code:
+                    router_id = router_id_from_code
+                    
+                logger.info(f"TV code {tv_code} resolved to MAC {mac_address}, router {router_id}")
             
             try:
                 router = Router.objects.get(id=router_id, is_active=True)
@@ -576,6 +602,19 @@ class HotspotPurchaseView(APIView):
                 payment.save(update_fields=['status', 'tuma_status', 'failure_reason'])
                 session.mark_failed(payment.failure_reason)
                 return Response({'error': 'Failed to initiate payment'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+            # ============================================================
+            # OPTIONALLY invalidate used TV code after successful payment init
+            # ============================================================
+            if tv_code:
+                try:
+                    tv_cache_key = f"tv_code:{tenant.schema_name}:{tv_code}"
+                    cache.delete(tv_cache_key)
+                    device_cache_key = f"tv_device:{tenant.schema_name}:{router_id}:{mac_address}"
+                    cache.delete(device_cache_key)
+                    logger.info(f"TV code {tv_code} invalidated after purchase")
+                except Exception as e:
+                    logger.warning(f"Failed to delete TV code {tv_code}: {e}")
 
             return Response({
                 'status': 'pending',

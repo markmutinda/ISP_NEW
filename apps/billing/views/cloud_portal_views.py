@@ -6,12 +6,15 @@ These views support the Cloud Redirector flow:
 2. auto-login/ — MAC-based auto-login check
 3. device-auth/ — Smart TV / multi-device authorization
 4. return-trip/ — Completes the "Return Trip" back to MikroTik after payment
+5. tv/generate-code/ — Generates 5-char code for Smart TV pairing
+6. tv/verify-code/ — Verifies TV code from mobile device
 
 All endpoints are PUBLIC (no auth required — used from captive portal).
 """
 
 import logging
 import random
+import string
 from contextlib import contextmanager
 
 from django.conf import settings
@@ -50,6 +53,23 @@ def _resolve_tenant(tenant_value: str):
             Q(subdomain=tenant_value) | Q(schema_name=tenant_value),
             is_active=True,
         ).first()
+
+
+def _tv_code_cache_key(schema_name: str, code: str) -> str:
+    """Cache key for TV pairing code"""
+    return f"tv_code:{schema_name}:{code}"
+
+
+def _tv_device_cache_key(schema_name: str, router_id: str, mac: str) -> str:
+    """Cache key for TV device to code mapping"""
+    return f"tv_device:{schema_name}:{router_id}:{mac}"
+
+
+def _generate_tv_code(length: int = 5) -> str:
+    """Generate a human-friendly TV pairing code (excludes ambiguous characters)"""
+    # Exclude ambiguous chars: 0/O, 1/I/L
+    alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
+    return ''.join(random.choice(alphabet) for _ in range(length))
 
 
 def _ensure_session_radius_credentials(session: HotspotSession) -> bool:
@@ -108,6 +128,14 @@ def _tenant_ctx(tenant_subdomain: str):
 
 class AutoLoginRateThrottle(AnonRateThrottle):
     scope = "hotspot_auto_login"
+
+
+class TVCodeGenerateRateThrottle(AnonRateThrottle):
+    scope = "hotspot_tv_code_generate"
+
+
+class TVCodeVerifyRateThrottle(AnonRateThrottle):
+    scope = "hotspot_tv_code_verify"
 
 
 class HotspotLoginPageView(APIView):
@@ -287,6 +315,135 @@ class HotspotReturnTripView(APIView):
                     "speed": f"{session.plan.speed_limit_mbps}Mbps",
                 },
             })
+
+
+class GenerateTVCodeView(APIView):
+    """
+    GET /api/v1/hotspot/tv/generate-code/?tenant=...&router_id=...&mac_address=...
+    
+    Generates a 5-character code for Smart TV pairing.
+    The TV displays this code, user enters it on their phone.
+    """
+    permission_classes = [AllowAny]
+    authentication_classes = []
+    throttle_classes = [TVCodeGenerateRateThrottle]
+
+    def get(self, request):
+        tenant_subdomain = request.query_params.get('tenant')
+        router_id = request.query_params.get('router_id')
+        mac_address = _normalize_mac(request.query_params.get('mac_address'))
+
+        # Validation
+        if not tenant_subdomain:
+            return Response({'error': 'Tenant is required'}, status=status.HTTP_400_BAD_REQUEST)
+        
+        if not router_id or not mac_address or mac_address == '00:00:00:00:00:00':
+            return Response(
+                {'error': 'Valid router_id and mac_address are required'}, 
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        # Resolve tenant
+        tenant = _resolve_tenant(tenant_subdomain)
+        if not tenant:
+            return Response({'error': 'Invalid tenant'}, status=status.HTTP_400_BAD_REQUEST)
+
+        with schema_context(tenant.schema_name):
+            # Validate router exists in this tenant
+            try:
+                router = Router.objects.get(id=router_id, is_active=True)
+            except (Router.DoesNotExist, ValueError):
+                try:
+                    router = Router.objects.get(name=router_id, is_active=True)
+                except Router.DoesNotExist:
+                    return Response(
+                        {'error': 'Router not found'}, 
+                        status=status.HTTP_404_NOT_FOUND
+                    )
+
+            # Reuse active unexpired code for same TV+router
+            device_key = _tv_device_cache_key(tenant.schema_name, str(router.id), mac_address)
+            existing_code = cache.get(device_key)
+            if existing_code:
+                return Response({'code': existing_code, 'expires_in': 300})
+
+            # Generate unique 5-char code (best effort with retries)
+            code = None
+            for _ in range(10):  # Try up to 10 times to avoid collision
+                candidate = _generate_tv_code(5)
+                code_key = _tv_code_cache_key(tenant.schema_name, candidate)
+                if not cache.get(code_key):
+                    code = candidate
+                    break
+
+            if not code:
+                logger.error(f"Failed to generate unique TV code for router {router.id}, mac {mac_address}")
+                return Response(
+                    {'error': 'Unable to generate code. Please try again.'}, 
+                    status=status.HTTP_503_SERVICE_UNAVAILABLE
+                )
+
+            # Store pairing data
+            payload = {
+                'mac_address': mac_address,
+                'router_id': str(router.id),
+                'tenant': tenant.subdomain,
+                'created_at': timezone.now().isoformat(),
+            }
+
+            # TTL 5 minutes (good UX + secure)
+            cache.set(_tv_code_cache_key(tenant.schema_name, code), payload, timeout=300)
+            cache.set(device_key, code, timeout=300)
+
+            logger.info(f"Generated TV code {code} for router {router.id}, mac {mac_address}")
+            return Response({'code': code, 'expires_in': 300})
+
+
+class VerifyTVCodeView(APIView):
+    """
+    POST /api/v1/hotspot/tv/verify-code/
+    body: { "tenant": "...", "code": "B7X9Q" }
+    
+    Verifies the TV code entered by user on their phone.
+    Returns the TV's MAC address and router ID for payment.
+    """
+    permission_classes = [AllowAny]
+    authentication_classes = []
+    throttle_classes = [TVCodeVerifyRateThrottle]
+
+    def post(self, request):
+        tenant_subdomain = request.data.get('tenant') or request.query_params.get('tenant')
+        code = (request.data.get('code') or '').strip().upper()
+
+        # Validation
+        if not tenant_subdomain:
+            return Response({'error': 'Tenant is required'}, status=status.HTTP_400_BAD_REQUEST)
+        
+        if len(code) != 5:
+            return Response({'error': 'Invalid code format'}, status=status.HTTP_400_BAD_REQUEST)
+
+        # Resolve tenant
+        tenant = _resolve_tenant(tenant_subdomain)
+        if not tenant:
+            return Response({'error': 'Invalid tenant'}, status=status.HTTP_400_BAD_REQUEST)
+
+        # Look up code in cache
+        payload = cache.get(_tv_code_cache_key(tenant.schema_name, code))
+        if not payload:
+            logger.warning(f"Invalid or expired TV code attempt: {code}")
+            return Response(
+                {'error': 'Invalid or expired TV code. Please check the TV screen.'}, 
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        # Do NOT delete yet; keep valid until payment submit or expiry
+        logger.info(f"TV code {code} verified for router {payload['router_id']}, mac {payload['mac_address']}")
+        return Response({
+            'message': 'TV Found',
+            'mac_address': payload['mac_address'],
+            'router_id': payload['router_id'],
+            'code': code,
+        })
 
 
 class HotspotDeviceAuthView(APIView):

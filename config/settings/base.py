@@ -270,9 +270,11 @@ REST_FRAMEWORK = {
     'PAGE_SIZE': 20,
     
     # Rate limiting for hotspot endpoints
-    # This supports the AutoLoginRateThrottle used in cloud_portal_views.py
+    # This supports the throttles used in cloud_portal_views.py
     'DEFAULT_THROTTLE_RATES': {
-        'hotspot_auto_login': '20/min',  # 20 attempts per minute max per IP
+        'hotspot_auto_login': '20/min',           # Auto-login attempts
+        'hotspot_tv_code_generate': '30/min',     # TV code generation (prevents abuse)
+        'hotspot_tv_code_verify': '60/min',       # TV code verification (user-friendly)
     },
 }
 

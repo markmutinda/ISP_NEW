@@ -13,6 +13,8 @@ from .views.cloud_portal_views import (
     HotspotReturnTripView,
     HotspotDeviceAuthView,
     HotspotDeviceAuthStatusView,
+    GenerateTVCodeView,      # ADDED: TV code generation
+    VerifyTVCodeView,        # ADDED: TV code verification
 )
 from .views.hotspot_admin_views import (
     HotspotPlanViewSet,
@@ -183,6 +185,12 @@ hotspot_urlpatterns = [
     path('device-auth/authorize/', HotspotDeviceAuthView.as_view(), name='hotspot-device-auth-authorize'),
     path('device-auth/status/', HotspotDeviceAuthStatusView.as_view(), name='hotspot-device-auth-status'),
     path('voucher-redeem/', HotspotVoucherRedeemView.as_view(), name='hotspot-voucher-redeem'),
+    
+    # ── Smart TV Pairing Endpoints (ADDED) ──
+    # TV generates a code to display
+    path('tv/generate-code/', GenerateTVCodeView.as_view(), name='hotspot-tv-generate-code'),
+    # User verifies the code on their phone
+    path('tv/verify-code/', VerifyTVCodeView.as_view(), name='hotspot-tv-verify-code'),
 ]
 
 # ==========================
