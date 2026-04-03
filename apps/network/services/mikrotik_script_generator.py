@@ -166,11 +166,11 @@ class MikrotikScriptGenerator:
             self._section_bridge_ports(r, r_gateway_cidr),
             self._section_dhcp(r, gateway_ip, pool_range, dhcp_network),
             self._section_radius(r),
-            self._section_hotspot(r, gateway_ip),  # UPDATED with 3-minute interval
+            self._section_hotspot(r, gateway_ip),
             self._section_walled_garden(r, portal_domain),
             self._section_ssl_certs(r),
             self._section_hotspot_html(r),
-            self._section_pppoe(r, pppoe_local) if r.enable_pppoe else "",  # UPDATED with 3-minute interval
+            self._section_pppoe(r, pppoe_local) if r.enable_pppoe else "",
             self._section_anti_sharing(r, is_v6),
             self._section_nat(r),
             self._section_schedulers(r),
@@ -565,6 +565,10 @@ class MikrotikScriptGenerator:
 """
 
     def generate_login_html(self) -> str:
+        """
+        UPDATED: Enhanced Smart TV detection for LipaNet-style pairing.
+        Detects TVs even if they disguise their User-Agent.
+        """
         r = self.router
         portal_base = self.get_tenant_portal_url().rstrip('/')
         tenant_name = self._escape_ros_string(r.tenant_subdomain or 'public')
@@ -650,10 +654,32 @@ class MikrotikScriptGenerator:
             return; // Stop here, do not redirect to portal
         }}
 
-        // 2. REDIRECT MODE (Standard)
-        // No username found? This is a new user. Send them to the Cloud Portal.
+        // 2. SMART TV DETECTION (The LipaNet / Senior Dev Request)
+        // Comprehensive detection that catches even disguised Smart TVs
+        var ua = navigator.userAgent.toLowerCase();
         
-        // Construct Portal URL: http://portal.netily.com/hotspot/ROUTER_ID
+        // Basic TV detection from User-Agent
+        var isTV = /smart-?tv|webos|tizen|vidaa|hbbtv|roku|firetv|apple\\s?tv|android\\s?tv|bravia|netcast|viera|xbox|playstation|nintendo|box|stb/i.test(ua);
+        
+        // Additional detection: Screen size and aspect ratio (TVs are usually 16:9 and large)
+        var screenWidth = window.screen.width;
+        var screenHeight = window.screen.height;
+        var aspectRatio = screenWidth / screenHeight;
+        
+        // TV screens are typically 16:9 (1.77) or 4:3 (1.33) but large
+        var isLargeScreen = screenWidth >= 1280;
+        var isTVAspect = (aspectRatio > 1.5 && aspectRatio < 1.9); // 16:9 range
+        
+        // Check for touch capability (TVs usually don't have touch)
+        var hasTouch = 'ontouchstart' in window || navigator.maxTouchPoints > 0;
+        
+        // Combined detection: large screen + no touch + TV aspect ratio
+        var isLikelyTV = isLargeScreen && !hasTouch && isTVAspect;
+        
+        // Final decision: either User-Agent says TV or it's likely a TV based on screen
+        var finalIsTV = isTV || isLikelyTV;
+        
+        // 3. REDIRECT TO CLOUD PORTAL
         var portalUrl = '{portal_base}/hotspot/{r.id}';
         
         var params = [
@@ -664,6 +690,11 @@ class MikrotikScriptGenerator:
             'error=' + encodeURIComponent(error),
             'tenant=' + '{tenant_name}'
         ];
+
+        // If it's a TV, add the special flag so the frontend knows to show the pairing code
+        if (finalIsTV) {{
+            params.push('smart_tv=1');
+        }}
 
         var redirectUrl = portalUrl + '?' + params.join('&');
 
