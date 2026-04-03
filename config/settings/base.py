@@ -268,6 +268,12 @@ REST_FRAMEWORK = {
     ),
     'DEFAULT_PAGINATION_CLASS': 'rest_framework.pagination.PageNumberPagination',
     'PAGE_SIZE': 20,
+    
+    # Rate limiting for hotspot endpoints
+    # This supports the AutoLoginRateThrottle used in cloud_portal_views.py
+    'DEFAULT_THROTTLE_RATES': {
+        'hotspot_auto_login': '20/min',  # 20 attempts per minute max per IP
+    },
 }
 
 SIMPLE_JWT = {

@@ -40,20 +40,66 @@ def _normalize_mac(mac: str) -> str:
     return (mac or "").strip().upper().replace("-", ":")
 
 
-def _get_tenant(tenant_subdomain: str):
-    if not tenant_subdomain:
+def _resolve_tenant(tenant_value: str):
+    """Safely resolve tenant from public schema"""
+    if not tenant_value:
         return None
+
     with schema_context(get_public_schema_name()):
+        return Tenant.objects.filter(
+            Q(subdomain=tenant_value) | Q(schema_name=tenant_value),
+            is_active=True,
+        ).first()
+
+
+def _ensure_session_radius_credentials(session: HotspotSession) -> bool:
+    """Ensure RADIUS credentials exist for an active/paid session.
+    
+    This is the core reconnect fix. It re-seeds credentials when user 
+    returns after router reboot.
+    """
+    if session.status not in ('active', 'paid'):
+        return False
+
+    if session.status == 'paid':
         try:
-            return Tenant.objects.get(Q(subdomain=tenant_subdomain) | Q(schema_name=tenant_subdomain))
-        except Tenant.DoesNotExist:
-            logger.warning(f"Tenant not found: {tenant_subdomain}")
-            return None
+            session.activate(session.access_code)
+        except Exception as exc:
+            logger.error("Failed to activate paid session %s: %s", session.session_id, exc, exc_info=True)
+            return False
+
+    if not session.access_code:
+        logger.warning("Auto-login: session %s is active but has no access_code", session.session_id)
+        return False
+
+    try:
+        from apps.billing.services.hotspot_radius_service import HotspotRadiusService
+
+        radius_service = HotspotRadiusService()
+        ok = radius_service.create_hotspot_credentials(
+            username=session.access_code,
+            password=session.access_code,
+            router=session.router,
+            plan=session.plan,
+            expires_at=session.expires_at,
+            mac_address=session.mac_address or '',
+        )
+        
+        if not ok:
+            logger.error("RADIUS reseed returned False for session %s", session.session_id)
+            return False
+            
+        logger.info("Successfully reseeded RADIUS credentials for session %s", session.session_id)
+        return True
+    except Exception as exc:
+        logger.error("Failed to reseed hotspot RADIUS credentials for %s: %s", session.session_id, exc, exc_info=True)
+        return False
 
 
 @contextmanager
 def _tenant_ctx(tenant_subdomain: str):
-    tenant = _get_tenant(tenant_subdomain)
+    """Context manager for tenant operations"""
+    tenant = _resolve_tenant(tenant_subdomain)
     if not tenant:
         raise ValueError("Invalid tenant")
     with schema_context(tenant.schema_name):
@@ -139,77 +185,62 @@ class HotspotAutoLoginView(APIView):
         if not router_id or not mac_address:
             return Response({"error": "Missing router/mac"}, status=status.HTTP_400_BAD_REQUEST)
 
-        try:
-            with _tenant_ctx(tenant_subdomain):
-                # router lookup by id or name
-                try:
-                    router = Router.objects.get(id=router_id, is_active=True)
-                except (Router.DoesNotExist, ValueError):
-                    try:
-                        router = Router.objects.get(name=router_id, is_active=True)
-                    except Router.DoesNotExist:
-                        return Response({"error": "Router not found"}, status=status.HTTP_400_BAD_REQUEST)
-
-                session = (
-                    HotspotSession.objects.filter(
-                        router=router,
-                        mac_address=mac_address,
-                        status__in=["active", "paid"],
-                        expires_at__gt=timezone.now(),
-                    )
-                    .order_by("-activated_at")
-                    .first()
-                )
-
-                if not session:
-                    return Response({"has_session": False})
-
-                if not session.access_code:
-                    logger.warning(f"Session {session.session_id} has no access_code")
-                    return Response({"has_session": False})
-
-                # If paid but not active, activate via model method (keeps logic centralized)
-                if session.status == "paid":
-                    try:
-                        session.activate(session.access_code)
-                    except Exception as e:
-                        logger.error(f"Failed to activate paid session {session.session_id}: {e}")
-                        return Response({"has_session": False})
-
-                # Self-heal RADIUS credentials after router reboot
-                try:
-                    from apps.billing.services.hotspot_radius_service import HotspotRadiusService
-                    HotspotRadiusService().create_hotspot_credentials(
-                        username=session.access_code,
-                        password=session.access_code,
-                        router=session.router,
-                        plan=session.plan,
-                        expires_at=session.expires_at,
-                        mac_address=mac_address,
-                    )
-                except Exception as e:
-                    logger.warning(f"RADIUS re-seed failed for {session.session_id}: {e}")
-
-                remaining_minutes = max(
-                    int((session.expires_at - timezone.now()).total_seconds() / 60), 0
-                )
-
-                return Response({
-                    "has_session": True,
-                    "session_id": session.session_id,
-                    "access_code": session.access_code,
-                    "plan_name": session.plan.name,
-                    "expires_at": session.expires_at.isoformat(),
-                    "remaining_minutes": remaining_minutes,
-                    "data_remaining_mb": session.data_remaining_mb,
-                    "speed": f"{session.plan.speed_limit_mbps}Mbps",
-                    "credentials": {
-                        "username": session.access_code,
-                        "password": session.access_code,
-                    },
-                })
-        except ValueError:
+        # Resolve tenant first
+        tenant = _resolve_tenant(tenant_subdomain)
+        if not tenant:
             return Response({"error": "Invalid tenant."}, status=status.HTTP_400_BAD_REQUEST)
+
+        # Normalize MAC again to ensure consistency
+        mac_address = mac_address.upper().replace("-", ":")
+
+        with schema_context(tenant.schema_name):
+            # router lookup by id or name
+            try:
+                router = Router.objects.get(id=router_id, is_active=True)
+            except (Router.DoesNotExist, ValueError):
+                try:
+                    router = Router.objects.get(name=router_id, is_active=True)
+                except Router.DoesNotExist:
+                    return Response({"error": "Router not found"}, status=status.HTTP_400_BAD_REQUEST)
+
+            # Find session - handles both paid and active
+            active_session = HotspotSession.objects.filter(
+                router=router,
+                mac_address=mac_address,
+            ).filter(
+                Q(status='paid') |
+                Q(status='active', expires_at__gt=timezone.now())
+            ).order_by('-created_at').first()
+
+            if not active_session:
+                return Response({"has_session": False})
+
+            # Ensure credentials exist before returning session
+            if not _ensure_session_radius_credentials(active_session):
+                logger.warning(f"Auto-login: session {active_session.session_id} has no valid credentials")
+                return Response({"has_session": False, "reason": "Session credentials unavailable"})
+
+            # Guard against missing expires_at
+            remaining_minutes = 0
+            if active_session.expires_at:
+                remaining_minutes = max(
+                    int((active_session.expires_at - timezone.now()).total_seconds() / 60), 0
+                )
+
+            return Response({
+                "has_session": True,
+                "session_id": active_session.session_id,
+                "access_code": active_session.access_code,
+                "plan_name": active_session.plan.name,
+                "expires_at": active_session.expires_at.isoformat() if active_session.expires_at else None,
+                "remaining_minutes": remaining_minutes,
+                "data_remaining_mb": active_session.data_remaining_mb,
+                "speed": f"{active_session.plan.speed_limit_mbps}Mbps",
+                "credentials": {
+                    "username": active_session.access_code,
+                    "password": active_session.access_code,
+                },
+            })
 
 
 class HotspotReturnTripView(APIView):
@@ -221,32 +252,41 @@ class HotspotReturnTripView(APIView):
         if not tenant_subdomain:
             return Response({"error": "Tenant parameter required"}, status=400)
 
-        try:
-            with _tenant_ctx(tenant_subdomain):
-                try:
-                    session = HotspotSession.objects.select_related("plan", "router").get(session_id=session_id)
-                except HotspotSession.DoesNotExist:
-                    return Response({"error": "Session not found"}, status=status.HTTP_404_NOT_FOUND)
-
-                if session.status not in ("active", "paid"):
-                    return Response({"status": session.status, "message": "Session is not ready for authentication."})
-
-                login_url = request.query_params.get("login_url") or f"http://{session.router.gateway_ip}/login"
-                return Response({
-                    "status": "ready",
-                    "session_id": session.session_id,
-                    "login_url": login_url,
-                    "username": session.access_code,
-                    "password": session.access_code,
-                    "method": "auto_submit",
-                    "plan": {
-                        "name": session.plan.name,
-                        "duration_display": session.plan.duration_display,
-                        "speed": f"{session.plan.speed_limit_mbps}Mbps",
-                    },
-                })
-        except ValueError:
+        # Resolve tenant first
+        tenant = _resolve_tenant(tenant_subdomain)
+        if not tenant:
             return Response({"error": "Invalid tenant provided"}, status=400)
+
+        with schema_context(tenant.schema_name):
+            try:
+                session = HotspotSession.objects.select_related("plan", "router").get(session_id=session_id)
+            except HotspotSession.DoesNotExist:
+                return Response({"error": "Session not found"}, status=status.HTTP_404_NOT_FOUND)
+
+            if session.status not in ("active", "paid"):
+                return Response({"status": session.status, "message": "Session is not ready for authentication."})
+
+            # Ensure credentials exist before returning login details
+            if not _ensure_session_radius_credentials(session):
+                return Response(
+                    {"status": "error", "message": "Session credentials unavailable. Please refresh and try again."},
+                    status=status.HTTP_409_CONFLICT,
+                )
+
+            login_url = request.query_params.get("login_url") or f"http://{session.router.gateway_ip}/login"
+            return Response({
+                "status": "ready",
+                "session_id": session.session_id,
+                "login_url": login_url,
+                "username": session.access_code,
+                "password": session.access_code,
+                "method": "auto_submit",
+                "plan": {
+                    "name": session.plan.name,
+                    "duration_display": session.plan.duration_display,
+                    "speed": f"{session.plan.speed_limit_mbps}Mbps",
+                },
+            })
 
 
 class HotspotDeviceAuthView(APIView):
@@ -258,16 +298,19 @@ class HotspotDeviceAuthView(APIView):
         if not tenant_subdomain:
             return Response({"error": "Tenant parameter required"}, status=400)
 
-        action = request.path.rstrip("/").split("/")[-1]
-        try:
-            with _tenant_ctx(tenant_subdomain):
-                if action == "request":
-                    return self._request_pairing(request)
-                if action == "authorize":
-                    return self._authorize_device(request)
-                return Response({"error": "Invalid action"}, status=status.HTTP_400_BAD_REQUEST)
-        except ValueError:
+        # Resolve tenant first
+        tenant = _resolve_tenant(tenant_subdomain)
+        if not tenant:
             return Response({"error": "Invalid tenant provided"}, status=400)
+
+        action = request.path.rstrip("/").split("/")[-1]
+        
+        with schema_context(tenant.schema_name):
+            if action == "request":
+                return self._request_pairing(request)
+            if action == "authorize":
+                return self._authorize_device(request)
+            return Response({"error": "Invalid action"}, status=status.HTTP_400_BAD_REQUEST)
 
     def _request_pairing(self, request):
         router_id = request.data.get("router_id")
@@ -361,30 +404,32 @@ class HotspotDeviceAuthStatusView(APIView):
         if not router_id or not mac_address:
             return Response({"error": "router_id and mac are required"}, status=status.HTTP_400_BAD_REQUEST)
 
-        try:
-            with _tenant_ctx(tenant_subdomain):
-                pairing_code = cache.get(f"device_pairing_mac:{router_id}:{mac_address}")
-                if pairing_code:
-                    return Response({
-                        "status": "waiting",
-                        "pairing_code": pairing_code,
-                        "message": "Waiting for authorization...",
-                    })
-
-                active_session = HotspotSession.objects.filter(
-                    router_id=router_id,
-                    mac_address=mac_address,
-                    status="active",
-                    expires_at__gt=timezone.now(),
-                ).first()
-
-                if active_session:
-                    return Response({
-                        "status": "authorized",
-                        "access_code": active_session.access_code,
-                        "message": "Device authorized! Connecting...",
-                    })
-
-                return Response({"status": "not_found", "message": "No pairing request found."})
-        except ValueError:
+        # Resolve tenant first
+        tenant = _resolve_tenant(tenant_subdomain)
+        if not tenant:
             return Response({"error": "Invalid tenant provided"}, status=400)
+
+        with schema_context(tenant.schema_name):
+            pairing_code = cache.get(f"device_pairing_mac:{router_id}:{mac_address}")
+            if pairing_code:
+                return Response({
+                    "status": "waiting",
+                    "pairing_code": pairing_code,
+                    "message": "Waiting for authorization...",
+                })
+
+            active_session = HotspotSession.objects.filter(
+                router_id=router_id,
+                mac_address=mac_address,
+                status="active",
+                expires_at__gt=timezone.now(),
+            ).first()
+
+            if active_session:
+                return Response({
+                    "status": "authorized",
+                    "access_code": active_session.access_code,
+                    "message": "Device authorized! Connecting...",
+                })
+
+            return Response({"status": "not_found", "message": "No pairing request found."})
