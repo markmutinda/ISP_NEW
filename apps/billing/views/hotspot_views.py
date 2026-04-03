@@ -385,6 +385,8 @@ class HotspotPurchaseView(APIView):
             # ============================================================
             # TV CODE RESOLUTION: If tv_code provided, resolve MAC server-side
             # ============================================================
+            reserved_access_code = None
+            
             if tv_code:
                 tv_cache_key = f"tv_code:{tenant.schema_name}:{tv_code}"
                 tv_payload = cache.get(tv_cache_key)
@@ -401,8 +403,11 @@ class HotspotPurchaseView(APIView):
                 
                 if router_id_from_code:
                     router_id = router_id_from_code
-                    
-                logger.info(f"TV code {tv_code} resolved to MAC {mac_address}, router {router_id}")
+                
+                # This is the key part: get the reserved access_code from the TV payload
+                reserved_access_code = tv_payload.get('access_code') or tv_code
+                
+                logger.info(f"TV code {tv_code} resolved to MAC {mac_address}, router {router_id}, reserved access_code: {reserved_access_code}")
             
             try:
                 router = Router.objects.get(id=router_id, is_active=True)
@@ -419,28 +424,35 @@ class HotspotPurchaseView(APIView):
             
             mac_address = mac_address.upper().replace('-', ':')
             
-            existing_user = HotspotSession.objects.filter(
-                mac_address=mac_address
-            ).exclude(
-                access_code__isnull=True
-            ).order_by('-created_at').first()
-
-            is_roaming = False
-            roamed_from_name = None
-
-            if existing_user and existing_user.access_code:
-                friendly_username = existing_user.access_code
-                
-                if existing_user.router_id != router.id:
-                    is_roaming = True
-                    roamed_from_name = existing_user.router.name
-                    logger.info(f"📍 ROAMING DETECTED: User {friendly_username} moved from {roamed_from_name} to {router.name}")
-                else:
-                    logger.info(f"🏠 HOME ROUTER: User {friendly_username} returning to {router.name}")
-                    
+            # ============================================================
+            # FIX: Force purchase to use reserved code as session.access_code
+            # ============================================================
+            if reserved_access_code:
+                friendly_username = reserved_access_code
+                logger.info(f"🎯 TV PURCHASE: Using reserved access code {friendly_username}")
             else:
-                friendly_username = self.generate_unique_code()
-                logger.info(f"✨ NEW USER: {mac_address} -> {friendly_username} at {router.name}")
+                existing_user = HotspotSession.objects.filter(
+                    mac_address=mac_address
+                ).exclude(
+                    access_code__isnull=True
+                ).order_by('-created_at').first()
+
+                is_roaming = False
+                roamed_from_name = None
+
+                if existing_user and existing_user.access_code:
+                    friendly_username = existing_user.access_code
+                    
+                    if existing_user.router_id != router.id:
+                        is_roaming = True
+                        roamed_from_name = existing_user.router.name
+                        logger.info(f"📍 ROAMING DETECTED: User {friendly_username} moved from {roamed_from_name} to {router.name}")
+                    else:
+                        logger.info(f"🏠 HOME ROUTER: User {friendly_username} returning to {router.name}")
+                        
+                else:
+                    friendly_username = self.generate_unique_code()
+                    logger.info(f"✨ NEW USER: {mac_address} -> {friendly_username} at {router.name}")
 
             session_id = HotspotSession.generate_session_id()
             session = HotspotSession.objects.create(
@@ -452,8 +464,8 @@ class HotspotPurchaseView(APIView):
                 amount=plan.price,
                 status='pending',
                 access_code=friendly_username,
-                is_roaming=is_roaming,
-                roamed_from=roamed_from_name
+                is_roaming=is_roaming if not reserved_access_code else False,
+                roamed_from=roamed_from_name if not reserved_access_code else None
             )
 
             cfg = TenantTumaConfig.objects.filter(schema_name=tenant.schema_name, is_active=True).first()

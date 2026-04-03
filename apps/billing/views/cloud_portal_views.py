@@ -6,7 +6,7 @@ These views support the Cloud Redirector flow:
 2. auto-login/ — MAC-based auto-login check
 3. device-auth/ — Smart TV / multi-device authorization
 4. return-trip/ — Completes the "Return Trip" back to MikroTik after payment
-5. tv/generate-code/ — Generates 5-char code for Smart TV pairing
+5. tv/generate-code/ — Generates access-style code for Smart TV pairing
 6. tv/verify-code/ — Verifies TV code from mobile device
 
 All endpoints are PUBLIC (no auth required — used from captive portal).
@@ -65,11 +65,10 @@ def _tv_device_cache_key(schema_name: str, router_id: str, mac: str) -> str:
     return f"tv_device:{schema_name}:{router_id}:{mac}"
 
 
-def _generate_tv_code(length: int = 5) -> str:
-    """Generate a human-friendly TV pairing code (excludes ambiguous characters)"""
-    # Exclude ambiguous chars: 0/O, 1/I/L
-    alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
-    return ''.join(random.choice(alphabet) for _ in range(length))
+def _generate_access_style_code() -> str:
+    """Generate an access-style code like MXTV-827S (same style as hotspot access code)"""
+    alphabet = string.ascii_uppercase + string.digits
+    return f"{''.join(random.choices(alphabet, k=4))}-{''.join(random.choices(alphabet, k=4))}"
 
 
 def _ensure_session_radius_credentials(session: HotspotSession) -> bool:
@@ -321,8 +320,9 @@ class GenerateTVCodeView(APIView):
     """
     GET /api/v1/hotspot/tv/generate-code/?tenant=...&router_id=...&mac_address=...
     
-    Generates a 5-character code for Smart TV pairing.
+    Generates an access-style code (e.g., MXTV-827S) for Smart TV pairing.
     The TV displays this code, user enters it on their phone.
+    The code is reserved and becomes the actual hotspot access_code.
     """
     permission_classes = [AllowAny]
     authentication_classes = []
@@ -361,51 +361,79 @@ class GenerateTVCodeView(APIView):
                         status=status.HTTP_404_NOT_FOUND
                     )
 
-            # Reuse active unexpired code for same TV+router
+            # ============================================================
+            # 1) Reuse code for same TV+router if present
+            # ============================================================
             device_key = _tv_device_cache_key(tenant.schema_name, str(router.id), mac_address)
             existing_code = cache.get(device_key)
             if existing_code:
-                return Response({'code': existing_code, 'expires_in': 300})
+                payload = cache.get(_tv_code_cache_key(tenant.schema_name, existing_code)) or {}
+                return Response({
+                    "code": existing_code,
+                    "access_code": existing_code,
+                    "expires_in": 300,
+                    "router_id": str(router.id),
+                    "mac_address": mac_address,
+                    "reserved": bool(payload),
+                })
 
-            # Generate unique 5-char code (best effort with retries)
+            # ============================================================
+            # 2) Create unique access-style code
+            # ============================================================
             code = None
-            for _ in range(10):  # Try up to 10 times to avoid collision
-                candidate = _generate_tv_code(5)
+            for _ in range(20):  # Try up to 20 times to avoid collision
+                candidate = _generate_access_style_code()
                 code_key = _tv_code_cache_key(tenant.schema_name, candidate)
-                if not cache.get(code_key):
+                
+                # Avoid collision with active cache + hotspot sessions
+                exists_in_cache = cache.get(code_key) is not None
+                exists_in_sessions = HotspotSession.objects.filter(access_code=candidate).exists()
+                
+                if not exists_in_cache and not exists_in_sessions:
                     code = candidate
                     break
 
             if not code:
-                logger.error(f"Failed to generate unique TV code for router {router.id}, mac {mac_address}")
+                logger.error(f"Failed to generate unique access-style code for router {router.id}, mac {mac_address}")
                 return Response(
-                    {'error': 'Unable to generate code. Please try again.'}, 
+                    {'error': 'Unable to reserve access code. Please try again.'}, 
                     status=status.HTTP_503_SERVICE_UNAVAILABLE
                 )
 
-            # Store pairing data
+            # ============================================================
+            # 3) Store pairing data with access_code
+            # ============================================================
             payload = {
-                'mac_address': mac_address,
-                'router_id': str(router.id),
-                'tenant': tenant.subdomain,
-                'created_at': timezone.now().isoformat(),
+                "mac_address": mac_address,
+                "router_id": str(router.id),
+                "tenant": tenant.subdomain,
+                "access_code": code,  # important: this becomes the actual hotspot access_code
+                "created_at": timezone.now().isoformat(),
             }
 
             # TTL 5 minutes (good UX + secure)
             cache.set(_tv_code_cache_key(tenant.schema_name, code), payload, timeout=300)
             cache.set(device_key, code, timeout=300)
 
-            logger.info(f"Generated TV code {code} for router {router.id}, mac {mac_address}")
-            return Response({'code': code, 'expires_in': 300})
+            logger.info(f"Generated TV access code {code} for router {router.id}, mac {mac_address}")
+            return Response({
+                "code": code,  # TV displays this
+                "access_code": code,
+                "expires_in": 300,
+                "router_id": str(router.id),
+                "mac_address": mac_address,
+                "reserved": True,
+            })
 
 
 class VerifyTVCodeView(APIView):
     """
     POST /api/v1/hotspot/tv/verify-code/
-    body: { "tenant": "...", "code": "B7X9Q" }
+    body: { "tenant": "...", "code": "MXTV-827S" }
     
     Verifies the TV code entered by user on their phone.
     Returns the TV's MAC address and router ID for payment.
+    The code is now an access-style code (e.g., MXTV-827S).
     """
     permission_classes = [AllowAny]
     authentication_classes = []
@@ -419,7 +447,8 @@ class VerifyTVCodeView(APIView):
         if not tenant_subdomain:
             return Response({'error': 'Tenant is required'}, status=status.HTTP_400_BAD_REQUEST)
         
-        if len(code) != 5:
+        # Access-style code format: 4 chars + hyphen + 4 chars (9 characters total)
+        if len(code) != 9 or code[4] != '-':
             return Response({'error': 'Invalid code format'}, status=status.HTTP_400_BAD_REQUEST)
 
         # Resolve tenant
@@ -443,6 +472,7 @@ class VerifyTVCodeView(APIView):
             'mac_address': payload['mac_address'],
             'router_id': payload['router_id'],
             'code': code,
+            'access_code': payload.get('access_code', code),  # Return the access_code for payment
         })
 
 
