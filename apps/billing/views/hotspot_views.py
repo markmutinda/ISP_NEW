@@ -496,6 +496,14 @@ class HotspotPurchaseView(APIView):
                 base_email = f"hotspot_{mac_seed}@hotspot.local"
                 identity_phone = f"+999{''.join(ch for ch in mac_seed if ch.isdigit())[:12]}"
             
+            # ============================================================
+            # FIX: Derive first_name and last_name from friendly_username
+            # friendly_username examples: MXTV-827S, WIFI-AB12, etc.
+            # ============================================================
+            parts = (friendly_username or "").split("-", 1)
+            derived_first_name = parts[0] if parts and parts[0] else "Hotspot"
+            derived_last_name = parts[1] if len(parts) > 1 and parts[1] else "Customer"
+            
             # 1) Reuse existing user first
             user = User.objects.filter(email=base_email).first()
             if not user and identity_phone:
@@ -508,12 +516,12 @@ class HotspotPurchaseView(APIView):
                     email=base_email,
                     password=random_password,
                     phone_number=identity_phone,
-                    first_name="Hotspot",
-                    last_name="Customer",
+                    first_name=derived_first_name,
+                    last_name=derived_last_name,
                     role='customer',
                     tenant_subdomain=getattr(tenant, 'subdomain', tenant_subdomain),
                 )
-                logger.info(f"Created new hotspot user: {user.email}")
+                logger.info(f"Created new hotspot user: {user.email} (name: {derived_first_name} {derived_last_name})")
             else:
                 logger.info(f"Reusing existing hotspot user: {user.email} (phone: {user.phone_number})")
             
