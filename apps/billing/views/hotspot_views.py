@@ -595,13 +595,35 @@ class HotspotPurchaseView(APIView):
                 logger.info(f"STK Push initiated for session {session.session_id}, payment {payment.payment_number}")
                 
             except Exception as e:
-                logger.error(f"STK initiation failed for session {session.session_id}: {e}")
+                err_text = str(e)
+                logger.error(f"STK initiation failed for session {session.session_id}: {err_text}", exc_info=True)
+
                 payment.status = 'FAILED'
                 payment.tuma_status = 'failed'
-                payment.failure_reason = str(e)
+                payment.failure_reason = err_text
                 payment.save(update_fields=['status', 'tuma_status', 'failure_reason'])
                 session.mark_failed(payment.failure_reason)
-                return Response({'error': 'Failed to initiate payment'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+                # Classify transient upstream failures as retriable
+                retriable_markers = ["404", "429", "502", "503", "504", "timed out", "connection", "temporar"]
+                is_retriable = any(m in err_text.lower() for m in retriable_markers)
+
+                if is_retriable:
+                    return Response(
+                        {
+                            "error": "Payment gateway is temporarily unavailable. Please retry in 5-10 seconds.",
+                            "retriable": True,
+                        },
+                        status=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    )
+
+                return Response(
+                    {
+                        "error": "Failed to initiate payment. Please confirm your number and try again.",
+                        "retriable": False,
+                    },
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
 
             # ============================================================
             # OPTIONALLY invalidate used TV code after successful payment init

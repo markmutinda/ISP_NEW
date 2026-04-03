@@ -2,9 +2,11 @@
 import hashlib
 import requests
 import logging
+import random
+import time
 from django.conf import settings
 from django.core.cache import cache
-
+from requests.exceptions import RequestException, HTTPError, ConnectionError, Timeout
 
 logger = logging.getLogger(__name__)
 
@@ -26,30 +28,84 @@ class TumaClient:
         self.base = settings.TUMA_API_BASE_URL.rstrip("/")
 
     # ------------------------------------------------------------------
-    # Authentication with caching
+    # Authentication with caching and retry logic
     # ------------------------------------------------------------------
 
     def auth_token(self, email, api_key):
         """
         Authenticate with Tuma API and get access token.
-        Raw call — prefer get_token() which adds caching.
+        Adds retry/backoff for transient upstream failures.
         """
-        response = requests.post(
-            f"{self.base}/auth/token",
-            json={"email": email, "api_key": api_key},
-            timeout=20
-        )
-        response.raise_for_status()
-        payload = response.json()
-        if not payload.get("success"):
-            raise TumaError(payload.get("message", "Authentication failed"))
-        return payload
+        url = f"{self.base}/auth/token"
+        payload = {"email": email, "api_key": api_key}
+
+        max_attempts = 3
+        backoff_seconds = [0.8, 1.5, 2.5]
+
+        last_err = None
+
+        for attempt in range(1, max_attempts + 1):
+            try:
+                response = requests.post(url, json=payload, timeout=20)
+
+                # Handle HTTP errors with retriable policy
+                if response.status_code >= 500 or response.status_code in (404, 429):
+                    # transient/provider/gateway style failures
+                    raise HTTPError(
+                        f"HTTP {response.status_code} from {url}: {response.text[:300]}",
+                        response=response,
+                    )
+
+                response.raise_for_status()
+
+                data = response.json()
+                if not data.get("success"):
+                    # business/auth failure (likely non-retriable)
+                    msg = data.get("message", "Authentication failed")
+                    raise TumaError(msg)
+
+                return data
+
+            except (ConnectionError, Timeout) as e:
+                last_err = e
+                retriable = True
+            except HTTPError as e:
+                last_err = e
+                status_code = getattr(getattr(e, "response", None), "status_code", None)
+                retriable = status_code in (404, 429) or (status_code is not None and status_code >= 500)
+            except RequestException as e:
+                last_err = e
+                retriable = True
+            except TumaError:
+                # Non-transport business/auth errors should bubble immediately
+                raise
+
+            if not retriable or attempt == max_attempts:
+                break
+
+            sleep_for = backoff_seconds[min(attempt - 1, len(backoff_seconds) - 1)] + random.uniform(0, 0.4)
+            logger.warning(
+                "Tuma auth attempt %s/%s failed for %s; retrying in %.2fs. base=%s err=%s",
+                attempt, max_attempts, email, sleep_for, self.base, str(last_err)
+            )
+            time.sleep(sleep_for)
+
+        raise TumaError(f"Tuma auth failed after {max_attempts} attempts: {last_err}")
 
     def get_token(self, email, api_key):
         """
         Get a cached Tuma JWT token or authenticate if cache miss / expired.
         Returns the token string.
+        
+        Normalizes credentials (strips whitespace) before processing.
         """
+        # Normalize credentials
+        email = (email or "").strip()
+        api_key = (api_key or "").strip()
+
+        if not email or not api_key:
+            raise TumaError("Missing Tuma business email or API key")
+
         cache_key = f"{self.TOKEN_CACHE_PREFIX}{hashlib.sha256(email.encode()).hexdigest()[:16]}"
         cached = cache.get(cache_key)
         if cached:
