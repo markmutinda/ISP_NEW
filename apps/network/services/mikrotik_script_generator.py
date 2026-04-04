@@ -566,8 +566,9 @@ class MikrotikScriptGenerator:
 
     def generate_login_html(self) -> str:
         """
-        UPDATED: Enhanced Smart TV detection for LipaNet-style pairing.
-        Detects TVs even if they disguise their User-Agent.
+        UPDATED: Strict TV detection based on User-Agent allowlist + desktop denylist.
+        Removed screen-size heuristic to prevent false positives.
+        Includes optional manual override via force_tv=1/0 URL parameter.
         """
         r = self.router
         portal_base = self.get_tenant_portal_url().rstrip('/')
@@ -611,6 +612,7 @@ class MikrotikScriptGenerator:
             margin: 0 auto 1rem;
         }}
         @keyframes spin {{ 0% {{ transform: rotate(0deg); }} 100% {{ transform: rotate(360deg); }} }}
+        .log-marker {{ display: none; }}
     </style>
 </head>
 <body>
@@ -654,30 +656,38 @@ class MikrotikScriptGenerator:
             return; // Stop here, do not redirect to portal
         }}
 
-        // 2. SMART TV DETECTION (The LipaNet / Senior Dev Request)
-        // Comprehensive detection that catches even disguised Smart TVs
+        // 2. STRICT TV DETECTION (Lipanet / Senior Dev Request)
+        // No screen-size heuristics - only strict UA matching with desktop denylist
+        
         var ua = navigator.userAgent.toLowerCase();
+        var q = new URLSearchParams(window.location.search);
         
-        // Basic TV detection from User-Agent
-        var isTV = /smart-?tv|webos|tizen|vidaa|hbbtv|roku|firetv|apple\\s?tv|android\\s?tv|bravia|netcast|viera|xbox|playstation|nintendo|box|stb/i.test(ua);
+        // Manual override hooks (optional but very useful for testing)
+        var forcedTV = null;
+        if (q.get('force_tv') === '1') forcedTV = true;
+        else if (q.get('force_tv') === '0') forcedTV = false;
         
-        // Additional detection: Screen size and aspect ratio (TVs are usually 16:9 and large)
-        var screenWidth = window.screen.width;
-        var screenHeight = window.screen.height;
-        var aspectRatio = screenWidth / screenHeight;
+        // STRICT TV UA allowlist (TV only)
+        // Includes: Smart TV, Android TV, Google TV, WebOS, Tizen, Vidaa, HbbTV, Roku,
+        // FireTV, Apple TV, Bravia, Netcast, Viera, plus common TV tokens like 'aft' (Fire TV),
+        // 'crkey' (Chromecast), and 'tv safari'
+        var tvUa = /(smart-?tv|android\\s?tv|google\\s?tv|webos|tizen|vidaa|hbbtv|roku|firetv|appletv|apple\\s?tv|bravia|netcast|viera|\\baf\\b|crkey|tv safari)/i.test(ua);
         
-        // TV screens are typically 16:9 (1.77) or 4:3 (1.33) but large
-        var isLargeScreen = screenWidth >= 1280;
-        var isTVAspect = (aspectRatio > 1.5 && aspectRatio < 1.9); // 16:9 range
+        // Strong desktop denylist - prevents desktops from being misidentified as TVs
+        var desktopUa = /(windows nt|macintosh|x11|linux x86_64|cros)/i.test(ua);
         
-        // Check for touch capability (TVs usually don't have touch)
-        var hasTouch = 'ontouchstart' in window || navigator.maxTouchPoints > 0;
+        // Final decision: manual override > (TV UA AND not desktop)
+        var finalIsTV = forcedTV !== null ? forcedTV : (tvUa && !desktopUa);
         
-        // Combined detection: large screen + no touch + TV aspect ratio
-        var isLikelyTV = isLargeScreen && !hasTouch && isTVAspect;
-        
-        // Final decision: either User-Agent says TV or it's likely a TV based on screen
-        var finalIsTV = isTV || isLikelyTV;
+        // Log detection result for debugging (visible in browser console)
+        console.log('[Netily] TV Detection:', {{
+            userAgent: ua,
+            isTV: finalIsTV,
+            tvUaMatch: tvUa,
+            desktopUaMatch: desktopUa,
+            forced: forcedTV !== null,
+            manualValue: forcedTV
+        }});
         
         // 3. REDIRECT TO CLOUD PORTAL
         var portalUrl = '{portal_base}/hotspot/{r.id}';
@@ -691,9 +701,11 @@ class MikrotikScriptGenerator:
             'tenant=' + '{tenant_name}'
         ];
 
-        // If it's a TV, add the special flag so the frontend knows to show the pairing code
+        // Explicitly add flags for the frontend
         if (finalIsTV) {{
             params.push('smart_tv=1');
+        }} else {{
+            params.push('smart_tv=0');
         }}
 
         var redirectUrl = portalUrl + '?' + params.join('&');
