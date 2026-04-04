@@ -9,6 +9,7 @@ import csv
 import json
 from io import StringIO
 from .views_v1 import AnalyticsDashboardView
+from django.utils import timezone
 
 
 class AnalyticsKPIsView(APIView):

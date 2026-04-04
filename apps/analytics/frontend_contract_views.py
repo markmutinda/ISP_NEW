@@ -3,8 +3,9 @@ from datetime import timedelta
 from dateutil.relativedelta import relativedelta
 
 from django.core.cache import cache
-from django.db.models import Sum, Count, Avg, Q, F
-from django.db.models.functions import TruncDay, TruncHour, TruncMonth
+from django.db import models
+from django.db.models import Sum, Count, Avg, Q, F, DecimalField, ExpressionWrapper
+from django.db.models.functions import Coalesce, TruncDay, TruncHour, TruncMonth
 from django.utils import timezone
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
@@ -19,15 +20,51 @@ from apps.bandwidth.models import DataUsage
 
 CACHE_TTL = 300  # 5 min
 
+# ==========================================
+# PAYMENT METHOD NORMALIZATION
+# ==========================================
+
+PAYMENT_METHOD_NORMALIZATION = {
+    "mpesa": "M-Pesa",
+    "m-pesa": "M-Pesa",
+    "card": "Card",
+    "visa": "Card",
+    "mastercard": "Card",
+    "bank": "Bank Transfer",
+    "bank transfer": "Bank Transfer",
+    "cash": "Cash",
+}
+
+
+def _norm_method(name: str) -> str:
+    """Normalize payment method names for consistent reporting."""
+    n = (name or "").strip().lower()
+    for k, v in PAYMENT_METHOD_NORMALIZATION.items():
+        if k in n:
+            return v
+    return "Other"
+
 
 def _pct(cur, prev):
+    """Calculate percentage change between current and previous values."""
     if not prev:
         return 0.0
     return round(((cur - prev) / prev) * 100, 2)
 
 
 def _safe_float(v):
+    """Safely convert value to float, defaulting to 0."""
     return float(v or 0)
+
+
+def _bytes_to_tb(v):
+    """Convert bytes to terabytes (4 decimal places)."""
+    return round(_safe_float(v) / (1024 ** 4), 4)
+
+
+def _bytes_to_gb(v):
+    """Convert bytes to gigabytes (2 decimal places)."""
+    return round(_safe_float(v) / (1024 ** 3), 2)
 
 
 class _RangeMixin:
@@ -224,7 +261,9 @@ class AnalyticsChurnView(APIView, _RangeMixin):
         if (cached := cache.get(ck)):
             return Response(cached)
 
+        now = timezone.now()
         total = Customer.objects.count()
+
         churn_qs = Customer.objects.filter(status__iexact="terminated", updated_at__gte=start)
         churned = churn_qs.count()
         churn_rate = round((churned / total) * 100, 2) if total else 0
@@ -233,23 +272,90 @@ class AnalyticsChurnView(APIView, _RangeMixin):
             Payment.objects.filter(status__iexact="completed", customer__in=churn_qs).aggregate(v=Sum("amount"))["v"]
         )
 
+        # At-risk = active customers with stale payments
+        active_customers = Customer.objects.filter(status__iexact="active").annotate(
+            last_payment=models.Max("payments__payment_date", filter=Q(payments__status__iexact="completed"))
+        )
+
+        at_risk_rows = []
+        for c in active_customers:
+            if not c.last_payment:
+                days_inactive = 999
+            else:
+                days_inactive = (now.date() - c.last_payment.date()).days
+
+            if days_inactive < 14:
+                continue
+
+            # simple risk score
+            risk = min(100, max(0, int(days_inactive * 1.8)))
+            at_risk_rows.append({
+                "name": c.full_name or c.customer_code,
+                "plan": ServiceConnection.objects.filter(customer=c, status__iexact="active").values_list("plan__name", flat=True).first() or "Unknown",
+                "daysInactive": days_inactive,
+                "lastPayment": c.last_payment.date().isoformat() if c.last_payment else None,
+                "riskScore": risk,
+            })
+
+        at_risk_rows.sort(key=lambda x: x["riskScore"], reverse=True)
+        at_risk_rows = at_risk_rows[:100]
+
+        # Try to get churn reasons from model (if exists)
+        try:
+            from apps.analytics.models import CustomerChurnEvent
+            reason_qs = (
+                CustomerChurnEvent.objects.filter(created_at__gte=start)
+                .values("reason")
+                .annotate(count=Count("id"))
+                .order_by("-count")
+            )
+            reason_total = sum(x["count"] for x in reason_qs) or 1
+            reasons = [{
+                "reason": x["reason"],
+                "count": x["count"],
+                "percentage": round((x["count"] / reason_total) * 100, 2),
+            } for x in reason_qs]
+        except (ImportError, models.Model.DoesNotExist):
+            reasons = []
+
+        # monthly trend
+        trend_qs = (
+            churn_qs.annotate(m=TruncMonth("updated_at"))
+            .values("m")
+            .annotate(churned=Count("id"))
+            .order_by("m")
+        )
+        trend = []
+        for t in trend_qs:
+            month_start = t["m"]
+            month_end = month_start + relativedelta(months=1)
+            month_total = Customer.objects.filter(created_at__lt=month_end).count() or 1
+            month_churn_rate = round((t["churned"] / month_total) * 100, 2)
+            month_rev = _safe_float(
+                Payment.objects.filter(
+                    status__iexact="completed",
+                    customer__in=Customer.objects.filter(status__iexact="terminated", updated_at__gte=month_start, updated_at__lt=month_end)
+                ).aggregate(v=Sum("amount"))["v"]
+            )
+            trend.append({
+                "month": month_start.strftime("%b %Y"),
+                "churned": t["churned"],
+                "rate": month_churn_rate,
+                "revenue": month_rev,
+            })
+
         payload = {
             "churnStats": {
                 "churnRate": churn_rate,
                 "churnedThisMonth": churned,
-                "atRisk": 0,
+                "atRisk": len(at_risk_rows),
                 "revenueLost": revenue_lost,
-                "avgLifetimeBeforeChurn": 0,
-                "winbackRate": 0,
+                "avgLifetimeBeforeChurn": 0,  # optionally compute like customers avgLifetime on churn subset
+                "winbackRate": 0,             # implement from re-activated churn events if tracked
             },
-            "churnReasons": [],
-            "atRiskCustomers": [],
-            "churnTrend": [{
-                "month": timezone.now().strftime("%b %Y"),
-                "churned": churned,
-                "rate": churn_rate,
-                "revenue": revenue_lost
-            }],
+            "churnReasons": reasons,
+            "atRiskCustomers": at_risk_rows,
+            "churnTrend": trend,
         }
         cache.set(ck, payload, CACHE_TTL)
         return Response(payload)
@@ -279,6 +385,18 @@ class AnalyticsCustomersView(APIView, _RangeMixin):
         new = stats["new"] or 0
         churned = stats["churned"] or 0
 
+        # avg lifetime from terminated customers (days)
+        life_qs = Customer.objects.filter(status__iexact="terminated").exclude(updated_at__isnull=True)
+        avg_lifetime_days = life_qs.annotate(
+            lifetime=ExpressionWrapper(F("updated_at") - F("created_at"), output_field=models.DurationField())
+        ).aggregate(v=Avg("lifetime"))["v"]
+        avg_lifetime = round(avg_lifetime_days.days if avg_lifetime_days else 0, 2)
+
+        # LTV = avg revenue per customer over selected range
+        pay_sum = _safe_float(Payment.objects.filter(status__iexact="completed", payment_date__gte=start).aggregate(v=Sum("amount"))["v"])
+        ltv = round(pay_sum / max(total, 1), 2)
+
+        # by plan
         plan_raw = (
             ServiceConnection.objects.filter(status__iexact="active")
             .values("plan__name")
@@ -293,17 +411,50 @@ class AnalyticsCustomersView(APIView, _RangeMixin):
             "growth": 0,
         } for x in plan_raw]
 
+        # location (county/sub-county fallback)
         loc_raw = (
-            Customer.objects.values("addresses__county")
+            Customer.objects.values("addresses__sub_county", "addresses__county")
             .annotate(count=Count("id"))
-            .order_by("-count")[:20]
+            .order_by("-count")[:30]
         )
         loc_total = sum(x["count"] for x in loc_raw) or 1
         by_loc = [{
-            "location": x["addresses__county"] or "Unknown",
+            "location": x["addresses__sub_county"] or x["addresses__county"] or "Unknown",
             "count": x["count"],
             "percentage": round((x["count"] / loc_total) * 100, 2),
         } for x in loc_raw]
+
+        # cohorts (last 12 months)
+        now = timezone.now()
+        cohorts = []
+        for i in range(12):
+            cohort_start = (now - relativedelta(months=i)).replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+            cohort_end = (cohort_start + relativedelta(months=1))
+            acquired_qs = Customer.objects.filter(created_at__gte=cohort_start, created_at__lt=cohort_end)
+            acquired = acquired_qs.count()
+            if acquired == 0:
+                continue
+
+            ids = list(acquired_qs.values_list("id", flat=True))
+            
+            def retained(month_offset):
+                s = cohort_end + relativedelta(months=month_offset - 1)
+                e = s + relativedelta(months=1)
+                c = Payment.objects.filter(
+                    status__iexact="completed",
+                    customer_id__in=ids,
+                    payment_date__gte=s,
+                    payment_date__lt=e
+                ).values("customer_id").distinct().count()
+                return round((c / acquired) * 100, 2) if acquired else 0
+
+            cohorts.append({
+                "cohort": cohort_start.strftime("%b %Y"),
+                "acquired": acquired,
+                "month1": retained(1),
+                "month2": retained(2),
+                "month3": retained(3),
+            })
 
         payload = {
             "customerStats": {
@@ -313,12 +464,12 @@ class AnalyticsCustomersView(APIView, _RangeMixin):
                 "churned": churned,
                 "growthRate": round((new / max(total - new, 1)) * 100, 2) if total else 0,
                 "retentionRate": round((active / total) * 100, 2) if total else 0,
-                "avgLifetime": 0,
-                "ltv": 0,
+                "avgLifetime": avg_lifetime,
+                "ltv": ltv,
             },
             "customersByPlan": by_plan,
             "customersByLocation": by_loc,
-            "cohortData": [],
+            "cohortData": cohorts,
         }
         cache.set(ck, payload, CACHE_TTL)
         return Response(payload)
@@ -337,49 +488,71 @@ class AnalyticsRevenueView(APIView, _RangeMixin):
         if (cached := cache.get(ck)):
             return Response(cached)
 
-        pay = Payment.objects.filter(status__iexact="completed", created_at__gte=start)
-        totals = pay.aggregate(total=Sum("amount"), tx=Count("id"))
-        total_amt = _safe_float(totals["total"])
-        active_customers = Customer.objects.filter(status__iexact="active").count()
-        arpu = round(total_amt / active_customers, 2) if active_customers else 0
+        now = timezone.now()
+        prev_start = start - (now - start)
 
+        pay_cur = Payment.objects.filter(status__iexact="completed", payment_date__gte=start)
+        pay_prev = Payment.objects.filter(status__iexact="completed", payment_date__gte=prev_start, payment_date__lt=start)
+
+        cur_total = _safe_float(pay_cur.aggregate(v=Sum("amount"))["v"])
+        prev_total = _safe_float(pay_prev.aggregate(v=Sum("amount"))["v"])
+
+        active_customers = Customer.objects.filter(status__iexact="active").count()
+        arpu = round(cur_total / active_customers, 2) if active_customers else 0
+
+        prev_active = Customer.objects.filter(status__iexact="active", created_at__lt=start).count()
+        prev_arpu = round(prev_total / prev_active, 2) if prev_active else 0
+
+        # monthly trend + growth
         month_rows = (
-            pay.annotate(m=TruncMonth("created_at"))
+            pay_cur.annotate(m=TruncMonth("payment_date"))
             .values("m")
-            .annotate(revenue=Sum("amount"), transactions=Count("id"))
+            .annotate(revenue=Coalesce(Sum("amount"), 0), transactions=Count("id"))
             .order_by("m")
         )
-        monthly = [{
-            "month": r["m"].strftime("%b %Y"),
-            "revenue": _safe_float(r["revenue"]),
-            "growth": 0,
-            "transactions": r["transactions"],
-        } for r in month_rows]
+        monthly = []
+        last_rev = None
+        for r in month_rows:
+            rev = _safe_float(r["revenue"])
+            monthly.append({
+                "month": r["m"].strftime("%b %Y"),
+                "revenue": rev,
+                "growth": _pct(rev, last_rev) if last_rev is not None else 0,
+                "transactions": int(r["transactions"] or 0),
+            })
+            last_rev = rev
 
-        pay_method = (
-            pay.values("payment_method__name")
-            .annotate(amount=Sum("amount"), count=Count("id"))
-            .order_by("-amount")
-        )
-        method_total = sum(_safe_float(x["amount"]) for x in pay_method) or 1
+        # payment methods normalized
+        pm_rows = pay_cur.values("payment_method__name").annotate(amount=Sum("amount"), count=Count("id"))
+        buckets = {}
+        for row in pm_rows:
+            k = _norm_method(row["payment_method__name"])
+            buckets.setdefault(k, {"amount": 0, "count": 0})
+            buckets[k]["amount"] += _safe_float(row["amount"])
+            buckets[k]["count"] += int(row["count"] or 0)
+
+        method_total = sum(v["amount"] for v in buckets.values()) or 1
         methods = [{
-            "method": x["payment_method__name"] or "Unknown",
-            "amount": _safe_float(x["amount"]),
-            "percentage": round((_safe_float(x["amount"]) / method_total) * 100, 2),
-            "count": x["count"],
-        } for x in pay_method]
+            "method": k,
+            "amount": v["amount"],
+            "count": v["count"],
+            "percentage": round((v["amount"] / method_total) * 100, 2),
+        } for k, v in buckets.items()]
 
-        # 2-query merge for revenueByPlan (fast enough, no N+1)
+        # MRR = this calendar month completed payments
+        month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        prev_month_start = (month_start - timedelta(days=1)).replace(day=1)
+
+        mrr = _safe_float(Payment.objects.filter(status__iexact="completed", payment_date__gte=month_start).aggregate(v=Sum("amount"))["v"])
+        prev_mrr = _safe_float(Payment.objects.filter(status__iexact="completed", payment_date__gte=prev_month_start, payment_date__lt=month_start).aggregate(v=Sum("amount"))["v"])
+
+        # by plan
         plan_subs = {
             x["plan__name"]: x["subs"]
             for x in ServiceConnection.objects.filter(status__iexact="active")
             .values("plan__name").annotate(subs=Count("id"))
         }
-        plan_rev_qs = (
-            pay.values("invoice__plan__name")
-            .annotate(revenue=Sum("amount"))
-            .order_by("-revenue")
-        )
+        plan_rev_qs = pay_cur.values("invoice__plan__name").annotate(revenue=Sum("amount")).order_by("-revenue")
         rev_total = sum(_safe_float(x["revenue"]) for x in plan_rev_qs) or 1
         by_plan = [{
             "plan": x["invoice__plan__name"] or "Unknown",
@@ -390,13 +563,14 @@ class AnalyticsRevenueView(APIView, _RangeMixin):
 
         payload = {
             "revenueStats": {
-                "total": total_amt,
-                "growth": 0,
+                "total": cur_total,
+                "growth": _pct(cur_total, prev_total),
                 "arpu": arpu,
-                "arpuGrowth": 0,
-                "mrr": total_amt,
-                "mrrGrowth": 0,
-                "arr": total_amt * 12,
+                "arpuGrowth": _pct(arpu, prev_arpu),
+                "mrr": mrr,
+                "mrrGrowth": _pct(mrr, prev_mrr),
+                "arr": mrr * 12,
+                "arrGrowth": _pct(mrr * 12, prev_mrr * 12),
             },
             "monthlyRevenue": monthly,
             "revenueByPlan": by_plan,
@@ -419,48 +593,110 @@ class AnalyticsUsageView(APIView, _RangeMixin):
         if (cached := cache.get(ck)):
             return Response(cached)
 
-        usage = DataUsage.objects.filter(timestamp__gte=start)
+        usage = DataUsage.objects.filter(period_start__gte=start)
 
         totals = usage.aggregate(
-            down=Sum("download_mb"),
-            up=Sum("upload_mb"),
-            avg_daily=Avg(F("download_mb") + F("upload_mb")),
+            down=Coalesce(Sum("download_bytes"), 0),
+            up=Coalesce(Sum("upload_bytes"), 0),
+            avg_daily_bytes=Coalesce(Avg(F("download_bytes") + F("upload_bytes")), 0),
         )
-        total_down = _safe_float(totals["down"])
-        total_up = _safe_float(totals["up"])
+        total_down = totals["down"]
+        total_up = totals["up"]
 
+        # Hourly usage from period_start
         hour_rows = (
-            usage.annotate(h=TruncHour("timestamp"))
+            usage.annotate(h=TruncHour("period_start"))
             .values("h")
             .annotate(
-                download=Sum("download_mb"),
-                upload=Sum("upload_mb"),
-                users=Count("customer", distinct=True)
+                download_bytes=Coalesce(Sum("download_bytes"), 0),
+                upload_bytes=Coalesce(Sum("upload_bytes"), 0),
+                users=Count("customer", distinct=True),
             )
             .order_by("h")
         )
 
-        hourly = [{
-            "hour": r["h"].strftime("%H:00"),
-            "download": _safe_float(r["download"]),
-            "upload": _safe_float(r["upload"]),
-            "users": int(r["users"] or 0),
-        } for r in hour_rows]
+        # Convert bytes-per-hour bucket to approximate Mbps
+        hourly = []
+        for r in hour_rows:
+            down_mbps = round((r["download_bytes"] * 8) / 3600 / (1024 * 1024), 3)
+            up_mbps = round((r["upload_bytes"] * 8) / 3600 / (1024 * 1024), 3)
+            hourly.append({
+                "hour": r["h"].strftime("%H:00"),
+                "download": down_mbps,
+                "upload": up_mbps,
+                "users": int(r["users"] or 0),
+            })
 
         peak_hour = max(hourly, key=lambda x: x["download"] + x["upload"])["hour"] if hourly else None
 
+        # Top users
+        top_users_qs = (
+            usage.values("customer_id", "customer__full_name", "customer__customer_code")
+            .annotate(
+                download_bytes=Coalesce(Sum("download_bytes"), 0),
+                upload_bytes=Coalesce(Sum("upload_bytes"), 0),
+                sessions=Count("id"),
+            )
+            .order_by("-download_bytes", "-upload_bytes")[:10]
+        )
+
+        # Active plan per customer
+        active_plan_map = dict(
+            ServiceConnection.objects.filter(status__iexact="active")
+            .values_list("customer_id", "plan__name")
+        )
+
+        top_users = [{
+            "name": x["customer__full_name"] or x["customer__customer_code"] or f"Customer {x['customer_id']}",
+            "plan": active_plan_map.get(x["customer_id"], "Unknown"),
+            "download": _bytes_to_gb(x["download_bytes"]),
+            "upload": _bytes_to_gb(x["upload_bytes"]),
+            "sessions": int(x["sessions"] or 0),
+        } for x in top_users_qs]
+
+        # Usage by plan
+        by_plan_qs = (
+            usage.values("customer_id")
+            .annotate(
+                d=Coalesce(Sum("download_bytes"), 0),
+                u=Coalesce(Sum("upload_bytes"), 0),
+            )
+        )
+        plan_bucket = {}
+        total_bytes = 0
+        for row in by_plan_qs:
+            plan = active_plan_map.get(row["customer_id"], "Unknown")
+            b = int(row["d"] or 0) + int(row["u"] or 0)
+            total_bytes += b
+            plan_bucket.setdefault(plan, {"bytes": 0, "count": 0, "down": 0, "up": 0})
+            plan_bucket[plan]["bytes"] += b
+            plan_bucket[plan]["down"] += int(row["d"] or 0)
+            plan_bucket[plan]["up"] += int(row["u"] or 0)
+            plan_bucket[plan]["count"] += 1
+
+        usage_by_plan = []
+        for plan, data in plan_bucket.items():
+            c = max(data["count"], 1)
+            usage_by_plan.append({
+                "plan": plan,
+                "avgDownload": _bytes_to_gb(data["down"] / c),
+                "avgUpload": _bytes_to_gb(data["up"] / c),
+                "percentage": round((data["bytes"] / max(total_bytes, 1)) * 100, 2),
+            })
+        usage_by_plan.sort(key=lambda x: x["percentage"], reverse=True)
+
         payload = {
             "usageStats": {
-                "totalDownload": round(total_down / 1024, 2),  # GB
-                "totalUpload": round(total_up / 1024, 2),      # GB
+                "totalDownload": _bytes_to_tb(total_down),   # TB
+                "totalUpload": _bytes_to_tb(total_up),       # TB
                 "peakHour": peak_hour,
-                "avgSessionDuration": 0,
-                "heavyUsers": 0,
-                "avgDailyUsage": round(_safe_float(totals["avg_daily"]) / 1024, 2),
+                "avgSessionDuration": 0,  # add from RadiusAccounting if available
+                "heavyUsers": len([u for u in top_users if u["download"] > 100]),  # >100GB sample threshold
+                "avgDailyUsage": _bytes_to_gb(totals["avg_daily_bytes"]),
             },
             "hourlyUsage": hourly,
-            "usageByPlan": [],
-            "topUsers": [],
+            "usageByPlan": usage_by_plan,
+            "topUsers": top_users,
         }
         cache.set(ck, payload, CACHE_TTL)
         return Response(payload)

@@ -2,7 +2,6 @@ from django.db import models
 from django.contrib.auth import get_user_model
 from django.db.models import JSONField
 from django.utils import timezone
-  # ← Add this import
 from apps.customers.models import Customer
 from apps.network.models import OLTDevice, CPEDevice
 
@@ -102,3 +101,30 @@ class AnalyticsCache(models.Model):
     class Meta:
         app_label = 'analytics'
         ordering = ['-created_at']
+
+
+class CustomerChurnEvent(models.Model):
+    """
+    Track customer churn events with reasons for analytics.
+    This allows the churn view to provide meaningful churn reason data.
+    """
+    
+    customer = models.ForeignKey(
+        'customers.Customer', 
+        on_delete=models.CASCADE, 
+        related_name='churn_events'
+    )
+    reason = models.CharField(max_length=120, db_index=True)
+    note = models.TextField(blank=True, default="")
+    created_at = models.DateTimeField(auto_now_add=True)
+    
+    class Meta:
+        app_label = 'analytics'
+        indexes = [
+            models.Index(fields=['created_at']),
+            models.Index(fields=['reason', 'created_at']),
+        ]
+        ordering = ['-created_at']
+    
+    def __str__(self):
+        return f"{self.customer} - {self.reason} ({self.created_at.date()})"
