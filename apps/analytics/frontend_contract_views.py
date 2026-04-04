@@ -1,5 +1,5 @@
 # apps/analytics/frontend_contract_views.py
-from datetime import timedelta
+from datetime import timedelta, datetime
 from dateutil.relativedelta import relativedelta
 
 from django.core.cache import cache
@@ -103,6 +103,82 @@ class AnalyticsReportsView(APIView, _RangeMixin):
     """
     permission_classes = [IsAuthenticated, IsAdminOrStaff]
 
+    def _get_weekly_income(self, target_date, week_offset=0):
+        """
+        Get weekly income for a given week.
+        week_offset: 0 = current week (Mon-Sun containing target_date)
+                     -1 = previous week
+        Returns list of 7 objects with day labels and amounts.
+        """
+        # Get Monday of the week containing target_date
+        days_to_monday = target_date.weekday()  # Monday=0, Sunday=6
+        week_start = target_date - timedelta(days=days_to_monday)
+        # Apply week offset
+        week_start = week_start + timedelta(weeks=week_offset)
+        week_end = week_start + timedelta(days=7)
+        
+        # Query payments in this week range
+        payments = Payment.objects.filter(
+            status__iexact="completed",
+            payment_date__gte=week_start,
+            payment_date__lt=week_end
+        )
+        
+        # Aggregate by weekday
+        weekday_map = {i: 0 for i in range(7)}
+        for p in payments:
+            weekday = p.payment_date.weekday()
+            weekday_map[weekday] += _safe_float(p.amount)
+        
+        # Build result with day labels (Mon-Sun)
+        day_labels = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+        return [
+            {"day": day_labels[i], "amount": round(weekday_map[i], 2)}
+            for i in range(7)
+        ]
+    
+    def _get_monthly_earnings(self, year, include_future=False):
+        """
+        Get monthly earnings for a given year.
+        include_future: if True, include all 12 months even if future
+                       if False, only include months up to current month
+        Returns list of month objects with labels and amounts.
+        """
+        now = timezone.now()
+        current_year = now.year
+        current_month = now.month
+        
+        month_labels = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", 
+                       "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+        
+        result = []
+        for month in range(1, 13):
+            # Skip future months if not allowed
+            if not include_future and year == current_year and month > current_month:
+                break
+            
+            month_start = datetime(year, month, 1, tzinfo=timezone.get_current_timezone())
+            if month == 12:
+                month_end = datetime(year + 1, 1, 1, tzinfo=timezone.get_current_timezone())
+            else:
+                month_end = datetime(year, month + 1, 1, tzinfo=timezone.get_current_timezone())
+            
+            # Query payments for this month
+            total = _safe_float(
+                Payment.objects.filter(
+                    status__iexact="completed",
+                    payment_date__gte=month_start,
+                    payment_date__lt=month_end
+                ).aggregate(v=Sum("amount"))["v"]
+            )
+            
+            result.append({
+                "month": month_labels[month - 1],
+                "amount": round(total, 2)
+            })
+        
+        return result
+
     def get(self, request):
         time_range = request.query_params.get("time_range", "30d")
         start = self._start("reports", time_range)
@@ -191,6 +267,29 @@ class AnalyticsReportsView(APIView, _RangeMixin):
             "download": round((x["download"] or 0) / (1024 ** 3), 2),  # Convert to GB
         } for x in flow]
 
+        # ============================================================
+        # NEW: Weekly Income Data (Current Week)
+        # ============================================================
+        today_date = now.date()
+        weekly_income = self._get_weekly_income(today_date, week_offset=0)
+        
+        # ============================================================
+        # NEW: Last Week Income Data
+        # ============================================================
+        last_week_income = self._get_weekly_income(today_date, week_offset=-1)
+        
+        # ============================================================
+        # NEW: Monthly Earnings (Current Year, up to current month)
+        # ============================================================
+        current_year = now.year
+        monthly_earnings = self._get_monthly_earnings(current_year, include_future=False)
+        
+        # ============================================================
+        # NEW: Last Year Earnings (Full calendar year)
+        # ============================================================
+        last_year = current_year - 1
+        last_year_earnings = self._get_monthly_earnings(last_year, include_future=True)
+
         payload = {
             "overview": {
                 "today_revenue": today_amount,
@@ -203,6 +302,12 @@ class AnalyticsReportsView(APIView, _RangeMixin):
                 "hourly_revenue": hourly_rows,
                 "user_registrations": reg_rows,
                 "network_data_flow": flow_rows,
+                # New fields for weekly income charts
+                "weekly_income": weekly_income,
+                "last_week_income": last_week_income,
+                # New fields for monthly earnings charts
+                "monthly_earnings": monthly_earnings,
+                "last_year_earnings": last_year_earnings,
             },
             "financial": {
                 "income_comparison": {
