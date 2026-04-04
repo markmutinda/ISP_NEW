@@ -177,18 +177,18 @@ class AnalyticsReportsView(APIView, _RangeMixin):
         )
         reg_rows = [{"date": x["d"].date().isoformat(), "count": x["count"]} for x in regs]
 
-        # network flow (single grouped query)
+        # FIX A: network flow using correct field names (period_start, upload_bytes, download_bytes)
         flow = (
-            DataUsage.objects.filter(timestamp__gte=start)
-            .annotate(d=TruncDay("timestamp"))
+            DataUsage.objects.filter(period_start__gte=start)
+            .annotate(d=TruncDay("period_start"))
             .values("d")
-            .annotate(upload=Sum("upload_mb"), download=Sum("download_mb"))
+            .annotate(upload=Sum("upload_bytes"), download=Sum("download_bytes"))
             .order_by("d")
         )
         flow_rows = [{
             "date": x["d"].date().isoformat(),
-            "upload": _safe_float(x["upload"]),
-            "download": _safe_float(x["download"]),
+            "upload": round((x["upload"] or 0) / (1024 ** 3), 2),      # Convert to GB
+            "download": round((x["download"] or 0) / (1024 ** 3), 2),  # Convert to GB
         } for x in flow]
 
         payload = {
@@ -235,7 +235,7 @@ class AnalyticsReportsView(APIView, _RangeMixin):
                 },
                 "performance": {
                     "peak_usage_day": max(flow_rows, key=lambda x: x["upload"] + x["download"])["date"] if flow_rows else None,
-                    "avg_daily_usage": f"{round(sum(x['upload'] + x['download'] for x in flow_rows) / max(len(flow_rows), 1), 2)} MB",
+                    "avg_daily_usage": f"{round(sum(x['upload'] + x['download'] for x in flow_rows) / max(len(flow_rows), 1), 2)} GB",
                     "download_upload_ratio": (
                         f"{round((sum(x['download'] for x in flow_rows) / max(sum(x['upload'] for x in flow_rows), 1)), 2)}:1"
                         if flow_rows else "0:1"
@@ -593,6 +593,7 @@ class AnalyticsUsageView(APIView, _RangeMixin):
         if (cached := cache.get(ck)):
             return Response(cached)
 
+        # FIX B: Use correct field names (period_start, upload_bytes, download_bytes)
         usage = DataUsage.objects.filter(period_start__gte=start)
 
         totals = usage.aggregate(
@@ -687,12 +688,12 @@ class AnalyticsUsageView(APIView, _RangeMixin):
 
         payload = {
             "usageStats": {
-                "totalDownload": _bytes_to_tb(total_down),   # TB
-                "totalUpload": _bytes_to_tb(total_up),       # TB
+                "totalDownload": _bytes_to_tb(total_down),   # Convert to TB
+                "totalUpload": _bytes_to_tb(total_up),       # Convert to TB
                 "peakHour": peak_hour,
                 "avgSessionDuration": 0,  # add from RadiusAccounting if available
                 "heavyUsers": len([u for u in top_users if u["download"] > 100]),  # >100GB sample threshold
-                "avgDailyUsage": _bytes_to_gb(totals["avg_daily_bytes"]),
+                "avgDailyUsage": _bytes_to_gb(totals["avg_daily_bytes"]),  # Convert to GB
             },
             "hourlyUsage": hourly,
             "usageByPlan": usage_by_plan,
