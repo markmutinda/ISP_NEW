@@ -9,6 +9,8 @@ import logging
 import random
 import string
 import time
+import hashlib
+import base64
 from decimal import Decimal
 
 from django.conf import settings
@@ -35,6 +37,138 @@ from apps.network.models.router_models import Router
 from apps.subscriptions.models import CommissionLedger
 
 logger = logging.getLogger(__name__)
+
+
+# ============================================================
+# IDENTITY HELPER UTILITIES
+# ============================================================
+
+def _normalize_mac(mac: str) -> str:
+    """Normalize MAC address to uppercase with colons."""
+    return (mac or "").upper().replace("-", ":").strip()
+
+
+def _canonical_phone(phone: str) -> str:
+    """Canonicalize phone number to 254 format."""
+    digits = ''.join(ch for ch in (phone or '') if ch.isdigit())
+    if not digits:
+        return ''
+    if digits.startswith('0'):
+        return '254' + digits[1:]
+    if digits.startswith('254'):
+        return digits
+    return '254' + digits
+
+
+def _stable_5(seed: str) -> str:
+    """Generate a stable 5-character token from a seed string."""
+    digest = hashlib.sha256(seed.encode()).digest()
+    return base64.b32encode(digest).decode('ascii')[:5]  # A-Z2-7
+
+
+def resolve_identity(phone_number: str, mac_address: str, is_tv_flow: bool, is_voucher: bool = False):
+    """
+    Resolve deterministic identity for hotspot users.
+    
+    - TV purchases (tv_code present): MAC-first identity
+    - Phone purchases (normal): phone-first identity
+    - Voucher purchases: MAC-first identity (since phone is often absent)
+    
+    Returns a dict with email, phone_number, first_name, last_name.
+    """
+    mac_norm = _normalize_mac(mac_address)
+    mac_compact = mac_norm.replace(':', '').lower()
+    phone = _canonical_phone(phone_number)
+
+    if is_tv_flow or is_voucher:
+        # MAC-first identity
+        key = f"tv:{mac_compact}"
+        email = f"hotspot_tv_{mac_compact}@hotspot.local"
+        phone_fallback = f"+999{mac_compact[:12]}"
+        final_phone = phone if phone else phone_fallback
+    else:
+        # Phone-first identity
+        if not phone:
+            # Fallback to MAC if no phone provided (should not happen for normal flow)
+            mac_compact = mac_norm.replace(':', '').lower()
+            key = f"mac:{mac_compact}"
+            email = f"hotspot_mac_{mac_compact}@hotspot.local"
+            final_phone = f"+999{mac_compact[:12]}"
+        else:
+            key = f"phone:{phone}"
+            email = f"hotspot_{phone}@hotspot.local"
+            final_phone = phone
+
+    return {
+        "key": key,
+        "email": email,
+        "phone_number": final_phone,
+        "first_name": "HOTSPOT",
+        "last_name": _stable_5(key),
+    }
+
+
+def _get_or_create_hotspot_user_and_customer(identity, tenant_subdomain, tenant):
+    """
+    Get or create User and Customer for hotspot identity.
+    Returns tuple of (user, customer, created).
+    """
+    from django.contrib.auth import get_user_model
+    from apps.customers.models import Customer
+    import secrets
+    
+    User = get_user_model()
+    
+    # Reuse existing user
+    user = User.objects.filter(email=identity["email"]).first()
+    if not user and identity["phone_number"]:
+        user = User.objects.filter(phone_number=identity["phone_number"]).first()
+    
+    created = False
+    if not user:
+        random_password = ''.join(secrets.choice(string.ascii_letters + string.digits) for _ in range(16))
+        user = User.objects.create_user(
+            email=identity["email"],
+            password=random_password,
+            phone_number=identity["phone_number"],
+            first_name=identity["first_name"],  # HOTSPOT
+            last_name=identity["last_name"],    # stable 5 chars
+            role='customer',
+            tenant_subdomain=tenant_subdomain,
+        )
+        logger.info(f"Created new hotspot user: {user.email} (name: {identity['first_name']} {identity['last_name']})")
+        created = True
+    else:
+        # Keep canonical naming stable
+        updates = []
+        if user.first_name != "HOTSPOT":
+            user.first_name = "HOTSPOT"
+            updates.append("first_name")
+        if not user.last_name or len(user.last_name) != 5:
+            user.last_name = identity["last_name"]
+            updates.append("last_name")
+        if updates:
+            user.save(update_fields=updates)
+            logger.info(f"Updated hotspot user naming: {user.email} -> {user.first_name} {user.last_name}")
+        else:
+            logger.info(f"Reusing existing hotspot user: {user.email} (phone: {user.phone_number})")
+    
+    # Get or create Customer - 1:1 with User
+    hotspot_customer, customer_created = Customer.objects.get_or_create(
+        user=user,
+        defaults={
+            'status': 'ACTIVE',
+            'customer_type': 'RESIDENTIAL',
+            'category': 'PREPAID',
+        }
+    )
+    
+    if customer_created:
+        logger.info(f"Created new hotspot customer for user: {user.email}")
+    else:
+        logger.debug(f"Using existing hotspot customer for user: {user.email}")
+    
+    return user, hotspot_customer, created
 
 
 def _plan_data_limit_display(plan):
@@ -375,7 +509,7 @@ class HotspotPurchaseView(APIView):
             plan_id = request.data.get('plan_id')
             phone_number = request.data.get('phone_number')
             mac_address = request.data.get('mac_address', '')
-            tv_code = (request.data.get('tv_code') or '').strip().upper()  # ADDED: TV code support
+            tv_code = (request.data.get('tv_code') or '').strip().upper()
             
             if not all([router_id, plan_id, phone_number]):
                 return Response({
@@ -404,7 +538,7 @@ class HotspotPurchaseView(APIView):
                 if router_id_from_code:
                     router_id = router_id_from_code
                 
-                # This is the key part: get the reserved access_code from the TV payload
+                # Get the reserved access_code from the TV payload
                 reserved_access_code = tv_payload.get('access_code') or tv_code
                 
                 logger.info(f"TV code {tv_code} resolved to MAC {mac_address}, router {router_id}, reserved access_code: {reserved_access_code}")
@@ -422,7 +556,7 @@ class HotspotPurchaseView(APIView):
             except HotspotPlan.DoesNotExist:
                 return Response({'error': 'Plan not found'}, status=status.HTTP_404_NOT_FOUND)
             
-            mac_address = mac_address.upper().replace('-', ':')
+            mac_address = _normalize_mac(mac_address)
             
             # ============================================================
             # FIX: Force purchase to use reserved code as session.access_code
@@ -430,6 +564,8 @@ class HotspotPurchaseView(APIView):
             if reserved_access_code:
                 friendly_username = reserved_access_code
                 logger.info(f"🎯 TV PURCHASE: Using reserved access code {friendly_username}")
+                is_roaming = False
+                roamed_from_name = None
             else:
                 existing_user = HotspotSession.objects.filter(
                     mac_address=mac_address
@@ -464,8 +600,8 @@ class HotspotPurchaseView(APIView):
                 amount=plan.price,
                 status='pending',
                 access_code=friendly_username,
-                is_roaming=is_roaming if not reserved_access_code else False,
-                roamed_from=roamed_from_name if not reserved_access_code else None
+                is_roaming=is_roaming,
+                roamed_from=roamed_from_name
             )
 
             cfg = TenantTumaConfig.objects.filter(schema_name=tenant.schema_name, is_active=True).first()
@@ -489,68 +625,22 @@ class HotspotPurchaseView(APIView):
             payment_ref = f"HS-{session.session_id}-{int(time.time())}".replace(" ", "-")
             
             # ============================================================
-            # FIX: Reuse same hotspot account on repeat purchases
+            # IDENTITY RESOLUTION: Use deterministic identity helpers
             # ============================================================
-            from django.contrib.auth import get_user_model
-            from apps.customers.models import Customer
-            import hashlib
-            import secrets
-            
-            User = get_user_model()
-            
-            # Build deterministic identity from phone (preferred) or MAC hash
-            if phone_number and phone_number != 'VOUCHER':
-                safe_seed = ''.join(ch for ch in phone_number if ch.isdigit()) or 'guest'
-                base_email = f"hotspot_{safe_seed}@hotspot.local"
-                identity_phone = phone_number
-            else:
-                mac_seed = hashlib.md5(mac_address.encode()).hexdigest()[:12]
-                base_email = f"hotspot_{mac_seed}@hotspot.local"
-                identity_phone = f"+999{''.join(ch for ch in mac_seed if ch.isdigit())[:12]}"
-            
-            # ============================================================
-            # FIX: Derive first_name and last_name from friendly_username
-            # friendly_username examples: MXTV-827S, WIFI-AB12, etc.
-            # ============================================================
-            parts = (friendly_username or "").split("-", 1)
-            derived_first_name = parts[0] if parts and parts[0] else "Hotspot"
-            derived_last_name = parts[1] if len(parts) > 1 and parts[1] else "Customer"
-            
-            # 1) Reuse existing user first
-            user = User.objects.filter(email=base_email).first()
-            if not user and identity_phone:
-                user = User.objects.filter(phone_number=identity_phone).first()
-            
-            # 2) Only create if not found
-            if not user:
-                random_password = ''.join(secrets.choice(string.ascii_letters + string.digits) for _ in range(16))
-                user = User.objects.create_user(
-                    email=base_email,
-                    password=random_password,
-                    phone_number=identity_phone,
-                    first_name=derived_first_name,
-                    last_name=derived_last_name,
-                    role='customer',
-                    tenant_subdomain=getattr(tenant, 'subdomain', tenant_subdomain),
-                )
-                logger.info(f"Created new hotspot user: {user.email} (name: {derived_first_name} {derived_last_name})")
-            else:
-                logger.info(f"Reusing existing hotspot user: {user.email} (phone: {user.phone_number})")
-            
-            # 3) Get or create Customer - 1:1 with User
-            hotspot_customer, created = Customer.objects.get_or_create(
-                user=user,
-                defaults={
-                    'status': 'ACTIVE',
-                    'customer_type': 'RESIDENTIAL',
-                    'category': 'PREPAID',
-                }
+            is_tv_flow = bool(tv_code)
+            identity = resolve_identity(
+                phone_number=phone_number,
+                mac_address=mac_address,
+                is_tv_flow=is_tv_flow,
+                is_voucher=False,
             )
             
-            if created:
-                logger.info(f"Created new hotspot customer for user: {user.email}")
-            else:
-                logger.debug(f"Using existing hotspot customer for user: {user.email}")
+            # Get or create User and Customer
+            hotspot_customer, _ = _get_or_create_hotspot_user_and_customer(
+                identity=identity,
+                tenant_subdomain=getattr(tenant, 'subdomain', tenant_subdomain),
+                tenant=tenant,
+            )[1:]  # Returns (user, customer, created) - we only need customer
             
             payment = Payment.objects.create(
                 customer=hotspot_customer,
@@ -992,6 +1082,51 @@ class HotspotVoucherRedeemView(APIView):
                     'error': f'Voucher balance (KES {voucher.remaining_value}) is insufficient for this plan (KES {plan.price})'
                 }, status=status.HTTP_400_BAD_REQUEST)
 
+            # ============================================================
+            # IDENTITY RESOLUTION FOR VOUCHER: MAC-first identity
+            # ============================================================
+            identity = resolve_identity(
+                phone_number='',
+                mac_address=mac_address,
+                is_tv_flow=False,
+                is_voucher=True,  # MAC-first for voucher path
+            )
+            
+            # Get or create User and Customer for voucher analytics
+            from django.contrib.auth import get_user_model
+            from apps.customers.models import Customer
+            import secrets
+            
+            User = get_user_model()
+            
+            user = User.objects.filter(email=identity["email"]).first()
+            if not user and identity["phone_number"]:
+                user = User.objects.filter(phone_number=identity["phone_number"]).first()
+            
+            if not user:
+                random_password = ''.join(secrets.choice(string.ascii_letters + string.digits) for _ in range(16))
+                user = User.objects.create_user(
+                    email=identity["email"],
+                    password=random_password,
+                    phone_number=identity["phone_number"],
+                    first_name="HOTSPOT",
+                    last_name=identity["last_name"],
+                    role='customer',
+                    tenant_subdomain=getattr(tenant, 'subdomain', tenant_subdomain),
+                )
+                logger.info(f"Created new voucher user: {user.email}")
+            else:
+                logger.info(f"Reusing existing voucher user: {user.email}")
+            
+            hotspot_customer, _ = Customer.objects.get_or_create(
+                user=user,
+                defaults={
+                    'status': 'ACTIVE',
+                    'customer_type': 'RESIDENTIAL',
+                    'category': 'PREPAID',
+                }
+            )
+            
             # Generate or reuse access code for the user
             existing_user = HotspotSession.objects.filter(
                 mac_address=mac_address
@@ -999,8 +1134,10 @@ class HotspotVoucherRedeemView(APIView):
 
             if existing_user and existing_user.access_code:
                 friendly_username = existing_user.access_code
+                logger.info(f"Reusing existing access code for voucher user: {friendly_username}")
             else:
                 friendly_username = self._generate_code()
+                logger.info(f"Generated new access code for voucher user: {friendly_username}")
 
             # Mark voucher as used
             voucher.use_count = (voucher.use_count or 0) + 1
@@ -1022,6 +1159,7 @@ class HotspotVoucherRedeemView(APIView):
                 status='paid',
                 access_code=friendly_username,
                 payhero_checkout_id=f'VOUCHER_{voucher.code}',
+                customer=hotspot_customer,  # Link to customer for analytics
             )
 
             try:
