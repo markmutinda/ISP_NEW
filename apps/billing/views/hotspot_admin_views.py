@@ -16,11 +16,12 @@ from django.db.models import Sum, Count, Q
 from django.utils import timezone
 from datetime import timedelta
 
-from apps.billing.models.hotspot_models import HotspotPlan, HotspotSession, HotspotBranding
+from apps.billing.models.hotspot_models import HotspotPlan, HotspotSession, HotspotBranding, HotspotClient
 from apps.billing.serializers.hotspot_serializers import (
     HotspotPlanSerializer,
     HotspotSessionSerializer,
     HotspotBrandingSerializer,
+    HotspotClientSerializer,
 )
 from apps.network.models.router_models import Router
 from apps.core.permissions import IsAdminOrStaff
@@ -352,3 +353,25 @@ class GlobalHotspotPlanListView(generics.ListAPIView):
     pagination_class = None
     filter_backends = [filters.OrderingFilter]
     ordering = ['router__name', 'price']
+
+
+class HotspotClientViewSet(viewsets.ReadOnlyModelViewSet):
+    """
+    ViewSet for viewing transient hotspot clients (admin only).
+    
+    Endpoints:
+    - GET /api/v1/hotspot/admin/clients/
+    - GET /api/v1/hotspot/admin/clients/{id}/
+    """
+    
+    serializer_class = HotspotClientSerializer
+    permission_classes = [IsAuthenticated, IsAdminOrStaff]
+    filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
+    search_fields = ['canonical_phone', 'email', 'external_client_id']
+    ordering_fields = ['last_seen_at', 'first_seen_at', 'total_spend', 'total_sessions']
+    ordering = ['-last_seen_at']
+    pagination_class = StandardResultsSetPagination
+    
+    def get_queryset(self):
+        # Prefetch sessions to optimize the nested serializer query
+        return HotspotClient.objects.prefetch_related('sessions__plan').all()

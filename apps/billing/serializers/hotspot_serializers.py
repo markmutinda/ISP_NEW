@@ -2,7 +2,7 @@
 Hotspot Serializers for Admin API
 """
 from rest_framework import serializers
-from apps.billing.models.hotspot_models import HotspotPlan, HotspotSession, HotspotBranding
+from apps.billing.models.hotspot_models import HotspotPlan, HotspotSession, HotspotBranding, HotspotClient
 
 
 class HotspotPlanSerializer(serializers.ModelSerializer):
@@ -178,4 +178,27 @@ class HotspotBrandingSerializer(serializers.ModelSerializer):
             if request:
                 return request.build_absolute_uri(obj.background_image.url)
             return obj.background_image.url
+        return None
+
+
+class HotspotClientSerializer(serializers.ModelSerializer):
+    """Serializer for HotspotClient read operations (Admin)"""
+    
+    current_session = serializers.SerializerMethodField()
+    
+    class Meta:
+        model = HotspotClient
+        fields = [
+            'id', 'canonical_phone', 'email', 'external_client_id',
+            'total_sessions', 'total_spend', 
+            'first_seen_at', 'last_seen_at',
+            'current_session'
+        ]
+        
+    def get_current_session(self, obj):
+        """Get the most recent active session for this client"""
+        # Get the most recent session for this client
+        latest_session = obj.sessions.order_by('-created_at').first()
+        if latest_session:
+            return HotspotSessionSerializer(latest_session).data
         return None

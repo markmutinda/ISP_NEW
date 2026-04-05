@@ -651,7 +651,15 @@ class Payment(models.Model):
     ]
 
     payment_number = models.CharField(max_length=50, unique=True)
-    customer = models.ForeignKey('customers.Customer', on_delete=models.CASCADE, related_name='payments')
+    
+    # FIX: Made customer field optional for Hotspot-only payments
+    customer = models.ForeignKey(
+        'customers.Customer', 
+        on_delete=models.CASCADE, 
+        related_name='payments',
+        null=True,
+        blank=True
+    )
     invoice = models.ForeignKey(Invoice, on_delete=models.SET_NULL, null=True, blank=True, related_name='payments')
 
     amount = models.DecimalField(max_digits=12, decimal_places=2, validators=[MinValueValidator(0.01)])
@@ -744,7 +752,8 @@ class Payment(models.Model):
         ]
 
     def __str__(self):
-        return f"Payment #{self.payment_number} - {self.customer.customer_code}"
+        customer_ref = self.customer.customer_code if self.customer else "Hotspot Client"
+        return f"Payment #{self.payment_number} - {customer_ref}"
 
     def save(self, *args, **kwargs):
         if not self.payment_number:
@@ -769,7 +778,8 @@ class Payment(models.Model):
         if self.net_amount == 0 and self.amount:
             self.net_amount = self.amount - self.transaction_fee
         
-        if not self.schema_name:
+        # FIX: Only try to get schema_name from customer if customer exists
+        if not self.schema_name and self.customer:
             self.schema_name = self.customer.schema_name
             
         super().save(*args, **kwargs)
@@ -842,7 +852,15 @@ class Receipt(models.Model):
     ]
 
     receipt_number = models.CharField(max_length=50, unique=True)
-    customer = models.ForeignKey('customers.Customer', on_delete=models.CASCADE, related_name='receipts')
+    
+    # FIX: Made customer field optional for Hotspot-only receipts
+    customer = models.ForeignKey(
+        'customers.Customer', 
+        on_delete=models.CASCADE, 
+        related_name='receipts',
+        null=True,
+        blank=True
+    )
     
     payment = models.OneToOneField(Payment, on_delete=models.CASCADE, related_name='receipt')
     
@@ -885,7 +903,8 @@ class Receipt(models.Model):
         ]
 
     def __str__(self):
-        return f"Receipt #{self.receipt_number}"
+        customer_ref = self.customer.customer_code if self.customer else "Hotspot Client"
+        return f"Receipt #{self.receipt_number} - {customer_ref}"
 
     def save(self, *args, **kwargs):
         if not self.receipt_number:
@@ -914,6 +933,7 @@ class Receipt(models.Model):
         if not self.payment_reference and self.payment:
             self.payment_reference = self.payment.payment_reference
         
+        # FIX: Only try to get schema_name from payment if payment exists
         if not self.schema_name and self.payment:
             self.schema_name = self.payment.schema_name
         
@@ -933,11 +953,12 @@ class Receipt(models.Model):
             
             try:
                 from utils.helpers import generate_qr_code
+                customer_name = self.customer.full_name if self.customer else "Hotspot Client"
                 receipt_data = {
                     'receipt_number': self.receipt_number,
                     'date': self.receipt_date.isoformat(),
                     'amount': str(self.amount),
-                    'customer': self.customer.full_name,
+                    'customer': customer_name,
                     'payment_method': self.payment_method,
                 }
                 self.qr_code = generate_qr_code(str(receipt_data))

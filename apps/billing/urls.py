@@ -21,7 +21,8 @@ from .views.hotspot_admin_views import (
     HotspotSessionViewSet,
     HotspotBrandingView,
     HotspotDashboardView,
-    GlobalHotspotPlanListView,  # <--- ADD THIS
+    GlobalHotspotPlanListView,
+    HotspotClientViewSet,  # <--- ADDED: Hotspot Client ViewSet
 )
 from .views.hotspot_voucher_admin_views import (  # ADDED: Hotspot Voucher Admin Views
     HotspotVoucherGenerateView,
@@ -203,6 +204,16 @@ hotspot_admin_urlpatterns = [
     
     # Global Plans (ADDED for Vouchers Dropdown)
     path('admin/plans/', GlobalHotspotPlanListView.as_view(), name='hotspot-admin-all-plans'),
+    
+    # ============================================================
+    # HOTSPOT CLIENTS (ADDED)
+    # ============================================================
+    path('admin/clients/', 
+         HotspotClientViewSet.as_view({'get': 'list'}), 
+         name='hotspot-admin-clients'),
+    path('admin/clients/<int:pk>/', 
+         HotspotClientViewSet.as_view({'get': 'retrieve'}), 
+         name='hotspot-admin-client-detail'),
     
     # Plans CRUD (per-router) — prefixed with "admin/" to avoid collision with public plans endpoint
     path('admin/routers/<int:router_id>/plans/', 
