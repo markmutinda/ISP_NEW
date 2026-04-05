@@ -639,7 +639,6 @@ class InvoiceItemPayment(models.Model):
 
 
 class Payment(models.Model):
-    # ... unchanged (kept exactly as you provided)
     PAYMENT_STATUS = [
         ('PENDING', 'Pending'),
         ('PROCESSING', 'Processing'),
@@ -653,12 +652,14 @@ class Payment(models.Model):
     payment_number = models.CharField(max_length=50, unique=True)
     
     # FIX: Made customer field optional for Hotspot-only payments
+    # Using SET_NULL to preserve payment history even if customer is deleted
     customer = models.ForeignKey(
         'customers.Customer', 
-        on_delete=models.CASCADE, 
-        related_name='payments',
+        on_delete=models.SET_NULL,  # Changed from CASCADE to SET_NULL
         null=True,
-        blank=True
+        blank=True,
+        related_name='payments',
+        help_text="Customer linked to this payment. Set null if customer is deleted to preserve transaction history."
     )
     invoice = models.ForeignKey(Invoice, on_delete=models.SET_NULL, null=True, blank=True, related_name='payments')
 
@@ -844,7 +845,6 @@ class Payment(models.Model):
 
 
 class Receipt(models.Model):
-    # ... unchanged (kept exactly as you had it)
     RECEIPT_STATUS = [
         ('DRAFT', 'Draft'),
         ('ISSUED', 'Issued'),
@@ -856,10 +856,11 @@ class Receipt(models.Model):
     # FIX: Made customer field optional for Hotspot-only receipts
     customer = models.ForeignKey(
         'customers.Customer', 
-        on_delete=models.CASCADE, 
-        related_name='receipts',
+        on_delete=models.SET_NULL,  # Changed from CASCADE to SET_NULL
         null=True,
-        blank=True
+        blank=True,
+        related_name='receipts',
+        help_text="Customer linked to this receipt. Set null if customer is deleted to preserve receipt history."
     )
     
     payment = models.OneToOneField(Payment, on_delete=models.CASCADE, related_name='receipt')
