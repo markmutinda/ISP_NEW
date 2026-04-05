@@ -5,7 +5,7 @@ These are AUTHENTICATED endpoints for ISP staff to manage hotspot configuration.
 """
 
 import logging
-from rest_framework import viewsets, status, filters, generics  # Add generics here
+from rest_framework import viewsets, status, filters, generics
 from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
@@ -367,7 +367,7 @@ class HotspotClientViewSet(viewsets.ReadOnlyModelViewSet):
     serializer_class = HotspotClientSerializer
     permission_classes = [IsAuthenticated, IsAdminOrStaff]
     filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
-    search_fields = ['canonical_phone', 'email', 'external_client_id']
+    search_fields = ['canonical_phone', 'email', 'external_client_id', 'canonical_username']
     ordering_fields = ['last_seen_at', 'first_seen_at', 'total_spend', 'total_sessions']
     ordering = ['-last_seen_at']
     pagination_class = StandardResultsSetPagination
@@ -375,3 +375,137 @@ class HotspotClientViewSet(viewsets.ReadOnlyModelViewSet):
     def get_queryset(self):
         # Prefetch sessions to optimize the nested serializer query
         return HotspotClient.objects.prefetch_related('sessions__plan').all()
+
+
+class ActiveSubscriptionsView(APIView):
+    """
+    Returns all currently-active subscriptions across PPPoE and Hotspot.
+    Designed so the frontend Active Subs tab can consume a single endpoint.
+
+    Response shape:
+    {
+        "pppoe": [ { ...PPPoE customer data... } ],
+        "hotspot": [ { ...hotspot session data... } ],
+        "total": 42
+    }
+    """
+    permission_classes = [IsAuthenticated, IsAdminOrStaff]
+
+    def get(self, request):
+        now = timezone.now()
+
+        # ── PPPoE / Static active subscriptions ─────────────────────────────
+        from apps.radius.models import CustomerRadiusCredentials
+
+        pppoe_creds = (
+            CustomerRadiusCredentials.objects
+            .filter(is_enabled=True)
+            .select_related('customer__user', 'bandwidth_profile')
+        )
+
+        pppoe_results = []
+        for cred in pppoe_creds:
+            is_expired = (
+                cred.expiration_date is not None and cred.expiration_date <= now
+            )
+            if is_expired:
+                continue
+
+            customer = cred.customer
+            user = customer.user if customer else None
+
+            expiry_str = (
+                cred.expiration_date.isoformat()
+                if cred.expiration_date else None
+            )
+            days_left = None
+            if cred.expiration_date:
+                days_left = max(
+                    0,
+                    int((cred.expiration_date - now).total_seconds() / 86400)
+                )
+
+            # Best-effort plan info
+            service = customer.services.filter(status='ACTIVE').first() if customer else None
+            plan_name = service.plan.name if (service and service.plan) else "No Plan"
+            plan_price = (
+                float(service.plan.base_price)
+                if (service and service.plan) else 0
+            )
+
+            pppoe_results.append({
+                "type": "pppoe",
+                "username": cred.username,
+                "canonical_username": None,          # PPPoE uses real name
+                "display_name": (
+                    customer.full_name if customer else cred.username
+                ),
+                "phone": user.phone_number if user else None,
+                "email": user.email if user else None,
+                "customer_code": customer.customer_code if customer else None,
+                "plan_name": plan_name,
+                "plan_price": plan_price,
+                "expiry_date": expiry_str,
+                "days_left": days_left,
+                "is_unlimited": cred.expiration_date is None,
+                "connection_type": cred.connection_type,
+                "subscribed_at": cred.created_at.isoformat() if cred.created_at else None,
+            })
+
+        # ── Hotspot active subscriptions ─────────────────────────────────────
+        from apps.billing.models.hotspot_models import HotspotSession
+
+        active_sessions = (
+            HotspotSession.objects
+            .filter(
+                status='active',
+                expires_at__gt=now,
+            )
+            .select_related('plan', 'router', 'hotspot_client')
+            .order_by('-activated_at')
+        )
+
+        hotspot_results = []
+        for session in active_sessions:
+            client = session.hotspot_client
+            canonical_phone = None
+            if client and client.canonical_phone:
+                p = client.canonical_phone
+                canonical_phone = p if not p.startswith("MAC-") else None
+
+            days_left = max(
+                0, int((session.expires_at - now).total_seconds() / 86400)
+            ) if session.expires_at else 0
+            hours_left = max(
+                0, int((session.expires_at - now).total_seconds() / 3600)
+            ) if session.expires_at else 0
+
+            hotspot_results.append({
+                "type": "hotspot",
+                "username": session.access_code,           # e.g. "MXA-BKCS"
+                "canonical_username": session.access_code, # same thing
+                "display_name": session.access_code,       # shown prominently
+                "phone": canonical_phone or session.phone_number,
+                "email": client.email if client else None,
+                "customer_code": None,                     # no formal customer record
+                "plan_name": session.plan.name if session.plan else "Unknown",
+                "plan_price": float(session.amount),
+                "expiry_date": session.expires_at.isoformat() if session.expires_at else None,
+                "days_left": days_left,
+                "hours_left": hours_left,
+                "is_unlimited": False,
+                "connection_type": "HOTSPOT",
+                "subscribed_at": session.activated_at.isoformat() if session.activated_at else None,
+                "router": session.router.name if session.router else None,
+                "mac_address": session.mac_address,
+                "session_id": session.session_id,
+                # Lifetime analytics for this client
+                "client_total_sessions": client.total_sessions if client else 1,
+                "client_total_spend": float(client.total_spend) if client else float(session.amount),
+            })
+
+        return Response({
+            "pppoe": pppoe_results,
+            "hotspot": hotspot_results,
+            "total": len(pppoe_results) + len(hotspot_results),
+        })

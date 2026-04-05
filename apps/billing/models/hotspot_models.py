@@ -17,6 +17,38 @@ from django.db.models import F
 from django.utils import timezone
 
 
+# ═══════════════════════════════════════════════════════════════════
+# HELPER: Canonical Username Generator (Collision-free)
+# ═══════════════════════════════════════════════════════════════════
+
+def _generate_canonical_username() -> str:
+    """
+    Generate a collision-free 9-char hotspot username: XXXX-XXXX
+    Example: 'MXA-BKCS', 'F3T-R7NZ'
+    """
+    import secrets
+    import string as _string
+
+    safe = ''.join(c for c in (_string.ascii_uppercase + _string.digits)
+                   if c not in "O0I1S5")
+
+    for _ in range(50):
+        part1 = ''.join(secrets.choice(safe) for _ in range(4))
+        part2 = ''.join(secrets.choice(safe) for _ in range(4))
+        candidate = f"{part1}-{part2}"
+
+        # Avoid clashing with any existing client username or session access_code
+        from apps.billing.models.hotspot_models import HotspotClient, HotspotSession
+        taken = (
+            HotspotClient.objects.filter(canonical_username=candidate).exists()
+            or HotspotSession.objects.filter(access_code=candidate).exists()
+        )
+        if not taken:
+            return candidate
+
+    raise RuntimeError("Failed to generate unique hotspot username in 50 attempts")
+
+
 class HotspotPlan(models.Model):
     """
     Hotspot access plans configured per router.
@@ -301,7 +333,7 @@ class HotspotPlan(models.Model):
 
 
 # ═══════════════════════════════════════════════════════════════════
-# NEW: CLIENT IDENTITY MODELS FOR MAC RANDOMIZATION RESILIENCE
+# CLIENT IDENTITY MODELS FOR MAC RANDOMIZATION RESILIENCE
 # ═══════════════════════════════════════════════════════════════════
 
 class HotspotClient(models.Model):
@@ -318,6 +350,19 @@ class HotspotClient(models.Model):
         null=True, 
         db_index=True,
         help_text="Primary phone number for this client (stable across devices)"
+    )
+    
+    # NEW: Permanent RADIUS username (generated once, reused forever)
+    canonical_username = models.CharField(
+        max_length=20,
+        unique=True,
+        null=True,
+        blank=True,
+        db_index=True,
+        help_text=(
+            "Permanent RADIUS username for this hotspot client (e.g. MXA-BKCS). "
+            "Auto-generated on first purchase. Reused across all sessions on any device."
+        ),
     )
     
     # Timestamps
@@ -342,6 +387,7 @@ class HotspotClient(models.Model):
             models.Index(fields=['schema_name', 'email']),
             models.Index(fields=['schema_name', 'external_client_id']),
             models.Index(fields=['schema_name', 'last_seen_at']),
+            models.Index(fields=['canonical_username']),  # Index for username lookups
         ]
         unique_together = [
             ['schema_name', 'canonical_phone'],
@@ -349,10 +395,12 @@ class HotspotClient(models.Model):
         ]
     
     def __str__(self):
-        return f"{self.canonical_phone or self.email or 'Anonymous'} - {self.total_sessions} sessions"
+        identifier = self.canonical_phone or self.email or self.canonical_username or 'Anonymous'
+        return f"{identifier} - {self.total_sessions} sessions"
     
     def update_analytics(self, session_amount: Decimal = None):
         """Update analytics after a session completes"""
+        from apps.billing.models.hotspot_models import HotspotSession
         self.total_sessions = HotspotSession.objects.filter(hotspot_client=self).count()
         if session_amount:
             self.total_spend += session_amount
@@ -361,19 +409,72 @@ class HotspotClient(models.Model):
     
     @classmethod
     def get_or_create_by_phone(cls, schema_name: str, phone_number: str):
-        """Get or create a client by phone number"""
+        """
+        Get or create a client by phone number.
+        Always ensures canonical_username is set (generated on first purchase).
+        """
         if not phone_number:
             return None
-        
+
+        from django.utils import timezone as tz
+
         client, created = cls.objects.get_or_create(
             schema_name=schema_name,
             canonical_phone=phone_number,
-            defaults={'first_seen_at': timezone.now()}
+            defaults={"first_seen_at": tz.now()},
         )
+
+        # Generate username if missing (new client OR migrated existing without one)
+        if not client.canonical_username:
+            from apps.billing.models.hotspot_models import _generate_canonical_username
+            client.canonical_username = _generate_canonical_username()
+            client.save(update_fields=["canonical_username"])
+
         if not created:
-            client.last_seen_at = timezone.now()
-            client.save(update_fields=['last_seen_at'])
+            client.last_seen_at = tz.now()
+            client.save(update_fields=["last_seen_at"])
+
         return client
+    
+    @classmethod
+    def get_or_create_by_mac(cls, schema_name: str, mac_address: str,
+                              phone_number: str = None):
+        """
+        Resolve a hotspot client identity, preferring MAC lookup then phone.
+
+        Decision tree:
+        1. MAC is already registered → return that client (handles returning devices)
+        2. Phone number provided → get_or_create_by_phone (phone is more stable than MAC)
+        3. Neither → create an anonymous client keyed by MAC (unlikely edge case)
+
+        This intentionally does NOT make MAC the primary key because modern devices
+        randomise MACs per network. Phone is the stable anchor; MAC is a hint.
+        """
+        from apps.billing.models.hotspot_models import HotspotClientDevice
+
+        # 1. MAC lookup via device registry
+        device = (
+            HotspotClientDevice.objects
+            .filter(mac_address=mac_address)
+            .select_related("client")
+            .first()
+        )
+        if device and device.client:
+            client = device.client
+            # Backfill username if this client predates the feature
+            if not client.canonical_username:
+                from apps.billing.models.hotspot_models import _generate_canonical_username
+                client.canonical_username = _generate_canonical_username()
+                client.save(update_fields=["canonical_username"])
+            return client
+
+        # 2. Phone lookup (primary stable identifier)
+        if phone_number:
+            return cls.get_or_create_by_phone(schema_name, phone_number)
+
+        # 3. Truly anonymous: key by MAC (e.g. Smart TV with no SIM)
+        anon_phone = f"MAC-{mac_address.replace(':', '').upper()}"
+        return cls.get_or_create_by_phone(schema_name, anon_phone)
 
 
 class HotspotClientDevice(models.Model):
@@ -425,7 +526,7 @@ class HotspotClientDevice(models.Model):
         ]
     
     def __str__(self):
-        return f"{self.client.canonical_phone or self.client.id} - {self.mac_address}"
+        return f"{self.client.canonical_phone or self.client.canonical_username or self.client.id} - {self.mac_address}"
     
     @classmethod
     def record_device(cls, client: HotspotClient, mac_address: str, **kwargs):
@@ -494,7 +595,7 @@ class HotspotSession(models.Model):
         related_name='sessions'
     )
     
-    # ── NEW: Client Identity (for MAC randomization resilience) ──
+    # Client Identity (for MAC randomization resilience)
     hotspot_client = models.ForeignKey(
         'billing.HotspotClient',
         on_delete=models.SET_NULL,
@@ -516,7 +617,7 @@ class HotspotSession(models.Model):
     payhero_checkout_id = models.CharField(max_length=100, blank=True, null=True)
     mpesa_receipt = models.CharField(max_length=50, blank=True, null=True)
     
-    # ── NEW: Tuma Payment Request IDs for tracking ──
+    # Tuma Payment Request IDs for tracking
     tuma_merchant_request_id = models.CharField(
         max_length=120,
         blank=True,
@@ -532,7 +633,7 @@ class HotspotSession(models.Model):
         help_text="Tuma checkout request ID for this session's payment"
     )
     
-    # ── NEW: Explicit Payment Link (replaces unsafe writes) ──
+    # Explicit Payment Link (replaces unsafe writes)
     payment = models.ForeignKey(
         'billing.Payment',
         on_delete=models.SET_NULL,
@@ -555,7 +656,7 @@ class HotspotSession(models.Model):
     activated_at = models.DateTimeField(null=True, blank=True)
     expires_at = models.DateTimeField(null=True, blank=True)
     
-    # ── NEW: ROAMING ANALYTICS ──
+    # ROAMING ANALYTICS
     is_roaming = models.BooleanField(
         default=False, 
         help_text="True if purchased at a different router than their last session"
@@ -587,17 +688,12 @@ class HotspotSession(models.Model):
             models.Index(fields=['phone_number']),
             models.Index(fields=['mac_address']),
             models.Index(fields=['status']),
-            models.Index(fields=['tuma_merchant_request_id']),  # Index for Tuma tracking
-            models.Index(fields=['tuma_checkout_request_id']),  # Index for Tuma tracking
-            # NOTE: ForeignKey fields (payment, hotspot_client) are automatically indexed by Django.
-            # Explicitly adding them here would create redundant indexes and cause migration errors.
-            # Remove these lines if they exist:
-            # models.Index(fields=['payment']),
-            # models.Index(fields=['hotspot_client']),
+            models.Index(fields=['tuma_merchant_request_id']),
+            models.Index(fields=['tuma_checkout_request_id']),
         ]
     
     def __str__(self):
-        client_info = f" - Client:{self.hotspot_client.canonical_phone}" if self.hotspot_client else ""
+        client_info = f" - Client:{self.hotspot_client.canonical_phone or self.hotspot_client.canonical_username}" if self.hotspot_client else ""
         return f"{self.session_id} - {self.phone_number}{client_info} ({self.status})"
     
     @classmethod
@@ -652,8 +748,7 @@ class HotspotSession(models.Model):
         Mark session as active after successful payment.
         Sets access code and expiration time.
         """
-        # ── FIX 3.4: IDEMPOTENCY GUARD ──
-        # Prevent double-accrual if called multiple times (e.g., webhook + polling)
+        # IDEMPOTENCY GUARD - Prevent double-accrual if called multiple times
         if self.status == 'active':
             return
 
@@ -667,7 +762,7 @@ class HotspotSession(models.Model):
         if self.hotspot_client:
             self.hotspot_client.update_analytics(self.amount)
         
-        # ── FIX 2.1: METERED BILLING HOOK (Hotspot Revenue) ──
+        # METERED BILLING HOOK (Hotspot Revenue)
         try:
             from django.db import connection
             from django_tenants.utils import schema_context, get_public_schema_name
@@ -686,7 +781,7 @@ class HotspotSession(models.Model):
                 ).first()
                 
                 if active_cycle:
-                    # FIX 2.1: Use F() expression to push math to the database level
+                    # Use F() expression to push math to the database level
                     # This prevents 'lost updates' when concurrent payments occur
                     BillingCycle.objects.filter(id=active_cycle.id).update(
                         hotspot_revenue_accumulated=F('hotspot_revenue_accumulated') + Decimal(str(self.amount))
@@ -696,7 +791,6 @@ class HotspotSession(models.Model):
             import logging
             logging.getLogger(__name__).error(f"Failed to record hotspot revenue: {e}")
     
-    # ── FIX 3.3: REFUND / REVERSAL LOGIC ──
     def refund_or_cancel(self, reason: str = "Refunded"):
         """Reverses a previously active session and decrements the ledger."""
         was_active = self.status == 'active'

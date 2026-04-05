@@ -1,4 +1,3 @@
-# apps/billing/urls.py
 from django.urls import path, include
 from rest_framework.routers import DefaultRouter
 from .views.InvoiceViews import PlanViewSet, BillingCycleViewSet, InvoiceViewSet, InvoiceItemViewSet
@@ -22,7 +21,8 @@ from .views.hotspot_admin_views import (
     HotspotBrandingView,
     HotspotDashboardView,
     GlobalHotspotPlanListView,
-    HotspotClientViewSet,  # <--- ADDED: Hotspot Client ViewSet
+    HotspotClientViewSet,
+    ActiveSubscriptionsView,  # <--- ADDED: Active Subscriptions View
 )
 from .views.hotspot_voucher_admin_views import (  # ADDED: Hotspot Voucher Admin Views
     HotspotVoucherGenerateView,
@@ -214,6 +214,13 @@ hotspot_admin_urlpatterns = [
     path('admin/clients/<int:pk>/', 
          HotspotClientViewSet.as_view({'get': 'retrieve'}), 
          name='hotspot-admin-client-detail'),
+    
+    # ============================================================
+    # ACTIVE SUBSCRIPTIONS (ADDED - Single endpoint for PPPoE + Hotspot)
+    # ============================================================
+    path('admin/active-subscriptions/', 
+         ActiveSubscriptionsView.as_view(), 
+         name='hotspot-active-subscriptions'),
     
     # Plans CRUD (per-router) — prefixed with "admin/" to avoid collision with public plans endpoint
     path('admin/routers/<int:router_id>/plans/', 

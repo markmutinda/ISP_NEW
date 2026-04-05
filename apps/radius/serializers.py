@@ -75,7 +75,8 @@ class RadAcctSerializer(serializers.ModelSerializer):
 
 
 class OnlineUserSerializer(serializers.ModelSerializer):
-    """Specific serializer for the Online Users frontend dashboard"""
+    """Specific serializer for the Online Users frontend dashboard."""
+
     full_name = serializers.SerializerMethodField()
     phone_number = serializers.SerializerMethodField()
     mac_address = serializers.CharField(source='callingstationid', read_only=True)
@@ -84,93 +85,162 @@ class OnlineUserSerializer(serializers.ModelSerializer):
     usage = serializers.SerializerMethodField()
     router = serializers.SerializerMethodField()
     service_type = serializers.SerializerMethodField()
+    # NEW: surfaced so the frontend can distinguish PPPoE customer vs hotspot user
+    canonical_username = serializers.SerializerMethodField()
 
     class Meta:
         model = RadAcct
         fields = [
-            'radacctid', 'acctsessionid', 'username', 'full_name', 
-            'phone_number', 'mac_address', 'ip_address', 
-            'uptime', 'usage', 'router', 'service_type'
+            'radacctid', 'acctsessionid', 'username', 'full_name',
+            'phone_number', 'mac_address', 'ip_address',
+            'uptime', 'usage', 'router', 'service_type',
+            'canonical_username',
         ]
 
-    def get_full_name(self, obj):
-        # 1. Try direct link
+    # ─────────────────────────────────────────────────────────────────────────
+
+    def _resolve_hotspot_session(self, obj):
+        """
+        Try to find the HotspotSession whose access_code == obj.username.
+        Returns the session (with prefetched hotspot_client) or None.
+        """
+        from apps.billing.models.hotspot_models import HotspotSession
+        return (
+            HotspotSession.objects
+            .filter(access_code=obj.username)
+            .select_related('hotspot_client')
+            .first()
+        )
+
+    def _resolve_radius_credentials(self, obj):
+        """Look up CustomerRadiusCredentials by RADIUS username."""
+        from apps.radius.models import CustomerRadiusCredentials
+        return (
+            CustomerRadiusCredentials.objects
+            .filter(username=obj.username)
+            .select_related('customer__user')
+            .first()
+        )
+
+    # ─────────────────────────────────────────────────────────────────────────
+
+    def get_full_name(self, obj) -> str:
+        """
+        PPPoE → customer full name (e.g. "John Doe")
+        Hotspot → canonical username  (e.g. "MXA-BKCS")
+
+        The frontend shows these differently:
+          PPPoE:   "John Doe"   / phone below
+          Hotspot: "MXA-BKCS"  / canonical_phone below
+        """
+        # 1. Direct FK (fastest)
         if obj.customer:
             return obj.customer.full_name
-            
-        # 2. Try PPPoE/Customer Credentials link
-        from apps.radius.models import CustomerRadiusCredentials
-        creds = CustomerRadiusCredentials.objects.filter(username=obj.username).select_related('customer').first()
+
+        # 2. PPPoE via RADIUS credentials
+        creds = self._resolve_radius_credentials(obj)
         if creds and creds.customer:
             return creds.customer.full_name
 
-        # 3. NEW: Try Hotspot Session link (Persistent Identity)
-        from apps.billing.models.hotspot_models import HotspotSession
-        h_session = HotspotSession.objects.filter(access_code=obj.username).first()
+        # 3. Hotspot session — return the username (it IS the identity)
+        h_session = self._resolve_hotspot_session(obj)
         if h_session:
-            return f"{h_session.phone_number} (Hotspot)"
-            
-        return f"Hotspot-{obj.username}"
+            return obj.username  # e.g. "MXA-BKCS"
 
-    def get_phone_number(self, obj):
-        # 1. Resolve phone number via direct link
+        # 4. Absolute fallback
+        return obj.username
+
+    def get_phone_number(self, obj) -> str:
+        """
+        PPPoE → customer phone number
+        Hotspot → canonical_phone from HotspotClient (the buyer's phone)
+        """
+        # 1. Direct FK
         if obj.customer and hasattr(obj.customer, 'user') and obj.customer.user:
             return obj.customer.user.phone_number or "N/A"
-        
-        # 2. Manual lookup fallback via CustomerRadiusCredentials
-        from apps.radius.models import CustomerRadiusCredentials
-        creds = CustomerRadiusCredentials.objects.filter(username=obj.username).select_related('customer__user').first()
-        if creds and creds.customer and hasattr(creds.customer, 'user') and creds.customer.user:
+
+        # 2. PPPoE credentials
+        creds = self._resolve_radius_credentials(obj)
+        if creds and creds.customer and hasattr(creds.customer, 'user'):
             return creds.customer.user.phone_number or "N/A"
-        
-        # 3. Try Hotspot Session link for phone number
-        from apps.billing.models.hotspot_models import HotspotSession
-        h_session = HotspotSession.objects.filter(access_code=obj.username).first()
-        if h_session and h_session.phone_number:
-            return h_session.phone_number
-            
+
+        # 3. Hotspot session
+        h_session = self._resolve_hotspot_session(obj)
+        if h_session:
+            # Prefer the client's canonical_phone (normalised), fall back to session phone
+            if h_session.hotspot_client and h_session.hotspot_client.canonical_phone:
+                phone = h_session.hotspot_client.canonical_phone
+                # Strip the synthetic "MAC-..." prefix used for anonymous clients
+                return phone if not phone.startswith("MAC-") else "N/A"
+            return h_session.phone_number or "N/A"
+
         return "N/A"
 
-    def get_router(self, obj):
-        # 1. Try the direct link
+    def get_canonical_username(self, obj) -> str | None:
+        """
+        For hotspot sessions: the permanent RADIUS username (== access_code).
+        For PPPoE: None (the customer name is the identity there).
+
+        The frontend uses this to decide display mode:
+          - None → show customer name prominently
+          - "MXA-BKCS" → show username prominently, phone secondary
+        """
+        h_session = self._resolve_hotspot_session(obj)
+        if h_session:
+            # The session's access_code == the client's canonical_username
+            return obj.username
+        return None
+
+    def get_router(self, obj) -> str:
+        # 1. Direct FK
         if obj.router:
             return obj.router.name
-            
-        # 2. FALLBACK: Resolve router name from NAS IP Address
+
+        # 2. Resolve from NAS IP
         from apps.network.models import Router
         r = Router.objects.filter(
-            models.Q(vpn_ip_address=obj.nasipaddress) | 
+            models.Q(vpn_ip_address=obj.nasipaddress) |
             models.Q(ip_address=obj.nasipaddress)
         ).first()
-        return r.name if r else "Unknown Router"
+        return r.name if r else obj.nasipaddress or "Unknown Router"
 
-    def get_uptime(self, obj):
-        # Calculate live uptime based on when session started
+    def get_uptime(self, obj) -> str:
         if not obj.acctstarttime:
             return "0s"
         delta = timezone.now() - obj.acctstarttime
         total_seconds = int(delta.total_seconds())
         hours, remainder = divmod(total_seconds, 3600)
         minutes, seconds = divmod(remainder, 60)
-        
         if hours > 0:
             return f"{hours}h {minutes}m"
         return f"{minutes}m {seconds}s"
 
-    def get_usage(self, obj):
-        # Calculate total usage (Download + Upload) in MB/GB
+    def get_usage(self, obj) -> str:
         total_bytes = (obj.acctinputoctets or 0) + (obj.acctoutputoctets or 0)
         mb = total_bytes / (1024 * 1024)
-        if mb > 1024:
-            gb = mb / 1024
-            return f"{gb:.2f} GB"
+        if mb >= 1024:
+            return f"{mb / 1024:.2f} GB"
         return f"{mb:.2f} MB"
 
-    def get_service_type(self, obj):
-        # Heuristic based on framing protocol (Mikrotik standard)
+    def get_service_type(self, obj) -> str:
+        """
+        PPP framing → PPPoE.
+        Everything else that matches a hotspot session → HOTSPOT.
+        Fallback heuristic via nasporttype.
+        """
         if obj.framedprotocol == 'PPP':
             return 'PPPOE'
-        return 'HOTSPOT'
+
+        # Check if there's a hotspot session for this username
+        from apps.billing.models.hotspot_models import HotspotSession
+        if HotspotSession.objects.filter(access_code=obj.username).exists():
+            return 'HOTSPOT'
+
+        # nasporttype hints
+        if obj.nasporttype in ('Wireless-802.11', 'Wireless-Other'):
+            return 'HOTSPOT'
+
+        return 'PPPOE'
 
 
 class RadAcctSummarySerializer(serializers.Serializer):

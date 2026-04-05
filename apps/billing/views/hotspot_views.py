@@ -447,53 +447,75 @@ class HotspotPurchaseView(APIView):
             
             mac_address = _normalize_mac(mac_address)
             
-            # ============================================================
-            # GET OR CREATE HOTSPOT CLIENT (Transient, no User/Customer)
-            # ============================================================
+            # ══════════════════════════════════════════════════════════════
+            # RESOLVE HOTSPOT IDENTITY
+            # Identity priority: phone number → MAC → anonymous
+            # The client's canonical_username IS their permanent RADIUS login.
+            # ══════════════════════════════════════════════════════════════
             from apps.billing.models.hotspot_models import HotspotClient, HotspotClientDevice
-            
-            hotspot_client = HotspotClient.get_or_create_by_phone(
+
+            # Resolve the persistent client record
+            hotspot_client = HotspotClient.get_or_create_by_mac(
                 schema_name=tenant.schema_name,
-                phone_number=phone_number
+                mac_address=mac_address,
+                phone_number=phone_number,
             )
-            
+
+            # Register this specific device under the client
             if hotspot_client and mac_address:
                 HotspotClientDevice.record_device(
-                    client=hotspot_client, 
-                    mac_address=mac_address
+                    client=hotspot_client,
+                    mac_address=mac_address,
                 )
-            
-            # ============================================================
-            # DETERMINE ACCESS CODE (with roaming support)
-            # ============================================================
-            if reserved_access_code:
+
+            # ══════════════════════════════════════════════════════════════
+            # DETERMINE ACCESS CODE
+            # Use the client's PERMANENT canonical_username as the RADIUS
+            # access code.  This means the same person always logs in with
+            # the same credentials — enabling analytics, reconnection, etc.
+            # ══════════════════════════════════════════════════════════════
+            if tv_code and reserved_access_code:
+                # TV pairing: the TV code itself was pre-reserved as the access_code
                 friendly_username = reserved_access_code
-                logger.info(f"🎯 TV PURCHASE: Using reserved access code {friendly_username}")
                 is_roaming = False
                 roamed_from_name = None
-            else:
-                existing_user = HotspotSession.objects.filter(
-                    mac_address=mac_address
-                ).exclude(
-                    access_code__isnull=True
-                ).order_by('-created_at').first()
+                logger.info(f"📺 TV PURCHASE: Using reserved access code {friendly_username}")
 
-                is_roaming = False
-                roamed_from_name = None
+            elif hotspot_client and hotspot_client.canonical_username:
+                # Returning or new client: always use their permanent username
+                friendly_username = hotspot_client.canonical_username
 
-                if existing_user and existing_user.access_code:
-                    friendly_username = existing_user.access_code
-                    
-                    if existing_user.router_id != router.id:
-                        is_roaming = True
-                        roamed_from_name = existing_user.router.name
-                        logger.info(f"📍 ROAMING DETECTED: User {friendly_username} moved from {roamed_from_name} to {router.name}")
-                    else:
-                        logger.info(f"🏠 HOME ROUTER: User {friendly_username} returning to {router.name}")
-                        
+                # Roaming detection: did they connect here from a different router?
+                prev_session = (
+                    HotspotSession.objects
+                    .filter(hotspot_client=hotspot_client)
+                    .exclude(router=router)
+                    .order_by("-created_at")
+                    .first()
+                )
+                is_roaming = prev_session is not None
+                roamed_from_name = prev_session.router.name if is_roaming else None
+
+                if is_roaming:
+                    logger.info(
+                        f"📍 ROAMING: {friendly_username} moved from "
+                        f"{roamed_from_name} → {router.name}"
+                    )
                 else:
-                    friendly_username = self.generate_unique_code()
-                    logger.info(f"✨ NEW USER: {mac_address} -> {friendly_username} at {router.name}")
+                    logger.info(
+                        f"🏠 RETURNING: {friendly_username} at {router.name}"
+                    )
+
+            else:
+                # Fallback: generate a one-off code (should rarely happen given
+                # get_or_create_by_mac always sets canonical_username)
+                friendly_username = self.generate_unique_code()
+                is_roaming = False
+                roamed_from_name = None
+                logger.warning(
+                    f"⚠️  No canonical_username for client, using one-off code "
+                    f"{friendly_username} for MAC {mac_address}"
+                )
 
             session_id = HotspotSession.generate_session_id()
             session = HotspotSession.objects.create(
@@ -507,7 +529,7 @@ class HotspotPurchaseView(APIView):
                 access_code=friendly_username,
                 is_roaming=is_roaming,
                 roamed_from=roamed_from_name,
-                hotspot_client=hotspot_client  # Link to transient client
+                hotspot_client=hotspot_client,  # Link to transient client
             )
 
             cfg = TenantTumaConfig.objects.filter(schema_name=tenant.schema_name, is_active=True).first()
@@ -971,18 +993,20 @@ class HotspotVoucherRedeemView(APIView):
                     'error': f'Voucher balance (KES {voucher.remaining_value}) is insufficient for this plan (KES {plan.price})'
                 }, status=status.HTTP_400_BAD_REQUEST)
 
-            # ============================================================
-            # TRANSIENT CLIENT RESOLUTION FOR VOUCHER
-            # ============================================================
+            # ══════════════════════════════════════════════════════════════
+            # RESOLVE HOTSPOT IDENTITY FOR VOUCHER (using new canonical_username)
+            # ══════════════════════════════════════════════════════════════
             from apps.billing.models.hotspot_models import HotspotClient, HotspotClientDevice
             
             # Use MAC as a fallback identifier if real phone isn't provided
             provided_phone = request.data.get('phone_number') or ''
             phone_to_use = provided_phone if provided_phone else f"+999{mac_address.replace(':', '').lower()[:12]}"
             
-            hotspot_client = HotspotClient.get_or_create_by_phone(
+            # Resolve the persistent client record
+            hotspot_client = HotspotClient.get_or_create_by_mac(
                 schema_name=tenant.schema_name,
-                phone_number=phone_to_use
+                mac_address=mac_address,
+                phone_number=phone_to_use,
             )
             
             if hotspot_client and mac_address:
@@ -991,17 +1015,14 @@ class HotspotVoucherRedeemView(APIView):
                     mac_address=mac_address
                 )
             
-            # Generate or reuse access code for the user
-            existing_user = HotspotSession.objects.filter(
-                mac_address=mac_address
-            ).exclude(access_code__isnull=True).order_by('-created_at').first()
-
-            if existing_user and existing_user.access_code:
-                friendly_username = existing_user.access_code
-                logger.info(f"Reusing existing access code for voucher user: {friendly_username}")
+            # Use the client's permanent canonical_username as the access code
+            if hotspot_client and hotspot_client.canonical_username:
+                friendly_username = hotspot_client.canonical_username
+                logger.info(f"🔄 VOUCHER: Using permanent username {friendly_username} for {mac_address}")
             else:
+                # Fallback: generate new code (should rarely happen)
                 friendly_username = self._generate_code()
-                logger.info(f"Generated new access code for voucher user: {friendly_username}")
+                logger.warning(f"⚠️ VOUCHER: No canonical_username, using generated code {friendly_username}")
 
             # Mark voucher as used
             voucher.use_count = (voucher.use_count or 0) + 1
@@ -1023,7 +1044,7 @@ class HotspotVoucherRedeemView(APIView):
                 status='paid',
                 access_code=friendly_username,
                 payhero_checkout_id=f'VOUCHER_{voucher.code}',
-                hotspot_client=hotspot_client,  # Link to transient client
+                hotspot_client=hotspot_client,  # Link to persistent client
             )
 
             try:
