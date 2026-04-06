@@ -4,10 +4,10 @@ from django.db import transaction
 from apps.network.models.router_models import Router
 from apps.radius.models import Nas
 from apps.vpn.services.vpn_provisioning_service import VPNProvisioningService
-from apps.network.tasks import reload_radius_clients
 from django.db import connection
 from django_tenants.utils import schema_context
 import logging
+import subprocess
 
 logger = logging.getLogger(__name__)
 
@@ -21,6 +21,26 @@ def sanitize_string(value: str) -> str:
         return ""
     # Encode to bytes with replacement for any invalid surrogates, then decode back
     return value.encode('utf-8', 'replace').decode('utf-8')
+
+
+def reload_radius_clients_now() -> None:
+    """
+    Immediately reload FreeRADIUS clients (no Celery queue delay).
+    Runs after DB commit via transaction.on_commit.
+    """
+    cmd = ["docker", "exec", "netily_radius", "radmin", "-e", "hup"]
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
+        if result.returncode == 0:
+            logger.info("[RADIUS RELOAD] radmin hup succeeded.")
+        else:
+            logger.error(
+                "[RADIUS RELOAD] radmin hup failed rc=%s stderr=%s",
+                result.returncode,
+                (result.stderr or "").strip()
+            )
+    except Exception as e:
+        logger.exception("[RADIUS RELOAD] exception: %s", e)
 
 
 @receiver(post_save, sender=Router)
@@ -76,8 +96,8 @@ def handle_router_lifecycle(sender, instance, created, **kwargs):
         )
         logger.info(f"[RADIUS AUTO-SYNC] Added {instance.name} ({nas_ip}) to {connection.schema_name} NAS table.")
         
-        # Trigger RADIUS client reload after DB commit succeeds - explicitly use celery queue
-        transaction.on_commit(lambda: reload_radius_clients.apply_async(queue="celery"))
+        # Trigger RADIUS client reload after DB commit succeeds
+        transaction.on_commit(reload_radius_clients_now)
         
     except Exception as e:
         logger.error(f"RADIUS NAS sync failed for {instance.name}: {e}")
@@ -95,8 +115,8 @@ def cleanup_router_radius_nas(sender, instance, **kwargs):
         if deleted_count > 0:
             logger.info(f"[RADIUS CLEANUP] Removed {instance.name} from {connection.schema_name} NAS table.")
             
-            # Trigger RADIUS client reload after DB commit succeeds - explicitly use celery queue
-            transaction.on_commit(lambda: reload_radius_clients.apply_async(queue="celery"))
+            # Trigger RADIUS client reload after DB commit succeeds
+            transaction.on_commit(reload_radius_clients_now)
     except Exception as e:
         logger.error(f"Failed to cleanup RADIUS NAS for {instance.name}: {e}")
 
@@ -139,8 +159,8 @@ def cleanup_global_router_map(sender, instance, **kwargs):
             if deleted_count > 0:
                 logger.info(f"[GLOBAL CLEANUP] Removed {instance.name} ({nas_ip}) from GlobalRouterMap.")
                 
-                # Trigger RADIUS client reload after DB commit succeeds - explicitly use celery queue
-                transaction.on_commit(lambda: reload_radius_clients.apply_async(queue="celery"))
+                # Trigger RADIUS client reload after DB commit succeeds
+                transaction.on_commit(reload_radius_clients_now)
             else:
                 logger.debug(f"[GLOBAL CLEANUP] No GlobalRouterMap entry found for {instance.name} ({nas_ip})")
         except Exception as e:

@@ -58,6 +58,10 @@ def refresh_router_statuses():
 def reload_radius_clients(self):
     """
     Reload FreeRADIUS clients list so new GlobalRouterMap entries are recognized.
+    
+    NOTE: This task is kept for manual/admin use only.
+    Automatic reloads on router changes now happen synchronously via 
+    transaction.on_commit(reload_radius_clients_now) in signals.py
     """
     cmd = ["docker", "exec", "netily_radius", "radmin", "-e", "hup"]
     result = subprocess.run(cmd, capture_output=True, text=True, timeout=20)
