@@ -70,5 +70,19 @@ else
     echo "✗ WARNING: Could not connect to database."
 fi
 
+# ============================================================================
+# ADD VPN ROUTE (while still root, before dropping to freerad user)
+# ============================================================================
+echo "Setting up VPN route..."
+VPN_NETWORK_CIDR="${VPN_NETWORK_CIDR:-10.8.0.0/16}"
+VPN_GW="$(getent hosts netily-openvpn-isp | awk '{print $1}' | head -1 || true)"
+
+if [ -n "$VPN_GW" ]; then
+    echo "Adding route for ${VPN_NETWORK_CIDR} via ${VPN_GW}"
+    ip route replace "${VPN_NETWORK_CIDR}" via "${VPN_GW}" || echo "WARNING: route add failed"
+else
+    echo "WARNING: netily-openvpn-isp not resolvable; skipping route setup"
+fi
+
 echo "Starting FreeRADIUS with config root ${CONF_ROOT}..."
 exec gosu freerad "$@"
