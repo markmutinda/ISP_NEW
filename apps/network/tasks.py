@@ -48,7 +48,13 @@ def refresh_router_statuses():
     return {"refreshed": total, "errors": errors, "duration_ms": total_ms}
 
 
-@shared_task(bind=True, autoretry_for=(Exception,), retry_backoff=True, max_retries=5)
+@shared_task(
+    bind=True, 
+    queue="celery",
+    autoretry_for=(Exception,), 
+    retry_backoff=True, 
+    max_retries=5
+)
 def reload_radius_clients(self):
     """
     Reload FreeRADIUS clients list so new GlobalRouterMap entries are recognized.

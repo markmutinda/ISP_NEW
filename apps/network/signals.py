@@ -76,8 +76,8 @@ def handle_router_lifecycle(sender, instance, created, **kwargs):
         )
         logger.info(f"[RADIUS AUTO-SYNC] Added {instance.name} ({nas_ip}) to {connection.schema_name} NAS table.")
         
-        # Trigger RADIUS client reload after DB commit succeeds
-        transaction.on_commit(lambda: reload_radius_clients.delay())
+        # Trigger RADIUS client reload after DB commit succeeds - explicitly use celery queue
+        transaction.on_commit(lambda: reload_radius_clients.apply_async(queue="celery"))
         
     except Exception as e:
         logger.error(f"RADIUS NAS sync failed for {instance.name}: {e}")
@@ -95,8 +95,8 @@ def cleanup_router_radius_nas(sender, instance, **kwargs):
         if deleted_count > 0:
             logger.info(f"[RADIUS CLEANUP] Removed {instance.name} from {connection.schema_name} NAS table.")
             
-            # Trigger RADIUS client reload after DB commit succeeds
-            transaction.on_commit(lambda: reload_radius_clients.delay())
+            # Trigger RADIUS client reload after DB commit succeeds - explicitly use celery queue
+            transaction.on_commit(lambda: reload_radius_clients.apply_async(queue="celery"))
     except Exception as e:
         logger.error(f"Failed to cleanup RADIUS NAS for {instance.name}: {e}")
 
@@ -139,8 +139,8 @@ def cleanup_global_router_map(sender, instance, **kwargs):
             if deleted_count > 0:
                 logger.info(f"[GLOBAL CLEANUP] Removed {instance.name} ({nas_ip}) from GlobalRouterMap.")
                 
-                # Trigger RADIUS client reload after DB commit succeeds
-                transaction.on_commit(lambda: reload_radius_clients.delay())
+                # Trigger RADIUS client reload after DB commit succeeds - explicitly use celery queue
+                transaction.on_commit(lambda: reload_radius_clients.apply_async(queue="celery"))
             else:
                 logger.debug(f"[GLOBAL CLEANUP] No GlobalRouterMap entry found for {instance.name} ({nas_ip})")
         except Exception as e:
