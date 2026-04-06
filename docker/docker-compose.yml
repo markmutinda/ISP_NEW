@@ -1,13 +1,6 @@
 version: '3.8'
 
-# ────────────────────────────────────────────────────────────────
-# ALL secrets come from ../.env  (env_file on each service)
-# ────────────────────────────────────────────────────────────────
-
 services:
-  # ────────────────────────────────────────────────────────────────
-  # DATABASE
-  # ────────────────────────────────────────────────────────────────
   db:
     image: postgres:15-alpine
     container_name: netily_db
@@ -30,9 +23,6 @@ services:
     networks:
       - isp_network
 
-  # ────────────────────────────────────────────────────────────────
-  # REDIS
-  # ────────────────────────────────────────────────────────────────
   redis:
     image: redis:7-alpine
     container_name: netily_redis
@@ -51,9 +41,6 @@ services:
     networks:
       - isp_network
 
-  # ────────────────────────────────────────────────────────────────
-  # DJANGO WEB APPLICATION (The Heart)
-  # ────────────────────────────────────────────────────────────────
   web:
     build: 
       context: ..
@@ -109,9 +96,6 @@ services:
       - isp_network
       - vpn_network
 
-  # ────────────────────────────────────────────────────────────────
-  # CELERY WORKER
-  # ────────────────────────────────────────────────────────────────
   celery-worker:
     build: 
       context: ..
@@ -155,9 +139,6 @@ services:
       - isp_network
       - vpn_network
 
-  # ────────────────────────────────────────────────────────────────
-  # CELERY BEAT SCHEDULER
-  # ────────────────────────────────────────────────────────────────
   celery-beat:
     build: 
       context: ..
@@ -188,24 +169,18 @@ services:
     networks:
       - isp_network
 
-  # ────────────────────────────────────────────────────────────────
-  # FREERADIUS SERVER (SHARED CENTRAL SERVER) - SIMPLIFIED
-  # ────────────────────────────────────────────────────────────────
   radius:
     build:
       context: ..
       dockerfile: docker/Dockerfile.radius
     container_name: netily_radius
     restart: unless-stopped
-    # REMOVED: NET_ADMIN capability (no longer needed)
-    # SIMPLIFIED: Just run freeradius, no route setup
     command: freeradius -f -X
     env_file: ../.env
     environment:
       - DB_HOST=netily_db
       - DB_PORT=5432
       - DB_SCHEMA=public
-      - VPN_NETWORK_CIDR=${VPN_NETWORK_CIDR:-10.8.0.0/16}
     volumes:
       - ../radius_config/sites-available/default:/etc/freeradius/sites-enabled/default:ro
       - ../radius_config/mods-config/sql/main/postgresql/queries.conf:/etc/freeradius/mods-config/sql/main/postgresql/queries.conf:ro
@@ -226,9 +201,6 @@ services:
         aliases:
           - netily-radius-vpn
 
-  # ────────────────────────────────────────────────────────────────
-  # NEXT.JS FRONTEND
-  # ────────────────────────────────────────────────────────────────
   frontend:
     build:
       context: ../../netily_frontend
@@ -247,9 +219,6 @@ services:
     networks:
       - isp_network
 
-  # ────────────────────────────────────────────────────────────────
-  # NGINX REVERSE PROXY + SSL TERMINATION
-  # ────────────────────────────────────────────────────────────────
   nginx:
     image: nginx:alpine
     container_name: netily_nginx
@@ -273,9 +242,6 @@ services:
     networks:
       - isp_network
 
-  # ────────────────────────────────────────────────────────────────
-  # CERTBOT (SSL via Let's Encrypt)
-  # ────────────────────────────────────────────────────────────────
   certbot:
     image: certbot/certbot
     container_name: netily_certbot
@@ -286,9 +252,6 @@ services:
     networks:
       - isp_network
 
-  # ────────────────────────────────────────────────────────────────
-  # OPENVPN SERVER (The Veins)
-  # ────────────────────────────────────────────────────────────────
   openvpn:
     image: kylemanna/openvpn:latest
     container_name: netily-openvpn
@@ -311,12 +274,9 @@ services:
              echo 'Waiting for tun0...' &&
              while ! ip link show tun0 > /dev/null 2>&1; do sleep 1; done &&
              echo 'tun0 is up! Applying Forwarding Rules...' &&
-             
              iptables -t nat -I POSTROUTING -o tun0 -j MASQUERADE &&
-             
              iptables -I FORWARD -i tun0 -p udp -m multiport --dports 1812,1813 -j ACCEPT &&
              iptables -I FORWARD -o tun0 -p udp -m multiport --sports 1812,1813 -j ACCEPT &&
-             
              echo 'Waiting for RADIUS container to be resolvable...' &&
              for i in $$(seq 1 30); do
                BASE_IP=$$(getent hosts netily-radius-isp | awk '{ print $$1 }')
@@ -327,19 +287,21 @@ services:
                echo \"Attempt $$i/30: netily-radius-isp not yet resolvable, sleeping 2s...\"
                sleep 2
              done &&
-             
              if [ -n \"$$BASE_IP\" ]; then
                echo \"Forwarding 1812/1813 to Shared Radius ($$BASE_IP)\" &&
-               iptables -t nat -C PREROUTING -i tun0 -p udp --dport 1812 -j DNAT --to-destination $$BASE_IP:1812 2>/dev/null || \
+               iptables -t nat -C PREROUTING -i tun0 -p udp --dport 1812 -j DNAT --to-destination $$BASE_IP:1812 2>/dev/null ||
                iptables -t nat -A PREROUTING -i tun0 -p udp --dport 1812 -j DNAT --to-destination $$BASE_IP:1812 &&
-               
-               iptables -t nat -C PREROUTING -i tun0 -p udp --dport 1813 -j DNAT --to-destination $$BASE_IP:1813 2>/dev/null || \
+               iptables -t nat -C PREROUTING -i tun0 -p udp --dport 1813 -j DNAT --to-destination $$BASE_IP:1813 2>/dev/null ||
                iptables -t nat -A PREROUTING -i tun0 -p udp --dport 1813 -j DNAT --to-destination $$BASE_IP:1813 &&
-               echo \"RADIUS forwarding rules applied\"
+               echo \"Adding SNAT rules to ensure return path through tunnel...\" &&
+               iptables -t nat -C POSTROUTING -s $${VPN_NETWORK_CIDR:-10.8.0.0/16} -d $$BASE_IP -p udp --dport 1812 -j MASQUERADE 2>/dev/null ||
+               iptables -t nat -A POSTROUTING -s $${VPN_NETWORK_CIDR:-10.8.0.0/16} -d $$BASE_IP -p udp --dport 1812 -j MASQUERADE &&
+               iptables -t nat -C POSTROUTING -s $${VPN_NETWORK_CIDR:-10.8.0.0/16} -d $$BASE_IP -p udp --dport 1813 -j MASQUERADE 2>/dev/null ||
+               iptables -t nat -A POSTROUTING -s $${VPN_NETWORK_CIDR:-10.8.0.0/16} -d $$BASE_IP -p udp --dport 1813 -j MASQUERADE &&
+               echo \"RADIUS DNAT + SNAT rules applied\"
              else
                echo \"ERROR: Shared RADIUS container not found after 30 attempts\"
              fi &&
-             
              echo 'All Rules Applied.' &&
              wait"
     sysctls:
@@ -356,9 +318,6 @@ services:
         aliases:
           - netily-openvpn-vpn
 
-# ────────────────────────────────────────────────────────────────
-# NETWORKS
-# ────────────────────────────────────────────────────────────────
 networks:
   isp_network:
     driver: bridge
@@ -368,9 +327,6 @@ networks:
       config:
         - subnet: 10.10.0.0/24
 
-# ────────────────────────────────────────────────────────────────
-# VOLUMES
-# ────────────────────────────────────────────────────────────────
 volumes:
   postgres_data:
   redis_data:
