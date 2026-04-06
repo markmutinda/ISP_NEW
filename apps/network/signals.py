@@ -1,6 +1,7 @@
 from django.db.models.signals import post_save, post_delete
 from django.dispatch import receiver
 from django.db import transaction
+from django.core.cache import cache
 from apps.network.models.router_models import Router
 from apps.radius.models import Nas
 from apps.vpn.services.vpn_provisioning_service import VPNProvisioningService
@@ -10,6 +11,9 @@ import logging
 import subprocess
 
 logger = logging.getLogger(__name__)
+
+RADIUS_RELOAD_LOCK_KEY = "radius_reload_lock"
+RADIUS_RELOAD_LOCK_TTL = 8  # seconds
 
 def sanitize_string(value: str) -> str:
     """
@@ -25,32 +29,26 @@ def sanitize_string(value: str) -> str:
 
 def reload_radius_clients_now() -> None:
     """
-    Immediately reload FreeRADIUS clients (no Celery queue delay).
-    Runs after DB commit via transaction.on_commit.
-    
-    Attempts multiple methods to reload FreeRADIUS:
-    1. pkill -HUP freeradius (gentle reload)
-    2. pkill -HUP radiusd (alternative process name)
-    3. docker restart netily_radius (fallback - full restart)
+    Force FreeRADIUS to pick up new SQL clients by container restart.
+    Debounced to avoid restart storms on repeated router saves.
     """
-    cmds = [
-        ["docker", "exec", "netily_radius", "pkill", "-HUP", "freeradius"],
-        ["docker", "exec", "netily_radius", "pkill", "-HUP", "radiusd"],
-        ["docker", "restart", "netily_radius"],  # final fallback
-    ]
+    # add() returns False if key already exists
+    if not cache.add(RADIUS_RELOAD_LOCK_KEY, "1", timeout=RADIUS_RELOAD_LOCK_TTL):
+        logger.info("[RADIUS RELOAD] Skipped (debounced).")
+        return
 
-    for cmd in cmds:
-        try:
-            r = subprocess.run(cmd, capture_output=True, text=True, timeout=20)
-            if r.returncode == 0:
-                logger.info("[RADIUS RELOAD] Success via: %s", " ".join(cmd))
-                return
-            logger.warning("[RADIUS RELOAD] Failed rc=%s via %s stderr=%s",
-                           r.returncode, " ".join(cmd), (r.stderr or "").strip())
-        except Exception as e:
-            logger.warning("[RADIUS RELOAD] Exception via %s: %s", " ".join(cmd), e)
-
-    logger.error("[RADIUS RELOAD] All reload methods failed.")
+    cmd = ["docker", "restart", "netily_radius"]
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        if r.returncode == 0:
+            logger.info("[RADIUS RELOAD] Restarted netily_radius successfully.")
+        else:
+            logger.error(
+                "[RADIUS RELOAD] Restart failed rc=%s stderr=%s",
+                r.returncode, (r.stderr or "").strip()
+            )
+    except Exception as e:
+        logger.exception("[RADIUS RELOAD] Restart exception: %s", e)
 
 
 @receiver(post_save, sender=Router)
