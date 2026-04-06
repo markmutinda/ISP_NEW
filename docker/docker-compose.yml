@@ -333,23 +333,23 @@ services:
              iptables -I FORWARD -o tun0 -p udp -m multiport --sports 1812,1813 -j ACCEPT &&
              
              echo 'Waiting for RADIUS container to be resolvable...' &&
-             for i in \$(seq 1 30); do
-               BASE_IP=\$(getent hosts netily-radius-vpn | awk '{ print \$1 }')
-               if [ -n \"\$BASE_IP\" ]; then
-                 echo \"RADIUS container resolved to: \$BASE_IP (attempt \$i)\"
+             for i in $$(seq 1 30); do
+               BASE_IP=$$(getent hosts netily-radius-vpn | awk '{ print $$1 }')
+               if [ -n \"$$BASE_IP\" ]; then
+                 echo \"RADIUS container resolved to: $$BASE_IP (attempt $$i)\"
                  break
                fi
-               echo \"Attempt \$i/30: netily-radius-vpn not yet resolvable, sleeping 2s...\"
+               echo \"Attempt $$i/30: netily-radius-vpn not yet resolvable, sleeping 2s...\"
                sleep 2
              done &&
              
-             if [ -n \"\$BASE_IP\" ]; then
-               echo \"Forwarding 1812/1813 to Shared Radius (\$BASE_IP)\" &&
-               iptables -t nat -C PREROUTING -i tun0 -p udp --dport 1812 -j DNAT --to-destination \$BASE_IP:1812 2>/dev/null || \
-               iptables -t nat -A PREROUTING -i tun0 -p udp --dport 1812 -j DNAT --to-destination \$BASE_IP:1812 &&
+             if [ -n \"$$BASE_IP\" ]; then
+               echo \"Forwarding 1812/1813 to Shared Radius ($$BASE_IP)\" &&
+               iptables -t nat -C PREROUTING -i tun0 -p udp --dport 1812 -j DNAT --to-destination $$BASE_IP:1812 2>/dev/null || \
+               iptables -t nat -A PREROUTING -i tun0 -p udp --dport 1812 -j DNAT --to-destination $$BASE_IP:1812 &&
                
-               iptables -t nat -C PREROUTING -i tun0 -p udp --dport 1813 -j DNAT --to-destination \$BASE_IP:1813 2>/dev/null || \
-               iptables -t nat -A PREROUTING -i tun0 -p udp --dport 1813 -j DNAT --to-destination \$BASE_IP:1813 &&
+               iptables -t nat -C PREROUTING -i tun0 -p udp --dport 1813 -j DNAT --to-destination $$BASE_IP:1813 2>/dev/null || \
+               iptables -t nat -A PREROUTING -i tun0 -p udp --dport 1813 -j DNAT --to-destination $$BASE_IP:1813 &&
                echo \"RADIUS forwarding rules applied\";
              else
                echo \"ERROR: Shared RADIUS container not found after 30 attempts\";
