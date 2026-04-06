@@ -176,11 +176,14 @@ services:
     container_name: netily_radius
     restart: unless-stopped
     command: freeradius -f -X
+    cap_add:
+      - NET_ADMIN
     env_file: ../.env
     environment:
       - DB_HOST=netily_db
       - DB_PORT=5432
       - DB_SCHEMA=public
+      - VPN_NETWORK_CIDR=${VPN_NETWORK_CIDR:-10.8.0.0/16}
     volumes:
       - ../radius_config/sites-available/default:/etc/freeradius/sites-enabled/default:ro
       - ../radius_config/mods-config/sql/main/postgresql/queries.conf:/etc/freeradius/mods-config/sql/main/postgresql/queries.conf:ro
@@ -293,12 +296,7 @@ services:
                iptables -t nat -A PREROUTING -i tun0 -p udp --dport 1812 -j DNAT --to-destination $$BASE_IP:1812 &&
                iptables -t nat -C PREROUTING -i tun0 -p udp --dport 1813 -j DNAT --to-destination $$BASE_IP:1813 2>/dev/null ||
                iptables -t nat -A PREROUTING -i tun0 -p udp --dport 1813 -j DNAT --to-destination $$BASE_IP:1813 &&
-               echo \"Adding SNAT rules to ensure return path through tunnel...\" &&
-               iptables -t nat -C POSTROUTING -s $${VPN_NETWORK_CIDR:-10.8.0.0/16} -d $$BASE_IP -p udp --dport 1812 -j MASQUERADE 2>/dev/null ||
-               iptables -t nat -A POSTROUTING -s $${VPN_NETWORK_CIDR:-10.8.0.0/16} -d $$BASE_IP -p udp --dport 1812 -j MASQUERADE &&
-               iptables -t nat -C POSTROUTING -s $${VPN_NETWORK_CIDR:-10.8.0.0/16} -d $$BASE_IP -p udp --dport 1813 -j MASQUERADE 2>/dev/null ||
-               iptables -t nat -A POSTROUTING -s $${VPN_NETWORK_CIDR:-10.8.0.0/16} -d $$BASE_IP -p udp --dport 1813 -j MASQUERADE &&
-               echo \"RADIUS DNAT + SNAT rules applied\"
+               echo \"RADIUS DNAT rules applied\"
              else
                echo \"ERROR: Shared RADIUS container not found after 30 attempts\"
              fi &&
