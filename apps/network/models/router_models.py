@@ -358,9 +358,8 @@ class Router(AuditMixin):
         Do NOT sync to the global map unless we have a VPN IP.
         The VPN IP is what the RADIUS server sees as the NAS-IP-Address.
         
-        FIX: This method explicitly switches to the 'public' schema to query
-        the Tenant table, because the Tenant model lives in the public schema
-        in django-tenants architecture.
+        FIX: Uses self.schema_name and self.tenant_subdomain directly
+        instead of relying on connection.schema_name inside public context.
         """
         import logging
         logger = logging.getLogger(__name__)
@@ -372,26 +371,28 @@ class Router(AuditMixin):
 
         from apps.core.models import GlobalRouterMap, Tenant
         from django_tenants.utils import schema_context
-        from django.db import connection
 
         try:
             # We MUST query the Tenant table from the 'public' schema
             with schema_context('public'):
-                # We know the current schema from the connection, but we need to find 
-                # the actual Tenant object that corresponds to it in the public table.
-                current_schema = connection.schema_name
-                
-                # Fetch the Tenant object safely from the public schema
-                current_tenant = Tenant.objects.filter(schema_name=current_schema).first()
-                
-                # Fallback: Try using tenant_subdomain if schema_name fails
+                # FIXED: Use self.schema_name first instead of connection.schema_name
+                current_tenant = None
+
+                if self.schema_name:
+                    current_tenant = Tenant.objects.filter(schema_name=self.schema_name).first()
+                    if current_tenant:
+                        logger.debug(f"[GLOBAL MAP] Found tenant by schema_name: {self.schema_name}")
+
                 if not current_tenant and self.tenant_subdomain:
                     current_tenant = Tenant.objects.filter(subdomain=self.tenant_subdomain).first()
                     if current_tenant:
                         logger.info(f"[GLOBAL MAP] Found tenant by subdomain: {self.tenant_subdomain}")
 
                 if not current_tenant:
-                    logger.error(f"[GLOBAL MAP] Cannot sync {self.name} - No tenant found for schema '{current_schema}'")
+                    logger.error(
+                        f"[GLOBAL MAP] Cannot sync {self.name} - No tenant found for "
+                        f"schema_name='{self.schema_name}', subdomain='{self.tenant_subdomain}'"
+                    )
                     return
 
                 # We only write what the GlobalRouterMap model actually contains

@@ -214,48 +214,45 @@ class VPNProvisioningService:
         """
         Register the router in the GlobalRouterMap (public schema).
         This makes the IP visible to all tenants for global uniqueness.
+        
+        FIXED: Uses router.shared_secret instead of router.radius_secret,
+        and resolves tenant using router's stored schema_name / tenant_subdomain.
         """
         from django_tenants.utils import schema_context, get_public_schema_name
         from apps.core.models import GlobalRouterMap, Tenant
 
         logger.info(f"Registering router {router.name} (IP: {vpn_ip}) in GlobalRouterMap")
 
+        # Capture tenant identity BEFORE switching schema
+        tenant_schema = getattr(router, "schema_name", None)
+        tenant_subdomain = getattr(router, "tenant_subdomain", None)
+
         with schema_context(get_public_schema_name()):
-            # Get the tenant that owns this router
-            # Since we're in the tenant's schema when this is called,
-            # we need to get the tenant reference from the public schema
             tenant = None
-            try:
-                # The current schema is the tenant's schema
-                current_schema = router._state.db if hasattr(router, '_state') else None
-                if current_schema:
-                    tenant = Tenant.objects.filter(schema_name=current_schema).first()
-            except Exception as e:
-                logger.warning(f"Could not resolve tenant for router {router.name}: {e}")
+            if tenant_schema:
+                tenant = Tenant.objects.filter(schema_name=tenant_schema).first()
+            if not tenant and tenant_subdomain:
+                tenant = Tenant.objects.filter(subdomain=tenant_subdomain).first()
 
             if not tenant:
-                # Fallback: try to get tenant by subdomain from router's tenant_subdomain field
-                if hasattr(router, 'tenant_subdomain') and router.tenant_subdomain:
-                    tenant = Tenant.objects.filter(subdomain=router.tenant_subdomain).first()
-
-            if not tenant:
-                logger.error(f"Cannot register router {router.name}: No tenant found")
+                logger.error(
+                    "Cannot register router %s: tenant not found (schema=%s, subdomain=%s)",
+                    router.name, tenant_schema, tenant_subdomain
+                )
                 return
 
             # Create or update GlobalRouterMap entry
-            global_entry, created = GlobalRouterMap.objects.update_or_create(
+            # FIXED: Use router.shared_secret instead of router.radius_secret
+            GlobalRouterMap.objects.update_or_create(
                 nas_ip=vpn_ip,
                 defaults={
-                    'nas_secret': router.radius_secret or 'default_secret',
-                    'tenant': tenant,
-                    'is_active': True,
-                }
+                    "nas_secret": router.shared_secret or "default_secret",
+                    "tenant": tenant,
+                    "is_active": True,
+                },
             )
             
-            if created:
-                logger.info(f"Created GlobalRouterMap entry: {vpn_ip} -> {tenant.schema_name}")
-            else:
-                logger.info(f"Updated GlobalRouterMap entry: {vpn_ip} -> {tenant.schema_name}")
+            logger.info(f"Registered GlobalRouterMap entry: {vpn_ip} -> {tenant.schema_name}")
 
     def _unregister_router_globally(self, router) -> None:
         """
