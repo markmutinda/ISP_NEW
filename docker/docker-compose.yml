@@ -61,15 +61,14 @@ services:
       dockerfile: docker/Dockerfile
     container_name: netily_backend
     restart: unless-stopped
-    # FIXED: Use $$ to escape variables for the container shell
+    # FIXED: Reduced workers from 4 to 2, removed --reload to save memory
     command: >
       sh -c "echo 'Setting up routes...' &&
              VPN_IP=$$(python -c \"import socket; print(socket.gethostbyname('netily-openvpn-vpn'))\") &&
              echo 'VPN Gateway found at: '$$VPN_IP &&
              ip route add 10.8.0.0/24 via $$VPN_IP || true &&
              echo 'Route added successfully!' &&
-             # --- ADDED --timeout 120 FOR LONG-RUNNING REQUESTS ---
-             gunicorn config.wsgi:application --bind 0.0.0.0:8000 --workers 4 --timeout 120 --reload"
+             gunicorn config.wsgi:application --bind 0.0.0.0:8000 --workers 2 --timeout 120"
     working_dir: /app
     volumes:
       - ../:/app
@@ -105,7 +104,7 @@ services:
     deploy:
       resources:
         limits:
-          memory: 250M
+          memory: 512M  # Increased from 250M to 512M
     networks:
       - isp_network
       - vpn_network
@@ -125,7 +124,7 @@ services:
       sh -c "VPN_IP=$$(getent hosts netily-openvpn-vpn | awk '{ print $$1 }') &&
              echo 'VPN Gateway found at: '$$VPN_IP &&
              ip route add 10.8.0.0/24 via $$VPN_IP || true &&
-             celery -A config worker -l info --concurrency=4"
+             celery -A config worker -l info --concurrency=2"  # Reduced from 4 to 2
     volumes:
       - ../:/app
       - /var/run/docker.sock:/var/run/docker.sock
