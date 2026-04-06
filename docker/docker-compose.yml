@@ -18,7 +18,6 @@ services:
       - POSTGRES_DB=${DB_NAME:-isp_management}
       - POSTGRES_USER=${DB_USER:-isp_user}
       - POSTGRES_PASSWORD=${DB_PASSWORD:-changeme}
-    # Do NOT expose to the internet — only internal
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U isp_user -d isp_management"]
       interval: 10s
@@ -61,11 +60,9 @@ services:
       dockerfile: docker/Dockerfile
     container_name: netily_backend
     restart: unless-stopped
-    # FIXED: Reduced workers from 4 to 2, removed --reload to save memory
-    # UPDATED: Use VPN_NETWORK_CIDR from environment (defaults to /16)
     command: >
       sh -c "echo 'Setting up routes...' &&
-             VPN_IP=$$(python -c \"import socket; print(socket.gethostbyname('netily-openvpn-vpn'))\") &&
+             VPN_IP=$$(getent hosts netily-openvpn-isp | awk '{ print $$1 }') &&
              echo 'VPN Gateway found at: '$$VPN_IP &&
              echo 'Adding route for '$${VPN_NETWORK_CIDR:-10.8.0.0/16}' via '$$VPN_IP &&
              ip route add $${VPN_NETWORK_CIDR:-10.8.0.0/16} via $$VPN_IP || true &&
@@ -122,9 +119,8 @@ services:
     container_name: netily_worker
     restart: unless-stopped
     working_dir: /app
-    # UPDATED: Use VPN_NETWORK_CIDR from environment
     command: >
-      sh -c "VPN_IP=$$(getent hosts netily-openvpn-vpn | awk '{ print $$1 }') &&
+      sh -c "VPN_IP=$$(getent hosts netily-openvpn-isp | awk '{ print $$1 }') &&
              echo 'VPN Gateway found at: '$$VPN_IP &&
              echo 'Adding route for '$${VPN_NETWORK_CIDR:-10.8.0.0/16}' via '$$VPN_IP &&
              ip route add $${VPN_NETWORK_CIDR:-10.8.0.0/16} via $$VPN_IP || true &&
@@ -193,7 +189,7 @@ services:
       - isp_network
 
   # ────────────────────────────────────────────────────────────────
-  # FREERADIUS SERVER (SHARED CENTRAL SERVER) - FIXED WITH ROUTING
+  # FREERADIUS SERVER (SHARED CENTRAL SERVER)
   # ────────────────────────────────────────────────────────────────
   radius:
     build:
@@ -201,29 +197,29 @@ services:
       dockerfile: docker/Dockerfile.radius
     container_name: netily_radius
     restart: unless-stopped
-    # ADDED NET_ADMIN capability for routing
     cap_add:
       - NET_ADMIN
-    # UPDATED: Use VPN_NETWORK_CIDR from environment
     command: >
       sh -c "echo 'Setting up routes...' &&
-             VPN_IP=$$(getent hosts netily-openvpn-vpn | awk '{ print $$1 }') &&
-             echo 'VPN Gateway found at: '$$VPN_IP &&
-             echo 'Adding route for '$${VPN_NETWORK_CIDR:-10.8.0.0/16}' via '$$VPN_IP &&
-             ip route add $${VPN_NETWORK_CIDR:-10.8.0.0/16} via $$VPN_IP || true &&
-             echo 'Route added! Starting RADIUS...' &&
+             VPN_GW=$$(getent hosts netily-openvpn-isp | awk '{ print $$1 }') &&
+             if [ -z \"$$VPN_GW\" ]; then
+               echo 'ERROR: netily-openvpn-isp not resolvable, exiting...'
+               exit 1
+             fi &&
+             echo 'VPN Gateway found at: '$$VPN_GW &&
+             echo 'Adding route for '$${VPN_NETWORK_CIDR:-10.8.0.0/16}' via '$$VPN_GW &&
+             ip route replace $${VPN_NETWORK_CIDR:-10.8.0.0/16} via $$VPN_GW &&
+             echo 'Route added successfully!' &&
+             echo 'Starting RADIUS...' &&
              freeradius -f -X"
     env_file: ../.env
     environment:
       - DB_HOST=netily_db
       - DB_PORT=5432
-      # --- Force public schema for NAS lookup ---
       - DB_SCHEMA=public
       - VPN_NETWORK_CIDR=${VPN_NETWORK_CIDR:-10.8.0.0/16}
     volumes:
-      # --- Wire the dynamic routing config (THE BRAIN) ---
       - ../radius_config/sites-available/default:/etc/freeradius/sites-enabled/default:ro
-      # --- Wire the dynamic SQL queries (SCHEMA ROUTING) ---
       - ../radius_config/mods-config/sql/main/postgresql/queries.conf:/etc/freeradius/mods-config/sql/main/postgresql/queries.conf:ro
     depends_on:
       db:
@@ -236,6 +232,8 @@ services:
           memory: 60M
     networks:
       isp_network:
+        aliases:
+          - netily-radius-isp
       vpn_network:
         aliases:
           - netily-radius-vpn
@@ -296,7 +294,6 @@ services:
     volumes:
       - certbot_www:/var/www/certbot
       - certbot_certs:/etc/letsencrypt
-    # Runs once then exits — renew via cron on host
     entrypoint: "/bin/sh -c 'trap exit TERM; while :; do sleep 6h & wait $${!}; certbot renew; done;'"
     networks:
       - isp_network
@@ -334,12 +331,12 @@ services:
              
              echo 'Waiting for RADIUS container to be resolvable...' &&
              for i in $$(seq 1 30); do
-               BASE_IP=$$(getent hosts netily-radius-vpn | awk '{ print $$1 }')
+               BASE_IP=$$(getent hosts netily-radius-isp | awk '{ print $$1 }')
                if [ -n \"$$BASE_IP\" ]; then
                  echo \"RADIUS container resolved to: $$BASE_IP (attempt $$i)\"
                  break
                fi
-               echo \"Attempt $$i/30: netily-radius-vpn not yet resolvable, sleeping 2s...\"
+               echo \"Attempt $$i/30: netily-radius-isp not yet resolvable, sleeping 2s...\"
                sleep 2
              done &&
              
@@ -350,9 +347,9 @@ services:
                
                iptables -t nat -C PREROUTING -i tun0 -p udp --dport 1813 -j DNAT --to-destination $$BASE_IP:1813 2>/dev/null || \
                iptables -t nat -A PREROUTING -i tun0 -p udp --dport 1813 -j DNAT --to-destination $$BASE_IP:1813 &&
-               echo \"RADIUS forwarding rules applied\";
+               echo \"RADIUS forwarding rules applied\"
              else
-               echo \"ERROR: Shared RADIUS container not found after 30 attempts\";
+               echo \"ERROR: Shared RADIUS container not found after 30 attempts\"
              fi &&
              
              echo 'All Rules Applied.' &&
@@ -364,10 +361,12 @@ services:
         limits:
           memory: 50M
     networks:
+      isp_network:
+        aliases:
+          - netily-openvpn-isp
       vpn_network:
         aliases:
           - netily-openvpn-vpn
-      isp_network:
 
 # ────────────────────────────────────────────────────────────────
 # NETWORKS
