@@ -19,7 +19,8 @@ class NotificationsConfig(AppConfig):
             # to hang during startup (Database isn't ready yet).
             # self.create_default_templates()
             
-            logger.info("Notifications app initialized successfully")
+            # Changed from INFO to DEBUG to reduce log noise in production
+            logger.debug("Notifications app initialized")
             
         except Exception as e:
             logger.warning(f"Notifications initialized with simulated services: {str(e)}")

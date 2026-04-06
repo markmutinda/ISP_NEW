@@ -139,7 +139,7 @@ elif _droplet_ip:
     BASE_URL = f"http://{_droplet_ip}"
 
 # ────────────────────────────────────────────────────────────────
-#  LOGGING — structured for Railway log drain
+#  LOGGING — reduced verbosity for production VPS
 # ────────────────────────────────────────────────────────────────
 LOGGING = {
     'version': 1,
@@ -158,12 +158,12 @@ LOGGING = {
     },
     'root': {
         'handlers': ['console'],
-        'level': 'INFO',
+        'level': 'WARNING',  # Changed from INFO to WARNING
     },
     'loggers': {
         'django': {'handlers': ['console'], 'level': 'WARNING', 'propagate': False},
         'django.request': {'handlers': ['console'], 'level': 'ERROR', 'propagate': False},
-        'apps': {'handlers': ['console'], 'level': 'INFO', 'propagate': False},
+        'apps': {'handlers': ['console'], 'level': 'WARNING', 'propagate': False},  # Changed from INFO to WARNING
     },
 }
 

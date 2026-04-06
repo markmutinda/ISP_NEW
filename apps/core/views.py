@@ -72,19 +72,8 @@ class CustomTokenObtainPairView(TokenObtainPairView):
     serializer_class = CustomTokenObtainPairSerializer
 
     def post(self, request, *args, **kwargs):
-        print(f"DEBUG: Request data: {request.data}")
-        print(f"DEBUG: Content-Type: {request.content_type}")
-        
-        try:
-            response = super().post(request, *args, **kwargs)
-            print(f"DEBUG: Response: {response.data}")
-            return response
-        except Exception as e:
-            print(f"DEBUG: Exception: {str(e)}")
-            print(f"DEBUG: Exception type: {type(e)}")
-            import traceback
-            traceback.print_exc()
-            raise
+        # Removed sensitive debug prints
+        return super().post(request, *args, **kwargs)
 
 # In RegisterView class, update the create method:
 
@@ -817,8 +806,8 @@ class CompanyRegisterView(generics.CreateAPIView):
         user.set_password(data['admin_password'])
         user.save()
     
-        print(f"DEBUG: Created user {user.email} with company_name={user.company_name}, tenant_subdomain={user.tenant_subdomain}")
-    
+        # Removed sensitive debug print line
+        
         # Switch back to public schema
         connection.set_schema_to_public()
         

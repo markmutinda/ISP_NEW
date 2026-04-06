@@ -1,6 +1,7 @@
 """
 Serializers for core app
 """
+import logging
 from rest_framework import serializers
 from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
 from rest_framework_simplejwt.tokens import RefreshToken
@@ -11,6 +12,8 @@ from rest_framework_simplejwt.serializers import TokenRefreshSerializer  # Alrea
 from django.utils import timezone
 from django.contrib.auth.password_validation import validate_password
 from .models import User, Company, Tenant, SystemSettings, AuditLog, Changelog, FeatureRequest, FeatureUpvote  # Add FeatureRequest and FeatureUpvote here
+
+logger = logging.getLogger(__name__)
 
 
 class UserSerializer(serializers.ModelSerializer):
@@ -214,11 +217,13 @@ class LoginSerializer(serializers.Serializer):
         user = authenticate(email=email, password=password)
         
         if not user:
+            logger.warning("Login failed for email=%s", email)
             raise serializers.ValidationError({
                 "email": "Invalid email or password."
             })
         
         if not user.is_active:
+            logger.warning("Login attempted for inactive account: email=%s", email)
             raise serializers.ValidationError({
                 "email": "Account is deactivated."
             })
@@ -229,6 +234,8 @@ class LoginSerializer(serializers.Serializer):
         # Update last login
         user.last_login = timezone.now()
         user.save(update_fields=['last_login'])
+        
+        logger.info("Login successful for user_id=%s, email=%s", user.id, user.email)
         
         data['user'] = user
         data['token'] = str(refresh.access_token)
@@ -248,6 +255,7 @@ class TokenRefreshSerializer(serializers.Serializer):
         try:
             token = RefreshToken(refresh)
         except Exception as e:
+            logger.warning("Token refresh failed: invalid token")
             raise serializers.ValidationError({
                 "refresh": "Invalid refresh token."
             })
@@ -257,12 +265,15 @@ class TokenRefreshSerializer(serializers.Serializer):
         try:
             user = User.objects.get(id=user_id)
         except User.DoesNotExist:
+            logger.warning("Token refresh failed: user not found - user_id=%s", user_id)
             raise serializers.ValidationError({
                 "refresh": "User not found."
             })
         
         # Generate new access token
         new_access_token = RefreshToken.for_user(user).access_token
+        
+        logger.debug("Token refreshed successfully for user_id=%s", user.id)
         
         data['access'] = str(new_access_token)
         return data
@@ -297,6 +308,7 @@ class PasswordChangeSerializer(serializers.Serializer):
     def validate_current_password(self, value):
         user = self.context['request'].user
         if not user.check_password(value):
+            logger.warning("Password change failed: incorrect current password for user_id=%s", user.id)
             raise serializers.ValidationError("Current password is incorrect.")
         return value
 
@@ -308,6 +320,7 @@ class PasswordChangeSerializer(serializers.Serializer):
         user = self.context['request'].user
         user.set_password(self.validated_data['new_password'])
         user.save()
+        logger.info("Password changed successfully for user_id=%s", user.id)
 
 class CompanySerializer(serializers.ModelSerializer):
     """Serializer for Company model"""
@@ -443,11 +456,12 @@ class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
     email = serializers.EmailField()
     
     def validate(self, attrs):
-        print(f"DEBUG: Login attempt with attrs: {attrs}")
+        logger.debug("JWT login attempt received")
         
         # Get email from attrs
         email = attrs.get('email')
         if not email:
+            logger.warning("JWT login failed: missing email")
             raise serializers.ValidationError("Email is required")
         
         # Map email to username for parent class
@@ -468,11 +482,11 @@ class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
                 'is_superuser': user.is_superuser,
             }
             
-            print(f"DEBUG: Login successful for {user.email}")
+            logger.info("JWT login success for user_id=%s", user.id)
             return data
             
         except Exception as e:
-            print(f"DEBUG: JWT authentication error: {str(e)}")
+            logger.warning("JWT login failed: %s", str(e))
             raise serializers.ValidationError({
                 "detail": "Invalid email or password."
             })
@@ -502,6 +516,7 @@ class CustomTokenRefreshSerializer(TokenRefreshSerializer):
         try:
             return super().validate(attrs)
         except User.DoesNotExist:
+            logger.warning("Token refresh failed: user no longer exists")
             raise InvalidToken('User no longer exists')
 
 class CompanyRegisterSerializer(serializers.Serializer):
