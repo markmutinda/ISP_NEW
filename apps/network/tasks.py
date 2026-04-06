@@ -1,4 +1,5 @@
 import logging
+import subprocess
 import time
 from celery import shared_task
 from django_tenants.utils import get_tenant_model, schema_context
@@ -45,3 +46,18 @@ def refresh_router_statuses():
     total_ms = int((time.perf_counter() - started) * 1000)
     logger.info(f"[ROUTER STATUS] complete refreshed={total} errors={errors} duration_ms={total_ms}")
     return {"refreshed": total, "errors": errors, "duration_ms": total_ms}
+
+
+@shared_task(bind=True, autoretry_for=(Exception,), retry_backoff=True, max_retries=5)
+def reload_radius_clients(self):
+    """
+    Reload FreeRADIUS clients list so new GlobalRouterMap entries are recognized.
+    """
+    cmd = ["docker", "exec", "netily_radius", "radmin", "-e", "hup"]
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=20)
+
+    if result.returncode != 0:
+        raise RuntimeError(f"radmin hup failed: {result.stderr.strip()}")
+
+    logger.info("Triggered FreeRADIUS HUP to reload clients.")
+    return {"ok": True, "stdout": result.stdout.strip()}

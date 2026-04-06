@@ -1,8 +1,10 @@
 from django.db.models.signals import post_save, post_delete
 from django.dispatch import receiver
+from django.db import transaction
 from apps.network.models.router_models import Router
 from apps.radius.models import Nas
 from apps.vpn.services.vpn_provisioning_service import VPNProvisioningService
+from apps.network.tasks import reload_radius_clients
 from django.db import connection
 from django_tenants.utils import schema_context
 import logging
@@ -27,6 +29,7 @@ def handle_router_lifecycle(sender, instance, created, **kwargs):
     Orchestrates the Router lifecycle:
     1. Provision VPN (IP, Certs, CCD) if needed.
     2. Sync to RADIUS NAS whitelist ONLY if an IP exists.
+    3. Trigger RADIUS client reload after commit.
     """
     # 1. Prevent infinite loops during provisioning saves
     if kwargs.get('update_fields') and 'vpn_provisioned' in kwargs.get('update_fields'):
@@ -72,6 +75,10 @@ def handle_router_lifecycle(sender, instance, created, **kwargs):
             server='Default'
         )
         logger.info(f"[RADIUS AUTO-SYNC] Added {instance.name} ({nas_ip}) to {connection.schema_name} NAS table.")
+        
+        # Trigger RADIUS client reload after DB commit succeeds
+        transaction.on_commit(lambda: reload_radius_clients.delay())
+        
     except Exception as e:
         logger.error(f"RADIUS NAS sync failed for {instance.name}: {e}")
 
@@ -87,6 +94,9 @@ def cleanup_router_radius_nas(sender, instance, **kwargs):
         deleted_count, _ = Nas.objects.filter(shortname=instance.name).delete()
         if deleted_count > 0:
             logger.info(f"[RADIUS CLEANUP] Removed {instance.name} from {connection.schema_name} NAS table.")
+            
+            # Trigger RADIUS client reload after DB commit succeeds
+            transaction.on_commit(lambda: reload_radius_clients.delay())
     except Exception as e:
         logger.error(f"Failed to cleanup RADIUS NAS for {instance.name}: {e}")
 
@@ -128,6 +138,9 @@ def cleanup_global_router_map(sender, instance, **kwargs):
             deleted_count = GlobalRouterMap.objects.filter(nas_ip=nas_ip).delete()[0]
             if deleted_count > 0:
                 logger.info(f"[GLOBAL CLEANUP] Removed {instance.name} ({nas_ip}) from GlobalRouterMap.")
+                
+                # Trigger RADIUS client reload after DB commit succeeds
+                transaction.on_commit(lambda: reload_radius_clients.delay())
             else:
                 logger.debug(f"[GLOBAL CLEANUP] No GlobalRouterMap entry found for {instance.name} ({nas_ip})")
         except Exception as e:
