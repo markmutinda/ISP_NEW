@@ -62,11 +62,13 @@ services:
     container_name: netily_backend
     restart: unless-stopped
     # FIXED: Reduced workers from 4 to 2, removed --reload to save memory
+    # UPDATED: Use VPN_NETWORK_CIDR from environment (defaults to /16)
     command: >
       sh -c "echo 'Setting up routes...' &&
              VPN_IP=$$(python -c \"import socket; print(socket.gethostbyname('netily-openvpn-vpn'))\") &&
              echo 'VPN Gateway found at: '$$VPN_IP &&
-             ip route add 10.8.0.0/24 via $$VPN_IP || true &&
+             echo 'Adding route for '$${VPN_NETWORK_CIDR:-10.8.0.0/16}' via '$$VPN_IP &&
+             ip route add $${VPN_NETWORK_CIDR:-10.8.0.0/16} via $$VPN_IP || true &&
              echo 'Route added successfully!' &&
              gunicorn config.wsgi:application --bind 0.0.0.0:8000 --workers 2 --timeout 120"
     working_dir: /app
@@ -90,6 +92,7 @@ services:
       - VPN_GATEWAY_IP=${VPN_GATEWAY_IP:-10.8.0.1}
       - BASE_URL=${BASE_URL:-https://api.netily.co.ke}
       - FRONTEND_URL=${FRONTEND_URL:-https://netily.co.ke}
+      - VPN_NETWORK_CIDR=${VPN_NETWORK_CIDR:-10.8.0.0/16}
     cap_add:
       - NET_ADMIN
     depends_on:
@@ -104,7 +107,7 @@ services:
     deploy:
       resources:
         limits:
-          memory: 512M  # Increased from 250M to 512M
+          memory: 512M
     networks:
       - isp_network
       - vpn_network
@@ -119,12 +122,13 @@ services:
     container_name: netily_worker
     restart: unless-stopped
     working_dir: /app
-    # FIXED: Use $$ to escape variables for the container shell
+    # UPDATED: Use VPN_NETWORK_CIDR from environment
     command: >
       sh -c "VPN_IP=$$(getent hosts netily-openvpn-vpn | awk '{ print $$1 }') &&
              echo 'VPN Gateway found at: '$$VPN_IP &&
-             ip route add 10.8.0.0/24 via $$VPN_IP || true &&
-             celery -A config worker -l info --concurrency=2"  # Reduced from 4 to 2
+             echo 'Adding route for '$${VPN_NETWORK_CIDR:-10.8.0.0/16}' via '$$VPN_IP &&
+             ip route add $${VPN_NETWORK_CIDR:-10.8.0.0/16} via $$VPN_IP || true &&
+             celery -A config worker -l info --concurrency=2"
     volumes:
       - ../:/app
       - /var/run/docker.sock:/var/run/docker.sock
@@ -139,6 +143,7 @@ services:
       - DB_PORT=5432
       - OPENVPN_MANAGEMENT_HOST=netily-openvpn
       - VPN_GATEWAY_IP=${VPN_GATEWAY_IP:-10.8.0.1}
+      - VPN_NETWORK_CIDR=${VPN_NETWORK_CIDR:-10.8.0.0/16}
     cap_add:
       - NET_ADMIN
     depends_on:
@@ -199,12 +204,13 @@ services:
     # ADDED NET_ADMIN capability for routing
     cap_add:
       - NET_ADMIN
-    # FIXED: Use the vpn-specific alias for reliable resolution
+    # UPDATED: Use VPN_NETWORK_CIDR from environment
     command: >
       sh -c "echo 'Setting up routes...' &&
              VPN_IP=$$(getent hosts netily-openvpn-vpn | awk '{ print $$1 }') &&
              echo 'VPN Gateway found at: '$$VPN_IP &&
-             ip route add 10.8.0.0/24 via $$VPN_IP || true &&
+             echo 'Adding route for '$${VPN_NETWORK_CIDR:-10.8.0.0/16}' via '$$VPN_IP &&
+             ip route add $${VPN_NETWORK_CIDR:-10.8.0.0/16} via $$VPN_IP || true &&
              echo 'Route added! Starting RADIUS...' &&
              freeradius -f -X"
     env_file: ../.env
@@ -213,6 +219,7 @@ services:
       - DB_PORT=5432
       # --- Force public schema for NAS lookup ---
       - DB_SCHEMA=public
+      - VPN_NETWORK_CIDR=${VPN_NETWORK_CIDR:-10.8.0.0/16}
     volumes:
       # --- Wire the dynamic routing config (THE BRAIN) ---
       - ../radius_config/sites-available/default:/etc/freeradius/sites-enabled/default:ro
@@ -306,16 +313,14 @@ services:
     ports:
       - "1194:1194/udp"
       - "1194:1194/tcp"
-      # 🚨 REMOVED 7505 AND 8728 HERE FOR SECURITY 🚨
     volumes:
       - openvpn_data:/etc/openvpn
       - openvpn_ccd:/etc/openvpn/ccd
       - openvpn_logs:/var/log/openvpn
-      # --- Mount the dynamic ports map folder ---
       - ../radius_config/ports:/etc/openvpn/ports:ro
     environment:
-      - OPENVPN_OPTS=--management 0.0.0.0 7505 # Allow internal docker access
-    # FIXED: Added bi-directional FORWARD rules for RADIUS traffic
+      - OPENVPN_OPTS=--management 0.0.0.0 7505
+      - VPN_NETWORK_CIDR=${VPN_NETWORK_CIDR:-10.8.0.0/16}
     command: >
       sh -c "ovpn_run &
              echo 'Waiting for tun0...' &&
@@ -324,21 +329,30 @@ services:
              
              iptables -t nat -I POSTROUTING -o tun0 -j MASQUERADE &&
              
-             # --- FIX: Explicitly allow RADIUS traffic in BOTH directions ---
-             # Allow traffic coming INTO the tunnel (request from router to RADIUS)
              iptables -I FORWARD -i tun0 -p udp -m multiport --dports 1812,1813 -j ACCEPT &&
-             # Allow traffic going OUT of the tunnel (RADIUS reply back to router)
              iptables -I FORWARD -o tun0 -p udp -m multiport --sports 1812,1813 -j ACCEPT &&
              
-             # --- FIXED: Use the new vpn-specific alias for radius ---
-             BASE_IP=$$(getent hosts netily-radius-vpn | awk '{ print $$1 }') &&
-             if [ ! -z \"$$BASE_IP\" ]; then
-               echo \"Forwarding 1812/1813 to Shared Radius ($$BASE_IP)\" &&
-               iptables -t nat -A PREROUTING -i tun0 -p udp --dport 1812 -j DNAT --to-destination $$BASE_IP:1812 &&
-               iptables -t nat -A PREROUTING -i tun0 -p udp --dport 1813 -j DNAT --to-destination $$BASE_IP:1813 &&
+             echo 'Waiting for RADIUS container to be resolvable...' &&
+             for i in \$(seq 1 30); do
+               BASE_IP=\$(getent hosts netily-radius-vpn | awk '{ print \$1 }')
+               if [ -n \"\$BASE_IP\" ]; then
+                 echo \"RADIUS container resolved to: \$BASE_IP (attempt \$i)\"
+                 break
+               fi
+               echo \"Attempt \$i/30: netily-radius-vpn not yet resolvable, sleeping 2s...\"
+               sleep 2
+             done &&
+             
+             if [ -n \"\$BASE_IP\" ]; then
+               echo \"Forwarding 1812/1813 to Shared Radius (\$BASE_IP)\" &&
+               iptables -t nat -C PREROUTING -i tun0 -p udp --dport 1812 -j DNAT --to-destination \$BASE_IP:1812 2>/dev/null || \
+               iptables -t nat -A PREROUTING -i tun0 -p udp --dport 1812 -j DNAT --to-destination \$BASE_IP:1812 &&
+               
+               iptables -t nat -C PREROUTING -i tun0 -p udp --dport 1813 -j DNAT --to-destination \$BASE_IP:1813 2>/dev/null || \
+               iptables -t nat -A PREROUTING -i tun0 -p udp --dport 1813 -j DNAT --to-destination \$BASE_IP:1813 &&
                echo \"RADIUS forwarding rules applied\";
              else
-               echo \"Warning: Shared RADIUS container not found\";
+               echo \"ERROR: Shared RADIUS container not found after 30 attempts\";
              fi &&
              
              echo 'All Rules Applied.' &&

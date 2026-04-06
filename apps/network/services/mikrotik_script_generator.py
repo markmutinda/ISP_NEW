@@ -18,6 +18,9 @@ class MikrotikScriptGenerator:
         # ── VPN Gateway Logic ─────────────────────────────────────────
         self.vpn_gateway = getattr(settings, 'VPN_GATEWAY_IP', '10.8.0.1')
         
+        # ── VPN Network CIDR (dynamic from settings) ───────────────────
+        self.vpn_network_cidr = getattr(settings, 'VPN_NETWORK_CIDR', '10.8.0.0/16')
+        
         # ── Production URLs Logic ─────────────────────────────────────
         self.base_url = getattr(settings, 'BASE_URL', 'https://api.netily.co.ke').rstrip('/')
         self.portal_url = getattr(settings, 'FRONTEND_URL', 'https://netily.co.ke').rstrip('/')
@@ -184,6 +187,7 @@ class MikrotikScriptGenerator:
 # Router: {self._escape_ros_string(r.name)}
 # Tenant: {self._escape_ros_string(r.tenant_subdomain or 'public')}
 # VPN IP: {r.vpn_ip_address or 'auto-assigned'}
+# VPN Network: {self.vpn_network_cidr}
 # RouterOS: v{version}
 # Generated: {timezone.now().strftime("%Y-%m-%d %H:%M:%S")}
 # ═══════════════════════════════════════════════════════════════
@@ -286,14 +290,15 @@ class MikrotikScriptGenerator:
 """
 
     def _section_firewall(self, r: Router) -> str:
+        # Use dynamic VPN network CIDR instead of hardcoded /24
         return f"""# ─────────────────────────────────────────────────────────────
 # 4. FIREWALL (VPN & Management)
 # ─────────────────────────────────────────────────────────────
 :put "Configuring firewall rules..."
 
-/ip firewall filter add chain=input action=accept src-address=10.8.0.0/24 comment="Netily-VPN-Input-Allow"
-/ip firewall filter add chain=forward action=accept src-address=10.8.0.0/24 comment="Netily-VPN-Forward-Allow"
-/ip firewall filter add chain=forward action=accept dst-address=10.8.0.0/24 comment="Netily-VPN-Forward-Return"
+/ip firewall filter add chain=input action=accept src-address={self.vpn_network_cidr} comment="Netily-VPN-Input-Allow"
+/ip firewall filter add chain=forward action=accept src-address={self.vpn_network_cidr} comment="Netily-VPN-Forward-Allow"
+/ip firewall filter add chain=forward action=accept dst-address={self.vpn_network_cidr} comment="Netily-VPN-Forward-Return"
 /ip firewall filter add chain=input action=accept connection-state=established,related comment="Netily-Established"
 """
 
@@ -389,6 +394,7 @@ class MikrotikScriptGenerator:
     def _section_walled_garden(self, r: Router, portal_domain: str) -> str:
         tenant_domain = urlparse(self.get_tenant_portal_url()).netloc
         
+        # Use dynamic VPN network CIDR instead of hardcoded /24
         return f"""# ─────────────────────────────────────────────────────────────
 # 9. WALLED GARDEN (Pre-Auth Access)
 # ─────────────────────────────────────────────────────────────
@@ -408,7 +414,7 @@ class MikrotikScriptGenerator:
 
 # Allow VPN / API ranges
 /ip hotspot walled-garden ip add dst-address={self.vpn_gateway}/32 action=accept comment="Netily-VPN-API"
-/ip hotspot walled-garden ip add dst-address=10.8.0.0/24 action=accept comment="Netily-VPN-Network"
+/ip hotspot walled-garden ip add dst-address={self.vpn_network_cidr} action=accept comment="Netily-VPN-Network"
 """
 
     def _section_ssl_certs(self, r: Router) -> str:
@@ -443,8 +449,6 @@ class MikrotikScriptGenerator:
     :delay 1s
     /certificate import file-name="netily-ssl.key" passphrase="{passphrase}"
     :put "SSL key imported."
-}} on-error={{
-    :put "WARNING: Could not download SSL key."
 }}
 
 :delay 2s
@@ -555,13 +559,13 @@ class MikrotikScriptGenerator:
 :delay 1s
 :log info "Netily Cloud Controller v4.6 provisioning complete for {self._escape_ros_string(r.name)}"
 :put ""
-:put "════════════════════════════════════════════════════"
+:put "════════════════════════════════════════════════════════"
 :put " NETILY CLOUD CONTROLLER — SETUP COMPLETE"
 :put " Router:  {self._escape_ros_string(r.name)}"
 :put " VPN:     {self._escape_ros_string(vpn_host)}:{r.openvpn_port}"
 :put " RADIUS:  {self.vpn_gateway}:1812/1813"
 :put " Portal:  {self.get_tenant_portal_url()}"
-:put "════════════════════════════════════════════════════"
+:put "════════════════════════════════════════════════════════"
 """
 
     def generate_login_html(self) -> str:

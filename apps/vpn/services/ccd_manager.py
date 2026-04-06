@@ -11,6 +11,7 @@ This ensures a router always gets the same VPN IP regardless of
 when or where it connects.
 """
 
+import ipaddress
 import logging
 import os
 from typing import List, Dict, Optional
@@ -36,19 +37,40 @@ class CCDManager:
     def __init__(self, ccd_path: Optional[str] = None):
         self.ccd_path = ccd_path or getattr(settings, 'OPENVPN_CCD_PATH', '/etc/openvpn/ccd')
 
-    def create_ccd_file(self, common_name: str, vpn_ip: str, netmask: str = '255.255.255.0') -> str:
+    def _default_netmask(self) -> str:
+        """
+        Calculate the netmask from the VPN_NETWORK_CIDR setting.
+        
+        Returns:
+            Netmask as string (e.g., '255.255.0.0' for /16, '255.255.255.0' for /24)
+        """
+        cidr = getattr(settings, 'VPN_NETWORK_CIDR', '10.8.0.0/16')
+        try:
+            network = ipaddress.ip_network(cidr, strict=False)
+            netmask = str(network.netmask)
+            logger.debug(f"Calculated netmask {netmask} from CIDR {cidr}")
+            return netmask
+        except ValueError as e:
+            logger.error(f"Invalid VPN_NETWORK_CIDR '{cidr}': {e}, falling back to /24")
+            return '255.255.255.0'
+
+    def create_ccd_file(self, common_name: str, vpn_ip: str, netmask: str = None) -> str:
         """
         Create a CCD file that maps a certificate CN to a static VPN IP.
         
         Args:
             common_name: Certificate CN (the filename)
-            vpn_ip: The static IP to assign (e.g. '10.8.0.55')
-            netmask: Subnet mask (default 255.255.255.0)
+            vpn_ip: The static IP to assign (e.g., '10.8.0.55')
+            netmask: Subnet mask (auto-calculated from VPN_NETWORK_CIDR if not provided)
             
         Returns:
             Path to the created CCD file.
         """
         self._ensure_ccd_directory()
+        
+        # Use provided netmask or calculate from settings
+        if netmask is None:
+            netmask = self._default_netmask()
         
         filepath = os.path.join(self.ccd_path, common_name)
         content = f"ifconfig-push {vpn_ip} {netmask}\n"
@@ -56,7 +78,7 @@ class CCDManager:
         try:
             with open(filepath, 'w') as f:
                 f.write(content)
-            logger.info(f"CCD file created: {filepath} -> {vpn_ip}")
+            logger.info(f"CCD file created: {filepath} -> {vpn_ip} / {netmask}")
             return filepath
         except OSError as e:
             logger.error(f"Failed to write CCD file {filepath}: {e}")
@@ -82,8 +104,15 @@ class CCDManager:
             logger.error(f"Failed to remove CCD file {filepath}: {e}")
             raise CCDManagerError(f"Cannot remove CCD file for {common_name}: {e}")
 
-    def update_ccd_file(self, common_name: str, new_vpn_ip: str, netmask: str = '255.255.255.0') -> str:
-        """Update an existing CCD file with a new IP."""
+    def update_ccd_file(self, common_name: str, new_vpn_ip: str, netmask: str = None) -> str:
+        """
+        Update an existing CCD file with a new IP.
+        
+        Args:
+            common_name: Certificate CN (the filename)
+            new_vpn_ip: The new static IP to assign
+            netmask: Subnet mask (auto-calculated from VPN_NETWORK_CIDR if not provided)
+        """
         return self.create_ccd_file(common_name, new_vpn_ip, netmask)
 
     def get_ccd_content(self, common_name: str) -> Optional[str]:
@@ -121,7 +150,7 @@ class CCDManager:
                             results.append({
                                 'common_name': filename,
                                 'vpn_ip': parts[1],
-                                'netmask': parts[2] if len(parts) > 2 else '255.255.255.0',
+                                'netmask': parts[2] if len(parts) > 2 else self._default_netmask(),
                             })
         except OSError as e:
             logger.error(f"Failed to list CCD directory {self.ccd_path}: {e}")

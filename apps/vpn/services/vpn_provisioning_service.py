@@ -2,14 +2,15 @@
 VPN Provisioning Service — Cloud Controller Auto-Provisioning
 
 Handles the full lifecycle when a new Router is created:
-1. Assigns next available static VPN IP from the 10.8.0.0/24 pool (GLOBALLY unique across all tenants)
+1. Assigns next available static VPN IP from the configured CIDR pool (GLOBALLY unique across all tenants)
 2. Generates a client certificate via CertificateService
 3. Writes a CCD file mapping the certificate CN → static IP
 4. Stores PEM content on the Router model for .rsc script injection
 """
 
+import ipaddress
 import logging
-from typing import Optional, Tuple
+from typing import Optional, Set, Tuple
 
 from django.conf import settings
 from django.db import transaction
@@ -169,45 +170,79 @@ class VPNProvisioningService:
 
     def _assign_vpn_ip(self, router) -> str:
         """
-        Assign globally unique VPN IP across ALL tenants.
+        Assign globally unique VPN IP across ALL tenants using CIDR-based allocation.
         Uses GlobalRouterMap (public schema) as the source of truth.
         
         This prevents duplicate IPs across different tenants because:
         - GlobalRouterMap lives in public/shared space
         - nas_ip field has unique=True constraint
         - Every tenant draws from one common VPN pool
+        - Supports any CIDR size (default: /16 = 65,534 usable IPs)
         """
-        from django.conf import settings
         from django_tenants.utils import schema_context, get_public_schema_name
         from apps.core.models import GlobalRouterMap
-
-        range_start = getattr(settings, 'VPN_IP_RANGE_START', 10)
-        range_end = getattr(settings, 'VPN_IP_RANGE_END', 250)
 
         # Reuse existing assignment on router
         if router.vpn_ip_address:
             return str(router.vpn_ip_address)
 
-        base = '10.8.0'
+        # Get VPN network from settings (supports any CIDR)
+        vpn_cidr = getattr(settings, 'VPN_NETWORK_CIDR', '10.8.0.0/16')
+        try:
+            vpn_net = ipaddress.ip_network(vpn_cidr, strict=False)
+        except ValueError as e:
+            logger.error(f"Invalid VPN_NETWORK_CIDR: {vpn_cidr}")
+            raise VPNProvisioningError(f"Invalid VPN network configuration: {e}")
+
+        # Parse reserved IPs from settings
+        reserved_ips_str = getattr(settings, 'VPN_RESERVED_IPS', '10.8.0.1,10.8.0.2')
+        reserved_ips: Set[ipaddress.IPv4Address] = set()
+        for ip_str in reserved_ips_str.split(','):
+            ip_str = ip_str.strip()
+            if ip_str:
+                try:
+                    reserved_ips.add(ipaddress.ip_address(ip_str))
+                except ValueError:
+                    logger.warning(f"Invalid reserved IP address: {ip_str}")
 
         # IMPORTANT: Read globally assigned NAS IPs from PUBLIC schema
         # This ensures we see ALL routers across ALL tenants
         with schema_context(get_public_schema_name()):
-            assigned_ips = set(
-                GlobalRouterMap.objects.values_list('nas_ip', flat=True)
-            )
+            assigned_ips = set()
+            for ip_str in GlobalRouterMap.objects.values_list('nas_ip', flat=True):
+                if ip_str:
+                    try:
+                        assigned_ips.add(ipaddress.ip_address(ip_str))
+                    except ValueError:
+                        logger.warning(f"Invalid IP in GlobalRouterMap: {ip_str}")
+            
             logger.debug(f"Currently assigned global VPN IPs: {assigned_ips}")
+            logger.debug(f"Reserved IPs: {reserved_ips}")
+            logger.debug(f"VPN network: {vpn_net} (total hosts: {vpn_net.num_addresses - 2})")
 
-        # Find first available IP not in global assignments
-        for i in range(range_start, range_end + 1):
-            candidate = f"{base}.{i}"
-            if candidate not in assigned_ips:
-                logger.info(f"Found available VPN IP: {candidate}")
-                return candidate
+        # Iterate through all usable hosts in the network (excluding network and broadcast)
+        for host in vpn_net.hosts():
+            # Skip reserved IPs
+            if host in reserved_ips:
+                logger.debug(f"Skipping reserved IP: {host}")
+                continue
+            
+            # Skip already assigned IPs
+            if host in assigned_ips:
+                logger.debug(f"Skipping already assigned IP: {host}")
+                continue
+            
+            # Found available IP
+            logger.info(f"Found available VPN IP: {host}")
+            return str(host)
 
+        # No available IPs found
+        total_capacity = vpn_net.num_addresses - 2  # Subtract network and broadcast
         raise VPNProvisioningError(
-            f"No available VPN IPs in range {base}.{range_start}-{base}.{range_end}. "
-            f"{len(assigned_ips)} IPs already assigned globally."
+            f"No available VPN IPs in {vpn_cidr}. "
+            f"Total capacity: {total_capacity} IPs. "
+            f"Reserved: {len(reserved_ips)} IPs. "
+            f"Assigned: {len(assigned_ips)} IPs globally."
         )
 
     def _register_router_globally(self, router, vpn_ip: str) -> None:

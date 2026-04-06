@@ -441,12 +441,12 @@ else:
     BASE_URL = ''
 
 # ────────────────────────────────────────────────────────────────
-#  CLOUD CONTROLLER / VPN SETTINGS
+#  🚨 UPDATED: CLOUD CONTROLLER / VPN SETTINGS (EXPANDED CAPACITY)
+#  Now using /16 CIDR for up to 65,534 usable IP addresses
 # ────────────────────────────────────────────────────────────────
 VPN_SERVER_IP = os.environ.get('VPN_SERVER_IP', '10.8.0.1')
-VPN_NETWORK_CIDR = os.environ.get('VPN_NETWORK_CIDR', '10.8.0.0/24')
-VPN_IP_RANGE_START = int(os.environ.get('VPN_IP_RANGE_START', '10'))   # 10.8.0.10
-VPN_IP_RANGE_END = int(os.environ.get('VPN_IP_RANGE_END', '250'))      # 10.8.0.250
+VPN_NETWORK_CIDR = os.environ.get('VPN_NETWORK_CIDR', '10.8.0.0/16')  # 65,534 usable IPs (upgraded from /24)
+VPN_RESERVED_IPS = os.environ.get('VPN_RESERVED_IPS', '10.8.0.1,10.8.0.2')  # Reserved for server/infrastructure
 
 # OpenVPN Management Interface (for monitoring connected routers)
 OPENVPN_MANAGEMENT_HOST = os.environ.get('OPENVPN_MANAGEMENT_HOST', '127.0.0.1')
