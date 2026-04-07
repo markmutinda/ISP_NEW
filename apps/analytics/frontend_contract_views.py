@@ -3,6 +3,7 @@ from datetime import timedelta, datetime
 from dateutil.relativedelta import relativedelta
 
 from django.core.cache import cache
+from django.db import connection  # ADDED: For schema_name access
 from django.db import models
 from django.db.models import Sum, Count, Avg, Q, F, DecimalField, ExpressionWrapper
 from django.db.models.functions import Coalesce, TruncDay, TruncHour, TruncMonth
@@ -93,8 +94,11 @@ class _RangeMixin:
         return None
 
     def _cache_key(self, request, endpoint, time_range):
-        tenant_hint = getattr(request.user, "tenant_id", None) or getattr(request.user, "company_id", None) or "global"
-        return f"analytics:v2:{endpoint}:{tenant_hint}:{time_range}"
+        # FIXED: Use connection.schema_name instead of user attributes
+        # The old code used tenant_hint from user (which is None for tenant admin users)
+        # causing all tenants to share the same cache key "global"
+        schema = connection.schema_name
+        return f"analytics:v2:{endpoint}:{schema}:{time_range}"
 
 
 class AnalyticsReportsView(APIView, _RangeMixin):
