@@ -217,17 +217,64 @@ class OnlineUserSerializer(serializers.ModelSerializer):
 
     def get_usage(self, obj) -> str:
         """
-        Calculate cumulative usage including current session + all previous
-        stopped sessions for this username within the last 30 days.
-        This ensures usage doesn't reset when a user reconnects.
+        Calculate cumulative usage since the START of the user's current subscription period.
+        This ensures usage resets to 0 when a subscription renews, not on a rolling 30-day window.
+        
+        Strategy:
+        1. Look up the customer's RADIUS expiration date (set when subscription was activated)
+        2. Derive the period start by subtracting the plan duration from expiration
+        3. If we can't determine period start, fall back to 30 days ago
         """
         from django.db.models import Sum
+        from datetime import datetime
         
-        # Sum all historical (stopped) sessions for this username in the last 30 days
+        # ── Determine the subscription period start ────────────────────────
+        period_start = None
+        
+        try:
+            # Get the Expiration attribute for this RADIUS user
+            expiration_check = RadCheck.objects.filter(
+                username=obj.username,
+                attribute='Expiration'
+            ).first()
+            
+            if expiration_check and expiration_check.value:
+                # Parse the FreeRADIUS expiration format: "Jan 06 2026 14:30:00"
+                expiration_dt = datetime.strptime(
+                    expiration_check.value, "%b %d %Y %H:%M:%S"
+                )
+                expiration_dt = timezone.make_aware(expiration_dt) if timezone.is_naive(expiration_dt) else expiration_dt
+                
+                # Get the plan duration from CustomerRadiusCredentials → customer → service → plan
+                from apps.radius.models import CustomerRadiusCredentials
+                creds = CustomerRadiusCredentials.objects.filter(
+                    username=obj.username
+                ).select_related('customer__services__plan').first()
+                
+                plan_duration_days = 30  # safe default
+                if creds and creds.customer:
+                    service = creds.customer.services.filter(
+                        status='ACTIVE', plan__isnull=False
+                    ).first()
+                    if service and service.plan:
+                        plan_duration_days = service.plan.duration_days or 30
+                
+                # Period start = expiration minus plan duration
+                period_start = expiration_dt - timezone.timedelta(days=plan_duration_days)
+                
+        except Exception:
+            # If anything goes wrong, fall back gracefully — don't crash the serializer
+            pass
+        
+        # Fallback: use 30 days ago (original behavior)
+        if period_start is None:
+            period_start = timezone.now() - timezone.timedelta(days=30)
+        
+        # ── Sum usage since period_start ───────────────────────────────────
         historical = RadAcct.objects.filter(
             username=obj.username,
             acctstoptime__isnull=False,
-            acctstarttime__gte=timezone.now() - timezone.timedelta(days=30)
+            acctstarttime__gte=period_start  # ← NOW ANCHORED TO SUBSCRIPTION START
         ).aggregate(
             total_in=Sum('acctinputoctets'),
             total_out=Sum('acctoutputoctets')
@@ -241,7 +288,7 @@ class OnlineUserSerializer(serializers.ModelSerializer):
         hist_in = historical['total_in'] or 0
         hist_out = historical['total_out'] or 0
         
-        # Total cumulative usage
+        # Total cumulative usage since subscription start
         total_bytes = current_in + current_out + hist_in + hist_out
         
         # Format nicely
