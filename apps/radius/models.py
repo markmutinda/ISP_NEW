@@ -658,6 +658,14 @@ class CustomerRadiusCredentials(models.Model):
         help_text="Account expiration date"
     )
     
+    # ADDED: Subscription activation timestamp for usage calculation
+    subscription_activated_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text="Timestamp when the current subscription period started. "
+                  "Resets on each renewal — used to calculate usage from zero."
+    )
+    
     # Sync Status
     synced_to_radius = models.BooleanField(
         default=False,

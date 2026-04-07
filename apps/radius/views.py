@@ -977,6 +977,8 @@ class CustomerRadiusCredentialsViewSet(viewsets.ModelViewSet):
         credentials.expiration_date = new_expiration
         credentials.is_enabled = True
         credentials.disabled_reason = ''
+        # ADDED: Stamp the activation time for renewal tracking
+        credentials.subscription_activated_at = timezone.now()
         credentials.save()
         
         # Force sync to RADIUS

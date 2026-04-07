@@ -159,7 +159,7 @@ def auto_create_radius_for_service(sender, instance, created, **kwargs):
             needs_save = False
             
             # 🎯 Handle RENEWAL: When status changes from non-ACTIVE to ACTIVE
-            # This is the key moment to reset the expiration date
+            # This is the key moment to reset the expiration date and activation timestamp
             if instance.status == 'ACTIVE' and not credentials.is_enabled:
                 credentials.is_enabled = True
                 credentials.disabled_reason = ''
@@ -175,6 +175,11 @@ def auto_create_radius_for_service(sender, instance, created, **kwargs):
                         )
                     else:
                         logger.info(f"Renewed RADIUS for {credentials.username}: Unlimited validity")
+                
+                # 🎯 CRITICAL: Stamp subscription_activated_at on renewal
+                # This resets the usage counter for the new period
+                credentials.subscription_activated_at = timezone.now()
+                logger.info(f"Stamped subscription_activated_at for {credentials.username} on renewal: {credentials.subscription_activated_at}")
                 
                 needs_save = True
                 logger.info(f"Re-enabled RADIUS for customer: {customer.customer_code}")
@@ -297,6 +302,8 @@ def auto_create_radius_for_service(sender, instance, created, **kwargs):
             is_enabled=instance.status == 'ACTIVE',
             simultaneous_use=1,
             expiration_date=expiration_date,  # 🎯 CRITICAL: Set expiration
+            # 🎯 CRITICAL: Stamp subscription_activated_at on creation if service is ACTIVE
+            subscription_activated_at=timezone.now() if instance.status == 'ACTIVE' else None,
         )
         
         if radius_router_id:
@@ -321,6 +328,10 @@ def auto_create_radius_for_service(sender, instance, created, **kwargs):
                 logger.warning(f"IPAddress {radius_assigned_ip_id} not found for RADIUS cred creation")
         
         creds = CustomerRadiusCredentials.objects.create(**create_kwargs)
+        
+        # Log activation timestamp if set
+        if create_kwargs.get('subscription_activated_at'):
+            logger.info(f"Stamped subscription_activated_at for {creds.username} on creation: {creds.subscription_activated_at}")
         
         # Mark the IP as ASSIGNED after credentials are created
         if assigned_ip_obj:
