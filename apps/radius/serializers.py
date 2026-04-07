@@ -216,7 +216,35 @@ class OnlineUserSerializer(serializers.ModelSerializer):
         return f"{minutes}m {seconds}s"
 
     def get_usage(self, obj) -> str:
-        total_bytes = (obj.acctinputoctets or 0) + (obj.acctoutputoctets or 0)
+        """
+        Calculate cumulative usage including current session + all previous
+        stopped sessions for this username within the last 30 days.
+        This ensures usage doesn't reset when a user reconnects.
+        """
+        from django.db.models import Sum
+        
+        # Sum all historical (stopped) sessions for this username in the last 30 days
+        historical = RadAcct.objects.filter(
+            username=obj.username,
+            acctstoptime__isnull=False,
+            acctstarttime__gte=timezone.now() - timezone.timedelta(days=30)
+        ).aggregate(
+            total_in=Sum('acctinputoctets'),
+            total_out=Sum('acctoutputoctets')
+        )
+        
+        # Current session bytes
+        current_in = obj.acctinputoctets or 0
+        current_out = obj.acctoutputoctets or 0
+        
+        # Historical bytes (default to 0 if None)
+        hist_in = historical['total_in'] or 0
+        hist_out = historical['total_out'] or 0
+        
+        # Total cumulative usage
+        total_bytes = current_in + current_out + hist_in + hist_out
+        
+        # Format nicely
         mb = total_bytes / (1024 * 1024)
         if mb >= 1024:
             return f"{mb / 1024:.2f} GB"
