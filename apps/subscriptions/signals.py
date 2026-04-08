@@ -35,6 +35,11 @@ def create_trial_subscription_for_new_company(sender, instance, created, **kwarg
             f"Created trial subscription for company {instance.name}. "
             f"Trial ends: {subscription.trial_ends_at}"
         )
+        
+        # Send trial welcome email (async, best-effort)
+        from .tasks import send_trial_welcome_email
+        send_trial_welcome_email.delay(instance.id)
+        
     except Exception as e:
         logger.error(
             f"Failed to create trial subscription for company {instance.name}: {e}"

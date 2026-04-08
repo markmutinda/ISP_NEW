@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+{% include "emails/billing/_base_style.html" %}
+</head>
+<body>
+<div class="wrapper">
+  <div class="header">
+    <h1>🎉 Welcome to Netily!</h1>
+    <p>Your 14-Day Free Trial Starts Now</p>
+  </div>
+  <div class="body">
+    <p>Hi {{ company_name }},</p>
+    <p>Congratulations! Your ISP management account has been created and your <strong>14-day free trial</strong> is now active.</p>
+
+    <div class="highlight success">
+      <strong>What you can do right now:</strong>
+      <ul style="margin:8px 0 0;padding-left:20px;">
+        <li>Connect your first MikroTik router</li>
+        <li>Add PPPoE customers and manage their subscriptions</li>
+        <li>Set up your Hotspot captive portal</li>
+        <li>Configure payment methods (M-Pesa, Bank Transfer)</li>
+      </ul>
+    </div>
+
+    <p>Your dashboard is ready at:</p>
+    <p style="text-align:center;margin:24px 0;">
+      <a href="{{ platform_url }}" class="btn">Open Your Dashboard →</a>
+    </p>
+
+    <div class="info-box">
+      <div class="info-row"><span class="info-label">Trial Ends</span><span class="info-value">{{ trial_ends_at|date:"M d, Y" }}</span></div>
+      <div class="info-row"><span class="info-label">Subdomain</span><span class="info-value">{{ tenant_subdomain }}.netily.co.ke</span></div>
+      <div class="info-row"><span class="info-label">After Trial</span><span class="info-value">KES {{ base_fee }} base fee to continue</span></div>
+    </div>
+
+    <p>No credit card required during the trial. You'll only be charged after the 14 days if you choose to continue.</p>
+  </div>
+  <div class="footer">
+    <p>Netily — ISP Management, Simplified</p>
+    <p>Questions? Reply to this email or visit our help center.</p>
+  </div>
+</div>
+</body>
+</html>

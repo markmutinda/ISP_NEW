@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+{% include "emails/billing/_base_style.html" %}
+</head>
+<body>
+<div class="wrapper">
+  <div class="header" style="background:linear-gradient(135deg,#991b1b 0%,#7f1d1d 100%);">
+    <h1>🔒 Network Access Suspended</h1>
+    <p>{{ company_name }} — Account action required</p>
+  </div>
+  <div class="body">
+    <p>Hi {{ company_name }},</p>
+    <p>Your grace period has expired and your outstanding invoice remains unpaid. As a result, <strong>your Netily platform access has been suspended</strong>.</p>
+
+    <div class="highlight danger">
+      <strong>Account Status:</strong> <span class="badge" style="background:#dc2626;">SUSPENDED</span><br>
+      <strong>Outstanding Balance:</strong> KES {{ total_due }}
+    </div>
+
+    <p><strong>What this means:</strong></p>
+    <ul style="margin:12px 0;padding-left:20px;color:#475569;">
+      <li>You cannot access customer management, network controls, or billing features</li>
+      <li>Existing customer PPPoE/Hotspot sessions remain active, but no changes can be made</li>
+      <li>New customer registrations and service modifications are blocked</li>
+    </ul>
+
+    <div class="highlight success">
+      <strong>✅ How to restore access:</strong> Simply pay the outstanding invoice. Your account will be reactivated <strong>automatically within minutes</strong> of payment confirmation.
+    </div>
+
+    <p style="text-align:center;margin:24px 0;">
+      <a href="{{ platform_url }}" class="btn" style="background:#059669;">Pay &amp; Reactivate Now →</a>
+    </p>
+
+    <div class="info-box">
+      <div class="info-row"><span class="info-label">Amount Due</span><span class="info-value" style="color:#dc2626;font-weight:700;">KES {{ total_due }}</span></div>
+      {% if invoice_ref %}<div class="info-row"><span class="info-label">Invoice Reference</span><span class="info-value">{{ invoice_ref }}</span></div>{% endif %}
+      <div class="info-row"><span class="info-label">Payment Methods</span><span class="info-value">M-Pesa / Bank Transfer</span></div>
+    </div>
+
+    <p style="font-size:14px;color:#64748b;margin-top:16px;">Need help? Reply to this email or contact our support team. We want to help you get back online as quickly as possible.</p>
+  </div>
+  <div class="footer">
+    <p>Netily — ISP Management, Simplified</p>
+    <p>This is an automated notification regarding your account status.</p>
+  </div>
+</div>
+</body>
+</html>

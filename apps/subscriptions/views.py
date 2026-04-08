@@ -562,6 +562,10 @@ class SubscriptionPaymentViewSet(viewsets.ReadOnlyModelViewSet):
                                 subscription.extend_subscription()
                                 logger.info(f"Subscription extended via Polling: {subscription.company.name}")
                             
+                            # Send cycle activation email (async)
+                            from .tasks import send_cycle_activated_email
+                            send_cycle_activated_email.delay(subscription.company_id)
+                            
                             payment = locked_payment  # Update reference for response
                     
                     return Response({

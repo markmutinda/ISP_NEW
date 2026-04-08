@@ -53,7 +53,10 @@ class NetilyPlan(models.Model):
     )
     base_license_fee = models.DecimalField(max_digits=10, decimal_places=2, default=Decimal('500.00'))
     pppoe_unit_price = models.DecimalField(max_digits=10, decimal_places=2, default=Decimal('20.00'))
-    # REMOVED: pppoe_min_clients - No longer used, all users are billed
+    pppoe_min_clients = models.PositiveIntegerField(
+        default=20,
+        help_text="Minimum billable PPPoE clients per cycle (floor). ISPs with fewer active clients are still billed for this many."
+    )
     hotspot_revenue_share_pct = models.DecimalField(max_digits=5, decimal_places=2, default=Decimal('3.00'))
     
     # Limits
@@ -881,8 +884,14 @@ class BillingCycle(models.Model):
     # Locks in the pricing at the moment the cycle is created
     snapshot_base_fee = models.DecimalField(max_digits=10, decimal_places=2, default=Decimal('0.00'))
     snapshot_pppoe_price = models.DecimalField(max_digits=10, decimal_places=2, default=Decimal('0.00'))
-    # REMOVED: snapshot_min_clients - No longer used, all users are billed
+    snapshot_min_clients = models.PositiveIntegerField(default=20, help_text="Minimum billable PPPoE clients (floor)")
     snapshot_hotspot_share_pct = models.DecimalField(max_digits=5, decimal_places=2, default=Decimal('0.00'))
+
+    # Grace period tracking
+    grace_ends_at = models.DateTimeField(
+        null=True, blank=True,
+        help_text="When the 4-day grace period expires. Set when invoice is generated."
+    )
 
     class Meta:
         ordering = ['-start_date']
@@ -898,7 +907,7 @@ class BillingCycle(models.Model):
             plan = self.subscription.plan
             self.snapshot_base_fee = plan.base_license_fee
             self.snapshot_pppoe_price = plan.pppoe_unit_price
-            # REMOVED: self.snapshot_min_clients = plan.pppoe_min_clients
+            self.snapshot_min_clients = plan.pppoe_min_clients
             self.snapshot_hotspot_share_pct = plan.hotspot_revenue_share_pct
         super().save(*args, **kwargs)
 
@@ -910,19 +919,20 @@ class BillingCycle(models.Model):
 
     def calculate_total_pppoe(self):
         """
-        Calculate total PPPoE clients for this cycle.
-        (Removed the minimum commitment floor to strictly enforce flat billing)
+        Billable PPPoE client count for this cycle.
+        Enforces the minimum floor (default 20 clients).
+        If the ISP only has 5 active clients, they are still billed for 20.
         """
-        return self.billable_clients.count()
+        actual = self.billable_clients.count()
+        return max(actual, self.snapshot_min_clients)
 
     def calculate_pppoe_charge(self):
         """
-        Calculate charge for ALL active clients (Active Users * 20 KES).
-        No free users, no minimum thresholds.
+        Calculate PPPoE charge: max(actual_clients, min_floor) × unit_price.
+        Example: max(5, 20) × 20 = 400 KES
         """
-        actual_count = self.calculate_total_pppoe()
-        # Ensure we multiply using Decimals for currency safety
-        return (Decimal(str(actual_count)) * self.snapshot_pppoe_price).quantize(Decimal('0.01'))
+        billable_count = self.calculate_total_pppoe()
+        return (Decimal(str(billable_count)) * self.snapshot_pppoe_price).quantize(Decimal('0.01'))
 
     def calculate_total_charge(self):
         """

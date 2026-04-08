@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+{% include "emails/billing/_base_style.html" %}
+</head>
+<body>
+<div class="wrapper">
+  <div class="header" style="background:linear-gradient(135deg,#dc2626 0%,#b91c1c 100%);">
+    <h1>🚨 URGENT: Service Suspension in 24 Hours</h1>
+    <p>{{ company_name }} — Immediate action required</p>
+  </div>
+  <div class="body">
+    <p>Hi {{ company_name }},</p>
+    <p>Your invoice remains <strong>unpaid</strong> and the grace period expires <strong>tomorrow</strong>. If payment is not received, <span style="color:#dc2626;font-weight:700;">your network management access will be suspended.</span></p>
+
+    <div class="highlight danger">
+      <strong>⚠️ Suspension Date:</strong> {{ grace_ends_at|date:"l, M d, Y" }}<br>
+      <strong>Outstanding Amount:</strong> KES {{ total_due }}
+    </div>
+
+    <p><strong>What happens when suspended?</strong></p>
+    <ul style="margin:12px 0;padding-left:20px;color:#475569;">
+      <li>API access to your ISP dashboard is blocked</li>
+      <li>Customer management features become unavailable</li>
+      <li>PPPoE and Hotspot management is paused</li>
+      <li>Your customers' existing sessions continue, but you cannot make changes</li>
+    </ul>
+
+    <p style="text-align:center;margin:24px 0;">
+      <a href="{{ platform_url }}" class="btn" style="background:#dc2626;">Pay Now to Avoid Suspension →</a>
+    </p>
+
+    <div class="info-box">
+      <div class="info-row"><span class="info-label">Amount Due</span><span class="info-value" style="color:#dc2626;font-weight:700;">KES {{ total_due }}</span></div>
+      {% if invoice_ref %}<div class="info-row"><span class="info-label">Invoice Reference</span><span class="info-value">{{ invoice_ref }}</span></div>{% endif %}
+      <div class="info-row"><span class="info-label">Grace Period Ends</span><span class="info-value">{{ grace_ends_at|date:"M d, Y" }}</span></div>
+    </div>
+
+    <p style="font-size:14px;color:#64748b;margin-top:16px;">If you've already made a payment, please allow a few minutes for processing. Contact us if you need assistance.</p>
+  </div>
+  <div class="footer">
+    <p>Netily — ISP Management, Simplified</p>
+    <p>This is an automated reminder. Reply to this email for billing inquiries.</p>
+  </div>
+</div>
+</body>
+</html>

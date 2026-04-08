@@ -159,7 +159,9 @@ class PayHeroSubscriptionWebhookView(PayHeroWebhookMixin, APIView):
                     f"- KES {payment.amount} - {payload['mpesa_receipt']}"
                 )
                 
-                # TODO: Send confirmation email/SMS
+                # Send cycle activation confirmation email (async)
+                from apps.subscriptions.tasks import send_cycle_activated_email
+                send_cycle_activated_email.delay(subscription.company_id)
                 
             else:
                 # Failed

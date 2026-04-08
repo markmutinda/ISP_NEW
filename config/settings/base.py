@@ -337,7 +337,11 @@ EMAIL_PORT = int(os.getenv('EMAIL_PORT', 587))
 EMAIL_USE_TLS = os.getenv('EMAIL_USE_TLS', 'True') == 'True'
 EMAIL_HOST_USER = os.getenv('EMAIL_HOST_USER', '')
 EMAIL_HOST_PASSWORD = os.getenv('EMAIL_HOST_PASSWORD', '')
-DEFAULT_FROM_EMAIL = os.getenv('DEFAULT_FROM_EMAIL', 'noreply@yourisp.com')
+DEFAULT_FROM_EMAIL = os.getenv('DEFAULT_FROM_EMAIL', 'billing@netily.co.ke')
+
+# Resend — modern transactional email (primary provider)
+# Sign up at https://resend.com, add your domain, get the API key
+RESEND_API_KEY = os.getenv('RESEND_API_KEY', '')  # Set in .env for production
 
 # ────────────────────────────────────────────────────────────────
 #  SESSION SETTINGS

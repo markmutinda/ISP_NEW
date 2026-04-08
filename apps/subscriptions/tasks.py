@@ -82,12 +82,11 @@ def generate_metered_invoices():
                     
                     logger.info(f"[{tenant.name}] Calculated charges: Base={base_fee}, PPPoE({pppoe_count})={pppoe_fee}, Hotspot={hotspot_share}, Total={total_due}")
                     
-                    # ─── PHASE 4: THE ENFORCEMENT LOOP (LOCKOUT) ───
-                    # We DO NOT create a new cycle. We freeze the account until paid.
-                    sub = cycle.subscription
-                    sub.status = 'past_due'
-                    sub.save(update_fields=['status'])
-                    logger.info(f"[{tenant.name}] Subscription status set to 'past_due'")
+                    # ─── GRACE PERIOD: DO NOT LOCK IMMEDIATELY ───
+                    # Set grace_ends_at to 4 days from now. The separate
+                    # enforce_billing_grace_period task will lock the account
+                    # only after the grace period expires.
+                    grace_deadline = now + timedelta(days=4)
                     
                 # ─── CREATE INVOICE IN TENANT SCHEMA ───
                 with schema_context(tenant.schema_name):
@@ -111,7 +110,7 @@ def generate_metered_invoices():
                         status='ISSUED',
                         service_period_start=cycle.start_date.date(),
                         service_period_end=cycle.end_date.date(),
-                        due_date=(now + timedelta(days=7)).date(),
+                        due_date=(now + timedelta(days=4)).date(),  # 4-day grace period
                         billing_date=now.date(),
                     )
 
@@ -146,15 +145,387 @@ def generate_metered_invoices():
                             total=hotspot_share
                         )
 
-                # Save Invoice Reference in Public Schema
                 with schema_context(get_public_schema_name()):
                     cycle.status = 'invoiced'
                     cycle.invoice_reference = str(new_invoice.id)
-                    cycle.save(update_fields=['status', 'invoice_reference'])
+                    cycle.grace_ends_at = grace_deadline
+                    cycle.save(update_fields=['status', 'invoice_reference', 'grace_ends_at'])
                     
-                    logger.info(f"[{tenant.name}] Invoiced KES {total_due} (Invoice #{new_invoice.id}). Billed {pppoe_count} true PPPoE users. Subscription locked until paid.")
+                    logger.info(
+                        f"[{tenant.name}] Invoiced KES {total_due} (Invoice #{new_invoice.id}). "
+                        f"Billed {pppoe_count} PPPoE users (raw={cycle.get_raw_pppoe_count()}, min_floor={cycle.snapshot_min_clients}). "
+                        f"Grace period ends: {grace_deadline.date()}"
+                    )
+                    
+                    # ─── SEND INVOICE EMAIL ───
+                    try:
+                        _send_lifecycle_email(
+                            tenant=tenant,
+                            template='emails/billing/invoice_generated.html',
+                            subject='Your Monthly Netily Invoice is Ready',
+                            context={
+                                'base_fee': base_fee,
+                                'pppoe_count': pppoe_count,
+                                'pppoe_fee': pppoe_fee,
+                                'hotspot_share': hotspot_share,
+                                'total_due': total_due,
+                                'due_date': (now + timedelta(days=4)).date(),
+                                'grace_days': 4,
+                                'cycle_start': cycle.start_date.date(),
+                                'cycle_end': cycle.end_date.date(),
+                            }
+                        )
+                    except Exception as mail_err:
+                        logger.warning(f"[{tenant.name}] Failed to send invoice email: {mail_err}")
 
         except Exception as e:
             logger.error(f"Failed to process billing cycle for tenant {tenant.name}: {str(e)}", exc_info=True)
 
     return f"Processed {ended_cycles.count()} billing cycles."
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# HELPER: Send lifecycle emails to tenant admin(s)
+# ═══════════════════════════════════════════════════════════════════════════
+
+def _send_lifecycle_email(tenant, template, subject, context):
+    """
+    Send an email to the tenant's admin user(s) using template rendering.
+    Falls back to Resend if configured, otherwise uses Django SMTP.
+    """
+    from django.core.mail import EmailMultiAlternatives
+    from django.template.loader import render_to_string
+    from django.utils.html import strip_tags
+    from django.conf import settings
+
+    company = tenant.company
+    context.update({
+        'company_name': company.name,
+        'tenant_subdomain': tenant.subdomain,
+        'platform_url': getattr(settings, 'FRONTEND_URL', 'https://app.netily.co.ke'),
+    })
+
+    html_body = render_to_string(template, context)
+    text_body = strip_tags(html_body)
+    from_email = getattr(settings, 'DEFAULT_FROM_EMAIL', 'billing@netily.co.ke')
+
+    # Collect admin emails from the company
+    admin_emails = []
+    try:
+        from django_tenants.utils import schema_context
+        with schema_context(tenant.schema_name):
+            admins = User.objects.filter(role__in=['admin', 'owner'], is_active=True)
+            admin_emails = [u.email for u in admins if u.email]
+    except Exception:
+        pass
+
+    # Fallback to company contact email
+    if not admin_emails:
+        contact = getattr(company, 'contact_email', None) or getattr(company, 'email', None)
+        if contact:
+            admin_emails = [contact]
+
+    if not admin_emails:
+        logger.warning(f"[{tenant.name}] No admin emails found, cannot send lifecycle email: {subject}")
+        return
+
+    # Try Resend first, fall back to Django SMTP
+    resend_key = getattr(settings, 'RESEND_API_KEY', None)
+    if resend_key:
+        try:
+            import resend
+            resend.api_key = resend_key
+            resend.Emails.send({
+                'from': from_email,
+                'to': admin_emails,
+                'subject': subject,
+                'html': html_body,
+                'text': text_body,
+            })
+            logger.info(f"[{tenant.name}] Sent lifecycle email via Resend: {subject}")
+            return
+        except Exception as e:
+            logger.warning(f"[{tenant.name}] Resend failed, falling back to SMTP: {e}")
+
+    # Fallback: Django SMTP
+    msg = EmailMultiAlternatives(subject, text_body, from_email, admin_emails)
+    msg.attach_alternative(html_body, 'text/html')
+    msg.send(fail_silently=True)
+    logger.info(f"[{tenant.name}] Sent lifecycle email via SMTP: {subject}")
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# TASK: Trial Lifecycle Checker
+# Runs daily at 8 AM Nairobi time
+# ═══════════════════════════════════════════════════════════════════════════
+
+@shared_task
+def check_trial_lifecycle():
+    """
+    Handles the full trial notification lifecycle:
+    - Day 12: Send "trial ending in 48 hours" warning
+    - Day 15 (trial_ends_at passed): Set status to expired, send lockout email
+    """
+    from apps.subscriptions.models import CompanySubscription
+    now = timezone.now()
+
+    # ── Warning: 48 hours before trial ends (Day 12) ──
+    warning_window_start = now + timedelta(hours=46)
+    warning_window_end = now + timedelta(hours=50)
+
+    expiring_soon = CompanySubscription.objects.filter(
+        status='trialing',
+        is_trial=True,
+        trial_ends_at__gte=warning_window_start,
+        trial_ends_at__lte=warning_window_end,
+    ).select_related('company')
+
+    warned = 0
+    for sub in expiring_soon:
+        tenant = _get_tenant_for_company(sub.company)
+        if tenant:
+            try:
+                _send_lifecycle_email(
+                    tenant=tenant,
+                    template='emails/billing/trial_warning.html',
+                    subject='Your Free Trial Ends in 48 Hours',
+                    context={
+                        'trial_ends_at': sub.trial_ends_at,
+                        'days_remaining': sub.trial_days_remaining,
+                        'base_fee': sub.plan.base_license_fee,
+                    }
+                )
+                warned += 1
+            except Exception as e:
+                logger.error(f"Failed to send trial warning to {sub.company.name}: {e}")
+
+    # ── Lockout: Trial expired (Day 15+) ──
+    expired_trials = CompanySubscription.objects.filter(
+        status='trialing',
+        is_trial=True,
+        trial_ends_at__lt=now,
+    ).select_related('company')
+
+    locked = 0
+    for sub in expired_trials:
+        tenant = _get_tenant_for_company(sub.company)
+        if tenant:
+            try:
+                # The SubscriptionEnforcementMiddleware already blocks API access
+                # when trial_expired is True. We just send the notification email here.
+                _send_lifecycle_email(
+                    tenant=tenant,
+                    template='emails/billing/trial_expired.html',
+                    subject='Action Required: Your Netily Trial Has Expired',
+                    context={
+                        'base_fee': sub.plan.base_license_fee,
+                    }
+                )
+                locked += 1
+            except Exception as e:
+                logger.error(f"Failed to send trial expired email to {sub.company.name}: {e}")
+
+    return f"Trial lifecycle: {warned} warned, {locked} expired notifications sent."
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# TASK: Grace Period Enforcement
+# Runs daily at 12:15 AM Nairobi time (after invoice generation at 12:05)
+# ═══════════════════════════════════════════════════════════════════════════
+
+@shared_task
+def enforce_billing_grace_period():
+    """
+    Handles the billing grace period enforcement:
+    - Day 33 (1 day before grace expires): Send urgent warning
+    - Day 34 (grace_ends_at passed): Lock the account (past_due)
+    """
+    from apps.subscriptions.models import BillingCycle
+    now = timezone.now()
+
+    # ── Day 33 Warning: Grace expires in ~24 hours ──
+    warn_start = now + timedelta(hours=22)
+    warn_end = now + timedelta(hours=26)
+
+    warning_cycles = BillingCycle.objects.filter(
+        status='invoiced',
+        grace_ends_at__gte=warn_start,
+        grace_ends_at__lte=warn_end,
+    ).select_related('tenant', 'subscription', 'subscription__company')
+
+    warned = 0
+    for cycle in warning_cycles:
+        try:
+            _send_lifecycle_email(
+                tenant=cycle.tenant,
+                template='emails/billing/grace_warning.html',
+                subject='URGENT: 24 Hours Until Network Suspension',
+                context={
+                    'grace_ends_at': cycle.grace_ends_at,
+                    'total_due': cycle.calculate_total_charge(),
+                    'invoice_ref': cycle.invoice_reference,
+                }
+            )
+            warned += 1
+        except Exception as e:
+            logger.error(f"Failed to send grace warning to {cycle.tenant.name}: {e}")
+
+    # ── Day 34 Lockout: Grace has expired ──
+    expired_cycles = BillingCycle.objects.filter(
+        status='invoiced',
+        grace_ends_at__lt=now,
+    ).select_related('tenant', 'subscription', 'subscription__company')
+
+    locked = 0
+    for cycle in expired_cycles:
+        try:
+            with transaction.atomic():
+                sub = cycle.subscription
+                sub.status = 'past_due'
+                sub.save(update_fields=['status'])
+
+                logger.info(
+                    f"[{cycle.tenant.name}] Grace period expired. "
+                    f"Subscription locked (past_due). Invoice: {cycle.invoice_reference}"
+                )
+
+                _send_lifecycle_email(
+                    tenant=cycle.tenant,
+                    template='emails/billing/suspension_notice.html',
+                    subject='Notice of Network Suspension',
+                    context={
+                        'total_due': cycle.calculate_total_charge(),
+                        'invoice_ref': cycle.invoice_reference,
+                    }
+                )
+                locked += 1
+        except Exception as e:
+            logger.error(f"Failed to enforce grace period for {cycle.tenant.name}: {e}")
+
+    return f"Grace enforcement: {warned} warned, {locked} locked."
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# TASK: Mid-Cycle PPPoE Ghost Record Sweep
+# Runs daily at 12:10 AM — captures PPPoE users connecting mid-cycle
+# ═══════════════════════════════════════════════════════════════════════════
+
+@shared_task
+def sweep_pppoe_ghost_records():
+    """
+    Daily sweep of RadAcct for PPPoE sessions during active billing cycles.
+    Creates BillableClientRecord entries so the invoice total is always
+    up-to-date even before the cycle ends.
+    """
+    from apps.subscriptions.models import BillingCycle, BillableClientRecord
+    now = timezone.now()
+
+    active_cycles = BillingCycle.objects.filter(
+        status='active',
+    ).select_related('tenant')
+
+    total_created = 0
+    for cycle in active_cycles:
+        try:
+            with schema_context(cycle.tenant.schema_name):
+                active_usernames = list(RadAcct.objects.filter(
+                    acctstarttime__lt=now,
+                    framedprotocol='PPP',
+                ).filter(
+                    Q(acctstoptime__isnull=True) | Q(acctstoptime__gt=cycle.start_date)
+                ).values_list('username', flat=True).distinct())
+
+            with schema_context(get_public_schema_name()):
+                records = [
+                    BillableClientRecord(cycle=cycle, username=uname)
+                    for uname in active_usernames if uname
+                ]
+                if records:
+                    created = BillableClientRecord.objects.bulk_create(records, ignore_conflicts=True)
+                    total_created += len(created)
+
+        except Exception as e:
+            logger.error(f"Ghost record sweep failed for {cycle.tenant.name}: {e}")
+
+    return f"Ghost record sweep: {total_created} new records across {active_cycles.count()} cycles."
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# HELPER: Get Tenant for a Company
+# ═══════════════════════════════════════════════════════════════════════════
+
+def _get_tenant_for_company(company):
+    """Resolve the Tenant record for a Company."""
+    from apps.core.models import Tenant
+    try:
+        return Tenant.objects.get(company=company)
+    except Tenant.DoesNotExist:
+        return None
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# One-shot email tasks (called from views/signals, not beat-scheduled)
+# ═══════════════════════════════════════════════════════════════════════════
+
+@shared_task(bind=True, max_retries=2, default_retry_delay=30)
+def send_cycle_activated_email(self, company_id):
+    """Send a cycle-activation confirmation email when subscription payment succeeds."""
+    from apps.core.models import Company
+    try:
+        company = Company.objects.select_related('subscription', 'subscription__plan').get(id=company_id)
+        tenant = _get_tenant_for_company(company)
+        if not tenant:
+            logger.warning(f"No tenant for company {company_id}, skipping cycle_activated email")
+            return
+
+        sub = company.subscription
+        cycle = BillingCycle.objects.filter(
+            subscription=sub, status='active'
+        ).order_by('-start_date').first()
+
+        context = {
+            'plan_name': sub.plan.name if sub.plan else 'Metered',
+            'cycle_start': cycle.start_date if cycle else sub.current_period_start,
+            'cycle_end': cycle.end_date if cycle else sub.current_period_end,
+            'base_fee': str(sub.plan.base_license_fee) if sub.plan else '500',
+        }
+        _send_lifecycle_email(
+            tenant,
+            'emails/billing/cycle_activated.html',
+            'Payment Received — Your Netily Cycle is Active',
+            context,
+        )
+    except Company.DoesNotExist:
+        logger.error(f"Company {company_id} not found for cycle_activated email")
+    except Exception as exc:
+        logger.error(f"send_cycle_activated_email failed for company {company_id}: {exc}")
+        raise self.retry(exc=exc)
+
+
+@shared_task(bind=True, max_retries=2, default_retry_delay=30)
+def send_trial_welcome_email(self, company_id):
+    """Send a welcome email when a new ISP signs up and gets a trial."""
+    from apps.core.models import Company
+    try:
+        company = Company.objects.select_related('subscription').get(id=company_id)
+        tenant = _get_tenant_for_company(company)
+        if not tenant:
+            logger.warning(f"No tenant for company {company_id}, skipping trial_welcome email")
+            return
+
+        sub = company.subscription
+        context = {
+            'trial_end_date': sub.trial_ends_at,
+            'activation_fee': '500',
+        }
+        _send_lifecycle_email(
+            tenant,
+            'emails/billing/trial_welcome.html',
+            'Welcome to Netily! Your 14-Day Free Trial Starts Now',
+            context,
+        )
+    except Company.DoesNotExist:
+        logger.error(f"Company {company_id} not found for trial_welcome email")
+    except Exception as exc:
+        logger.error(f"send_trial_welcome_email failed for company {company_id}: {exc}")
+        raise self.retry(exc=exc)

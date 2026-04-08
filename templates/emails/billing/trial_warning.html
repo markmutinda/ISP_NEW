@@ -1,0 +1,38 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+{% include "emails/billing/_base_style.html" %}
+</head>
+<body>
+<div class="wrapper">
+  <div class="header">
+    <h1>⏰ Your Free Trial Ends in 48 Hours</h1>
+    <p>{{ company_name }} — Action Needed</p>
+  </div>
+  <div class="body">
+    <p>Hi {{ company_name }},</p>
+    <p>Your Netily free trial expires on <strong>{{ trial_ends_at|date:"M d, Y" }}</strong> — that's just <strong>{{ days_remaining }} day{{ days_remaining|pluralize }}</strong> away.</p>
+
+    <div class="highlight warning">
+      <strong>What happens next?</strong>
+      <p style="margin:8px 0 0;">After the trial ends, your account will be paused until you activate your first 30-day billing cycle by paying the <strong>KES {{ base_fee }}</strong> base fee.</p>
+    </div>
+
+    <p>Your customers, routers, and all data will be preserved — you just need to make a single payment to resume operations.</p>
+
+    <p style="text-align:center;margin:24px 0;">
+      <a href="{{ platform_url }}" class="btn">Activate Now — KES {{ base_fee }} →</a>
+    </p>
+
+    <div class="info-box">
+      <div class="info-row"><span class="info-label">Trial Ends</span><span class="info-value">{{ trial_ends_at|date:"M d, Y at H:i" }}</span></div>
+      <div class="info-row"><span class="info-label">Activation Fee</span><span class="info-value">KES {{ base_fee }}</span></div>
+      <div class="info-row"><span class="info-label">Billing Cycle</span><span class="info-value">30 days from payment</span></div>
+    </div>
+  </div>
+  <div class="footer">
+    <p>Netily — ISP Management, Simplified</p>
+  </div>
+</div>
+</body>
+</html>

@@ -140,6 +140,21 @@ app.conf.beat_schedule = {
         'schedule': crontab(hour=0, minute=5),  # Daily at 12:05 AM
         'options': {'queue': 'billing'}
     },
+    'sweep-pppoe-ghost-records-daily': {
+        'task': 'apps.subscriptions.tasks.sweep_pppoe_ghost_records',
+        'schedule': crontab(hour=0, minute=10),  # Daily at 12:10 AM
+        'options': {'queue': 'billing'}
+    },
+    'check-trial-lifecycle-daily': {
+        'task': 'apps.subscriptions.tasks.check_trial_lifecycle',
+        'schedule': crontab(hour=8, minute=0),  # Daily at 8:00 AM
+        'options': {'queue': 'billing'}
+    },
+    'enforce-billing-grace-period-daily': {
+        'task': 'apps.subscriptions.tasks.enforce_billing_grace_period',
+        'schedule': crontab(hour=0, minute=15),  # Daily at 12:15 AM
+        'options': {'queue': 'billing'}
+    },
 
     # ────────────────────────────────────────────────────────────────
     # FUP Automation - Every 10 minutes

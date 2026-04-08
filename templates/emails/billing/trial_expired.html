@@ -1,0 +1,39 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+{% include "emails/billing/_base_style.html" %}
+</head>
+<body>
+<div class="wrapper">
+  <div class="header">
+    <h1>🔒 Your Netily Trial Has Expired</h1>
+    <p>{{ company_name }} — Account Paused</p>
+  </div>
+  <div class="body">
+    <p>Hi {{ company_name }},</p>
+    <p>Your 14-day free trial has ended. Your account is now <strong>paused</strong> — your staff and customers cannot access the platform until you activate your subscription.</p>
+
+    <div class="highlight danger">
+      <strong>Your data is safe:</strong>
+      <p style="margin:8px 0 0;">All customer records, router configurations, and payment history are preserved. Once you pay the base fee, everything will be restored instantly.</p>
+    </div>
+
+    <p>To resume operations, pay the <strong>KES {{ base_fee }}</strong> base fee. This starts your first 30-day billing cycle.</p>
+
+    <p style="text-align:center;margin:24px 0;">
+      <a href="{{ platform_url }}" class="btn btn-danger">Reactivate Your Account →</a>
+    </p>
+
+    <div class="info-box">
+      <div class="info-row"><span class="info-label">Status</span><span class="info-value"><span class="badge badge-red">Paused</span></span></div>
+      <div class="info-row"><span class="info-label">Required Payment</span><span class="info-value">KES {{ base_fee }}</span></div>
+      <div class="info-row"><span class="info-label">Payment Method</span><span class="info-value">M-Pesa or Bank Transfer</span></div>
+    </div>
+  </div>
+  <div class="footer">
+    <p>Netily — ISP Management, Simplified</p>
+    <p>If you have questions about your account, reply to this email.</p>
+  </div>
+</div>
+</body>
+</html>

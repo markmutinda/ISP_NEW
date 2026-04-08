@@ -48,6 +48,9 @@ cryptography==42.0.0
 # SMS Integration
 africastalking==1.2.2
 
+# Email (Resend - modern developer-first transactional email)
+resend>=2.0.0
+
 django-extensions==3.2.3
 setuptools==69.0.3
 

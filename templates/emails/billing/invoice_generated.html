@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+{% include "emails/billing/_base_style.html" %}
+</head>
+<body>
+<div class="wrapper">
+  <div class="header">
+    <h1>📄 Your Monthly Netily Invoice</h1>
+    <p>{{ company_name }} — Cycle {{ cycle_start|date:"M d" }} to {{ cycle_end|date:"M d, Y" }}</p>
+  </div>
+  <div class="body">
+    <p>Hi {{ company_name }},</p>
+    <p>Your 30-day billing cycle has ended and your invoice is ready. You have <strong>{{ grace_days }} days</strong> to pay without any service interruption.</p>
+
+    <div class="info-box">
+      <p style="text-align:center;margin:0 0 16px;"><span class="amount">KES {{ total_due }}</span></p>
+      <div class="info-row"><span class="info-label">Base License Fee</span><span class="info-value">KES {{ base_fee }}</span></div>
+      <div class="info-row"><span class="info-label">PPPoE Clients ({{ pppoe_count }} × KES 20)</span><span class="info-value">KES {{ pppoe_fee }}</span></div>
+      {% if hotspot_share %}<div class="info-row"><span class="info-label">Hotspot Revenue Share (3%)</span><span class="info-value">KES {{ hotspot_share }}</span></div>{% endif %}
+      <div class="info-row" style="font-weight:700;border-top:2px solid #e2e8f0;padding-top:12px;"><span class="info-label" style="color:#111;">Total Due</span><span class="info-value" style="font-size:18px;">KES {{ total_due }}</span></div>
+    </div>
+
+    <div class="highlight warning">
+      <strong>⏰ Grace Period:</strong> You have until <strong>{{ due_date|date:"M d, Y" }}</strong> to settle this invoice. Service continues uninterrupted during this time.
+    </div>
+
+    <p style="text-align:center;margin:24px 0;">
+      <a href="{{ platform_url }}" class="btn">Pay Invoice Now →</a>
+    </p>
+
+    <div class="info-box">
+      <div class="info-row"><span class="info-label">Invoice Period</span><span class="info-value">{{ cycle_start|date:"M d" }} — {{ cycle_end|date:"M d, Y" }}</span></div>
+      <div class="info-row"><span class="info-label">Due Date</span><span class="info-value">{{ due_date|date:"M d, Y" }}</span></div>
+      <div class="info-row"><span class="info-label">Payment Methods</span><span class="info-value">M-Pesa / Bank Transfer</span></div>
+    </div>
+  </div>
+  <div class="footer">
+    <p>Netily — ISP Management, Simplified</p>
+    <p>This is an automated invoice. Reply to this email if you have questions.</p>
+  </div>
+</div>
+</body>
+</html>

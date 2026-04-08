@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+{% include "emails/billing/_base_style.html" %}
+</head>
+<body>
+<div class="wrapper">
+  <div class="header">
+    <h1>✅ Payment Received — Cycle Active</h1>
+    <p>{{ company_name }} — 30-Day Billing Cycle Started</p>
+  </div>
+  <div class="body">
+    <p>Hi {{ company_name }},</p>
+    <p>Your payment of <strong>KES {{ amount_paid }}</strong> has been received. Your 30-day billing cycle is now active!</p>
+
+    <div class="highlight success">
+      <strong>Your account is fully operational.</strong>
+      <p style="margin:8px 0 0;">All services are active. Your customers have full internet access.</p>
+    </div>
+
+    <div class="info-box">
+      <div class="info-row"><span class="info-label">Payment Amount</span><span class="info-value">KES {{ amount_paid }}</span></div>
+      {% if mpesa_receipt %}<div class="info-row"><span class="info-label">M-Pesa Receipt</span><span class="info-value">{{ mpesa_receipt }}</span></div>{% endif %}
+      <div class="info-row"><span class="info-label">Cycle Start</span><span class="info-value">{{ cycle_start|date:"M d, Y" }}</span></div>
+      <div class="info-row"><span class="info-label">Cycle End</span><span class="info-value">{{ cycle_end|date:"M d, Y" }}</span></div>
+      <div class="info-row"><span class="info-label">Status</span><span class="info-value"><span class="badge badge-green">Active</span></span></div>
+    </div>
+
+    <p><strong>How billing works during the cycle:</strong></p>
+    <ul>
+      <li><strong>Base Fee:</strong> KES 500 (included in your payment)</li>
+      <li><strong>PPPoE Usage:</strong> KES 20 per active client (min. 20 clients)</li>
+      <li><strong>Hotspot Commission:</strong> 3% of hotspot revenue</li>
+    </ul>
+    <p>At the end of 30 days, we'll generate your invoice with the total breakdown. You'll have a <strong>4-day grace period</strong> to settle.</p>
+
+    <p style="text-align:center;margin:24px 0;">
+      <a href="{{ platform_url }}" class="btn">Go to Dashboard →</a>
+    </p>
+  </div>
+  <div class="footer">
+    <p>Netily — ISP Management, Simplified</p>
+  </div>
+</div>
+</body>
+</html>
