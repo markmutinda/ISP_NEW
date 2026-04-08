@@ -483,11 +483,16 @@ def send_cycle_activated_email(self, company_id):
             subscription=sub, status='active'
         ).order_by('-start_date').first()
 
+        # Get the most recent completed payment for context
+        latest_payment = sub.payments.filter(status='completed').order_by('-completed_at').first()
+
         context = {
             'plan_name': sub.plan.name if sub.plan else 'Metered',
             'cycle_start': cycle.start_date if cycle else sub.current_period_start,
             'cycle_end': cycle.end_date if cycle else sub.current_period_end,
             'base_fee': str(sub.plan.base_license_fee) if sub.plan else '500',
+            'amount_paid': str(latest_payment.amount) if latest_payment else '',
+            'mpesa_receipt': latest_payment.mpesa_receipt if latest_payment else '',
         }
         _send_lifecycle_email(
             tenant,

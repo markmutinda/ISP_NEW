@@ -212,6 +212,30 @@ class TumaWebhookView(APIView):
                     # (e.g., PPPoE sessions, prepaid plans, etc.)
                     # For non-hotspot payments, you may want immediate activation here
                     # ================================================================
+
+                    # ================================================================
+                    # ACCUMULATE HOTSPOT REVENUE for metered billing
+                    # Increment the active BillingCycle's hotspot_revenue_accumulated
+                    # so the 3% share is calculated correctly at invoice time.
+                    # ================================================================
+                    if hotspot_session:
+                        try:
+                            from apps.subscriptions.models import BillingCycle
+                            from django.db.models import F
+                            with schema_context(get_public_schema_name()):
+                                updated = BillingCycle.objects.filter(
+                                    tenant__schema_name=payment_schema,
+                                    status='active',
+                                ).update(
+                                    hotspot_revenue_accumulated=F('hotspot_revenue_accumulated') + payment.amount
+                                )
+                                if updated:
+                                    logger.info(
+                                        f"Accumulated KES {payment.amount} hotspot revenue "
+                                        f"for tenant {payment_schema}"
+                                    )
+                        except Exception as acc_err:
+                            logger.warning(f"Failed to accumulate hotspot revenue: {acc_err}")
                     
                 else:
                     payment.status = "FAILED"

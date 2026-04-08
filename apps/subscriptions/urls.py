@@ -18,6 +18,7 @@ from .views import (
     VerifyPayoutView,
     SettlementSummaryView,
     SettlementHistoryViewSet,
+    BillingCalculatorView,
 )
 
 app_name = 'subscriptions'
@@ -35,6 +36,9 @@ urlpatterns = [
     path('usage/', SubscriptionUsageView.as_view(), name='usage'),
     path('pay/', InitiateSubscriptionPaymentView.as_view(), name='pay'),
     path('cancel/', CancelSubscriptionView.as_view(), name='cancel'),
+
+    # Public billing calculator (no auth)
+    path('calculator/', BillingCalculatorView.as_view(), name='billing-calculator'),
 ]
 
 # Settlement/Payout URLs (these go under /api/v1/core/)

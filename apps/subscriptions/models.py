@@ -30,6 +30,7 @@ class NetilyPlan(models.Model):
     """
     
     PLAN_CODES = (
+        ('metered', 'Metered'),
         ('starter', 'Starter'),
         ('professional', 'Professional'),
         ('enterprise', 'Enterprise'),

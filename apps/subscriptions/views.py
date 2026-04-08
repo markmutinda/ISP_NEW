@@ -867,3 +867,85 @@ class SettlementHistoryViewSet(viewsets.ReadOnlyModelViewSet):
         return ISPSettlement.objects.filter(
             company=user.company
         ).order_by('-created_at')
+
+
+# ─────────────────────────────────────────────────────────────
+#  PUBLIC BILLING CALCULATOR — Landing page widget
+# ─────────────────────────────────────────────────────────────
+
+class BillingCalculatorView(APIView):
+    """
+    Public endpoint for the landing-page billing calculator.
+    Lets ISPs estimate their monthly cost before signing up.
+
+    GET  /api/v1/subscriptions/calculator/
+         Returns all active plans with default estimate.
+
+    POST /api/v1/subscriptions/calculator/
+         Body: { "pppoe_clients": 50, "monthly_hotspot_revenue": 10000 }
+         Returns per-plan estimated monthly cost.
+    """
+    authentication_classes = []
+    permission_classes = [AllowAny]
+
+    def _build_estimates(self, pppoe_clients, hotspot_revenue):
+        plans = NetilyPlan.objects.filter(is_active=True).order_by('sort_order', 'price_monthly')
+        results = []
+        for plan in plans:
+            if plan.is_metered:
+                billable = max(pppoe_clients, plan.pppoe_min_clients)
+                pppoe_charge = billable * plan.pppoe_unit_price
+                hotspot_share = (hotspot_revenue * plan.hotspot_revenue_share_pct / Decimal('100')).quantize(Decimal('0.01'))
+                estimated_monthly = plan.base_license_fee + pppoe_charge + hotspot_share
+            else:
+                billable = pppoe_clients
+                pppoe_charge = Decimal('0')
+                hotspot_share = Decimal('0')
+                estimated_monthly = plan.price_monthly
+
+            results.append({
+                'plan_id': plan.id,
+                'plan_name': plan.name,
+                'plan_code': plan.code,
+                'tagline': plan.tagline,
+                'is_metered': plan.is_metered,
+                'base_fee': plan.base_license_fee if plan.is_metered else plan.price_monthly,
+                'pppoe_unit_price': plan.pppoe_unit_price,
+                'pppoe_min_clients': plan.pppoe_min_clients,
+                'hotspot_share_pct': plan.hotspot_revenue_share_pct,
+                'max_subscribers': plan.max_subscribers,
+                'max_routers': plan.max_routers,
+                'max_staff': plan.max_staff,
+                'features': plan.features,
+                'is_popular': plan.is_popular,
+                # Calculation breakdown
+                'input_pppoe_clients': pppoe_clients,
+                'billable_pppoe_clients': billable,
+                'pppoe_charge': pppoe_charge,
+                'input_hotspot_revenue': hotspot_revenue,
+                'hotspot_share': hotspot_share,
+                'estimated_monthly': estimated_monthly,
+                'price_yearly': plan.price_yearly,
+            })
+        return results
+
+    def get(self, request):
+        # Default estimate: 30 PPPoE clients, KES 5,000 hotspot revenue
+        results = self._build_estimates(30, Decimal('5000'))
+        return Response(results)
+
+    def post(self, request):
+        try:
+            pppoe_clients = int(request.data.get('pppoe_clients', 30))
+        except (TypeError, ValueError):
+            pppoe_clients = 30
+        pppoe_clients = max(0, min(pppoe_clients, 100000))
+
+        try:
+            hotspot_revenue = Decimal(str(request.data.get('monthly_hotspot_revenue', '5000')))
+        except Exception:
+            hotspot_revenue = Decimal('5000')
+        hotspot_revenue = max(Decimal('0'), hotspot_revenue)
+
+        results = self._build_estimates(pppoe_clients, hotspot_revenue)
+        return Response(results)

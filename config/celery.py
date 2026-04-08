@@ -89,6 +89,11 @@ app.conf.beat_schedule = {
         'schedule': crontab(minute='*/15'),
         'options': {'queue': 'notifications'}
     },
+    'retry-failed-notifications-every-30-min': {
+        'task': 'apps.notifications.tasks.retry_failed_notifications_task',
+        'schedule': crontab(minute='*/30'),
+        'options': {'queue': 'notifications'}
+    },
     
     # ────────────────────────────────────────────────────────────────
     # Sync RADIUS with MikroTik - Every hour

@@ -275,6 +275,13 @@ class TenantCreateView(APIView):
         try:
             from apps.subscriptions.models import CompanySubscription
             CompanySubscription.create_trial_subscription(company)
+
+            # Fire trial welcome email in background
+            try:
+                from apps.subscriptions.tasks import send_trial_welcome_email
+                send_trial_welcome_email.delay(company.id)
+            except Exception as email_err:
+                logger.warning("Could not queue trial welcome email: %s", email_err)
         except Exception as e:
             logger.warning("Could not create trial subscription: %s", e)
 
@@ -2121,8 +2128,21 @@ class SubscriptionStkCallbackView(APIView):
             if is_success:
                 receipt = data.get("mpesa_receipt_number", "")
                 payment.mark_completed(mpesa_receipt=receipt)
-                # Extend the subscription
-                payment.subscription.extend_subscription()
+
+                sub = payment.subscription
+                # If this is the first payment after a trial, convert properly
+                if sub.is_trial and sub.status == 'trialing':
+                    sub.convert_from_trial(billing_period=sub.billing_period or 'monthly')
+                else:
+                    sub.extend_subscription()
+
+                # Fire confirmation email in background
+                try:
+                    from apps.subscriptions.tasks import send_cycle_activated_email
+                    send_cycle_activated_email.delay(str(sub.company_id))
+                except Exception as email_err:
+                    logger.warning("Failed to queue cycle_activated email: %s", email_err)
+
                 logger.info("Subscription payment %s completed. Receipt: %s", payment.id, receipt)
             else:
                 reason = data.get("failure_reason") or data.get("result_desc") or "STK push failed"
