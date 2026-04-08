@@ -342,6 +342,7 @@ DEFAULT_FROM_EMAIL = os.getenv('DEFAULT_FROM_EMAIL', 'billing@netily.co.ke')
 # Resend — modern transactional email (primary provider)
 # Sign up at https://resend.com, add your domain, get the API key
 RESEND_API_KEY = os.getenv('RESEND_API_KEY', '')  # Set in .env for production
+RESEND_FROM_EMAIL = os.getenv('RESEND_FROM_EMAIL', 'Netily <billing@netily.co.ke>')
 
 # ────────────────────────────────────────────────────────────────
 #  PLATFORM DOMAIN SETTINGS

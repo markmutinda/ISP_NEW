@@ -162,6 +162,15 @@ class Command(BaseCommand):
             deleted, _ = NetilyPlan.objects.all().delete()
             self.stdout.write(self.style.WARNING(f"Deleted {deleted} existing plans."))
 
+        # Always clean up old/junk plans that don't match the 4 valid codes
+        valid_codes = [p["code"] for p in PLANS]
+        junk = NetilyPlan.objects.exclude(code__in=valid_codes)
+        if junk.exists():
+            names = list(junk.values_list("name", "code"))
+            junk.delete()
+            for name, code in names:
+                self.stdout.write(self.style.WARNING(f"  Removed old plan: {name} ({code})"))
+
         created = 0
         updated = 0
 
@@ -177,6 +186,16 @@ class Command(BaseCommand):
             else:
                 updated += 1
                 self.stdout.write(self.style.HTTP_INFO(f"  Updated: {obj.name} ({obj.code})"))
+
+        # Verify prices were saved correctly
+        self.stdout.write("\n  Verification:")
+        for p in NetilyPlan.objects.all().order_by("sort_order"):
+            self.stdout.write(
+                f"    {p.name} ({p.code}): "
+                f"monthly=KES {p.price_monthly}, "
+                f"yearly=KES {p.price_yearly}, "
+                f"metered={p.is_metered}"
+            )
 
         self.stdout.write(self.style.SUCCESS(
             f"\nDone — {created} created, {updated} updated. "

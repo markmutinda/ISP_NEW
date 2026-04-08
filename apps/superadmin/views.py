@@ -1805,8 +1805,16 @@ class TenantInventoryView(APIView):
 
 
 class TenantImpersonateView(APIView):
-    """Generate a JWT for the tenant's admin user so the superadmin
-    can access that tenant's panel without knowing the password."""
+    """Generate a JWT so the superadmin can access a tenant's panel.
+
+    POST /api/v1/superadmin/tenants/<pk>/impersonate/
+    Body (optional): { "use_own_account": true }
+
+    - Default: generates a JWT for the tenant's admin user.
+    - use_own_account=true: generates a JWT for the *superadmin* user so they
+      keep their own identity (the CompanyContextMiddleware patches
+      request.user.company on the fly for superadmin users on tenant subdomains).
+    """
     permission_classes = SUPERADMIN_PERMS
 
     def post(self, request, pk):
@@ -1816,23 +1824,29 @@ class TenantImpersonateView(APIView):
         except Tenant.DoesNotExist:
             return Response({"detail": "Tenant not found"}, status=status.HTTP_404_NOT_FOUND)
 
-        # Find the tenant's admin user
-        admin_user = (
-            User.objects
-            .filter(tenant=tenant, role="admin", is_active=True)
-            .order_by("date_joined")
-            .first()
-        )
-        if not admin_user:
-            return Response(
-                {"detail": "No active admin user found for this tenant."},
-                status=status.HTTP_404_NOT_FOUND,
-            )
+        use_own = request.data.get("use_own_account", False)
 
-        # Generate JWT for that user
+        if use_own:
+            # Issue tokens for the superadmin themselves
+            target_user = request.user
+        else:
+            # Find the tenant's admin user
+            target_user = (
+                User.objects
+                .filter(tenant=tenant, role="admin", is_active=True)
+                .order_by("date_joined")
+                .first()
+            )
+            if not target_user:
+                return Response(
+                    {"detail": "No active admin user found for this tenant."},
+                    status=status.HTTP_404_NOT_FOUND,
+                )
+
+        # Generate JWT for the target user
         try:
             from rest_framework_simplejwt.tokens import RefreshToken
-            refresh = RefreshToken.for_user(admin_user)
+            refresh = RefreshToken.for_user(target_user)
             tokens = {
                 "access": str(refresh.access_token),
                 "refresh": str(refresh),
@@ -1850,9 +1864,9 @@ class TenantImpersonateView(APIView):
 
         _log_action(
             request.user, "login", "Tenant",
-            object_repr=f"Impersonated {tenant.subdomain} as {admin_user.email}",
+            object_repr=f"Impersonated {tenant.subdomain} as {target_user.email}",
             object_id=tenant.id,
-            changes={"impersonated_user": admin_user.email},
+            changes={"impersonated_user": target_user.email, "use_own_account": use_own},
             request=request,
         )
 
@@ -1860,11 +1874,12 @@ class TenantImpersonateView(APIView):
             "access": tokens["access"],
             "refresh": tokens["refresh"],
             "user": {
-                "id": admin_user.id,
-                "email": admin_user.email,
-                "first_name": admin_user.first_name,
-                "last_name": admin_user.last_name,
-                "role": admin_user.role,
+                "id": target_user.id,
+                "email": target_user.email,
+                "first_name": target_user.first_name,
+                "last_name": target_user.last_name,
+                "role": target_user.role,
+                "is_superuser": target_user.is_superuser,
             },
             "tenant": {
                 "subdomain": tenant.subdomain,

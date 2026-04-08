@@ -209,6 +209,9 @@ def _send_lifecycle_email(tenant, template, subject, context):
     text_body = strip_tags(html_body)
     from_email = getattr(settings, 'DEFAULT_FROM_EMAIL', 'billing@netily.co.ke')
 
+    # For Resend, use a dedicated from address on the verified domain
+    resend_from = getattr(settings, 'RESEND_FROM_EMAIL', 'Netily <billing@netily.co.ke>')
+
     # Collect admin emails from the company
     admin_emails = []
     try:
@@ -236,7 +239,7 @@ def _send_lifecycle_email(tenant, template, subject, context):
             import resend
             resend.api_key = resend_key
             resend.Emails.send({
-                'from': from_email,
+                'from': resend_from,
                 'to': admin_emails,
                 'subject': subject,
                 'html': html_body,

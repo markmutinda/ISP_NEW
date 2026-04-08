@@ -136,12 +136,27 @@ class TenantMainMiddleware(MiddlewareMixin):
 
 class CompanyContextMiddleware(MiddlewareMixin):
     """
-    Attaches request.company and request.tenant for authenticated users
+    Attaches request.company and request.tenant for authenticated users.
+    For superadmin users on a tenant subdomain, temporarily sets
+    request.user.company so tenant views that filter by user.company work.
     """
     def process_request(self, request):
         # If tenant is already set by TenantMainMiddleware, use it
         if hasattr(request, 'tenant') and request.tenant:
             # Company is already set by TenantMainMiddleware
+            # For superadmin users visiting a tenant subdomain,
+            # patch user.company so queryset filters work correctly
+            if (
+                hasattr(request, 'user')
+                and request.user.is_authenticated
+                and request.user.is_superuser
+                and not getattr(request.user, 'company', None)
+            ):
+                tenant_company = getattr(request.tenant, 'company', None)
+                if tenant_company:
+                    request.user._original_company = None
+                    request.user.company = tenant_company
+                    request.user.tenant = request.tenant
             return None
         
         # For authenticated users, get their company/tenant
@@ -279,7 +294,11 @@ class SubscriptionEnforcementMiddleware(MiddlewareMixin):
         if any(request.path.startswith(p) for p in ALLOWED_PATHS):
             return None
         
-        # 4. Check subscription state
+        # 4. Superadmin users bypass subscription enforcement entirely
+        if hasattr(request, 'user') and hasattr(request.user, 'is_superuser') and request.user.is_superuser:
+            return None
+
+        # 5. Check subscription state
         tenant = getattr(request, 'tenant', None)
         
         # Only enforce if we have a tenant and company
