@@ -11,7 +11,7 @@ from django.utils.text import slugify
 from decimal import Decimal
 
 from apps.core.models import Tenant, Company, Domain, User
-from apps.subscriptions.models import BillingCycle  # Import BillingCycle
+from apps.subscriptions.models import BillingCycle, CompanySubscription  # Import BillingCycle
 
 
 # ──────────────────────────────────────────
@@ -380,3 +380,50 @@ class AuditLogSerializer(serializers.Serializer):
     object_repr = serializers.CharField(allow_null=True)
     ip_address = serializers.CharField(allow_null=True)
     changes = serializers.JSONField(allow_null=True)
+
+
+# ──────────────────────────────────────────
+# BILLING CYCLE
+# ──────────────────────────────────────────
+
+class BillingCycleSerializer(serializers.ModelSerializer):
+    tenant_name = serializers.SerializerMethodField()
+    plan_name = serializers.SerializerMethodField()
+    pppoe_clients = serializers.SerializerMethodField()
+    estimated_total = serializers.SerializerMethodField()
+
+    class Meta:
+        model = BillingCycle
+        fields = [
+            "id", "tenant_name", "plan_name", "status",
+            "start_date", "end_date", "grace_ends_at",
+            "hotspot_revenue_accumulated",
+            "snapshot_base_fee", "snapshot_pppoe_price",
+            "snapshot_min_clients", "snapshot_hotspot_share_pct",
+            "pppoe_clients", "estimated_total",
+            "invoice_reference",
+        ]
+
+    def get_tenant_name(self, obj):
+        try:
+            return obj.tenant.company.name
+        except Exception:
+            return obj.tenant.subdomain
+
+    def get_plan_name(self, obj):
+        try:
+            return obj.subscription.plan.name
+        except Exception:
+            return ""
+
+    def get_pppoe_clients(self, obj):
+        try:
+            return obj.calculate_total_pppoe()
+        except Exception:
+            return 0
+
+    def get_estimated_total(self, obj):
+        try:
+            return float(obj.calculate_total_charge())
+        except Exception:
+            return 0.0

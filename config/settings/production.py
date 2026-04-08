@@ -141,6 +141,12 @@ elif _droplet_ip:
 # Frontend URL (Next.js) — override for production
 FRONTEND_URL = os.environ.get('FRONTEND_URL', 'https://netily.co.ke')
 
+# Tuma payment gateway callback URL
+TUMA_CALLBACK_URL = os.environ.get(
+    'TUMA_CALLBACK_URL',
+    'https://api.netily.co.ke/api/v1/webhooks/tuma/callback/',
+)
+
 # ────────────────────────────────────────────────────────────────
 #  LOGGING — reduced verbosity for production VPS
 # ────────────────────────────────────────────────────────────────

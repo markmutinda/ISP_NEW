@@ -117,8 +117,11 @@ hotspot_admin_api_urlpatterns = [
 # TUMA WEBHOOK (PUBLIC - only the callback)
 # This is called by Tuma's servers
 # ==========================
+from apps.superadmin.views import SubscriptionStkCallbackView
+
 tuma_webhook_api_urlpatterns = [
     path('webhooks/tuma/', include(tuma_public_urlpatterns)),
+    path('webhooks/tuma/subscription-callback/', SubscriptionStkCallbackView.as_view(), name='tuma-subscription-callback'),
 ]
 
 # Main URL Patterns

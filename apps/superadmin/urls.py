@@ -71,4 +71,10 @@ urlpatterns = [
     # Feature Request Management
     path("feature-requests/", views.SuperadminFeatureListView.as_view(), name="superadmin-feature-list"),
     path("feature-requests/<int:pk>/", views.SuperadminFeatureDetailView.as_view(), name="superadmin-feature-detail"),
+
+    # Billing Cycles
+    path("billing-cycles/", views.BillingCycleListView.as_view(), name="billing-cycle-list"),
+
+    # Subscription Payments (Tuma STK Push)
+    path("subscriptions/pay/", views.SubscriptionStkPushView.as_view(), name="subscription-stk-push"),
 ]

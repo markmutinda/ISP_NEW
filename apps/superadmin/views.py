@@ -11,6 +11,7 @@ import logging
 from datetime import timedelta
 from decimal import Decimal
 
+from django.conf import settings
 from django.db import connection
 from django.db.models import Sum, Count, Q, F
 from django.http import HttpResponse
@@ -1960,3 +1961,172 @@ class SuperadminFeatureDetailView(APIView):
                 
                 return Response(serializer.data)
             return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  BILLING CYCLES
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+
+class BillingCycleListView(APIView):
+    """List all billing cycles across tenants."""
+    permission_classes = SUPERADMIN_PERMS
+
+    def get(self, request):
+        _ensure_public()
+        from apps.subscriptions.models import BillingCycle
+        from apps.superadmin.serializers import BillingCycleSerializer
+
+        status_filter = request.query_params.get("status")
+        search = request.query_params.get("search", "")
+        page = int(request.query_params.get("page", 1))
+        page_size = int(request.query_params.get("page_size", PAGE_SIZE))
+
+        qs = BillingCycle.objects.select_related(
+            "tenant", "tenant__company", "subscription", "subscription__plan",
+        ).order_by("-start_date")
+
+        if status_filter:
+            qs = qs.filter(status=status_filter)
+        if search:
+            qs = qs.filter(
+                Q(tenant__company__name__icontains=search)
+                | Q(tenant__subdomain__icontains=search)
+                | Q(invoice_reference__icontains=search)
+            )
+
+        total = qs.count()
+        start = (page - 1) * page_size
+        cycles = qs[start:start + page_size]
+
+        return Response({
+            "count": total,
+            "page": page,
+            "page_size": page_size,
+            "results": BillingCycleSerializer(cycles, many=True).data,
+        })
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  TUMA SUBSCRIPTION PAYMENTS (ISPs paying Netily)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+
+class SubscriptionStkPushView(APIView):
+    """Initiate an STK push to the ISP's phone via Tuma MASTER account.
+
+    POST /api/v1/superadmin/subscriptions/pay/
+    Body: { "subscription_id": "<uuid>", "phone": "2547XXXXXXXX", "amount": 5000 }
+    """
+    permission_classes = SUPERADMIN_PERMS
+
+    def post(self, request):
+        _ensure_public()
+        from apps.subscriptions.models import CompanySubscription, SubscriptionPayment
+        from apps.billing.services.tuma_service import TumaClient, TumaError
+
+        sub_id = request.data.get("subscription_id")
+        phone = request.data.get("phone", "").strip()
+        amount = request.data.get("amount")
+
+        if not sub_id or not phone or not amount:
+            return Response(
+                {"detail": "subscription_id, phone and amount are required."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        try:
+            subscription = CompanySubscription.objects.select_related("plan", "company").get(pk=sub_id)
+        except CompanySubscription.DoesNotExist:
+            return Response({"detail": "Subscription not found."}, status=status.HTTP_404_NOT_FOUND)
+
+        # Create a pending payment
+        payment = SubscriptionPayment.objects.create(
+            subscription=subscription,
+            amount=amount,
+            currency="KES",
+            payment_method="mpesa_stk",
+            phone_number=phone,
+            status="processing",
+        )
+
+        try:
+            client = TumaClient()
+            token = client.get_master_token()
+            callback_url = getattr(settings, "TUMA_CALLBACK_URL", "").replace(
+                "/callback/", "/subscription-callback/"
+            )
+            description = f"Netily-{subscription.company.name[:20]}"
+
+            result = client.stk_push(token, amount, phone, callback_url, description)
+            data = result.get("data", result)
+
+            payment.payhero_checkout_id = data.get("checkout_request_id", "")
+            payment.payhero_reference = data.get("merchant_request_id", "")
+            payment.save(update_fields=["payhero_checkout_id", "payhero_reference"])
+
+            return Response({
+                "payment_id": str(payment.id),
+                "merchant_request_id": data.get("merchant_request_id"),
+                "checkout_request_id": data.get("checkout_request_id"),
+                "status": "processing",
+                "message": "STK push sent. Awaiting confirmation.",
+            })
+        except TumaError as e:
+            payment.mark_failed(str(e))
+            return Response({"detail": str(e)}, status=status.HTTP_502_BAD_GATEWAY)
+        except Exception as e:
+            logger.exception("SubscriptionStkPush error")
+            payment.mark_failed(str(e))
+            return Response({"detail": "Payment initiation failed."}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+class SubscriptionStkCallbackView(APIView):
+    """PUBLIC webhook — Tuma calls this when the ISP completes (or cancels) the STK push.
+
+    POST /api/v1/webhooks/tuma/subscription-callback/
+    """
+    authentication_classes = []
+    permission_classes = []
+
+    def post(self, request):
+        data = request.data
+        merchant_id = data.get("merchant_request_id", "")
+        checkout_id = data.get("checkout_request_id", "")
+        result_code = data.get("result_code")
+
+        if not merchant_id and not checkout_id:
+            return Response({"success": False, "message": "Missing identifiers"}, status=400)
+
+        from apps.subscriptions.models import SubscriptionPayment
+        from django_tenants.utils import schema_context, get_public_schema_name
+
+        with schema_context(get_public_schema_name()):
+            payment = None
+            if checkout_id:
+                payment = SubscriptionPayment.objects.filter(payhero_checkout_id=checkout_id).first()
+            if not payment and merchant_id:
+                payment = SubscriptionPayment.objects.filter(payhero_reference=merchant_id).first()
+
+        if not payment:
+            logger.warning("Subscription callback: no payment for merchant=%s checkout=%s", merchant_id, checkout_id)
+            return Response({"success": False, "message": "Payment not found"}, status=404)
+
+        with schema_context(get_public_schema_name()):
+            if payment.status == "completed":
+                return Response({"success": True, "message": "Already processed"})
+
+            is_success = str(result_code) == "0"
+
+            if is_success:
+                receipt = data.get("mpesa_receipt_number", "")
+                payment.mark_completed(mpesa_receipt=receipt)
+                # Extend the subscription
+                payment.subscription.extend_subscription()
+                logger.info("Subscription payment %s completed. Receipt: %s", payment.id, receipt)
+            else:
+                reason = data.get("failure_reason") or data.get("result_desc") or "STK push failed"
+                payment.mark_failed(reason)
+                logger.warning("Subscription payment %s failed: %s", payment.id, reason)
+
+        return Response({"success": True})
