@@ -198,13 +198,18 @@ class Command(BaseCommand):
                 self.stdout.write(f"  DRY RUN: Would delete tenant_blue (id={tenant_id}) and its domains")
             else:
                 cur.execute("DELETE FROM core_domain WHERE tenant_id = %s", [tenant_id])
-                # Delete any subscriptions/billing cycles referencing this tenant
-                cur.execute(
-                    "DELETE FROM subscriptions_billingcycle WHERE subscription_id IN "
-                    "(SELECT id FROM subscriptions_companysubscription WHERE tenant_id = %s)",
-                    [tenant_id]
-                )
-                cur.execute("DELETE FROM subscriptions_companysubscription WHERE tenant_id = %s", [tenant_id])
+                # Get the company_id for cascade cleanup
+                cur.execute("SELECT company_id FROM core_tenant WHERE id = %s", [tenant_id])
+                company_row = cur.fetchone()
+                if company_row and company_row[0]:
+                    company_id = company_row[0]
+                    # Clean up subscriptions referencing this company
+                    cur.execute(
+                        "DELETE FROM subscriptions_billingcycle WHERE subscription_id IN "
+                        "(SELECT id FROM subscriptions_companysubscription WHERE company_id = %s)",
+                        [company_id]
+                    )
+                    cur.execute("DELETE FROM subscriptions_companysubscription WHERE company_id = %s", [company_id])
                 cur.execute("DELETE FROM core_tenant WHERE id = %s", [tenant_id])
                 self.stdout.write(self.style.SUCCESS(f"  Deleted tenant_blue (id={tenant_id})"))
 

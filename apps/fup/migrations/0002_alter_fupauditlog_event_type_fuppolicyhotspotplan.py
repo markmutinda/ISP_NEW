@@ -9,7 +9,7 @@ import uuid
 class Migration(migrations.Migration):
 
     dependencies = [
-        ('billing', '0007_hotspotsession_is_roaming_hotspotsession_roamed_from'),
+        ('billing', '0007_plan_priority_ippool_months_burst'),
         migrations.swappable_dependency(settings.AUTH_USER_MODEL),
         ('fup', '0001_initial'),
     ]
