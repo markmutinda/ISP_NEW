@@ -67,14 +67,80 @@ class CoAService:
             True if disconnect was acknowledged
         """
         try:
-            return self._send_coa_packet(
-                code='disconnect',
+            return self.disconnect_user_via_coa(
                 username=username,
-                nas_ip_address=nas_ip_address,
+                nas_ip=nas_ip_address,
                 session_id=session_id,
             )
         except Exception as e:
             logger.error(f"CoA disconnect failed for {username}: {e}")
+            return False
+    
+    def disconnect_user_via_coa(self, username: str, nas_ip: str, session_id: str = None) -> bool:
+        """
+        Sends a CoA Disconnect-Request UDP packet directly to the NAS.
+        More reliable than the existing method - handles timeout gracefully.
+        
+        Args:
+            username: RADIUS username to disconnect
+            nas_ip: IP address of the NAS (router)
+            session_id: Optional Acct-Session-Id for more precise targeting
+        
+        Returns:
+            True if disconnect was acknowledged OR timeout (treat as disconnected)
+        """
+        import hashlib
+        import os
+        import socket
+        import struct
+
+        COA_CODE = 40  # Disconnect-Request
+        COA_PORT = 3799
+
+        # Build minimal RADIUS disconnect packet
+        identifier = os.urandom(1)[0]
+        authenticator = b'\x00' * 16  # Zeroed for request
+
+        # Attributes
+        def make_attr(attr_type: int, value: bytes) -> bytes:
+            return bytes([attr_type, 2 + len(value)]) + value
+
+        attrs = make_attr(1, username.encode())  # User-Name = type 1
+        if nas_ip:
+            import ipaddress
+            packed_ip = ipaddress.IPv4Address(nas_ip).packed
+            attrs += make_attr(4, packed_ip)  # NAS-IP-Address = type 4
+        if session_id:
+            attrs += make_attr(44, session_id.encode())  # Acct-Session-Id = type 44
+
+        length = 20 + len(attrs)
+        header = struct.pack('!BBH16s', COA_CODE, identifier, length, authenticator)
+        packet = header + attrs
+
+        # Compute proper authenticator: MD5(code+id+length+zeros+attrs+secret)
+        md5 = hashlib.md5(packet + self.secret).digest()
+        packet = struct.pack('!BBH', COA_CODE, identifier, length) + md5 + attrs
+
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            sock.settimeout(3)
+            sock.sendto(packet, (nas_ip, COA_PORT))
+            response, _ = sock.recvfrom(4096)
+            sock.close()
+            # 41 = Disconnect-ACK, 42 = Disconnect-NAK
+            if response[0] == 41:
+                logger.info(f"CoA disconnect ACK for {username}@{nas_ip}")
+                return True
+            else:
+                logger.warning(f"CoA disconnect NAK for {username}@{nas_ip}: code={response[0]}")
+                return False
+        except socket.timeout:
+            # Timeout means NAS is unreachable — session is already dead
+            # Still return True so we close the DB record
+            logger.info(f"CoA timeout for {username}@{nas_ip} — treating as disconnected")
+            return True
+        except Exception as e:
+            logger.error(f"CoA error for {username}: {e}")
             return False
     
     def disconnect_mac(
@@ -155,7 +221,7 @@ class CoAService:
             )
         except ImportError:
             logger.warning("pyrad not installed, falling back to raw CoA packet")
-            return self._send_raw_disconnect(username)
+            return self._send_raw_disconnect(username, nas_ip_address, session_id)
     
     def _send_with_pyrad(
         self,
@@ -239,47 +305,67 @@ class CoAService:
             logger.error(f"pyrad CoA error: {e}", exc_info=True)
             return False
     
-    def _send_raw_disconnect(self, username: str) -> bool:
+    def _send_raw_disconnect(self, username: str, nas_ip: str = None, session_id: str = None) -> bool:
         """
-        Fallback: Send a raw RADIUS Disconnect-Request via UDP.
-        Minimal implementation for when pyrad is not available.
+        Send a raw RADIUS Disconnect-Request via UDP.
+        Improved version that properly handles CoA packets directly to NAS.
+        
+        Args:
+            username: RADIUS username to disconnect
+            nas_ip: IP address of the NAS (router)
+            session_id: Optional Acct-Session-Id for more precise targeting
         """
-        import struct
         import hashlib
         import os
-        
+        import socket
+        import struct
+        import ipaddress
+
         # RADIUS Disconnect-Request (Code 40)
         DISCONNECT_REQUEST = 40
+        COA_PORT = 3799
         
-        # Build a minimal RADIUS packet
+        # Use provided NAS IP or fallback to configured
+        target_ip = nas_ip or self.nas_ip
+        
+        # Build minimal RADIUS disconnect packet
         identifier = os.urandom(1)[0]
         
-        # User-Name attribute (Type 1)
-        user_attr = self._build_radius_attribute(1, username.encode('utf-8'))
+        # Attributes
+        def make_attr(attr_type: int, value: bytes) -> bytes:
+            return bytes([attr_type, 2 + len(value)]) + value
         
-        # Calculate length
-        # Header (20 bytes: code + id + length + authenticator) + attributes
-        authenticator = os.urandom(16)
-        attrs_data = user_attr
-        length = 20 + len(attrs_data)
+        attrs = make_attr(1, username.encode())  # User-Name = type 1
         
-        # Build packet
-        header = struct.pack('!BBH', DISCONNECT_REQUEST, identifier, length)
-        packet_data = header + authenticator + attrs_data
+        if target_ip and target_ip != self.nas_ip:
+            # Only add NAS-IP-Address if targeting a specific NAS
+            try:
+                packed_ip = ipaddress.IPv4Address(target_ip).packed
+                attrs += make_attr(4, packed_ip)  # NAS-IP-Address = type 4
+            except Exception:
+                pass
+        
+        if session_id:
+            attrs += make_attr(44, session_id.encode())  # Acct-Session-Id = type 44
+        
+        length = 20 + len(attrs)
+        authenticator = b'\x00' * 16  # Zeroed for request
+        
+        # Build packet without auth
+        header = struct.pack('!BBH16s', DISCONNECT_REQUEST, identifier, length, authenticator)
+        packet = header + attrs
         
         # Calculate Response Authenticator
         # Auth = MD5(Code + ID + Length + Request-Auth + Attributes + Secret)
-        md5 = hashlib.md5()
-        md5.update(packet_data + self.secret)
-        auth = md5.digest()
+        md5 = hashlib.md5(packet + self.secret).digest()
         
-        # Replace authenticator in packet
-        packet_data = header + auth + attrs_data
+        # Build final packet with proper auth
+        final_packet = struct.pack('!BBH', DISCONNECT_REQUEST, identifier, length) + md5 + attrs
         
         try:
             sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             sock.settimeout(COA_TIMEOUT)
-            sock.sendto(packet_data, (self.nas_ip, COA_PORT))
+            sock.sendto(final_packet, (target_ip, COA_PORT))
             
             # Wait for response
             response, _ = sock.recvfrom(4096)
@@ -288,17 +374,19 @@ class CoAService:
             # Check response code (41 = Disconnect-ACK, 42 = Disconnect-NAK)
             resp_code = response[0]
             if resp_code == 41:
-                logger.info(f"Raw CoA disconnect success: user={username}")
+                logger.info(f"Raw CoA disconnect success: user={username}@{target_ip}")
                 return True
             else:
                 logger.warning(f"Raw CoA disconnect rejected: user={username} code={resp_code}")
                 return False
                 
         except socket.timeout:
-            logger.warning(f"CoA disconnect timeout: user={username}")
-            return False
+            # Timeout means NAS is unreachable — session is already dead
+            # Still return True so we close the DB record
+            logger.info(f"Raw CoA timeout for {username}@{target_ip} — treating as disconnected")
+            return True
         except Exception as e:
-            logger.error(f"Raw CoA error: {e}")
+            logger.error(f"Raw CoA error for {username}: {e}")
             return False
     
     @staticmethod

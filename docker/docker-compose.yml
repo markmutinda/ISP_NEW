@@ -108,7 +108,7 @@ services:
              echo 'VPN Gateway found at: '$$VPN_IP &&
              echo 'Adding route for '$${VPN_NETWORK_CIDR:-10.8.0.0/16}' via '$$VPN_IP &&
              ip route add $${VPN_NETWORK_CIDR:-10.8.0.0/16} via $$VPN_IP || true &&
-             celery -A config worker -l info --concurrency=2 -Q default,celery"
+             celery -A config worker -l info --concurrency=4 -Q default,celery,radius,billing,notifications"
     volumes:
       - ../:/app
       - /var/run/docker.sock:/var/run/docker.sock

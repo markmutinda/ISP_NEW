@@ -140,62 +140,187 @@ def _mark_sessions_terminated_for_tenant(expired_users: list, tenant_schema: str
         logger.error(f"Error marking sessions terminated for tenant {tenant_schema}: {e}")
 
 
-@shared_task
-def cleanup_stale_sessions():
+@shared_task(bind=True, max_retries=2)
+def cleanup_stale_sessions(self):
     """
-    Clean up stale RADIUS sessions across all tenants.
-    Finds sessions without stop time that are older than 2 HOURS.
+    Closes ghost RADIUS sessions - sessions where:
+    1. acctstoptime IS NULL (still "open")
+    2. acctupdatetime hasn't been updated in > 10 minutes (NAS stopped sending)
+    
+    This is the ONLY guaranteed way to catch ghost sessions without
+    relying on Accounting-Stop packets from the router.
     """
+    from django_tenants.utils import get_tenant_model, schema_context
+    
     TenantModel = get_tenant_model()
-    cutoff_time = timezone.now() - timedelta(hours=2)
-    total_cleaned = 0
+    now = timezone.now()
     
-    tenants = TenantModel.objects.exclude(schema_name='public')
+    # Ghost threshold: no interim update in 10 minutes = dead session
+    # Most ISPs configure NAS to send interim updates every 5 min
+    ghost_threshold = now - timedelta(minutes=10)
     
-    for tenant in tenants:
-        tenant_start = time.perf_counter()
-        try:
-            with schema_context(tenant.schema_name):
-                with connection.cursor() as cursor:
-                    cursor.execute("""
-                        UPDATE radacct 
-                        SET acctstoptime = NOW(),
-                            acctterminatecause = 'Stale-Session-Cleanup'
-                        WHERE acctstoptime IS NULL 
-                            AND acctstarttime < %s
-                    """, [cutoff_time])
-                    
-                    cleaned = cursor.rowcount
-                    total_cleaned += cleaned
-                    if cleaned > 0:
-                        logger.info(f"[CLEANUP TASK] Cleaned {cleaned} stale sessions for tenant {tenant.schema_name}")
-        except Exception as e:
-            logger.error(f"[CLEANUP TASK] Error cleaning tenant {tenant.schema_name}: {e}")
-        finally:
-            logger.info(
-                "[RADIUS TASK TIMING] task=cleanup_stale_sessions tenant=%s duration_ms=%d",
-                tenant.schema_name,
-                int((time.perf_counter() - tenant_start) * 1000)
-            )
+    # Hard stale: truly abandoned, no update in 2 hours
+    stale_threshold = now - timedelta(hours=2)
+    
+    total_ghost = 0
+    total_stale = 0
 
-    # Optional: Still sweep public.radacct
+    tenants = TenantModel.objects.exclude(schema_name='public').values_list('schema_name', flat=True)
+
+    for schema_name in tenants:
+        try:
+            with schema_context(schema_name):
+                with connection.cursor() as cursor:
+                    # 1. Close GHOST sessions (stopped receiving interim updates)
+                    cursor.execute("""
+                        UPDATE radacct
+                        SET
+                            acctstoptime     = acctupdatetime,
+                            acctterminatecause = 'NAS-Reboot',
+                            acctsessiontime  = EXTRACT(EPOCH FROM (acctupdatetime - acctstarttime))::bigint
+                        WHERE
+                            acctstoptime IS NULL
+                            AND acctupdatetime IS NOT NULL
+                            AND acctupdatetime < %s
+                        RETURNING radacctid
+                    """, [ghost_threshold])
+                    ghost_count = cursor.rowcount
+                    total_ghost += ghost_count
+
+                    # 2. Close TRULY STALE sessions (never got any interim update)
+                    cursor.execute("""
+                        UPDATE radacct
+                        SET
+                            acctstoptime     = NOW(),
+                            acctterminatecause = 'Stale-Session-Cleanup',
+                            acctsessiontime  = EXTRACT(EPOCH FROM (NOW() - acctstarttime))::bigint
+                        WHERE
+                            acctstoptime IS NULL
+                            AND acctupdatetime IS NULL
+                            AND acctstarttime < %s
+                    """, [stale_threshold])
+                    stale_count = cursor.rowcount
+                    total_stale += stale_count
+
+                    if ghost_count or stale_count:
+                        logger.info(
+                            f"[CLEANUP] {schema_name}: closed {ghost_count} ghost + "
+                            f"{stale_count} stale sessions"
+                        )
+        except Exception as e:
+            logger.error(f"[CLEANUP] Error in schema {schema_name}: {e}")
+
+    # Also sweep public schema (hotspot sessions stored there)
     try:
         with connection.cursor() as cursor:
             cursor.execute("""
-                UPDATE public.radacct 
+                UPDATE public.radacct
+                SET acctstoptime = acctupdatetime,
+                    acctterminatecause = 'NAS-Reboot',
+                    acctsessiontime = EXTRACT(EPOCH FROM (acctupdatetime - acctstarttime))::bigint
+                WHERE acctstoptime IS NULL
+                  AND acctupdatetime IS NOT NULL
+                  AND acctupdatetime < %s
+            """, [ghost_threshold])
+            total_ghost += cursor.rowcount
+            
+            # Also handle stale sessions in public schema
+            cursor.execute("""
+                UPDATE public.radacct
                 SET acctstoptime = NOW(),
-                    acctterminatecause = 'Stale-Session-Cleanup'
-                WHERE acctstoptime IS NULL 
-                    AND acctstarttime < %s
-            """, [cutoff_time])
-            total_cleaned += cursor.rowcount
+                    acctterminatecause = 'Stale-Session-Cleanup',
+                    acctsessiontime = EXTRACT(EPOCH FROM (NOW() - acctstarttime))::bigint
+                WHERE acctstoptime IS NULL
+                  AND acctupdatetime IS NULL
+                  AND acctstarttime < %s
+            """, [stale_threshold])
+            total_stale += cursor.rowcount
+            
             if cursor.rowcount > 0:
-                logger.info(f"[CLEANUP TASK] Cleaned {cursor.rowcount} stale sessions from public.radacct")
+                logger.info(f"[CLEANUP] public schema: closed {cursor.rowcount} stale sessions")
     except Exception as e:
-        logger.error(f"[CLEANUP TASK] Error cleaning public.radacct: {e}")
+        logger.error(f"[CLEANUP] Error in public schema: {e}")
 
-    logger.info(f"[CLEANUP TASK] Total stale sessions cleaned: {total_cleaned}")
-    return total_cleaned
+    logger.info(f"[CLEANUP] Done: {total_ghost} ghost + {total_stale} stale sessions closed")
+    return {'ghost': total_ghost, 'stale': total_stale}
+
+
+@shared_task(bind=True, max_retries=2, default_retry_delay=30)
+def force_close_expired_sessions(self):
+    """
+    For ACTIVE sessions where the user's RADIUS Expiration has passed:
+    1. Sends CoA Disconnect to the router (kicks them off immediately)
+    2. Marks the session closed in radacct
+    
+    Runs every 5 minutes via Celery Beat.
+    """
+    from django_tenants.utils import get_tenant_model, schema_context
+    from apps.radius.services.coa_service import CoAService
+
+    TenantModel = get_tenant_model()
+    now = timezone.now()
+    kicked = 0
+    closed = 0
+
+    tenants = TenantModel.objects.exclude(
+        schema_name='public'
+    ).values_list('schema_name', flat=True)
+
+    for schema_name in tenants:
+        try:
+            with schema_context(schema_name):
+                with connection.cursor() as cursor:
+                    # Find expired but still-open sessions
+                    cursor.execute("""
+                        SELECT
+                            ra.username,
+                            ra.nasipaddress,
+                            ra.acctsessionid,
+                            ra.radacctid
+                        FROM radacct ra
+                        INNER JOIN radcheck rc
+                            ON ra.username = rc.username
+                           AND rc.attribute = 'Expiration'
+                        WHERE
+                            ra.acctstoptime IS NULL
+                            AND TO_TIMESTAMP(rc.value, 'Mon DD YYYY HH24:MI:SS') < NOW()
+                        LIMIT 200
+                    """)
+                    rows = cursor.fetchall()
+
+                for username, nas_ip, session_id, radacct_id in rows:
+                    # 1. CoA kick (best effort — don't block on failure)
+                    try:
+                        coa = CoAService(nas_ip=nas_ip)
+                        coa.disconnect_user_via_coa(username, nas_ip, session_id)
+                        kicked += 1
+                        logger.info(f"[FORCE CLOSE] CoA disconnect sent to {username}@{nas_ip}")
+                    except Exception as e:
+                        logger.warning(f"[FORCE CLOSE] CoA failed for {username}: {e}")
+
+                    # 2. Close the DB record regardless of CoA result
+                    with schema_context(schema_name):
+                        with connection.cursor() as cursor:
+                            cursor.execute("""
+                                UPDATE radacct
+                                SET
+                                    acctstoptime = NOW(),
+                                    acctterminatecause = 'Session-Timeout',
+                                    acctsessiontime = EXTRACT(
+                                        EPOCH FROM (NOW() - acctstarttime)
+                                    )::bigint
+                                WHERE radacctid = %s
+                                  AND acctstoptime IS NULL
+                            """, [radacct_id])
+                            closed += cursor.rowcount
+                            if cursor.rowcount > 0:
+                                logger.info(f"[FORCE CLOSE] Closed DB record for {username}")
+
+        except Exception as e:
+            logger.error(f"[FORCE CLOSE] Error in {schema_name}: {e}")
+
+    logger.info(f"[FORCE CLOSE] Kicked {kicked} sessions, closed {closed} records")
+    return {'kicked': kicked, 'closed': closed}
 
 
 @shared_task
