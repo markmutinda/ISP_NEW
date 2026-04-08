@@ -59,3 +59,4 @@ django-debug-toolbar==4.2.0
 pandas==2.2.1
 django-health-check==3.18.1
 psutil==5.9.8
+firebase-admin>=6.0.0
