@@ -307,6 +307,7 @@ class NetilyPlanSerializer(serializers.Serializer):
     is_metered = serializers.BooleanField(default=False, required=False)
     base_license_fee = serializers.DecimalField(max_digits=10, decimal_places=2, required=False, allow_null=True)
     pppoe_unit_price = serializers.DecimalField(max_digits=10, decimal_places=2, required=False, allow_null=True)
+    pppoe_min_clients = serializers.IntegerField(required=False, default=20)
     hotspot_revenue_share_pct = serializers.DecimalField(max_digits=5, decimal_places=2, required=False, allow_null=True)
     
     currency = serializers.CharField(max_length=3, default="KES")

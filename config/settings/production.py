@@ -138,6 +138,9 @@ elif _domain:
 elif _droplet_ip:
     BASE_URL = f"http://{_droplet_ip}"
 
+# Frontend URL (Next.js) — override for production
+FRONTEND_URL = os.environ.get('FRONTEND_URL', 'https://netily.co.ke')
+
 # ────────────────────────────────────────────────────────────────
 #  LOGGING — reduced verbosity for production VPS
 # ────────────────────────────────────────────────────────────────

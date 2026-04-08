@@ -344,6 +344,14 @@ DEFAULT_FROM_EMAIL = os.getenv('DEFAULT_FROM_EMAIL', 'billing@netily.co.ke')
 RESEND_API_KEY = os.getenv('RESEND_API_KEY', '')  # Set in .env for production
 
 # ────────────────────────────────────────────────────────────────
+#  PLATFORM DOMAIN SETTINGS
+# ────────────────────────────────────────────────────────────────
+# Base domain for tenant subdomains (e.g. "acme.netily.co.ke")
+TENANT_BASE_DOMAIN = os.getenv('TENANT_BASE_DOMAIN', 'localhost')
+# Frontend URL (Next.js app) — used for admin panel links et al
+FRONTEND_URL = os.getenv('FRONTEND_URL', 'http://localhost:3000')
+
+# ────────────────────────────────────────────────────────────────
 #  SESSION SETTINGS
 # ────────────────────────────────────────────────────────────────
 SESSION_COOKIE_AGE = 86400  # 24 hours

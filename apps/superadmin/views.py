@@ -128,7 +128,36 @@ class DashboardView(APIView):
             "mrr": mrr,
             "recent_signups": recent_signups,
         }
-        return Response(DashboardKPISerializer(data).data)
+
+        # ── Cross-tenant aggregates ──
+        total_pppoe = 0
+        total_hotspot = 0
+        total_customers = 0
+        total_tenant_revenue = Decimal("0.00")
+        for tenant in tenants.filter(status__in=["active", "trial"]):
+            schema = tenant.schema_name
+            try:
+                with connection.cursor() as cur:
+                    cur.execute(f'SELECT COUNT(*) FROM "{schema}"."network_pppoeuser"')
+                    total_pppoe += cur.fetchone()[0]
+                    cur.execute(f'SELECT COUNT(*) FROM "{schema}"."network_hotspotuser"')
+                    total_hotspot += cur.fetchone()[0]
+                    cur.execute(f'SELECT COUNT(*) FROM "{schema}"."customers_customer"')
+                    total_customers += cur.fetchone()[0]
+                    cur.execute(
+                        f"SELECT COALESCE(SUM(amount), 0) FROM \"{schema}\".\"billing_payment\" "
+                        f"WHERE status = 'COMPLETED'"
+                    )
+                    total_tenant_revenue += Decimal(str(cur.fetchone()[0]))
+            except Exception:
+                pass
+
+        data["total_pppoe_users"] = total_pppoe
+        data["total_hotspot_users"] = total_hotspot
+        data["total_customers"] = total_customers
+        data["total_tenant_revenue"] = float(total_tenant_revenue)
+
+        return Response(data)
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -211,10 +240,12 @@ class TenantCreateView(APIView):
         )
         tenant.save()  # schema_name auto-set from subdomain
 
-        # 3. Create Domain
+        # 3. Create Domain (use TENANT_BASE_DOMAIN from settings)
+        from django.conf import settings as conf
+        base_domain = getattr(conf, 'TENANT_BASE_DOMAIN', 'localhost')
         Domain.objects.create(
             tenant=tenant,
-            domain=f"{d['subdomain']}.localhost",
+            domain=f"{d['subdomain']}.{base_domain}",
             is_primary=True,
         )
 
@@ -576,24 +607,59 @@ class UserActivateView(APIView):
 
 
 class PaymentListView(APIView):
-    """List subscription payments across all tenants."""
+    """List payments across the platform.
+    
+    Query params:
+        source: 'platform' | 'tenant' | 'all' (default: 'all')
+        status: filter by payment status
+        search: search company name / receipt
+        page, page_size: pagination
+    """
     permission_classes = SUPERADMIN_PERMS
 
     def get(self, request):
         _ensure_public()
+        source = request.query_params.get("source", "all")
+        status_filter = request.query_params.get("status")
+        search = request.query_params.get("search", "")
+        page = int(request.query_params.get("page", 1))
+        page_size = int(request.query_params.get("page_size", PAGE_SIZE))
+
+        results = []
+
+        # ── Platform (subscription) payments ──
+        if source in ("all", "platform"):
+            results.extend(self._get_platform_payments(status_filter, search))
+
+        # ── Tenant-level payments (from each tenant schema) ──
+        if source in ("all", "tenant"):
+            results.extend(self._get_tenant_payments(status_filter, search))
+
+        # Sort combined by date desc
+        results.sort(key=lambda x: x["created_at"], reverse=True)
+
+        total = len(results)
+        start = (page - 1) * page_size
+        end = start + page_size
+
+        return Response({
+            "count": total,
+            "page": page,
+            "page_size": page_size,
+            "results": results[start:end],
+        })
+
+    def _get_platform_payments(self, status_filter, search):
+        """Fetch SubscriptionPayment records from the public schema."""
+        data = []
         try:
             from apps.subscriptions.models import SubscriptionPayment
             qs = SubscriptionPayment.objects.select_related(
                 "subscription", "subscription__company", "subscription__plan"
             ).order_by("-created_at")
 
-            # Status filter
-            status_filter = request.query_params.get("status")
             if status_filter:
-                qs = qs.filter(status=status_filter)
-
-            # Search
-            search = request.query_params.get("search")
+                qs = qs.filter(status=status_filter.lower())
             if search:
                 qs = qs.filter(
                     Q(subscription__company__name__icontains=search)
@@ -602,20 +668,10 @@ class PaymentListView(APIView):
                     | Q(bank_reference__icontains=search)
                 )
 
-            # Pagination
-            page = int(request.query_params.get("page", 1))
-            page_size = int(request.query_params.get("page_size", PAGE_SIZE))
-            start = (page - 1) * page_size
-            end = start + page_size
-
-            total = qs.count()
-            payments = qs[start:end]
-
-            data = []
-            for p in payments:
+            for p in qs[:200]:
                 ref = p.mpesa_receipt or p.payhero_reference or p.bank_reference or ""
-                plan_name = ""
                 company_name = "—"
+                plan_name = ""
                 if p.subscription:
                     if p.subscription.company:
                         company_name = p.subscription.company.name
@@ -624,8 +680,10 @@ class PaymentListView(APIView):
 
                 data.append({
                     "id": str(p.id),
+                    "source": "platform",
                     "company_name": company_name,
                     "plan_name": plan_name,
+                    "customer_name": "",
                     "amount": str(p.amount),
                     "currency": p.currency,
                     "status": p.status,
@@ -633,51 +691,135 @@ class PaymentListView(APIView):
                     "reference": ref,
                     "created_at": p.created_at.isoformat(),
                 })
-
-            return Response({
-                "count": total,
-                "page": page,
-                "page_size": page_size,
-                "results": data,
-            })
         except Exception as e:
-            logger.exception("PaymentListView error")
-            return Response({"results": [], "count": 0, "page": 1, "page_size": PAGE_SIZE, "error": str(e)})
+            logger.exception("PaymentListView platform error: %s", e)
+        return data
+
+    def _get_tenant_payments(self, status_filter, search):
+        """Fetch billing.Payment records across all tenant schemas via raw SQL."""
+        data = []
+        try:
+            tenants = Tenant.objects.filter(
+                status__in=["active", "trial"]
+            ).select_related("company")
+
+            for tenant in tenants:
+                schema = tenant.schema_name
+                company_name = tenant.company.name if tenant.company else tenant.subdomain
+
+                where_clauses = []
+                params = []
+
+                if status_filter:
+                    where_clauses.append("p.status = %s")
+                    params.append(status_filter.upper())
+                if search:
+                    where_clauses.append(
+                        "(p.payer_name ILIKE %s OR p.mpesa_receipt ILIKE %s OR p.payment_reference ILIKE %s)"
+                    )
+                    s = f"%{search}%"
+                    params.extend([s, s, s])
+
+                where_sql = f"WHERE {' AND '.join(where_clauses)}" if where_clauses else ""
+
+                try:
+                    with connection.cursor() as cur:
+                        cur.execute(
+                            f'SELECT p.id, p.amount, p.status, p.mpesa_receipt, '
+                            f'p.payment_reference, p.payer_name, p.payment_date, '
+                            f'p.currency '
+                            f'FROM "{schema}"."billing_payment" p '
+                            f'{where_sql} '
+                            f'ORDER BY p.payment_date DESC LIMIT 100',
+                            params,
+                        )
+                        for row in cur.fetchall():
+                            data.append({
+                                "id": str(row[0]),
+                                "source": "tenant",
+                                "company_name": company_name,
+                                "plan_name": "",
+                                "customer_name": row[5] or "",
+                                "amount": str(row[1]),
+                                "currency": row[7] or "KES",
+                                "status": (row[2] or "").lower(),
+                                "payment_method": "",
+                                "reference": row[3] or row[4] or "",
+                                "created_at": row[6].isoformat() if row[6] else "",
+                            })
+                except Exception:
+                    # Schema may not have billing_payment table yet
+                    pass
+        except Exception as e:
+            logger.exception("PaymentListView tenant error: %s", e)
+        return data
 
 
 class PaymentSummaryView(APIView):
-    """Revenue summary for dashboard cards."""
+    """Revenue summary for dashboard cards — includes platform + tenant revenue."""
     permission_classes = SUPERADMIN_PERMS
 
     def get(self, request):
         _ensure_public()
         now = timezone.now()
+
+        # ── Platform subscription revenue ──
+        platform_total = Decimal("0.00")
+        platform_this_month = Decimal("0.00")
+        platform_last_month = Decimal("0.00")
         try:
             from apps.subscriptions.models import SubscriptionPayment
             completed = SubscriptionPayment.objects.filter(status="completed")
-            total = completed.aggregate(t=Sum("amount"))["t"] or Decimal("0.00")
-            this_month = completed.filter(
+            platform_total = completed.aggregate(t=Sum("amount"))["t"] or Decimal("0.00")
+            platform_this_month = completed.filter(
                 created_at__year=now.year, created_at__month=now.month
             ).aggregate(t=Sum("amount"))["t"] or Decimal("0.00")
             last_month_start = (now.replace(day=1) - timedelta(days=1)).replace(day=1)
             last_month_end = now.replace(day=1) - timedelta(days=1)
-            last_month = completed.filter(
+            platform_last_month = completed.filter(
                 created_at__date__gte=last_month_start, created_at__date__lte=last_month_end
             ).aggregate(t=Sum("amount"))["t"] or Decimal("0.00")
-
-            return Response({
-                "total_revenue": float(total),
-                "this_month": float(this_month),
-                "last_month": float(last_month),
-                "currency": "KES",
-            })
         except Exception:
-            return Response({
-                "total_revenue": 0,
-                "this_month": 0,
-                "last_month": 0,
-                "currency": "KES",
-            })
+            pass
+
+        # ── Aggregate tenant-level revenue ──
+        tenant_total = Decimal("0.00")
+        tenant_this_month = Decimal("0.00")
+        try:
+            tenants = Tenant.objects.filter(status__in=["active", "trial"])
+            for tenant in tenants:
+                schema = tenant.schema_name
+                try:
+                    with connection.cursor() as cur:
+                        cur.execute(
+                            f"SELECT COALESCE(SUM(amount), 0) FROM \"{schema}\".\"billing_payment\" "
+                            f"WHERE status = 'COMPLETED'"
+                        )
+                        tenant_total += Decimal(str(cur.fetchone()[0]))
+
+                        cur.execute(
+                            f"SELECT COALESCE(SUM(amount), 0) FROM \"{schema}\".\"billing_payment\" "
+                            f"WHERE status = 'COMPLETED' "
+                            f"AND EXTRACT(YEAR FROM payment_date) = %s "
+                            f"AND EXTRACT(MONTH FROM payment_date) = %s",
+                            [now.year, now.month],
+                        )
+                        tenant_this_month += Decimal(str(cur.fetchone()[0]))
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+        return Response({
+            "total_revenue": float(platform_total),
+            "this_month": float(platform_this_month),
+            "last_month": float(platform_last_month),
+            "tenant_total_revenue": float(tenant_total),
+            "tenant_this_month": float(tenant_this_month),
+            "combined_total": float(platform_total + tenant_total),
+            "combined_this_month": float(platform_this_month + tenant_this_month),
+            "currency": "KES",
+        })
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -1662,8 +1804,12 @@ class TenantImpersonateView(APIView):
             return Response({"detail": f"Token generation failed: {e}"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
         # Determine the tenant panel URL
-        domain = tenant.domains.filter(is_primary=True).first()
-        panel_url = f"http://{domain.domain}:3000/admin" if domain else f"http://{tenant.subdomain}.localhost:3000/admin"
+        from django.conf import settings as conf
+        frontend_url = getattr(conf, 'FRONTEND_URL', 'http://localhost:3000')
+        base_domain = getattr(conf, 'TENANT_BASE_DOMAIN', 'localhost')
+        # Parse protocol from FRONTEND_URL
+        protocol = 'https' if 'https' in frontend_url else 'http'
+        panel_url = f"{protocol}://{tenant.subdomain}.{base_domain}/admin"
 
         _log_action(
             request.user, "login", "Tenant",
