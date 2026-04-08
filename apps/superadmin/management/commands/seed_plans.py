@@ -148,32 +148,42 @@ PLANS = [
 class Command(BaseCommand):
     help = "Seed the 4 Netily subscription plans (Metered, Starter, Professional, Enterprise)"
 
+    # Mapping: old plan name fragments → target new plan code
+    # Key is a lowercase substring of the old plan name, value is the new code.
+    OLD_PLAN_MIGRATION_MAP = {
+        'starter':      'metered',   # Netily Starters → Metered (pay-as-you-grow)
+        'basic':        'metered',
+        'free':         'metered',
+        'professional': 'professional',
+        'pro':          'professional',
+        'enterprise':   'enterprise',
+        'metered':      'metered',
+    }
+    DEFAULT_MIGRATION_TARGET = 'metered'  # Fallback for unrecognised old plan names
+
     def add_arguments(self, parser):
         parser.add_argument(
             "--force",
             action="store_true",
-            help="Delete ALL existing plans and recreate from scratch",
+            help="Delete ALL existing plans and recreate from scratch (migrates subscriptions first)",
         )
 
+    def _resolve_replacement(self, old_plan, new_plans_by_code):
+        """Pick the best new plan to replace an old one."""
+        name_lower = old_plan.name.lower()
+        for fragment, new_code in self.OLD_PLAN_MIGRATION_MAP.items():
+            if fragment in name_lower:
+                target = new_plans_by_code.get(new_code)
+                if target:
+                    return target
+        return new_plans_by_code.get(self.DEFAULT_MIGRATION_TARGET)
+
     def handle(self, *args, **options):
-        from apps.subscriptions.models import NetilyPlan
+        from apps.subscriptions.models import NetilyPlan, CompanySubscription
 
-        if options["force"]:
-            deleted, _ = NetilyPlan.objects.all().delete()
-            self.stdout.write(self.style.WARNING(f"Deleted {deleted} existing plans."))
-
-        # Always clean up old/junk plans that don't match the 4 valid codes
-        valid_codes = [p["code"] for p in PLANS]
-        junk = NetilyPlan.objects.exclude(code__in=valid_codes)
-        if junk.exists():
-            names = list(junk.values_list("name", "code"))
-            junk.delete()
-            for name, code in names:
-                self.stdout.write(self.style.WARNING(f"  Removed old plan: {name} ({code})"))
-
+        # ── STEP 1: Create/update the 4 canonical plans first ─────────────────
         created = 0
         updated = 0
-
         for plan_data in PLANS:
             code = plan_data["code"]
             obj, was_created = NetilyPlan.objects.update_or_create(
@@ -187,14 +197,59 @@ class Command(BaseCommand):
                 updated += 1
                 self.stdout.write(self.style.HTTP_INFO(f"  Updated: {obj.name} ({obj.code})"))
 
-        # Verify prices were saved correctly
-        self.stdout.write("\n  Verification:")
+        # Reload the canonical plans for the migration map
+        valid_codes = [p["code"] for p in PLANS]
+        new_plans_by_code = {p.code: p for p in NetilyPlan.objects.filter(code__in=valid_codes)}
+
+        # ── STEP 2: Migrate subscriptions off old/junk plans ──────────────────
+        junk_plans = NetilyPlan.objects.exclude(code__in=valid_codes)
+        junk_count = junk_plans.count()
+
+        if junk_count:
+            self.stdout.write(f"\n  Found {junk_count} old plan(s) to migrate away from:")
+            for old_plan in junk_plans:
+                replacement = self._resolve_replacement(old_plan, new_plans_by_code)
+                if not replacement:
+                    self.stdout.write(
+                        self.style.ERROR(
+                            f"    ✗ Could not find a replacement for '{old_plan.name}'. "
+                            f"Subscriptions will NOT be migrated. Add a mapping in OLD_PLAN_MIGRATION_MAP."
+                        )
+                    )
+                    continue
+
+                subs = CompanySubscription.objects.filter(plan=old_plan)
+                sub_count = subs.count()
+                if sub_count:
+                    # Migrate all subscriptions to the replacement plan
+                    subs.update(plan=replacement)
+                    self.stdout.write(
+                        self.style.WARNING(
+                            f"    ↳ Migrated {sub_count} subscription(s) from "
+                            f"'{old_plan.name}' → '{replacement.name}'"
+                        )
+                    )
+                else:
+                    self.stdout.write(
+                        self.style.WARNING(f"    ↳ '{old_plan.name}' — no subscriptions, will delete")
+                    )
+
+            # ── STEP 3: Delete junk plans (safe now — no protected FKs) ───────
+            deleted_names = list(junk_plans.values_list("name", flat=True))
+            junk_plans.delete()
+            for name in deleted_names:
+                self.stdout.write(self.style.WARNING(f"  Removed old plan: {name}"))
+
+        # ── STEP 4: Verify ────────────────────────────────────────────────────
+        self.stdout.write("\n  Final plan table:")
         for p in NetilyPlan.objects.all().order_by("sort_order"):
+            sub_cnt = CompanySubscription.objects.filter(plan=p).count()
             self.stdout.write(
                 f"    {p.name} ({p.code}): "
                 f"monthly=KES {p.price_monthly}, "
                 f"yearly=KES {p.price_yearly}, "
-                f"metered={p.is_metered}"
+                f"metered={p.is_metered}, "
+                f"subscribers={sub_cnt}"
             )
 
         self.stdout.write(self.style.SUCCESS(
