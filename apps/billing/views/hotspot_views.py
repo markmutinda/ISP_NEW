@@ -783,6 +783,25 @@ class HotspotPurchaseStatusView(APIView):
             elif session.status == 'paid':
                 session.activate(session.access_code)
                 
+                # ────────────────────────────────────────────────────────────
+                # FIX 2: Close any still-open radacct rows from old subscription
+                # This prevents historical usage from bleeding into the new period
+                # ────────────────────────────────────────────────────────────
+                try:
+                    from apps.radius.models import RadAcct
+                    closed_count = RadAcct.objects.filter(
+                        username=session.access_code,
+                        acctstoptime__isnull=True,
+                        acctstarttime__lt=timezone.now()
+                    ).update(acctstoptime=timezone.now())
+                    if closed_count > 0:
+                        logger.info(
+                            f"Closed {closed_count} stale RADIUS sessions for {session.access_code} "
+                            f"before activating new subscription"
+                        )
+                except Exception as e:
+                    logger.warning(f"Failed to close stale RADIUS sessions: {e}")
+                
                 try:
                     from apps.billing.services.hotspot_radius_service import HotspotRadiusService
                     
@@ -823,6 +842,25 @@ class HotspotPurchaseStatusView(APIView):
                         session.save(update_fields=['tuma_checkout_request_id', 'tuma_merchant_request_id', 'payment'])
                     
                     session.activate(session.access_code)
+                    
+                    # ────────────────────────────────────────────────────────
+                    # FIX 2: Close any still-open radacct rows from old subscription
+                    # This prevents historical usage from bleeding into the new period
+                    # ────────────────────────────────────────────────────────
+                    try:
+                        from apps.radius.models import RadAcct
+                        closed_count = RadAcct.objects.filter(
+                            username=session.access_code,
+                            acctstoptime__isnull=True,
+                            acctstarttime__lt=timezone.now()
+                        ).update(acctstoptime=timezone.now())
+                        if closed_count > 0:
+                            logger.info(
+                                f"Closed {closed_count} stale RADIUS sessions for {session.access_code} "
+                                f"before activating new subscription"
+                            )
+                    except Exception as e:
+                        logger.warning(f"Failed to close stale RADIUS sessions: {e}")
                     
                     try:
                         from apps.billing.services.hotspot_radius_service import HotspotRadiusService
@@ -1049,6 +1087,26 @@ class HotspotVoucherRedeemView(APIView):
 
             try:
                 session.activate(friendly_username)
+                
+                # ────────────────────────────────────────────────────────────
+                # FIX 2: Close any still-open radacct rows from old subscription
+                # This prevents historical usage from bleeding into the new period
+                # ────────────────────────────────────────────────────────────
+                try:
+                    from apps.radius.models import RadAcct
+                    closed_count = RadAcct.objects.filter(
+                        username=friendly_username,
+                        acctstoptime__isnull=True,
+                        acctstarttime__lt=timezone.now()
+                    ).update(acctstoptime=timezone.now())
+                    if closed_count > 0:
+                        logger.info(
+                            f"Closed {closed_count} stale RADIUS sessions for {friendly_username} "
+                            f"before activating new subscription"
+                        )
+                except Exception as e:
+                    logger.warning(f"Failed to close stale RADIUS sessions: {e}")
+                
                 from apps.billing.services.hotspot_radius_service import HotspotRadiusService
                 radius_service = HotspotRadiusService()
                 radius_service.create_hotspot_credentials(

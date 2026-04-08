@@ -217,56 +217,74 @@ class OnlineUserSerializer(serializers.ModelSerializer):
 
     def get_usage(self, obj) -> str:
         """
-        Calculate cumulative usage since the START of the user's current subscription period.
-        This ensures usage resets to 0 when a subscription renews, not on a rolling 30-day window.
-        
-        Uses subscription_activated_at from CustomerRadiusCredentials as the period anchor.
-        This field is set when the subscription is activated and updated on each renewal.
+        Calculate data usage since the START of the user's CURRENT subscription period.
+
+        For PPPoE users:   anchored to CustomerRadiusCredentials.subscription_activated_at
+        For hotspot users: anchored to the most-recent HotspotSession.activated_at
+
+        This means usage resets to 0 every time a new subscription is purchased,
+        regardless of what happened in previous periods.
         """
         from django.db.models import Sum
 
-        # ── Determine the subscription period start ────────────────────────
+        # ── Step 1: determine the period-start anchor ──────────────────────
         period_start = None
 
+        # PPPoE path — explicit renewal timestamp stored on credentials
         try:
             from apps.radius.models import CustomerRadiusCredentials
             creds = CustomerRadiusCredentials.objects.filter(
                 username=obj.username
             ).first()
-
             if creds and creds.subscription_activated_at:
-                # Use the explicit activation timestamp — resets on each renewal
                 period_start = creds.subscription_activated_at
         except Exception:
-            # If anything goes wrong, fall back gracefully — don't crash the serializer
             pass
 
-        # Fallback: use 30 days ago (original behavior)
+        # Hotspot path — use the most-recent session's activated_at.
+        # This is the exact moment the customer paid for the current period.
         if period_start is None:
-            period_start = timezone.now() - timezone.timedelta(days=30)
+            try:
+                from apps.billing.models.hotspot_models import HotspotSession
+                hs = (
+                    HotspotSession.objects
+                    .filter(
+                        access_code=obj.username,
+                        status__in=('active', 'paid'),
+                        activated_at__isnull=False,
+                    )
+                    .order_by('-activated_at')
+                    .first()
+                )
+                if hs and hs.activated_at:
+                    period_start = hs.activated_at
+            except Exception:
+                pass
 
-        # ── Sum usage since period_start ───────────────────────────────────
+        # Last resort: scope to the current open RADIUS session only.
+        # This guarantees we never accumulate across subscription periods
+        # even if the anchors above are unavailable.
+        if period_start is None:
+            period_start = obj.acctstarttime
+
+        # ── Step 2: sum closed sessions since period_start ─────────────────
         historical = RadAcct.objects.filter(
             username=obj.username,
             acctstoptime__isnull=False,
-            acctstarttime__gte=period_start  # ← NOW ANCHORED TO SUBSCRIPTION START
+            acctstarttime__gte=period_start,
         ).aggregate(
             total_in=Sum('acctinputoctets'),
-            total_out=Sum('acctoutputoctets')
+            total_out=Sum('acctoutputoctets'),
         )
 
-        # Current session bytes
-        current_in = obj.acctinputoctets or 0
+        # ── Step 3: add the current open session ───────────────────────────
+        current_in  = obj.acctinputoctets  or 0
         current_out = obj.acctoutputoctets or 0
+        hist_in     = historical['total_in']  or 0
+        hist_out    = historical['total_out'] or 0
 
-        # Historical bytes (default to 0 if None)
-        hist_in = historical['total_in'] or 0
-        hist_out = historical['total_out'] or 0
-
-        # Total cumulative usage since subscription start
         total_bytes = current_in + current_out + hist_in + hist_out
 
-        # Format nicely
         mb = total_bytes / (1024 * 1024)
         if mb >= 1024:
             return f"{mb / 1024:.2f} GB"
