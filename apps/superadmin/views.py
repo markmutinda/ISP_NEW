@@ -138,19 +138,24 @@ class DashboardView(APIView):
             schema = tenant.schema_name
             try:
                 with connection.cursor() as cur:
-                    cur.execute(f'SELECT COUNT(*) FROM "{schema}"."network_pppoeuser"')
+                    cur.execute(f'SET search_path TO "{schema}"')
+                    cur.execute('SELECT COUNT(*) FROM network_pppoeuser')
                     total_pppoe += cur.fetchone()[0]
-                    cur.execute(f'SELECT COUNT(*) FROM "{schema}"."network_hotspotuser"')
+                    cur.execute('SELECT COUNT(*) FROM network_hotspotuser')
                     total_hotspot += cur.fetchone()[0]
-                    cur.execute(f'SELECT COUNT(*) FROM "{schema}"."customers_customer"')
+                    cur.execute('SELECT COUNT(*) FROM customers_customer')
                     total_customers += cur.fetchone()[0]
                     cur.execute(
-                        f"SELECT COALESCE(SUM(amount), 0) FROM \"{schema}\".\"billing_payment\" "
-                        f"WHERE status = 'COMPLETED'"
+                        "SELECT COALESCE(SUM(amount), 0) FROM billing_payment "
+                        "WHERE status = 'COMPLETED'"
                     )
                     total_tenant_revenue += Decimal(str(cur.fetchone()[0]))
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.warning("Dashboard cross-tenant error for %s: %s", schema, exc)
+
+        # Reset to public schema after cross-tenant loop
+        with connection.cursor() as cur:
+            cur.execute('SET search_path TO "public"')
 
         data["total_pppoe_users"] = total_pppoe
         data["total_hotspot_users"] = total_hotspot
@@ -688,6 +693,7 @@ class PaymentListView(APIView):
                     "currency": p.currency,
                     "status": p.status,
                     "payment_method": p.payment_method or "",
+                    "service_type": "subscription",
                     "reference": ref,
                     "created_at": p.created_at.isoformat(),
                 })
@@ -724,13 +730,19 @@ class PaymentListView(APIView):
 
                 try:
                     with connection.cursor() as cur:
+                        cur.execute(f'SET search_path TO "{schema}"')
                         cur.execute(
-                            f'SELECT p.id, p.amount, p.status, p.mpesa_receipt, '
-                            f'p.payment_reference, p.payer_name, p.payment_date, '
-                            f'p.currency '
-                            f'FROM "{schema}"."billing_payment" p '
+                            'SELECT p.id, p.amount, p.status, p.mpesa_receipt, '
+                            'p.payment_reference, p.payer_name, p.payment_date, '
+                            'p.currency, '
+                            'CASE WHEN p.hotspot_session_id IS NOT NULL '
+                            "  THEN 'hotspot' "
+                            '  WHEN p.customer_id IS NOT NULL '
+                            "  THEN 'pppoe' "
+                            "  ELSE 'other' END AS service_type "
+                            'FROM billing_payment p '
                             f'{where_sql} '
-                            f'ORDER BY p.payment_date DESC LIMIT 100',
+                            'ORDER BY p.payment_date DESC LIMIT 100',
                             params,
                         )
                         for row in cur.fetchall():
@@ -743,13 +755,13 @@ class PaymentListView(APIView):
                                 "amount": str(row[1]),
                                 "currency": row[7] or "KES",
                                 "status": (row[2] or "").lower(),
-                                "payment_method": "",
+                                "payment_method": "M-Pesa",
+                                "service_type": row[8],
                                 "reference": row[3] or row[4] or "",
                                 "created_at": row[6].isoformat() if row[6] else "",
                             })
-                except Exception:
-                    # Schema may not have billing_payment table yet
-                    pass
+                except Exception as exc:
+                    logger.warning("PaymentList tenant error for %s: %s", schema, exc)
         except Exception as e:
             logger.exception("PaymentListView tenant error: %s", e)
         return data
@@ -762,6 +774,7 @@ class PaymentSummaryView(APIView):
     def get(self, request):
         _ensure_public()
         now = timezone.now()
+        last_month_start = (now.replace(day=1) - timedelta(days=1)).replace(day=1)
 
         # ── Platform subscription revenue ──
         platform_total = Decimal("0.00")
@@ -774,7 +787,6 @@ class PaymentSummaryView(APIView):
             platform_this_month = completed.filter(
                 created_at__year=now.year, created_at__month=now.month
             ).aggregate(t=Sum("amount"))["t"] or Decimal("0.00")
-            last_month_start = (now.replace(day=1) - timedelta(days=1)).replace(day=1)
             last_month_end = now.replace(day=1) - timedelta(days=1)
             platform_last_month = completed.filter(
                 created_at__date__gte=last_month_start, created_at__date__lte=last_month_end
@@ -785,39 +797,56 @@ class PaymentSummaryView(APIView):
         # ── Aggregate tenant-level revenue ──
         tenant_total = Decimal("0.00")
         tenant_this_month = Decimal("0.00")
+        tenant_last_month = Decimal("0.00")
         try:
             tenants = Tenant.objects.filter(status__in=["active", "trial"])
             for tenant in tenants:
                 schema = tenant.schema_name
                 try:
                     with connection.cursor() as cur:
+                        cur.execute(f'SET search_path TO "{schema}"')
                         cur.execute(
-                            f"SELECT COALESCE(SUM(amount), 0) FROM \"{schema}\".\"billing_payment\" "
-                            f"WHERE status = 'COMPLETED'"
+                            "SELECT COALESCE(SUM(amount), 0) FROM billing_payment "
+                            "WHERE status = 'COMPLETED'"
                         )
                         tenant_total += Decimal(str(cur.fetchone()[0]))
 
                         cur.execute(
-                            f"SELECT COALESCE(SUM(amount), 0) FROM \"{schema}\".\"billing_payment\" "
-                            f"WHERE status = 'COMPLETED' "
-                            f"AND EXTRACT(YEAR FROM payment_date) = %s "
-                            f"AND EXTRACT(MONTH FROM payment_date) = %s",
+                            "SELECT COALESCE(SUM(amount), 0) FROM billing_payment "
+                            "WHERE status = 'COMPLETED' "
+                            "AND EXTRACT(YEAR FROM payment_date) = %s "
+                            "AND EXTRACT(MONTH FROM payment_date) = %s",
                             [now.year, now.month],
                         )
                         tenant_this_month += Decimal(str(cur.fetchone()[0]))
-                except Exception:
-                    pass
+
+                        cur.execute(
+                            "SELECT COALESCE(SUM(amount), 0) FROM billing_payment "
+                            "WHERE status = 'COMPLETED' "
+                            "AND payment_date >= %s AND payment_date < %s",
+                            [last_month_start, now.replace(day=1)],
+                        )
+                        tenant_last_month += Decimal(str(cur.fetchone()[0]))
+                except Exception as exc:
+                    logger.warning("PaymentSummary tenant error for %s: %s", schema, exc)
         except Exception:
             pass
 
+        combined_last = platform_last_month + tenant_last_month
+        combined_this = platform_this_month + tenant_this_month
+        pct_change = 0.0
+        if combined_last > 0:
+            pct_change = round(float((combined_this - combined_last) / combined_last * 100), 1)
+
         return Response({
-            "total_revenue": float(platform_total),
-            "this_month": float(platform_this_month),
-            "last_month": float(platform_last_month),
+            "total_revenue": float(platform_total + tenant_total),
+            "this_month": float(combined_this),
+            "last_month": float(combined_last),
+            "pct_change": pct_change,
             "tenant_total_revenue": float(tenant_total),
             "tenant_this_month": float(tenant_this_month),
             "combined_total": float(platform_total + tenant_total),
-            "combined_this_month": float(platform_this_month + tenant_this_month),
+            "combined_this_month": float(combined_this),
             "currency": "KES",
         })
 
