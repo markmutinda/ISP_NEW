@@ -38,6 +38,11 @@ class Command(BaseCommand):
             action="store_true",
             help="Check for tenants whose PostgreSQL schema does not exist",
         )
+        parser.add_argument(
+            "--delete-orphans",
+            action="store_true",
+            help="Delete tenants whose PostgreSQL schema does not exist (irreversible unless --dry-run)",
+        )
 
     def handle(self, *args, **options):
         from apps.core.models import Tenant, Domain
@@ -47,16 +52,18 @@ class Command(BaseCommand):
         base_domain = options.get("base_domain")
         dry_run = options.get("dry_run")
         check_schemas = options.get("check_schemas")
+        delete_orphans = options.get("delete_orphans")
 
         tenants = Tenant.objects.select_related("company").all()
 
-        if check_schemas or (not base_domain):
+        if check_schemas or delete_orphans or (not base_domain):
             self.stdout.write(self.style.MIGRATE_HEADING("\n=== Tenant Schema Check ==="))
             existing_schemas = set()
             with connection.cursor() as cur:
                 cur.execute("SELECT schema_name FROM information_schema.schemata")
                 existing_schemas = {row[0] for row in cur.fetchall()}
 
+            orphans = []
             for tenant in tenants:
                 domain = tenant.domains.filter(is_primary=True).first()
                 domain_str = domain.domain if domain else "(no domain)"
@@ -69,6 +76,7 @@ class Command(BaseCommand):
                 )
 
                 if not schema_exists:
+                    orphans.append(tenant)
                     self.stdout.write(
                         self.style.WARNING(
                             f"    ⚠ Schema '{tenant.schema_name}' does not exist in PostgreSQL. "
@@ -78,6 +86,28 @@ class Command(BaseCommand):
                             f"      3. Or set status to 'cancelled' to skip during migrations"
                         )
                     )
+
+            if delete_orphans and orphans:
+                self.stdout.write(self.style.MIGRATE_HEADING(f"\n=== Deleting {len(orphans)} Orphaned Tenant(s) ==="))
+                for tenant in orphans:
+                    if dry_run:
+                        self.stdout.write(
+                            self.style.WARNING(
+                                f"  DRY RUN: Would delete tenant '{tenant.subdomain}' (schema={tenant.schema_name})"
+                            )
+                        )
+                    else:
+                        tenant.domains.all().delete()
+                        tenant.delete()
+                        self.stdout.write(
+                            self.style.SUCCESS(
+                                f"  Deleted orphaned tenant '{tenant.subdomain}' (schema={tenant.schema_name})"
+                            )
+                        )
+                if not dry_run:
+                    self.stdout.write(self.style.SUCCESS(f"\nDeleted {len(orphans)} orphaned tenant(s)."))
+            elif delete_orphans and not orphans:
+                self.stdout.write(self.style.SUCCESS("\nNo orphaned tenants found. Nothing to delete."))
 
         if base_domain:
             self.stdout.write(self.style.MIGRATE_HEADING(f"\n=== Rewriting Domains to *.{base_domain} ==="))
@@ -107,6 +137,6 @@ class Command(BaseCommand):
             action = "would update" if dry_run else "updated"
             self.stdout.write(self.style.SUCCESS(f"\n{action} {updated} domain(s)."))
 
-        if not base_domain and not check_schemas:
-            self.stdout.write("\nUse --base-domain to fix domains, or --check-schemas to check for orphans.")
+        if not base_domain and not check_schemas and not delete_orphans:
+            self.stdout.write("\nUse --base-domain to fix domains, --check-schemas to check for orphans, or --delete-orphans to remove them.")
 
