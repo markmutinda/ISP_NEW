@@ -340,14 +340,17 @@ class InitiateSubscriptionPaymentView(APIView):
         payment_method = serializer.validated_data['payment_method']
         billing_period = serializer.validated_data['billing_period']
         phone_number = serializer.validated_data.get('phone_number')
+        amount_override = serializer.validated_data.get('amount')
         
         # ─────────────────────────────────────────────────────────────
-        # P2 FIX: Enforce base_license_fee for metered plans
-        # When an ISP initiates payment to leave the trial, they should be
-        # charged the base_license_fee (500 KES) instead of price_monthly.
-        # This ensures the correct amount for the first month after trial.
+        # Amount priority:
+        # 1. Explicit amount (when paying an outstanding invoice)
+        # 2. base_license_fee (metered plans — first payment / trial conversion)
+        # 3. price_yearly / price_monthly (flat-rate plans)
         # ─────────────────────────────────────────────────────────────
-        if plan.is_metered:
+        if amount_override:
+            amount = amount_override
+        elif plan.is_metered:
             amount = plan.base_license_fee
         elif billing_period == 'yearly':
             amount = plan.price_yearly

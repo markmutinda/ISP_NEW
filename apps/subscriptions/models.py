@@ -954,6 +954,24 @@ class BillingCycle(models.Model):
         
         return base_fee + pppoe_charge + hotspot_share
 
+    def get_actual_hotspot_revenue(self):
+        """
+        Query actual paid hotspot sessions from the tenant's schema.
+        Returns the sum of amounts from sessions activated during this cycle.
+        This is the source of truth — not the accumulator.
+        """
+        from django_tenants.utils import schema_context
+        from django.db.models import Sum
+
+        with schema_context(self.tenant.schema_name):
+            from apps.billing.models.hotspot_models import HotspotSession
+            result = HotspotSession.objects.filter(
+                status__in=['active', 'expired'],
+                activated_at__gte=self.start_date,
+                activated_at__lt=self.end_date,
+            ).aggregate(total=Sum('amount'))['total']
+        return result or Decimal('0.00')
+
 
 class BillableClientRecord(models.Model):
     """

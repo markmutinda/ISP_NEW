@@ -307,7 +307,7 @@ class SubscriptionEnforcementMiddleware(MiddlewareMixin):
             from django_tenants.utils import schema_context
             
             with schema_context('public'):
-                from apps.subscriptions.models import CompanySubscription
+                from apps.subscriptions.models import CompanySubscription, BillingCycle
                 
                 try:
                     sub = CompanySubscription.objects.select_related('plan').get(company=request.company)
@@ -322,6 +322,20 @@ class SubscriptionEnforcementMiddleware(MiddlewareMixin):
                     elif sub.trial_expired:
                         is_locked = True
                         lock_reason = 'Your free trial has expired. Please subscribe to continue using Netily.'
+                    elif sub.status == 'active':
+                        # ── Fallback: catch overdue billing cycles the beat task missed ──
+                        from django.utils import timezone as tz
+                        overdue_cycle = BillingCycle.objects.filter(
+                            tenant=tenant,
+                            subscription=sub,
+                            status='invoiced',
+                            grace_ends_at__lt=tz.now(),
+                        ).exists()
+                        if overdue_cycle:
+                            sub.status = 'past_due'
+                            sub.save(update_fields=['status'])
+                            is_locked = True
+                            lock_reason = 'Your subscription payment is past due. Please settle your invoice to restore access.'
                     
                     if is_locked:
                         logger.warning(

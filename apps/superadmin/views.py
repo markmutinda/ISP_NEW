@@ -2151,6 +2151,31 @@ class SubscriptionStkCallbackView(APIView):
                 else:
                     sub.extend_subscription()
 
+                # ── Mark NET-BILL invoices as paid in tenant schema ──
+                try:
+                    company = sub.company
+                    tenant = getattr(company, 'tenant', None)
+                    if not tenant and hasattr(company, 'tenant_set'):
+                        tenant = company.tenant_set.first()
+                    if tenant:
+                        with schema_context(tenant.schema_name):
+                            from apps.billing.models import Invoice
+                            unpaid = Invoice.objects.filter(
+                                invoice_number__startswith='NET-BILL',
+                                status__in=['ISSUED', 'issued', 'pending', 'overdue'],
+                            ).order_by('created_at')
+                            updated = unpaid.update(
+                                status='paid',
+                                paid_date=timezone.now().date(),
+                            )
+                            if updated:
+                                logger.info(
+                                    "Marked %d NET-BILL invoice(s) as paid for %s (receipt: %s)",
+                                    updated, company.name, receipt
+                                )
+                except Exception as inv_err:
+                    logger.warning("Failed to mark invoices paid for %s: %s", sub.company_id, inv_err)
+
                 # Fire confirmation email in background
                 try:
                     from apps.subscriptions.tasks import send_cycle_activated_email

@@ -160,6 +160,11 @@ app.conf.beat_schedule = {
         'schedule': crontab(hour=0, minute=15),  # Daily at 12:15 AM
         'options': {'queue': 'billing'}
     },
+    'reconcile-hotspot-accumulators': {
+        'task': 'apps.subscriptions.tasks.reconcile_hotspot_accumulators',
+        'schedule': crontab(hour=6, minute=0),  # Daily at 6:00 AM
+        'options': {'queue': 'billing'}
+    },
 
     # ────────────────────────────────────────────────────────────────
     # FUP Automation - Every 10 minutes

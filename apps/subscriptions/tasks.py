@@ -6,7 +6,7 @@ from decimal import Decimal
 from celery import shared_task
 from django.utils import timezone
 from django.db import transaction
-from django.db.models import Q
+from django.db.models import Q, Sum
 from django.contrib.auth import get_user_model
 from django_tenants.utils import schema_context, get_public_schema_name
 
@@ -61,7 +61,29 @@ def generate_metered_invoices():
                     ).values_list('username', flat=True).distinct())
                     
                     logger.info(f"[{tenant.name}] Found {len(active_usernames)} unique PPPoE users with active sessions during cycle")
-                
+
+                    # ─── ACTUAL HOTSPOT REVENUE FROM DATABASE ───
+                    # Query the REAL paid sessions instead of trusting the accumulator.
+                    # This is the single source of truth for hotspot billing.
+                    from apps.billing.models.hotspot_models import HotspotSession
+                    actual_hotspot_revenue = HotspotSession.objects.filter(
+                        status__in=['active', 'expired'],
+                        activated_at__gte=cycle.start_date,
+                        activated_at__lt=cycle.end_date,
+                    ).aggregate(total=Sum('amount'))['total'] or Decimal('0.00')
+
+                    hotspot_session_count = HotspotSession.objects.filter(
+                        status__in=['active', 'expired'],
+                        activated_at__gte=cycle.start_date,
+                        activated_at__lt=cycle.end_date,
+                    ).count()
+
+                    logger.info(
+                        f"[{tenant.name}] Actual hotspot revenue from {hotspot_session_count} "
+                        f"paid sessions: KES {actual_hotspot_revenue:,.2f} "
+                        f"(accumulator was: KES {cycle.hotspot_revenue_accumulated:,.2f})"
+                    )
+
                 # Switch to public schema to insert the ghost records for billing
                 with schema_context(get_public_schema_name()):
                     records_to_create = [
@@ -77,8 +99,9 @@ def generate_metered_invoices():
                     pppoe_count = cycle.calculate_total_pppoe()
                     pppoe_fee = cycle.calculate_pppoe_charge()
                     
-                    hotspot_share = (cycle.hotspot_revenue_accumulated * (cycle.snapshot_hotspot_share_pct / Decimal('100.0'))).quantize(Decimal('0.01'))
-                    total_due = cycle.calculate_total_charge()
+                    # Use ACTUAL hotspot revenue queried from DB, not the accumulator
+                    hotspot_share = (actual_hotspot_revenue * (cycle.snapshot_hotspot_share_pct / Decimal('100.0'))).quantize(Decimal('0.01'))
+                    total_due = base_fee + pppoe_fee + hotspot_share
                     
                     logger.info(f"[{tenant.name}] Calculated charges: Base={base_fee}, PPPoE({pppoe_count})={pppoe_fee}, Hotspot={hotspot_share}, Total={total_due}")
                     
@@ -137,7 +160,8 @@ def generate_metered_invoices():
                     if hotspot_share > 0:
                         InvoiceItem.objects.create(
                             invoice=new_invoice, 
-                            description='Hotspot Revenue Share (3%)',
+                            description=f'Hotspot Revenue Share ({cycle.snapshot_hotspot_share_pct}% of KES {actual_hotspot_revenue:,.0f})',
+                            # ↑ Uses actual DB figure, not accumulator
                             quantity=1, 
                             unit_price=hotspot_share, 
                             tax_rate=0, 
@@ -146,10 +170,18 @@ def generate_metered_invoices():
                         )
 
                 with schema_context(get_public_schema_name()):
+                    # Reconcile the accumulator with actual DB figures
+                    if cycle.hotspot_revenue_accumulated != actual_hotspot_revenue:
+                        logger.warning(
+                            f"[{tenant.name}] Reconciling hotspot accumulator: "
+                            f"KES {cycle.hotspot_revenue_accumulated} → KES {actual_hotspot_revenue}"
+                        )
+                        cycle.hotspot_revenue_accumulated = actual_hotspot_revenue
+
                     cycle.status = 'invoiced'
                     cycle.invoice_reference = str(new_invoice.id)
                     cycle.grace_ends_at = grace_deadline
-                    cycle.save(update_fields=['status', 'invoice_reference', 'grace_ends_at'])
+                    cycle.save(update_fields=['status', 'invoice_reference', 'grace_ends_at', 'hotspot_revenue_accumulated'])
                     
                     logger.info(
                         f"[{tenant.name}] Invoiced KES {total_due} (Invoice #{new_invoice.id}). "
@@ -537,3 +569,44 @@ def send_trial_welcome_email(self, company_id):
     except Exception as exc:
         logger.error(f"send_trial_welcome_email failed for company {company_id}: {exc}")
         raise self.retry(exc=exc)
+
+
+@shared_task
+def reconcile_hotspot_accumulators():
+    """
+    Periodic task: recalculate hotspot_revenue_accumulated from actual
+    HotspotSession records for all active billing cycles.
+
+    This ensures the real-time accumulator stays in sync with the DB
+    source of truth, catching any drift from bugs or race conditions.
+    """
+    from apps.billing.models.hotspot_models import HotspotSession
+
+    active_cycles = BillingCycle.objects.filter(
+        status='active',
+    ).select_related('tenant')
+
+    reconciled = 0
+    for cycle in active_cycles:
+        try:
+            with schema_context(cycle.tenant.schema_name):
+                actual = HotspotSession.objects.filter(
+                    status__in=['active', 'expired'],
+                    activated_at__gte=cycle.start_date,
+                    activated_at__lt=cycle.end_date,
+                ).aggregate(total=Sum('amount'))['total'] or Decimal('0.00')
+
+            with schema_context(get_public_schema_name()):
+                if cycle.hotspot_revenue_accumulated != actual:
+                    logger.info(
+                        f"[{cycle.tenant.schema_name}] Reconciling hotspot accumulator: "
+                        f"KES {cycle.hotspot_revenue_accumulated} -> KES {actual}"
+                    )
+                    BillingCycle.objects.filter(pk=cycle.pk).update(
+                        hotspot_revenue_accumulated=actual
+                    )
+                    reconciled += 1
+        except Exception as e:
+            logger.error(f"[{cycle.tenant.schema_name}] Reconciliation failed: {e}")
+
+    return f"Reconciled {reconciled}/{active_cycles.count()} active cycles"
