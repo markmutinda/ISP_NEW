@@ -150,13 +150,25 @@ def cleanup_stale_sessions(self):
     
     This is the ONLY guaranteed way to catch ghost sessions without
     relying on Accounting-Stop packets from the router.
+    
+    FIX 1: Raised ghost threshold from 15 to 30 minutes to accommodate
+    MikroTik routers with longer interim update intervals (5-15 minutes typical).
+    A 30-minute threshold gives a bigger buffer before assuming a session is a ghost.
+    
+    FIX 3: Exclude usernames that have an active HotspotSession from being ghost-closed.
+    Even if interim updates are delayed, if a HotspotSession with status='active' 
+    and future expires_at exists, the radacct row stays open so users remain visible 
+    in the Online tab.
     """
     from django_tenants.utils import get_tenant_model, schema_context
     
     TenantModel = get_tenant_model()
     now = timezone.now()
     
-    ghost_minutes = int(getattr(settings, "RADIUS_GHOST_MINUTES", 15))
+    # FIX 1: Increased ghost threshold from 15 to 30 minutes
+    # This prevents premature termination of valid sessions on routers with
+    # longer interim-update intervals (e.g., 5-15 minutes configured)
+    ghost_minutes = int(getattr(settings, "RADIUS_GHOST_MINUTES", 30))
     stale_hours = int(getattr(settings, "RADIUS_STALE_HOURS", 4))
     
     ghost_threshold = now - timedelta(minutes=ghost_minutes)
@@ -171,7 +183,9 @@ def cleanup_stale_sessions(self):
         try:
             with schema_context(schema_name):
                 with connection.cursor() as cursor:
-                    # 1. Close GHOST sessions (stopped receiving interim updates)
+                    # FIX 3: Close GHOST sessions BUT exclude those with active HotspotSession
+                    # This prevents valid hotspot users from being disconnected even if
+                    # their interim updates are delayed or lost
                     cursor.execute("""
                         UPDATE radacct
                         SET
@@ -182,6 +196,13 @@ def cleanup_stale_sessions(self):
                             acctstoptime IS NULL
                             AND acctupdatetime IS NOT NULL
                             AND acctupdatetime < %s
+                            AND username NOT IN (
+                                SELECT access_code
+                                FROM billing_hotspotsession
+                                WHERE status = 'active'
+                                  AND expires_at > NOW()
+                                  AND access_code IS NOT NULL
+                            )
                         RETURNING radacctid
                     """, [ghost_threshold])
                     ghost_count = cursor.rowcount
@@ -213,6 +234,7 @@ def cleanup_stale_sessions(self):
     # Also sweep public schema (hotspot sessions stored there)
     try:
         with connection.cursor() as cursor:
+            # FIX 3: Also exclude active hotspot sessions in public schema
             cursor.execute("""
                 UPDATE public.radacct
                 SET acctstoptime = acctupdatetime,
@@ -221,6 +243,13 @@ def cleanup_stale_sessions(self):
                 WHERE acctstoptime IS NULL
                   AND acctupdatetime IS NOT NULL
                   AND acctupdatetime < %s
+                  AND username NOT IN (
+                      SELECT access_code
+                      FROM public.billing_hotspotsession
+                      WHERE status = 'active'
+                        AND expires_at > NOW()
+                        AND access_code IS NOT NULL
+                  )
             """, [ghost_threshold])
             total_ghost += cursor.rowcount
             
