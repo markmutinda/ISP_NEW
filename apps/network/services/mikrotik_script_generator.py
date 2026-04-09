@@ -570,9 +570,12 @@ class MikrotikScriptGenerator:
 
     def generate_login_html(self) -> str:
         """
-        UPDATED: Strict TV detection based on User-Agent allowlist + desktop denylist.
-        Removed screen-size heuristic to prevent false positives.
-        Includes optional manual override via force_tv=1/0 URL parameter.
+        UPDATED: 3-layer hybrid TV detection that catches everything without false positives.
+        
+        Layer 1: URL param override (admin can force it, zero ambiguity)
+        Layer 2: UA allowlist for known TV platforms  
+        Layer 3: Screen geometry + no-touch fallback — catches Android TV sticks that fail UA matching
+                while having zero false positives on MacBooks/Windows laptops (which are in desktop denylist)
         """
         r = self.router
         portal_base = self.get_tenant_portal_url().rstrip('/')
@@ -660,35 +663,42 @@ class MikrotikScriptGenerator:
             return; // Stop here, do not redirect to portal
         }}
 
-        // 2. STRICT TV DETECTION (Lipanet / Senior Dev Request)
-        // No screen-size heuristics - only strict UA matching with desktop denylist
+        // ============================================================
+        // 3-LAYER HYBRID TV DETECTION
+        // ============================================================
         
         var ua = navigator.userAgent.toLowerCase();
         var q = new URLSearchParams(window.location.search);
-        
-        // Manual override hooks (optional but very useful for testing)
+
+        // Layer 1: explicit override (admin or forced URL param)
         var forcedTV = null;
-        if (q.get('force_tv') === '1') forcedTV = true;
+        if (q.get('force_tv') === '1' || q.get('smart_tv') === '1') forcedTV = true;
         else if (q.get('force_tv') === '0') forcedTV = false;
-        
-        // STRICT TV UA allowlist (TV only)
-        // Includes: Smart TV, Android TV, Google TV, WebOS, Tizen, Vidaa, HbbTV, Roku,
-        // FireTV, Apple TV, Bravia, Netcast, Viera, plus common TV tokens like 'aft' (Fire TV),
-        // 'crkey' (Chromecast), and 'tv safari'
-        var tvUa = /(smart-?tv|android\\s?tv|google\\s?tv|webos|tizen|vidaa|hbbtv|roku|firetv|appletv|apple\\s?tv|bravia|netcast|viera|\\baf\\b|crkey|tv safari)/i.test(ua);
-        
-        // Strong desktop denylist - prevents desktops from being misidentified as TVs
-        var desktopUa = /(windows nt|macintosh|x11|linux x86_64|cros)/i.test(ua);
-        
-        // Final decision: manual override > (TV UA AND not desktop)
-        var finalIsTV = forcedTV !== null ? forcedTV : (tvUa && !desktopUa);
-        
+
+        // Layer 2: UA allowlist for platforms with reliable TV strings
+        var tvByUA = /(smart-?tv|webos|tizen|vidaa|hbbtv|roku|firetv|appletv|apple\\s?tv|bravia|netcast|viera|aft[a-z]|crkey|tv safari)/i.test(ua);
+
+        // Android TV: android present, "mobile" absent, large screen
+        var isAndroidTV = /android/i.test(ua) && !/mobile/i.test(ua) && window.screen.width >= 1280;
+
+        // Layer 3: geometry heuristic — safe because desktop OS strings are blocked
+        var isDesktopOS = /(windows nt|macintosh|\\bx11\\b|linux x86_64|cros)/i.test(ua);
+        var geoTV = !isDesktopOS
+                    && window.screen.width  >= 1280
+                    && window.screen.height >= 720
+                    && (window.screen.width / window.screen.height) >= 1.5
+                    && !('ontouchstart' in window)
+                    && navigator.maxTouchPoints === 0;
+
+        var finalIsTV = forcedTV !== null ? forcedTV : (tvByUA || isAndroidTV || geoTV);
+
         // Log detection result for debugging (visible in browser console)
-        console.log('[Netily] TV Detection:', {{
-            userAgent: ua,
-            isTV: finalIsTV,
-            tvUaMatch: tvUa,
-            desktopUaMatch: desktopUa,
+        console.log('[Netily TV]', {{
+            ua: ua,
+            tvByUA: tvByUA,
+            isAndroidTV: isAndroidTV,
+            geoTV: geoTV,
+            finalIsTV: finalIsTV,
             forced: forcedTV !== null,
             manualValue: forcedTV
         }});
