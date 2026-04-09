@@ -48,7 +48,11 @@ services:
     container_name: netily_backend
     restart: unless-stopped
     command: >
-      sh -c "echo 'Setting up routes...' &&
+      sh -c "echo 'Running migrations...' &&
+             python manage.py migrate_schemas --shared 2>&1 &&
+             python manage.py migrate_schemas --tenant 2>&1 &&
+             echo 'Migrations complete.' &&
+             echo 'Setting up routes...' &&
              VPN_IP=$$(getent hosts netily-openvpn-isp | awk '{ print $$1 }') &&
              echo 'VPN Gateway found at: '$$VPN_IP &&
              echo 'Adding route for '$${VPN_NETWORK_CIDR:-10.8.0.0/16}' via '$$VPN_IP &&
