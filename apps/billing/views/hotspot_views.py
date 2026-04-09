@@ -1054,7 +1054,8 @@ class HotspotVoucherRedeemView(APIView):
             
             # Use MAC as a fallback identifier if real phone isn't provided
             provided_phone = request.data.get('phone_number') or ''
-            phone_to_use = provided_phone if provided_phone else f"+999{mac_address.replace(':', '').lower()[:12]}"
+            # MAC-derived fallback must stay within max_length=15: "MAC-" (4) + 11 chars = 15
+            phone_to_use = provided_phone if provided_phone else f"MAC-{mac_address.replace(':', '')[:11]}"
             
             # Resolve the persistent client record
             hotspot_client = HotspotClient.get_or_create_by_mac(
