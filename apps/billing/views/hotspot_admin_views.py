@@ -392,6 +392,9 @@ class ActiveSubscriptionsView(APIView):
     permission_classes = [IsAuthenticated, IsAdminOrStaff]
 
     def get(self, request):
+        from apps.radius.models import RadAcct
+        from apps.billing.models.hotspot_models import HotspotSession
+        
         now = timezone.now()
 
         # ── PPPoE / Static active subscriptions ─────────────────────────────
@@ -453,8 +456,6 @@ class ActiveSubscriptionsView(APIView):
             })
 
         # ── Hotspot active subscriptions ─────────────────────────────────────
-        from apps.billing.models.hotspot_models import HotspotSession
-
         active_sessions = (
             HotspotSession.objects
             .filter(
@@ -465,8 +466,23 @@ class ActiveSubscriptionsView(APIView):
             .order_by('-activated_at')
         )
 
+        open_radacct_usernames = set(
+            RadAcct.objects.filter(acctstoptime__isnull=True).values_list('username', flat=True)
+        )
+
         hotspot_results = []
         for session in active_sessions:
+            has_open_radacct = bool(session.access_code and session.access_code in open_radacct_usernames)
+            pending_accounting = (
+                not has_open_radacct
+                and session.activated_at
+                and session.activated_at >= now - timedelta(minutes=5)
+            )
+
+            # skip stale "active" rows that are neither online nor in startup grace
+            if not has_open_radacct and not pending_accounting:
+                continue
+
             client = session.hotspot_client
             canonical_phone = None
             if client and client.canonical_phone:
@@ -499,6 +515,8 @@ class ActiveSubscriptionsView(APIView):
                 "router": session.router.name if session.router else None,
                 "mac_address": session.mac_address,
                 "session_id": session.session_id,
+                "online_source": "radacct" if has_open_radacct else "hotspot_pending_accounting",
+                "pending_accounting_start": pending_accounting,
                 # Lifetime analytics for this client
                 "client_total_sessions": client.total_sessions if client else 1,
                 "client_total_spend": float(client.total_spend) if client else float(session.amount),

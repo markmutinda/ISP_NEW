@@ -14,6 +14,7 @@ from datetime import timedelta
 from celery import shared_task
 from django.utils import timezone
 from django.db import connection
+from django.conf import settings
 from django_tenants.utils import schema_context, get_tenant_model
 
 logger = logging.getLogger(__name__)
@@ -145,7 +146,7 @@ def cleanup_stale_sessions(self):
     """
     Closes ghost RADIUS sessions - sessions where:
     1. acctstoptime IS NULL (still "open")
-    2. acctupdatetime hasn't been updated in > 10 minutes (NAS stopped sending)
+    2. acctupdatetime hasn't been updated in > configured minutes (NAS stopped sending)
     
     This is the ONLY guaranteed way to catch ghost sessions without
     relying on Accounting-Stop packets from the router.
@@ -155,12 +156,11 @@ def cleanup_stale_sessions(self):
     TenantModel = get_tenant_model()
     now = timezone.now()
     
-    # Ghost threshold: no interim update in 10 minutes = dead session
-    # Most ISPs configure NAS to send interim updates every 5 min
-    ghost_threshold = now - timedelta(minutes=10)
+    ghost_minutes = int(getattr(settings, "RADIUS_GHOST_MINUTES", 15))
+    stale_hours = int(getattr(settings, "RADIUS_STALE_HOURS", 4))
     
-    # Hard stale: truly abandoned, no update in 2 hours
-    stale_threshold = now - timedelta(hours=2)
+    ghost_threshold = now - timedelta(minutes=ghost_minutes)
+    stale_threshold = now - timedelta(hours=stale_hours)
     
     total_ghost = 0
     total_stale = 0

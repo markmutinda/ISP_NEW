@@ -133,26 +133,72 @@ class RadiusActiveSessionsView(APIView):
     permission_classes = [IsAuthenticated, HasCompanyAccess]
     
     def get(self, request):
-        # Added 'customer__user' to select_related so it fetches phone numbers efficiently
-        sessions = RadAcct.objects.filter(
-            acctstoptime__isnull=True
-        ).select_related('customer', 'customer__user', 'router').order_by('-acctstarttime')
-        
-        # Filter by NAS
+        now = timezone.now()
+
+        radacct_qs = (
+            RadAcct.objects
+            .filter(acctstoptime__isnull=True)
+            .select_related('customer', 'customer__user', 'router')
+            .order_by('-acctstarttime')
+        )
+
         nas_ip = request.query_params.get('nas')
         if nas_ip:
-            sessions = sessions.filter(nasipaddress=nas_ip)
-        
-        # Filter by username
+            radacct_qs = radacct_qs.filter(nasipaddress=nas_ip)
+
         username = request.query_params.get('username')
         if username:
-            sessions = sessions.filter(username__icontains=username)
-        
-        # CHANGED: Use the new OnlineUserSerializer here
-        serializer = OnlineUserSerializer(sessions[:100], many=True)
+            radacct_qs = radacct_qs.filter(username__icontains=username)
+
+        # Existing radacct-backed online users
+        radacct_data = OnlineUserSerializer(radacct_qs[:100], many=True).data
+        accted_usernames = set(
+            radacct_qs.values_list('username', flat=True)
+        )
+
+        # NEW: Hotspot sessions active in Django but not yet accounted by NAS (startup gap)
+        pending_qs = (
+            HotspotSession.objects
+            .filter(
+                status='active',
+                expires_at__gt=now,
+                activated_at__gte=now - timedelta(minutes=5),
+            )
+            .exclude(access_code__isnull=True)
+            .exclude(access_code='')
+            .exclude(access_code__in=accted_usernames)
+            .select_related('router', 'plan', 'hotspot_client')
+            .order_by('-activated_at')
+        )
+
+        if username:
+            pending_qs = pending_qs.filter(access_code__icontains=username)
+        if nas_ip:
+            pending_qs = pending_qs.filter(router__ip_address=nas_ip)
+
+        pending_data = []
+        for s in pending_qs[:100]:
+            pending_data.append({
+                "username": s.access_code,
+                "status": "active_pending_accounting_start",
+                "session_type": "HOTSPOT",
+                "acctstarttime": s.activated_at,
+                "acctsessiontime": 0,
+                "download_mb": 0,
+                "upload_mb": 0,
+                "nasipaddress": getattr(s.router, "ip_address", None),
+                "router_name": s.router.name if s.router else None,
+                "phone": getattr(s.hotspot_client, "canonical_phone", None) or s.phone_number,
+                "expires_at": s.expires_at,
+                "source": "hotspot_session",
+            })
+
+        sessions = radacct_data + pending_data
         return Response({
-            'count': sessions.count(),
-            'sessions': serializer.data
+            "count": len(sessions),
+            "radacct_count": radacct_qs.count(),
+            "pending_accounting_count": len(pending_data),
+            "sessions": sessions,
         })
 
 
