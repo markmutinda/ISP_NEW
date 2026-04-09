@@ -46,6 +46,7 @@ from .serializers import (
     CustomerRadiusCredentialsDetailSerializer,
 )
 from .services import RadiusSyncService
+from apps.billing.models.hotspot_models import HotspotSession
 
 logger = logging.getLogger(__name__)
 

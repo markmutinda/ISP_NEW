@@ -97,30 +97,34 @@ class OnlineUserSerializer(serializers.ModelSerializer):
             'canonical_username',
         ]
 
-    # ─────────────────────────────────────────────────────────────────────────
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._hotspot_cache = {}
+        self._radius_cache = {}
 
     def _resolve_hotspot_session(self, obj):
-        """
-        Try to find the HotspotSession whose access_code == obj.username.
-        Returns the session (with prefetched hotspot_client) or None.
-        """
-        from apps.billing.models.hotspot_models import HotspotSession
-        return (
-            HotspotSession.objects
-            .filter(access_code=obj.username)
-            .select_related('hotspot_client')
-            .first()
-        )
+        username = obj.username
+        if username not in self._hotspot_cache:
+            from apps.billing.models.hotspot_models import HotspotSession
+            self._hotspot_cache[username] = (
+                HotspotSession.objects
+                .filter(access_code=username)
+                .select_related('hotspot_client')
+                .first()
+            )
+        return self._hotspot_cache[username]
 
     def _resolve_radius_credentials(self, obj):
-        """Look up CustomerRadiusCredentials by RADIUS username."""
-        from apps.radius.models import CustomerRadiusCredentials
-        return (
-            CustomerRadiusCredentials.objects
-            .filter(username=obj.username)
-            .select_related('customer__user')
-            .first()
-        )
+        username = obj.username
+        if username not in self._radius_cache:
+            from apps.radius.models import CustomerRadiusCredentials
+            self._radius_cache[username] = (
+                CustomerRadiusCredentials.objects
+                .filter(username=username)
+                .select_related('customer__user')
+                .first()
+            )
+        return self._radius_cache[username]
 
     # ─────────────────────────────────────────────────────────────────────────
 
