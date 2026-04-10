@@ -2145,8 +2145,8 @@ class SubscriptionStkCallbackView(APIView):
                 payment.mark_completed(mpesa_receipt=receipt)
 
                 sub = payment.subscription
-                # If this is the first payment after a trial, convert properly
-                if sub.is_trial and sub.status == 'trialing':
+                # If this is the first payment after a trial (or expired trial), convert properly
+                if sub.is_trial and sub.status in ('trialing', 'expired'):
                     sub.convert_from_trial(billing_period=sub.billing_period or 'monthly')
                 else:
                     sub.extend_subscription()

@@ -22,7 +22,7 @@ from rest_framework.permissions import IsAuthenticated, AllowAny
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from apps.billing.services.payhero import PayHeroClient, PayHeroError, PaymentStatus
+from apps.billing.services.tuma_service import TumaClient, TumaError
 from apps.core.models import Company
 
 from .models import (
@@ -406,52 +406,59 @@ class InitiateSubscriptionPaymentView(APIView):
         )
     
     def _handle_stk_push(self, payment, phone_number, amount, plan):
-        """Initiate M-Pesa STK Push"""
+        """Initiate M-Pesa STK Push via Tuma parent/master account"""
         try:
-            client = PayHeroClient()
-            
+            client = TumaClient()
+            token = client.get_master_token()
+
             reference = f"NETILY-{plan.code.upper()}-{payment.id.hex[:8].upper()}"
-            
-            logger.info(f"Initiating STK Push: phone={phone_number}, amount={amount}, ref={reference}")
-            
+
+            logger.info(f"Initiating Tuma STK Push: phone={phone_number}, amount={amount}, ref={reference}")
+
             response = client.stk_push(
-                phone_number=phone_number,
+                token=token,
                 amount=int(amount),
-                reference=reference,
+                phone=phone_number,
+                callback_url=settings.TUMA_SUBSCRIPTION_CALLBACK,
                 description=f"Netily {plan.name} Subscription",
-                callback_url=settings.PAYHERO_SUBSCRIPTION_CALLBACK,
             )
-            
-            logger.info(f"STK Push response: success={response.success}, message={response.message}")
-            
-            if response.success:
-                payment.payhero_checkout_id = response.checkout_request_id
+
+            logger.info(f"Tuma STK Push response: {response}")
+
+            resp_data = response.get('data', response)
+            merchant_request_id = resp_data.get('merchant_request_id', '')
+            checkout_request_id = resp_data.get('checkout_request_id', '')
+
+            if merchant_request_id or checkout_request_id:
+                # Store Tuma IDs in existing fields (repurposed from PayHero)
+                payment.payhero_checkout_id = checkout_request_id or merchant_request_id
                 payment.payhero_reference = reference
                 payment.status = 'processing'
                 payment.save()
-                
+
                 return Response({
                     'status': 'pending',
                     'payment_id': str(payment.id),
-                    'checkout_request_id': response.checkout_request_id,
+                    'checkout_request_id': checkout_request_id,
+                    'merchant_request_id': merchant_request_id,
                     'message': 'STK Push sent. Check your phone and enter your M-Pesa PIN.',
                 })
             else:
                 payment.status = 'failed'
-                payment.failure_reason = response.message
+                payment.failure_reason = str(response)
                 payment.save()
-                
+
                 return Response({
                     'status': 'error',
-                    'message': response.message,
+                    'message': 'STK Push failed. Please try again.',
                 }, status=status.HTTP_400_BAD_REQUEST)
-        
-        except PayHeroError as e:
-            logger.error(f"PayHero STK push failed: {e.message}")
+
+        except (TumaError, Exception) as e:
+            logger.error(f"Tuma STK push failed: {e}")
             payment.status = 'failed'
             payment.failure_reason = str(e)
             payment.save()
-            
+
             return Response({
                 'status': 'error',
                 'message': 'Failed to initiate payment. Please try again.',

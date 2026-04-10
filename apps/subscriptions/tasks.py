@@ -346,8 +346,13 @@ def check_trial_lifecycle():
         tenant = _get_tenant_for_company(sub.company)
         if tenant:
             try:
-                # The SubscriptionEnforcementMiddleware already blocks API access
-                # when trial_expired is True. We just send the notification email here.
+                # Explicitly set status to 'expired' so the frontend and middleware
+                # both consistently see the lockout state.
+                if sub.status != 'expired':
+                    sub.status = 'expired'
+                    sub.save(update_fields=['status'])
+                    logger.info(f"[{sub.company.name}] Trial expired — marked status='expired'")
+
                 _send_lifecycle_email(
                     tenant=tenant,
                     template='emails/billing/trial_expired.html',
