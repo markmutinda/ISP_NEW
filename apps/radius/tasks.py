@@ -250,6 +250,12 @@ def cleanup_stale_sessions(self):
                     acctstoptime    IS NULL
                     AND acctupdatetime IS NOT NULL
                     AND acctupdatetime < %s
+                    AND username NOT IN (
+                        SELECT access_code
+                        FROM public.radcheck
+                        WHERE attribute = 'Expiration'
+                        AND TO_TIMESTAMP(value, 'Mon DD YYYY HH24:MI:SS') > NOW()
+                    )
             """, [ghost_threshold])
             public_ghost = cursor.rowcount
             total_ghost += public_ghost

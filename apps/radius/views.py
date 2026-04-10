@@ -163,7 +163,6 @@ class RadiusActiveSessionsView(APIView):
             .filter(
                 status='active',
                 expires_at__gt=now,
-                activated_at__gte=now - timedelta(minutes=5),
             )
             .exclude(access_code__isnull=True)
             .exclude(access_code='')
@@ -179,7 +178,22 @@ class RadiusActiveSessionsView(APIView):
 
         pending_data = []
         for s in pending_qs[:100]:
-            seconds_since_activation = int((now - s.activated_at).total_seconds())
+            seconds_since_activation = int((now - s.activated_at).total_seconds()) if s.activated_at else 0
+            hours, remainder = divmod(seconds_since_activation, 3600)
+            minutes_part, secs_part = divmod(remainder, 60)
+            if hours > 0:
+                uptime_str = f"{hours}h {minutes_part}m"
+            elif minutes_part > 0:
+                uptime_str = f"{minutes_part}m {secs_part}s"
+            else:
+                uptime_str = f"{secs_part}s"
+
+            # A session that has been active for more than 3 minutes
+            # is likely confirmed online (accounting may just be going to a different schema).
+            # We still mark accounting_pending=True so the frontend knows there's no radacct entry,
+            # but we change the display label after 3 minutes.
+            is_recently_activated = seconds_since_activation < 180
+
             pending_data.append({
                 "username": s.access_code,
                 "full_name": s.access_code,
@@ -189,7 +203,6 @@ class RadiusActiveSessionsView(APIView):
                     or ""
                 ),
                 "status": "active_pending_accounting_start",
-                "session_type": "HOTSPOT",
                 "service_type": "HOTSPOT",
                 "acctstarttime": s.activated_at,
                 "acctsessiontime": 0,
@@ -197,15 +210,16 @@ class RadiusActiveSessionsView(APIView):
                 "upload_mb": 0,
                 "nasipaddress": getattr(s.router, "ip_address", None),
                 "router": s.router.name if s.router else None,
-                "ip_address": None,       # router hasn't reported yet
+                "ip_address": None,
                 "mac_address": s.mac_address,
-                "uptime": f"{seconds_since_activation}s",   # actual elapsed seconds
+                "uptime": uptime_str,
                 "usage": "0 MB",
                 "radacctid": f"pending-{s.session_id}",
                 "canonical_username": s.access_code,
                 "expires_at": s.expires_at,
                 "source": "hotspot_session",
-                "accounting_pending": True,   # ← new flag for frontend
+                "accounting_pending": True,
+                "recently_activated": is_recently_activated,
             })
 
         sessions = radacct_data + pending_data
