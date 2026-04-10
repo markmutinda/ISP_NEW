@@ -491,18 +491,6 @@ def update_user_expiration(username: str, new_expiration: str):
                 tenant.schema_name,
                 int((time.perf_counter() - tenant_start) * 1000)
             )
-
-    try:
-        with connection.cursor() as cursor:
-            cursor.execute("""
-                INSERT INTO public.radcheck (username, attribute, op, value, created_at, updated_at)
-                VALUES (%s, 'Expiration', ':=', %s, NOW(), NOW())
-                ON CONFLICT (username, attribute) 
-                DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()
-            """, [username, new_expiration])
-        results['updated_tenants'].append('public')
-    except Exception as e:
-        results['errors'].append({'tenant': 'public', 'error': str(e)})
     
     return results
 
