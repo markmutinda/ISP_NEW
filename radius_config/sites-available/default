@@ -60,20 +60,35 @@ server default {
             Tmp-String-0 := "%{sql:SELECT t.schema_name FROM core_tenant t JOIN core_globalroutermap g ON t.id = g.tenant_id WHERE g.nas_ip = '%{NAS-IP-Address}' AND g.is_active = true LIMIT 1}"
         }
 
+        if (&control:Tmp-String-0 == "") {
+            reject
+        }
+        sql
+    }
+
+    session {
+        update control {
+            Tmp-String-0 := "%{sql:SELECT t.schema_name FROM core_tenant t JOIN core_globalroutermap g ON t.id = g.tenant_id WHERE g.nas_ip = '%{NAS-IP-Address}' AND g.is_active = true LIMIT 1}"
+        }
+
         if (&control:Tmp-String-0 != "") {
             sql
         }
     }
 
-    session {
-        sql
-    }
-
     post-auth {
-        sql
-        
-        Post-Auth-Type REJECT {
+        update control {
+            Tmp-String-0 := "%{sql:SELECT t.schema_name FROM core_tenant t JOIN core_globalroutermap g ON t.id = g.tenant_id WHERE g.nas_ip = '%{NAS-IP-Address}' AND g.is_active = true LIMIT 1}"
+        }
+
+        if (&control:Tmp-String-0 != "") {
             sql
+        }
+
+        Post-Auth-Type REJECT {
+            if (&control:Tmp-String-0 != "") {
+                sql
+            }
             attr_filter.access_reject
         }
     }
