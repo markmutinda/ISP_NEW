@@ -28,6 +28,7 @@ from rest_framework.permissions import IsAdminUser
 from apps.customers.models import Customer
 from apps.billing.models.billing_models import Invoice, Plan
 from apps.billing.models.payment_models import Payment
+from apps.billing.models.hotspot_models import HotspotPlan
 from apps.network.models import OLTDevice, CPEDevice, MikrotikQueue  
 from apps.bandwidth.models import DataUsage, BandwidthProfile
 
@@ -84,6 +85,8 @@ class AnalyticsDashboardView(APIView):
             'revenue_forecast': self.get_revenue_forecast(),
             'revenue_target': self.get_revenue_target(),
             'network_stats': self.get_network_stats(),
+            'top_impactful_customers': self.get_top_impactful_customers(),
+            'plan_transaction_analytics': self.get_plan_transaction_analytics(),
             'time_range': time_range,
             'timestamp': timezone.now().isoformat(),
         }
@@ -517,3 +520,156 @@ class AnalyticsDashboardView(APIView):
             'avg_bandwidth': round(float(avg_bandwidth) / (1024*1024), 1) if avg_bandwidth else 72,  # Convert bytes to MB if needed
             'warning_count': warning_count,
         }
+
+    def get_top_impactful_customers(self):
+        """
+        Top 10 customers/users by highest lifetime total transacted amount.
+        Includes:
+          - PPPoE/regular customers via Payment.customer
+          - Hotspot clients via Payment.hotspot_session.hotspot_client.canonical_username
+        """
+        payments = (
+            Payment.objects
+            .filter(status__iexact='completed')
+            .select_related(
+                'customer__user',
+                'hotspot_session__hotspot_client',
+                'invoice__service_connection'
+            )
+        )
+
+        bucket = {}  # key -> aggregated row
+
+        for p in payments:
+            # 1) PPPoE / customer-linked payment
+            if p.customer_id:
+                key = f"customer:{p.customer_id}"
+                full_name = getattr(p.customer, 'full_name', None) or getattr(p.customer, 'customer_code', 'Unknown Customer')
+                phone = getattr(getattr(p.customer, 'user', None), 'phone_number', '') or ''
+                username = None  # PPPoE is customer-centric in UI
+
+                if key not in bucket:
+                    bucket[key] = {
+                        "entity_type": "PPPOE",
+                        "entity_id": str(p.customer_id),
+                        "display_name": full_name,
+                        "canonical_username": username,
+                        "phone_number": phone,
+                        "total_amount": 0.0,
+                        "transaction_count": 0,
+                        "last_payment_date": None,
+                    }
+
+                bucket[key]["total_amount"] += float(p.amount or 0)
+                bucket[key]["transaction_count"] += 1
+                if not bucket[key]["last_payment_date"] or (p.payment_date and p.payment_date > bucket[key]["last_payment_date"]):
+                    bucket[key]["last_payment_date"] = p.payment_date
+                continue
+
+            # 2) Hotspot payment via linked hotspot_session
+            hs = p.hotspot_session
+            if hs and hs.hotspot_client_id:
+                client = hs.hotspot_client
+                canonical_username = (client.canonical_username if client else None) or hs.access_code
+                phone = (client.canonical_phone if client else None) or hs.phone_number or ""
+                key = f"hotspot_client:{hs.hotspot_client_id}"
+
+                if key not in bucket:
+                    bucket[key] = {
+                        "entity_type": "HOTSPOT",
+                        "entity_id": str(hs.hotspot_client_id),
+                        "display_name": canonical_username or "Hotspot User",
+                        "canonical_username": canonical_username,
+                        "phone_number": phone,
+                        "total_amount": 0.0,
+                        "transaction_count": 0,
+                        "last_payment_date": None,
+                    }
+
+                bucket[key]["total_amount"] += float(p.amount or 0)
+                bucket[key]["transaction_count"] += 1
+                if not bucket[key]["last_payment_date"] or (p.payment_date and p.payment_date > bucket[key]["last_payment_date"]):
+                    bucket[key]["last_payment_date"] = p.payment_date
+                continue
+
+            # 3) Fallback: unknown/unlinked payment
+            key = "unknown"
+            if key not in bucket:
+                bucket[key] = {
+                    "entity_type": "UNKNOWN",
+                    "entity_id": "unknown",
+                    "display_name": "Unlinked Payment",
+                    "canonical_username": None,
+                    "phone_number": "",
+                    "total_amount": 0.0,
+                    "transaction_count": 0,
+                    "last_payment_date": None,
+                }
+            bucket[key]["total_amount"] += float(p.amount or 0)
+            bucket[key]["transaction_count"] += 1
+            if not bucket[key]["last_payment_date"] or (p.payment_date and p.payment_date > bucket[key]["last_payment_date"]):
+                bucket[key]["last_payment_date"] = p.payment_date
+
+        # sort by total amount descending
+        rows = sorted(bucket.values(), key=lambda r: r["total_amount"], reverse=True)[:10]
+
+        # normalize datetime
+        for r in rows:
+            if r["last_payment_date"]:
+                r["last_payment_date"] = r["last_payment_date"].isoformat()
+
+        return rows
+
+    def get_plan_transaction_analytics(self):
+        """
+        Returns all tenant plans with transaction counts:
+          - PPPoE/regular billing plans from billing.Plan
+          - Hotspot plans from billing.HotspotPlan
+        """
+        completed_payments = Payment.objects.filter(status__iexact='completed')
+
+        result = []
+
+        # A) Billing plans (includes PPPoE plans; can include other plan types too)
+        billing_plans = Plan.objects.all().order_by('name')
+        for plan in billing_plans:
+            # "pppoe side" transaction count is invoice-linked payments on this plan
+            pppoe_qs = completed_payments.filter(invoice__plan_id=plan.id)
+
+            tx_count = pppoe_qs.count()
+            total_amount = pppoe_qs.aggregate(total=Sum('amount'))['total'] or 0
+
+            result.append({
+                "plan_source": "billing_plan",
+                "plan_type": getattr(plan, 'plan_type', 'UNKNOWN'),
+                "plan_id": str(plan.id),
+                "plan_name": plan.name,
+                "pppoe_transactions": tx_count,
+                "hotspot_transactions": 0,
+                "total_transactions": tx_count,
+                "total_amount": float(total_amount),
+            })
+
+        # B) Hotspot plans
+        hotspot_plans = HotspotPlan.objects.all().order_by('name')
+        for hplan in hotspot_plans:
+            hotspot_qs = completed_payments.filter(hotspot_session__plan_id=hplan.id)
+
+            h_count = hotspot_qs.count()
+            h_total = hotspot_qs.aggregate(total=Sum('amount'))['total'] or 0
+
+            result.append({
+                "plan_source": "hotspot_plan",
+                "plan_type": "HOTSPOT",
+                "plan_id": str(hplan.id),
+                "plan_name": hplan.name,
+                "pppoe_transactions": 0,
+                "hotspot_transactions": h_count,
+                "total_transactions": h_count,
+                "total_amount": float(h_total),
+            })
+
+        # sort by transaction volume desc then amount desc
+        result.sort(key=lambda x: (x["total_transactions"], x["total_amount"]), reverse=True)
+
+        return result
