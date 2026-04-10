@@ -68,6 +68,113 @@ def _bytes_to_gb(v):
     return round(_safe_float(v) / (1024 ** 3), 2)
 
 
+def _get_top_impactful_customers():
+    """Top 10 customers by lifetime spend. Combines PPPoE + Hotspot clients."""
+    from apps.billing.models.payment_models import Payment
+    from django.db.models import Sum, Count, Q
+
+    # PPPoE customers
+    pppoe_rows = (
+        Payment.objects
+        .filter(status__iexact="completed", customer__isnull=False)
+        .values("customer_id", "customer__user__first_name", "customer__user__last_name", "customer__customer_code")
+        .annotate(total=Sum("amount"), tx_count=Count("id"))
+        .order_by("-total")
+    )
+
+    # Hotspot clients
+    hotspot_rows = (
+        Payment.objects
+        .filter(status__iexact="completed", hotspot_session__hotspot_client__isnull=False)
+        .values(
+            "hotspot_session__hotspot_client__id",
+            "hotspot_session__hotspot_client__canonical_username",
+            "hotspot_session__hotspot_client__canonical_phone",
+        )
+        .annotate(total=Sum("amount"), tx_count=Count("id"))
+        .order_by("-total")
+    )
+
+    bucket = []
+
+    for r in pppoe_rows:
+        fn = r.get("customer__user__first_name") or ""
+        ln = r.get("customer__user__last_name") or ""
+        name = f"{fn} {ln}".strip() or r.get("customer__customer_code") or "Unknown"
+        bucket.append({
+            "type": "PPPOE",
+            "display_name": name,
+            "identifier": r.get("customer__customer_code") or "",
+            "total_amount": _safe_float(r["total"]),
+            "tx_count": r["tx_count"],
+        })
+
+    for r in hotspot_rows:
+        bucket.append({
+            "type": "HOTSPOT",
+            "display_name": r.get("hotspot_session__hotspot_client__canonical_username") or "Hotspot User",
+            "identifier": r.get("hotspot_session__hotspot_client__canonical_phone") or "",
+            "total_amount": _safe_float(r["total"]),
+            "tx_count": r["tx_count"],
+        })
+
+    # Merge & deduplicate by display_name, sort, top 10
+    seen = {}
+    for item in bucket:
+        key = item["display_name"]
+        if key in seen:
+            seen[key]["total_amount"] += item["total_amount"]
+            seen[key]["tx_count"] += item["tx_count"]
+        else:
+            seen[key] = dict(item)
+
+    return sorted(seen.values(), key=lambda x: x["total_amount"], reverse=True)[:10]
+
+
+def _get_plan_analytics():
+    """All plans (PPPoE + Hotspot) with transaction count and lifetime revenue."""
+    from apps.billing.models.billing_models import Plan
+    from apps.billing.models.hotspot_models import HotspotPlan
+    from apps.billing.models.payment_models import Payment
+    from django.db.models import Sum, Count
+
+    results = []
+
+    # Billing plans (PPPoE etc.)
+    for plan in Plan.objects.filter(is_active=True).values("id", "name", "plan_type", "base_price"):
+        agg = (
+            Payment.objects
+            .filter(status__iexact="completed", invoice__plan_id=plan["id"])
+            .aggregate(total=Sum("amount"), count=Count("id"))
+        )
+        results.append({
+            "plan_type": "billing",
+            "connection_type": plan.get("plan_type", "PPPOE"),
+            "name": plan["name"],
+            "base_price": _safe_float(plan["base_price"]),
+            "total_revenue": _safe_float(agg["total"]),
+            "total_transactions": agg["count"] or 0,
+        })
+
+    # Hotspot plans
+    for plan in HotspotPlan.objects.filter(is_active=True).values("id", "name", "price"):
+        agg = (
+            Payment.objects
+            .filter(status__iexact="completed", hotspot_session__plan_id=plan["id"])
+            .aggregate(total=Sum("amount"), count=Count("id"))
+        )
+        results.append({
+            "plan_type": "hotspot",
+            "connection_type": "HOTSPOT",
+            "name": plan["name"],
+            "base_price": _safe_float(plan["price"]),
+            "total_revenue": _safe_float(agg["total"]),
+            "total_transactions": agg["count"] or 0,
+        })
+
+    return sorted(results, key=lambda x: x["total_revenue"], reverse=True)
+
+
 class _RangeMixin:
     ALLOWED = {
         "reports": {"7d", "30d", "90d"},
@@ -352,6 +459,10 @@ class AnalyticsReportsView(APIView, _RangeMixin):
                 },
             },
         }
+
+        # Add the two new fields right before cache.set
+        payload["top_customers"] = _get_top_impactful_customers()
+        payload["plan_analytics"] = _get_plan_analytics()
 
         cache.set(ck, payload, CACHE_TTL)
         return Response(payload)
