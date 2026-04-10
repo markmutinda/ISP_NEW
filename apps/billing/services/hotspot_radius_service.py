@@ -210,23 +210,15 @@ class HotspotRadiusService:
             return False
     
     def _update_reply_attribute(self, username: str, attribute: str, value: str):
-        """Update a single reply attribute in both schemas."""
-        # Tenant schema (ORM)
+        """
+        Update a single reply attribute in tenant schema only.
+        
+        Public schema writes are handled by the sync service now.
+        """
+        # Tenant schema (ORM) only
         RadReply.objects.filter(
             username=username, attribute=attribute
         ).update(value=value)
-        
-        # Public schema (raw SQL)
-        tenant_schema = connection.schema_name
-        with connection.cursor() as cursor:
-            cursor.execute(
-                """
-                UPDATE public.radreply
-                SET value = %s
-                WHERE username = %s AND attribute = %s AND tenant_schema = %s
-                """,
-                [value, username, attribute, tenant_schema]
-            )
     
     def cleanup_expired_sessions(self) -> int:
         """

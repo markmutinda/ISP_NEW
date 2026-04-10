@@ -77,7 +77,6 @@ SHARED_APPS = (
     'apps.core',                       # Tenant & Domain models go here - MUST be in BOTH
     'apps.subscriptions',              # Netily platform subscriptions (public schema only)
     'apps.superadmin', 
-    'apps.radius',                     # Platform owner dashboard (public schema only, no models)
 ) + CELERY_APPS  # Add Celery apps to SHARED_APPS
 
 TENANT_APPS = (
