@@ -6,6 +6,7 @@ from datetime import timedelta
 from django.db.models import Sum, Count, Avg, Q
 from django.utils import timezone
 from rest_framework import viewsets, status
+from django.conf import settings
 from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.views import APIView
@@ -132,7 +133,7 @@ class RadiusActiveSessionsView(APIView):
     List all active RADIUS sessions.
     """
     permission_classes = [IsAuthenticated, HasCompanyAccess]
-    
+
     def get(self, request):
         now = timezone.now()
 
@@ -151,19 +152,22 @@ class RadiusActiveSessionsView(APIView):
         if username:
             radacct_qs = radacct_qs.filter(username__icontains=username)
 
-        # Existing radacct-backed online users
         radacct_data = OnlineUserSerializer(radacct_qs[:100], many=True).data
         accted_usernames = set(
             radacct_qs.values_list('username', flat=True)
         )
 
-        # NEW: Hotspot sessions active in Django but not yet accounted by NAS (startup gap)
+        # FIX: Extended window from 5 minutes to 35 minutes (ghost_threshold + buffer)
+        # This catches users whose radacct row was swept by the ghost cleaner
+        # but whose hotspot subscription is still valid.
+        pending_window_minutes = int(getattr(settings, "RADIUS_GHOST_MINUTES", 30)) + 5
+
         pending_qs = (
             HotspotSession.objects
             .filter(
                 status='active',
                 expires_at__gt=now,
-                activated_at__gte=now - timedelta(minutes=5),
+                activated_at__gte=now - timedelta(minutes=pending_window_minutes),
             )
             .exclude(access_code__isnull=True)
             .exclude(access_code='')
@@ -180,6 +184,12 @@ class RadiusActiveSessionsView(APIView):
         pending_data = []
         for s in pending_qs[:100]:
             seconds_since_activation = int((now - s.activated_at).total_seconds())
+            
+            # Determine if this is truly "pending accounting start" (< 5 min)
+            # or "accounting was swept but subscription is still valid" (> 5 min)
+            is_fresh = seconds_since_activation < 300
+            accounting_pending_flag = is_fresh
+
             pending_data.append({
                 "username": s.access_code,
                 "full_name": s.access_code,
@@ -188,24 +198,24 @@ class RadiusActiveSessionsView(APIView):
                     or s.phone_number
                     or ""
                 ),
-                "status": "active_pending_accounting_start",
+                "status": "active_pending_accounting_start" if is_fresh else "active_subscription_valid",
                 "session_type": "HOTSPOT",
                 "service_type": "HOTSPOT",
                 "acctstarttime": s.activated_at,
-                "acctsessiontime": 0,
+                "acctsessiontime": seconds_since_activation,
                 "download_mb": 0,
                 "upload_mb": 0,
                 "nasipaddress": getattr(s.router, "ip_address", None),
                 "router": s.router.name if s.router else None,
-                "ip_address": None,       # router hasn't reported yet
+                "ip_address": None,
                 "mac_address": s.mac_address,
-                "uptime": f"{seconds_since_activation}s",   # actual elapsed seconds
+                "uptime": f"{seconds_since_activation}s",
                 "usage": "0 MB",
                 "radacctid": f"pending-{s.session_id}",
                 "canonical_username": s.access_code,
                 "expires_at": s.expires_at,
                 "source": "hotspot_session",
-                "accounting_pending": True,   # ← new flag for frontend
+                "accounting_pending": accounting_pending_flag,
             })
 
         sessions = radacct_data + pending_data

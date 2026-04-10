@@ -183,9 +183,10 @@ def cleanup_stale_sessions(self):
         try:
             with schema_context(schema_name):
                 with connection.cursor() as cursor:
-                    # FIX 3: Close GHOST sessions BUT exclude those with active HotspotSession
-                    # This prevents valid hotspot users from being disconnected even if
-                    # their interim updates are delayed or lost
+                    # GHOST sessions: had interim updates but NAS went silent
+                    # CRITICAL FIX: Protect ANY session where the HotspotSession
+                    # subscription is still valid (active OR paid, not expired).
+                    # This prevents VPN tunnel hiccups from kicking valid users.
                     cursor.execute("""
                         UPDATE radacct
                         SET
@@ -199,7 +200,7 @@ def cleanup_stale_sessions(self):
                             AND username NOT IN (
                                 SELECT access_code
                                 FROM billing_hotspotsession
-                                WHERE status = 'active'
+                                WHERE status IN ('active', 'paid')
                                   AND expires_at > NOW()
                                   AND access_code IS NOT NULL
                             )
@@ -208,7 +209,8 @@ def cleanup_stale_sessions(self):
                     ghost_count = cursor.rowcount
                     total_ghost += ghost_count
 
-                    # 2. Close TRULY STALE sessions (never got any interim update)
+                    # STALE sessions: never got any interim update
+                    # Also protect hotspot sessions here
                     cursor.execute("""
                         UPDATE radacct
                         SET
@@ -219,6 +221,13 @@ def cleanup_stale_sessions(self):
                             acctstoptime IS NULL
                             AND acctupdatetime IS NULL
                             AND acctstarttime < %s
+                            AND username NOT IN (
+                                SELECT access_code
+                                FROM billing_hotspotsession
+                                WHERE status IN ('active', 'paid')
+                                  AND expires_at > NOW()
+                                  AND access_code IS NOT NULL
+                            )
                     """, [stale_threshold])
                     stale_count = cursor.rowcount
                     total_stale += stale_count
