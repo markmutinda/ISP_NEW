@@ -133,38 +133,42 @@ def _serialize_hotspot_plan(plan):
 
 def _close_prior_radacct_rows_for_renewal(session, username: str):
     """
-    Close only pre-renewal/open rows that belong to a previous subscription period.
-    Never blanket-close current live rows.
+    Close open radacct rows that belong to a prior subscription period.
+
+    We anchor on session.activated_at (the CURRENT session's start time).
+    Any open row that started BEFORE this session was activated belongs to
+    a previous period and must be closed so usage resets correctly.
     """
     from apps.radius.models import RadAcct
-    from apps.billing.models.hotspot_models import HotspotSession
 
     if not username:
         return 0
 
+    # Only meaningful for returning clients (hotspot_client links sessions)
     if not session.hotspot_client:
         return 0
 
-    prev = (
-        HotspotSession.objects
-        .filter(
-            hotspot_client=session.hotspot_client,
-            status='active',
-            activated_at__isnull=False,
-        )
-        .exclude(id=session.id)
-        .order_by('-activated_at')
-        .first()
-    )
-
-    if not prev or not prev.activated_at:
+    # Need a concrete start time to anchor the cut-off
+    if not session.activated_at:
         return 0
 
-    return RadAcct.objects.filter(
+    closed = RadAcct.objects.filter(
         username=username,
         acctstoptime__isnull=True,
-        acctstarttime__lt=prev.activated_at,  # only older subscription period
-    ).update(acctstoptime=timezone.now())
+        acctstarttime__lt=session.activated_at,   # ← was prev.activated_at (wrong)
+    ).update(
+        acctstoptime=timezone.now(),
+        acctterminatecause='Session-Timeout',
+    )
+
+    if closed:
+        logger.info(
+            "Closed %d prior-period radacct row(s) for %s "
+            "(new period started %s)",
+            closed, username, session.activated_at.isoformat(),
+        )
+
+    return closed
 
 
 class CaptivePortalView(APIView):
@@ -771,6 +775,7 @@ class HotspotPurchaseStatusView(APIView):
             else:
                 return ('pending', 'Waiting for payment confirmation...', None)
     
+    @transaction.atomic
     def get(self, request, session_id):
         tenant_subdomain = request.query_params.get('tenant')
         if not tenant_subdomain:

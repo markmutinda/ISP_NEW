@@ -231,44 +231,53 @@ def cleanup_stale_sessions(self):
         except Exception as e:
             logger.error(f"[CLEANUP] Error in schema {schema_name}: {e}")
 
-    # Also sweep public schema (hotspot sessions stored there)
+    # ── Public schema sweep ──────────────────────────────────────────────────
+    # NOTE: billing_hotspotsession lives in TENANT schemas, not public.
+    # The public radacct table (if populated) does not correspond to hotspot
+    # sessions, so we skip the hotspot-exclusion subquery here.
     try:
         with connection.cursor() as cursor:
-            # FIX 3: Also exclude active hotspot sessions in public schema
+            # Ghost rows: had interim updates but the NAS went silent
             cursor.execute("""
                 UPDATE public.radacct
-                SET acctstoptime = acctupdatetime,
+                SET
+                    acctstoptime       = acctupdatetime,
                     acctterminatecause = 'NAS-Reboot',
-                    acctsessiontime = EXTRACT(EPOCH FROM (acctupdatetime - acctstarttime))::bigint
-                WHERE acctstoptime IS NULL
-                  AND acctupdatetime IS NOT NULL
-                  AND acctupdatetime < %s
-                  AND username NOT IN (
-                      SELECT access_code
-                      FROM public.billing_hotspotsession
-                      WHERE status = 'active'
-                        AND expires_at > NOW()
-                        AND access_code IS NOT NULL
-                  )
+                    acctsessiontime    = EXTRACT(
+                        EPOCH FROM (acctupdatetime - acctstarttime)
+                    )::bigint
+                WHERE
+                    acctstoptime    IS NULL
+                    AND acctupdatetime IS NOT NULL
+                    AND acctupdatetime < %s
             """, [ghost_threshold])
-            total_ghost += cursor.rowcount
-            
-            # Also handle stale sessions in public schema
+            public_ghost = cursor.rowcount
+            total_ghost += public_ghost
+
+            # Stale rows: never got any interim update at all
             cursor.execute("""
                 UPDATE public.radacct
-                SET acctstoptime = NOW(),
+                SET
+                    acctstoptime       = NOW(),
                     acctterminatecause = 'Stale-Session-Cleanup',
-                    acctsessiontime = EXTRACT(EPOCH FROM (NOW() - acctstarttime))::bigint
-                WHERE acctstoptime IS NULL
-                  AND acctupdatetime IS NULL
-                  AND acctstarttime < %s
+                    acctsessiontime    = EXTRACT(
+                        EPOCH FROM (NOW() - acctstarttime)
+                    )::bigint
+                WHERE
+                    acctstoptime    IS NULL
+                    AND acctupdatetime IS NULL
+                    AND acctstarttime  < %s
             """, [stale_threshold])
-            total_stale += cursor.rowcount
-            
-            if cursor.rowcount > 0:
-                logger.info(f"[CLEANUP] public schema: closed {cursor.rowcount} stale sessions")
+            public_stale = cursor.rowcount
+            total_stale += public_stale
+
+            if public_ghost or public_stale:
+                logger.info(
+                    "[CLEANUP] public schema: closed %d ghost + %d stale sessions",
+                    public_ghost, public_stale,
+                )
     except Exception as e:
-        logger.error(f"[CLEANUP] Error in public schema: {e}")
+        logger.error("[CLEANUP] Error in public schema: %s", e)
 
     logger.info(f"[CLEANUP] Done: {total_ghost} ghost + {total_stale} stale sessions closed")
     return {'ghost': total_ghost, 'stale': total_stale}

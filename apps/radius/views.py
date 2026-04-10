@@ -179,16 +179,15 @@ class RadiusActiveSessionsView(APIView):
 
         pending_data = []
         for s in pending_qs[:100]:
+            seconds_since_activation = int((now - s.activated_at).total_seconds())
             pending_data.append({
                 "username": s.access_code,
-                # ── ADD THESE ──
                 "full_name": s.access_code,
                 "phone_number": (
                     getattr(s.hotspot_client, "canonical_phone", None)
                     or s.phone_number
                     or ""
                 ),
-                # ─────────────
                 "status": "active_pending_accounting_start",
                 "session_type": "HOTSPOT",
                 "service_type": "HOTSPOT",
@@ -198,14 +197,15 @@ class RadiusActiveSessionsView(APIView):
                 "upload_mb": 0,
                 "nasipaddress": getattr(s.router, "ip_address", None),
                 "router": s.router.name if s.router else None,
-                "ip_address": None,
+                "ip_address": None,       # router hasn't reported yet
                 "mac_address": s.mac_address,
-                "uptime": "just connected",
+                "uptime": f"{seconds_since_activation}s",   # actual elapsed seconds
                 "usage": "0 MB",
                 "radacctid": f"pending-{s.session_id}",
                 "canonical_username": s.access_code,
                 "expires_at": s.expires_at,
                 "source": "hotspot_session",
+                "accounting_pending": True,   # ← new flag for frontend
             })
 
         sessions = radacct_data + pending_data

@@ -746,50 +746,60 @@ class HotspotSession(models.Model):
     def activate(self, access_code: str = None):
         """
         Mark session as active after successful payment.
-        Sets access code and expiration time.
+        Uses select_for_update to prevent concurrent double-activation.
         """
-        # IDEMPOTENCY GUARD - Prevent double-accrual if called multiple times
-        if self.status == 'active':
+        from apps.billing.models.hotspot_models import HotspotSession  # avoid circular at module level
+
+        # Atomic idempotency guard — re-fetch with a row lock
+        locked = (
+            HotspotSession.objects
+            .select_for_update()
+            .filter(pk=self.pk, status__in=('pending', 'paid'))
+            .first()
+        )
+        if locked is None:
+            # Already active (or failed/expired) — nothing to do
             return
 
-        self.status = 'active'
-        self.access_code = access_code or self.generate_access_code()
-        self.activated_at = timezone.now()
-        self.expires_at = timezone.now() + timedelta(minutes=self.plan.duration_minutes)
-        self.save()
-        
+        locked.status = 'active'
+        locked.access_code = access_code or locked.access_code or self.generate_access_code()
+        locked.activated_at = timezone.now()
+        locked.expires_at = timezone.now() + timedelta(minutes=locked.plan.duration_minutes)
+        locked.save()
+
+        # Copy updated fields back to self so callers see the new state
+        self.status = locked.status
+        self.access_code = locked.access_code
+        self.activated_at = locked.activated_at
+        self.expires_at = locked.expires_at
+
         # Update client analytics if client exists
         if self.hotspot_client:
             self.hotspot_client.update_analytics(self.amount)
-        
-        # METERED BILLING HOOK (Hotspot Revenue)
+
+        # METERED BILLING HOOK (Hotspot Revenue) — runs only once due to row lock
         try:
             from django.db import connection
             from django_tenants.utils import schema_context, get_public_schema_name
             from apps.subscriptions.models import BillingCycle
             from apps.core.models import Tenant
-            
-            # 1. Capture the tenant's schema BEFORE switching
+
             tenant_schema = connection.schema_name
-            
-            # 2. Switch to public schema
+
             with schema_context(get_public_schema_name()):
                 current_tenant = Tenant.objects.get(schema_name=tenant_schema)
                 active_cycle = BillingCycle.objects.filter(
-                    tenant=current_tenant, 
+                    tenant=current_tenant,
                     status='active'
                 ).first()
-                
+
                 if active_cycle:
-                    # Use F() expression to push math to the database level
-                    # This prevents 'lost updates' when concurrent payments occur
                     BillingCycle.objects.filter(id=active_cycle.id).update(
                         hotspot_revenue_accumulated=F('hotspot_revenue_accumulated') + Decimal(str(self.amount))
                     )
-                    
         except Exception as e:
-            import logging
-            logging.getLogger(__name__).error(f"Failed to record hotspot revenue: {e}")
+            import logging as _log
+            _log.getLogger(__name__).error("Failed to record hotspot revenue: %s", e)
     
     def refund_or_cancel(self, reason: str = "Refunded"):
         """Reverses a previously active session and decrements the ledger."""
