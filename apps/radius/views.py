@@ -6,7 +6,6 @@ from datetime import timedelta
 from django.db.models import Sum, Count, Avg, Q
 from django.utils import timezone
 from rest_framework import viewsets, status
-from django.conf import settings
 from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.views import APIView
@@ -47,7 +46,6 @@ from .serializers import (
     CustomerRadiusCredentialsDetailSerializer,
 )
 from .services import RadiusSyncService
-from apps.billing.models.hotspot_models import HotspotSession
 
 logger = logging.getLogger(__name__)
 
@@ -135,8 +133,6 @@ class RadiusActiveSessionsView(APIView):
     permission_classes = [IsAuthenticated, HasCompanyAccess]
 
     def get(self, request):
-        now = timezone.now()
-
         radacct_qs = (
             RadAcct.objects
             .filter(acctstoptime__isnull=True)
@@ -153,77 +149,12 @@ class RadiusActiveSessionsView(APIView):
             radacct_qs = radacct_qs.filter(username__icontains=username)
 
         radacct_data = OnlineUserSerializer(radacct_qs[:100], many=True).data
-        accted_usernames = set(
-            radacct_qs.values_list('username', flat=True)
-        )
 
-        # FIX: Extended window from 5 minutes to 35 minutes (ghost_threshold + buffer)
-        # This catches users whose radacct row was swept by the ghost cleaner
-        # but whose hotspot subscription is still valid.
-        pending_window_minutes = int(getattr(settings, "RADIUS_GHOST_MINUTES", 30)) + 5
-
-        pending_qs = (
-            HotspotSession.objects
-            .filter(
-                status='active',
-                expires_at__gt=now,
-                activated_at__gte=now - timedelta(minutes=pending_window_minutes),
-            )
-            .exclude(access_code__isnull=True)
-            .exclude(access_code='')
-            .exclude(access_code__in=accted_usernames)
-            .select_related('router', 'plan', 'hotspot_client')
-            .order_by('-activated_at')
-        )
-
-        if username:
-            pending_qs = pending_qs.filter(access_code__icontains=username)
-        if nas_ip:
-            pending_qs = pending_qs.filter(router__ip_address=nas_ip)
-
-        pending_data = []
-        for s in pending_qs[:100]:
-            seconds_since_activation = int((now - s.activated_at).total_seconds())
-            
-            # Determine if this is truly "pending accounting start" (< 5 min)
-            # or "accounting was swept but subscription is still valid" (> 5 min)
-            is_fresh = seconds_since_activation < 300
-            accounting_pending_flag = is_fresh
-
-            pending_data.append({
-                "username": s.access_code,
-                "full_name": s.access_code,
-                "phone_number": (
-                    getattr(s.hotspot_client, "canonical_phone", None)
-                    or s.phone_number
-                    or ""
-                ),
-                "status": "active_pending_accounting_start" if is_fresh else "active_subscription_valid",
-                "session_type": "HOTSPOT",
-                "service_type": "HOTSPOT",
-                "acctstarttime": s.activated_at,
-                "acctsessiontime": seconds_since_activation,
-                "download_mb": 0,
-                "upload_mb": 0,
-                "nasipaddress": getattr(s.router, "ip_address", None),
-                "router": s.router.name if s.router else None,
-                "ip_address": None,
-                "mac_address": s.mac_address,
-                "uptime": f"{seconds_since_activation}s",
-                "usage": "0 MB",
-                "radacctid": f"pending-{s.session_id}",
-                "canonical_username": s.access_code,
-                "expires_at": s.expires_at,
-                "source": "hotspot_session",
-                "accounting_pending": accounting_pending_flag,
-            })
-
-        sessions = radacct_data + pending_data
         return Response({
-            "count": len(sessions),
+            "count": len(radacct_data),
             "radacct_count": radacct_qs.count(),
-            "pending_accounting_count": len(pending_data),
-            "sessions": sessions,
+            "pending_accounting_count": 0,
+            "sessions": radacct_data,
         })
 
 
