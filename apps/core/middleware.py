@@ -287,6 +287,7 @@ class SubscriptionEnforcementMiddleware(MiddlewareMixin):
             '/api/v1/subscriptions/current/',  # View their locked status
             '/api/v1/subscriptions/pay/',      # Initiate M-Pesa payment
             '/api/v1/subscriptions/payments/', # Poll payment status
+            '/api/v1/subscriptions/plans/',    # View available plans (to select & pay)
             '/api/v1/auth/',                   # Login/Logout/Refresh
         ]
         
@@ -319,6 +320,9 @@ class SubscriptionEnforcementMiddleware(MiddlewareMixin):
                     if sub.status == 'past_due':
                         is_locked = True
                         lock_reason = 'Your subscription payment is past due. Please settle your invoice to restore access.'
+                    elif sub.status == 'expired':
+                        is_locked = True
+                        lock_reason = 'Your subscription has expired. Please select a plan and pay to restore access.'
                     elif sub.trial_expired:
                         is_locked = True
                         lock_reason = 'Your free trial has expired. Please subscribe to continue using Netily.'
@@ -353,6 +357,7 @@ class SubscriptionEnforcementMiddleware(MiddlewareMixin):
                                 '/api/v1/subscriptions/current/',
                                 '/api/v1/subscriptions/pay/',
                                 '/api/v1/subscriptions/payments/',
+                                '/api/v1/subscriptions/plans/',
                                 '/api/v1/auth/',
                             ]
                         }, status=402)  # HTTP 402 Payment Required
