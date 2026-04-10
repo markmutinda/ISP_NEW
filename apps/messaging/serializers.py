@@ -1,6 +1,7 @@
 # apps/messaging/serializers.py
 from rest_framework import serializers
-from .models import SMSMessage, SMSTemplate, SMSCampaign
+from .models import SMSMessage, SMSTemplate, SMSCampaign, SMSGatewayConfig
+from .services.gateway_dispatcher import PROVIDER_FIELDS
 from apps.customers.serializers.customer_serializers import CustomerListSerializer
 
 
@@ -164,3 +165,56 @@ class SMSBalanceSerializer(serializers.Serializer):
 class SMSRetrySerializer(serializers.Serializer):
     """Optional: can be empty or add reason/note later"""
     pass
+
+
+class SMSGatewayConfigSerializer(serializers.ModelSerializer):
+    """Full serializer – masks secrets on read."""
+    provider_display = serializers.CharField(source='get_provider_display', read_only=True)
+    field_labels = serializers.SerializerMethodField()
+
+    class Meta:
+        model = SMSGatewayConfig
+        fields = [
+            'id', 'provider', 'provider_display', 'is_active',
+            'api_key', 'api_secret', 'username', 'sender_id',
+            'extra_config',
+            'auto_payment_confirmation', 'auto_expiry_reminder',
+            'auto_welcome_message', 'auto_service_suspension',
+            'field_labels',
+            'created_at', 'updated_at',
+        ]
+        read_only_fields = ['created_at', 'updated_at']
+
+    def get_field_labels(self, obj):
+        return PROVIDER_FIELDS.get(obj.provider, {})
+
+    def to_representation(self, instance):
+        data = super().to_representation(instance)
+        # Mask secrets: show only last 4 chars
+        for field in ('api_key', 'api_secret'):
+            val = data.get(field) or ''
+            if len(val) > 4:
+                data[field] = '•' * (len(val) - 4) + val[-4:]
+        return data
+
+
+class SMSGatewayConfigWriteSerializer(serializers.ModelSerializer):
+    """Write serializer – accepts raw credentials."""
+
+    class Meta:
+        model = SMSGatewayConfig
+        fields = [
+            'provider', 'is_active',
+            'api_key', 'api_secret', 'username', 'sender_id',
+            'extra_config',
+            'auto_payment_confirmation', 'auto_expiry_reminder',
+            'auto_welcome_message', 'auto_service_suspension',
+        ]
+
+    def validate(self, attrs):
+        # If activating, deactivate all others
+        if attrs.get('is_active'):
+            SMSGatewayConfig.objects.exclude(
+                pk=self.instance.pk if self.instance else None
+            ).update(is_active=False)
+        return attrs

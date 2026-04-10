@@ -148,3 +148,49 @@ class SMSMessage(models.Model):
         self.status = 'failed'
         self.error_message = error
         self.save(update_fields=['status', 'error_message'])
+
+
+class SMSGatewayConfig(models.Model):
+    """
+    Per-tenant SMS gateway configuration.
+    ISPs plug in their own provider credentials.
+    Only one gateway can be active at a time per tenant.
+    """
+    PROVIDER_CHOICES = (
+        ('africastalking', "Africa's Talking"),
+        ('twilio', 'Twilio'),
+        ('vonage', 'Vonage (Nexmo)'),
+        ('infobip', 'Infobip'),
+        ('beem', 'Beem Africa'),
+        ('advanta', 'Advanta SMS'),
+        ('hubtel', 'Hubtel'),
+    )
+
+    provider = models.CharField(max_length=30, choices=PROVIDER_CHOICES)
+    is_active = models.BooleanField(default=False)
+
+    # Common fields
+    api_key = models.CharField(max_length=255)
+    api_secret = models.CharField(max_length=255, blank=True, default='')
+    username = models.CharField(max_length=100, blank=True, default='')
+    sender_id = models.CharField(max_length=20, blank=True, default='')
+
+    # Provider-specific extras (e.g. account_sid for Twilio, base_url for Beem)
+    extra_config = models.JSONField(default=dict, blank=True)
+
+    # Automated triggers
+    auto_payment_confirmation = models.BooleanField(default=True)
+    auto_expiry_reminder = models.BooleanField(default=True)
+    auto_welcome_message = models.BooleanField(default=True)
+    auto_service_suspension = models.BooleanField(default=False)
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        app_label = 'messaging'
+        verbose_name = 'SMS Gateway Config'
+        verbose_name_plural = 'SMS Gateway Configs'
+
+    def __str__(self):
+        return f"{self.get_provider_display()} ({'active' if self.is_active else 'inactive'})"

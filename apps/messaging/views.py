@@ -11,7 +11,7 @@ from datetime import timedelta
 from django_filters.rest_framework import DjangoFilterBackend
 from rest_framework import filters
 
-from .models import SMSMessage, SMSTemplate, SMSCampaign
+from .models import SMSMessage, SMSTemplate, SMSCampaign, SMSGatewayConfig
 from .serializers import (
     SMSMessageSerializer,
     SMSMessageCreateSerializer,
@@ -22,8 +22,10 @@ from .serializers import (
     SMSCampaignCreateUpdateSerializer,
     SMSStatsSerializer,
     SMSBalanceSerializer,
+    SMSGatewayConfigSerializer,
+    SMSGatewayConfigWriteSerializer,
 )
-from .services.sms_service import SMSService
+from .services.gateway_dispatcher import GatewayDispatcher, PROVIDER_FIELDS
 
 
 class SMSMessageViewSet(viewsets.ModelViewSet):
@@ -47,15 +49,18 @@ class SMSMessageViewSet(viewsets.ModelViewSet):
         return SMSMessageSerializer
 
     def perform_create(self, serializer):
-        """Send single SMS via Africa's Talking"""
-        sms_service = SMSService()
+        """Send single SMS via the active gateway provider"""
         sms_message = serializer.save(status='pending', type='single')
 
-        result = sms_service.send_single(
-            recipient=sms_message.recipient,
+        try:
+            dispatcher = GatewayDispatcher()
+        except ValueError as e:
+            sms_message.mark_failed(str(e))
+            raise serializers.ValidationError({"send_error": str(e), "status": "failed"})
+
+        result = dispatcher.send_sms(
+            to=sms_message.recipient,
             message=sms_message.message,
-            template=sms_message.template,
-            customer=sms_message.customer,
         )
 
         if not result['success']:
@@ -78,23 +83,38 @@ class SMSMessageViewSet(viewsets.ModelViewSet):
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
 
-        sms_service = SMSService()
-        result = sms_service.send_bulk(
-            recipients=serializer.validated_data['recipients'],
-            message=serializer.validated_data.get('message'),
-            template=serializer.validated_data.get('template'),
-        )
+        try:
+            dispatcher = GatewayDispatcher()
+        except ValueError as e:
+            return Response({"detail": str(e)}, status=status.HTTP_400_BAD_REQUEST)
 
-        if not result.get('success', True):  # bulk can partially succeed
-            return Response(
-                {"detail": result.get('error', 'Bulk operation failed'), "details": result},
-                status=status.HTTP_400_BAD_REQUEST
+        recipients = serializer.validated_data['recipients']
+        message = serializer.validated_data.get('message', '')
+        if not message and serializer.validated_data.get('template'):
+            message = serializer.validated_data['template'].content
+
+        results = []
+        total_cost = Decimal('0.00')
+        for phone in recipients:
+            r = dispatcher.send_sms(to=phone, message=message)
+            sms_msg = SMSMessage.objects.create(
+                recipient=phone,
+                message=message,
+                status=r.get('status', 'failed'),
+                type='bulk',
+                provider=dispatcher.config.provider,
+                provider_message_id=r.get('provider_id', ''),
+                cost=r.get('cost', Decimal('0.00')),
+                sent_at=timezone.now() if r.get('success') else None,
+                error_message=r.get('error', ''),
             )
+            total_cost += sms_msg.cost
+            results.append({'id': sms_msg.id, 'recipient': phone, 'status': sms_msg.status})
 
         return Response({
-            "detail": f"Queued {result['queued']} messages",
-            "total_cost": result['total_cost'],
-            "messages": result['messages']
+            "detail": f"Queued {len(recipients)} messages",
+            "total_cost": str(total_cost),
+            "messages": results,
         }, status=status.HTTP_201_CREATED)
 
     @action(detail=True, methods=['post'], url_path='retry')
@@ -108,13 +128,14 @@ class SMSMessageViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_400_BAD_REQUEST
             )
 
-        sms_service = SMSService()
-        result = sms_service.send_single(
-            recipient=sms_message.recipient,
+        try:
+            dispatcher = GatewayDispatcher()
+        except ValueError as e:
+            return Response({"detail": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+        result = dispatcher.send_sms(
+            to=sms_message.recipient,
             message=sms_message.message,
-            template=sms_message.template,
-            customer=sms_message.customer,
-            campaign=sms_message.campaign,
         )
 
         if result['success']:
@@ -258,14 +279,75 @@ class SMSStatsView(APIView):
 class SMSBalanceView(APIView):
     """
     GET /api/v1/messaging/sms/balance/
+    Uses the active gateway's provider SDK to fetch real balance.
     """
     permission_classes = [IsAuthenticated, IsAdminUser]
 
     def get(self, request):
-        sms_service = SMSService()
-        balance_info = sms_service.get_balance()
+        try:
+            dispatcher = GatewayDispatcher()
+            balance_info = dispatcher.get_balance()
+        except ValueError:
+            balance_info = {'balance': 0, 'currency': 'KES', 'success': False}
 
-        # Add timestamp
+        balance_info.setdefault('unit_cost', 0.50)
+        balance_info.setdefault('provider', 'none')
+        bal = balance_info.get('balance', 0) or 0
+        unit_cost = balance_info.get('unit_cost', 0.50) or 0.50
+        balance_info['units_remaining'] = int(bal / unit_cost) if unit_cost else 0
         balance_info['last_updated'] = timezone.now().isoformat()
 
         return Response(SMSBalanceSerializer(balance_info).data)
+
+
+# ────────────────────────────────────────────────
+# Gateway Config CRUD + test connection
+# ────────────────────────────────────────────────
+
+class SMSGatewayConfigViewSet(viewsets.ModelViewSet):
+    """
+    /api/v1/messaging/gateway/
+    CRUD for per-tenant SMS gateway configuration.
+    """
+    queryset = SMSGatewayConfig.objects.order_by('-is_active', '-updated_at')
+    permission_classes = [IsAuthenticated, IsAdminUser]
+
+    def get_serializer_class(self):
+        if self.action in ('create', 'update', 'partial_update'):
+            return SMSGatewayConfigWriteSerializer
+        return SMSGatewayConfigSerializer
+
+    @action(detail=True, methods=['post'], url_path='activate')
+    def activate(self, request, pk=None):
+        """Set this config as the active gateway, deactivate others."""
+        config = self.get_object()
+        SMSGatewayConfig.objects.exclude(pk=config.pk).update(is_active=False)
+        config.is_active = True
+        config.save(update_fields=['is_active'])
+        return Response(SMSGatewayConfigSerializer(config).data)
+
+    @action(detail=True, methods=['post'], url_path='test')
+    def test_connection(self, request, pk=None):
+        """Test the provider credentials by fetching balance."""
+        config = self.get_object()
+        from .services.gateway_dispatcher import BACKENDS
+        cls = BACKENDS.get(config.provider)
+        if not cls:
+            return Response({"success": False, "error": "Unknown provider"}, status=400)
+        try:
+            backend = cls(
+                api_key=config.api_key,
+                api_secret=config.api_secret,
+                username=config.username,
+                sender_id=config.sender_id,
+                extra_config=config.extra_config,
+            )
+            bal = backend.get_balance()
+            return Response({"success": True, "balance": bal})
+        except Exception as e:
+            return Response({"success": False, "error": str(e)}, status=400)
+
+    @action(detail=False, methods=['get'], url_path='providers')
+    def list_providers(self, request):
+        """List available providers and their required fields."""
+        return Response(PROVIDER_FIELDS)

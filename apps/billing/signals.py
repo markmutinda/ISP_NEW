@@ -55,6 +55,18 @@ def handle_payment_completion(sender, instance, created, **kwargs):
             
             invoice.save()
 
+        # Auto SMS: payment confirmation
+        if customer:
+            try:
+                from apps.messaging.tasks import send_payment_confirmation_sms
+                send_payment_confirmation_sms.delay(
+                    customer_id=customer.id,
+                    amount=float(instance.amount),
+                    reference=instance.reference or '',
+                )
+            except Exception:
+                pass
+
 
 @receiver(post_save, sender=Voucher)
 def handle_voucher_sale(sender, instance, created, **kwargs):

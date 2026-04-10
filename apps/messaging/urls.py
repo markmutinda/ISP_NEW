@@ -8,12 +8,14 @@ from .views import (
     SMSCampaignViewSet,
     SMSStatsView,
     SMSBalanceView,
+    SMSGatewayConfigViewSet,
 )
 
 router = DefaultRouter()
 router.register(r'sms', SMSMessageViewSet, basename='sms-message')
 router.register(r'templates', SMSTemplateViewSet, basename='sms-template')
 router.register(r'campaigns', SMSCampaignViewSet, basename='sms-campaign')
+router.register(r'gateway', SMSGatewayConfigViewSet, basename='sms-gateway')
 
 urlpatterns = [
     # All standard CRUD from router
@@ -29,7 +31,12 @@ urlpatterns = [
     path('campaigns/<int:pk>/start/', SMSCampaignViewSet.as_view({'post': 'start'}), name='campaign-start'),
     path('campaigns/<int:pk>/cancel/', SMSCampaignViewSet.as_view({'post': 'cancel'}), name='campaign-cancel'),
 
-    # Missing stats & balance (these are the ones causing 404)
+    # Stats & balance
     path('sms/stats/', SMSStatsView.as_view(), name='sms-stats'),
     path('sms/balance/', SMSBalanceView.as_view(), name='sms-balance'),
+
+    # Gateway config actions
+    path('gateway/<int:pk>/activate/', SMSGatewayConfigViewSet.as_view({'post': 'activate'}), name='gateway-activate'),
+    path('gateway/<int:pk>/test/', SMSGatewayConfigViewSet.as_view({'post': 'test_connection'}), name='gateway-test'),
+    path('gateway/providers/', SMSGatewayConfigViewSet.as_view({'get': 'list_providers'}), name='gateway-providers'),
 ]

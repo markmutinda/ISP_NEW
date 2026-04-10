@@ -101,6 +101,13 @@ class CustomerCreateSerializer(serializers.ModelSerializer):
             customer_code=customer_code,
             **validated_data
         )
+
+        # Auto SMS: welcome message
+        try:
+            from apps.messaging.tasks import send_welcome_sms
+            send_welcome_sms.delay(customer_id=customer.id)
+        except Exception:
+            pass
         
         return customer
     

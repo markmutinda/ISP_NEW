@@ -965,6 +965,16 @@ class ServiceConnection(AuditMixin):
             created_by=user
         )
 
+        # Auto SMS: service suspension
+        try:
+            from apps.messaging.tasks import send_service_suspension_sms
+            send_service_suspension_sms.delay(
+                customer_id=self.customer.id,
+                reason=reason,
+            )
+        except Exception:
+            pass
+
     def terminate_service(self, reason="", user=None):
         self.status = 'TERMINATED'
         self.termination_date = timezone.now()
