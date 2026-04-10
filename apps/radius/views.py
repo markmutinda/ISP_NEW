@@ -133,6 +133,12 @@ class RadiusActiveSessionsView(APIView):
     permission_classes = [IsAuthenticated, HasCompanyAccess]
 
     def get(self, request):
+        from apps.billing.models.hotspot_models import HotspotSession
+        from django.utils import timezone
+
+        now = timezone.now()
+
+        # ── 1. Real RADIUS sessions (PPPoE + hotspot that have radacct rows) ──
         radacct_qs = (
             RadAcct.objects
             .filter(acctstoptime__isnull=True)
@@ -144,17 +150,73 @@ class RadiusActiveSessionsView(APIView):
         if nas_ip:
             radacct_qs = radacct_qs.filter(nasipaddress=nas_ip)
 
-        username = request.query_params.get('username')
-        if username:
-            radacct_qs = radacct_qs.filter(username__icontains=username)
+        username_filter = request.query_params.get('username')
+        if username_filter:
+            radacct_qs = radacct_qs.filter(username__icontains=username_filter)
 
-        radacct_data = OnlineUserSerializer(radacct_qs[:100], many=True).data
+        radacct_data = OnlineUserSerializer(radacct_qs[:200], many=True).data
+
+        # Build a set of usernames already represented in radacct
+        radacct_usernames = {s['username'] for s in radacct_data}
+
+        # ── 2. Active HotspotSessions NOT yet in radacct ──
+        # These are paying customers who are connected but whose accounting
+        # start packet hasn't arrived yet (or was swept by ghost cleaner).
+        active_hotspot = (
+            HotspotSession.objects
+            .filter(
+                status='active',
+                expires_at__gt=now,
+            )
+            .exclude(access_code__in=radacct_usernames)
+            .exclude(access_code__isnull=True)
+            .exclude(access_code='')
+            .select_related('plan', 'router', 'hotspot_client')
+            .order_by('-activated_at')
+        )
+
+        synthetic_sessions = []
+        for session in active_hotspot:
+            client = session.hotspot_client
+            canonical_phone = None
+            if client and client.canonical_phone:
+                p = client.canonical_phone
+                canonical_phone = p if not p.startswith("MAC-") else None
+
+            activated_at = session.activated_at or session.created_at
+            duration_seconds = int((now - activated_at).total_seconds()) if activated_at else 0
+            hours, rem = divmod(duration_seconds, 3600)
+            minutes, secs = divmod(rem, 60)
+            uptime_str = f"{hours}h {minutes}m" if hours > 0 else f"{minutes}m {secs}s"
+
+            # Data usage from session record
+            data_mb = session.data_used_mb or 0
+            usage_str = f"{data_mb / 1024:.2f} GB" if data_mb >= 1024 else f"{data_mb:.2f} MB"
+
+            synthetic_sessions.append({
+                "radacctid": f"hs_{session.session_id}",
+                "acctsessionid": session.session_id,
+                "username": session.access_code,
+                "full_name": session.access_code,  # canonical_username IS the identity
+                "phone_number": canonical_phone or session.phone_number or "",
+                "mac_address": session.mac_address or "",
+                "ip_address": "",  # Not assigned yet at this stage
+                "router": session.router.name if session.router else "",
+                "uptime": uptime_str,
+                "usage": usage_str,
+                "service_type": "HOTSPOT",
+                "canonical_username": session.access_code,
+                # Flag so frontend knows this is from subscription, not live radacct
+                "accounting_pending": True,
+            })
+
+        all_sessions = list(radacct_data) + synthetic_sessions
 
         return Response({
-            "count": len(radacct_data),
+            "count": len(all_sessions),
             "radacct_count": radacct_qs.count(),
-            "pending_accounting_count": 0,
-            "sessions": radacct_data,
+            "pending_accounting_count": len(synthetic_sessions),
+            "sessions": all_sessions,
         })
 
 
