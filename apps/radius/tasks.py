@@ -232,58 +232,60 @@ def cleanup_stale_sessions(self):
             logger.error(f"[CLEANUP] Error in schema {schema_name}: {e}")
 
     # ── Public schema sweep ──────────────────────────────────────────────────
-    # NOTE: billing_hotspotsession lives in TENANT schemas, not public.
-    # The public radacct table (if populated) does not correspond to hotspot
-    # sessions, so we skip the hotspot-exclusion subquery here.
-    try:
-        with connection.cursor() as cursor:
-            # Ghost rows: had interim updates but the NAS went silent
-            cursor.execute("""
-                UPDATE public.radacct
-                SET
-                    acctstoptime       = acctupdatetime,
-                    acctterminatecause = 'NAS-Reboot',
-                    acctsessiontime    = EXTRACT(
-                        EPOCH FROM (acctupdatetime - acctstarttime)
-                    )::bigint
-                WHERE
-                    acctstoptime    IS NULL
-                    AND acctupdatetime IS NOT NULL
-                    AND acctupdatetime < %s
-                    AND username NOT IN (
-                        SELECT access_code
-                        FROM public.radcheck
-                        WHERE attribute = 'Expiration'
-                        AND TO_TIMESTAMP(value, 'Mon DD YYYY HH24:MI:SS') > NOW()
+    # NOTE: Accounting is now tenant-correct. This public schema sweep is disabled
+    # by default and only runs if ENABLE_PUBLIC_RADACCT_SWEEP=True in settings.
+    if getattr(settings, "ENABLE_PUBLIC_RADACCT_SWEEP", False):
+        try:
+            with connection.cursor() as cursor:
+                # Ghost rows: had interim updates but the NAS went silent
+                cursor.execute("""
+                    UPDATE public.radacct
+                    SET
+                        acctstoptime       = acctupdatetime,
+                        acctterminatecause = 'NAS-Reboot',
+                        acctsessiontime    = EXTRACT(
+                            EPOCH FROM (acctupdatetime - acctstarttime)
+                        )::bigint
+                    WHERE
+                        acctstoptime    IS NULL
+                        AND acctupdatetime IS NOT NULL
+                        AND acctupdatetime < %s
+                        AND username NOT IN (
+                            SELECT access_code
+                            FROM public.radcheck
+                            WHERE attribute = 'Expiration'
+                            AND TO_TIMESTAMP(value, 'Mon DD YYYY HH24:MI:SS') > NOW()
+                        )
+                """, [ghost_threshold])
+                public_ghost = cursor.rowcount
+                total_ghost += public_ghost
+
+                # Stale rows: never got any interim update at all
+                cursor.execute("""
+                    UPDATE public.radacct
+                    SET
+                        acctstoptime       = NOW(),
+                        acctterminatecause = 'Stale-Session-Cleanup',
+                        acctsessiontime    = EXTRACT(
+                            EPOCH FROM (NOW() - acctstarttime)
+                        )::bigint
+                    WHERE
+                        acctstoptime    IS NULL
+                        AND acctupdatetime IS NULL
+                        AND acctstarttime  < %s
+                """, [stale_threshold])
+                public_stale = cursor.rowcount
+                total_stale += public_stale
+
+                if public_ghost or public_stale:
+                    logger.info(
+                        "[CLEANUP] public schema: closed %d ghost + %d stale sessions",
+                        public_ghost, public_stale,
                     )
-            """, [ghost_threshold])
-            public_ghost = cursor.rowcount
-            total_ghost += public_ghost
-
-            # Stale rows: never got any interim update at all
-            cursor.execute("""
-                UPDATE public.radacct
-                SET
-                    acctstoptime       = NOW(),
-                    acctterminatecause = 'Stale-Session-Cleanup',
-                    acctsessiontime    = EXTRACT(
-                        EPOCH FROM (NOW() - acctstarttime)
-                    )::bigint
-                WHERE
-                    acctstoptime    IS NULL
-                    AND acctupdatetime IS NULL
-                    AND acctstarttime  < %s
-            """, [stale_threshold])
-            public_stale = cursor.rowcount
-            total_stale += public_stale
-
-            if public_ghost or public_stale:
-                logger.info(
-                    "[CLEANUP] public schema: closed %d ghost + %d stale sessions",
-                    public_ghost, public_stale,
-                )
-    except Exception as e:
-        logger.error("[CLEANUP] Error in public schema: %s", e)
+        except Exception as e:
+            logger.error("[CLEANUP] Error in public schema: %s", e)
+    else:
+        logger.debug("[CLEANUP] Public schema sweep disabled (ENABLE_PUBLIC_RADACCT_SWEEP=False)")
 
     logger.info(f"[CLEANUP] Done: {total_ghost} ghost + {total_stale} stale sessions closed")
     return {'ghost': total_ghost, 'stale': total_stale}
