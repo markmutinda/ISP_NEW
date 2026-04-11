@@ -314,6 +314,10 @@ def force_close_expired_sessions(self):
 
     TenantModel = get_tenant_model()
     now = timezone.now()
+    
+    # --- ADD THIS LOG ---
+    logger.info(f"[FORCE CLOSE] Checking for expired sessions at {now}")
+    
     kicked = 0
     closed = 0
 

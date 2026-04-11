@@ -122,13 +122,26 @@ class HotspotRadiusService:
                 reply_attributes=reply_attributes,
             )
             
-            # Set expiration (sync service handles UTC conversion)
-            self.sync_service.set_user_expiration(username, expires_at)
+            # --- APPLY FIX HERE ---
+            # CRITICAL: Verify expires_at is in the future before setting
+            if expires_at and expires_at > timezone.now():
+                self.sync_service.set_user_expiration(username, expires_at)
+                logger.info(
+                    f"Hotspot RADIUS credentials created: user={username} "
+                    f"plan={plan.name} expires={expires_at} mac={mac_address}"
+                )
+            elif expires_at:
+                # expires_at is in the past — this would instantly kill the session!
+                logger.error(
+                    f"HOTSPOT RADIUS: expires_at is in the PAST for {username}! "
+                    f"expires_at={expires_at}, now={timezone.now()}. "
+                    f"NOT setting Expiration attribute to prevent instant disconnect."
+                )
+                # Don't set expiration — let Session-Timeout handle it instead
+            else:
+                logger.warning(f"No expires_at for hotspot session {username}, relying on Session-Timeout only")
+            # --- END FIX ---
             
-            logger.info(
-                f"Hotspot RADIUS credentials created: user={username} "
-                f"plan={plan.name} expires={expires_at} mac={mac_address}"
-            )
             return True
             
         except Exception as e:

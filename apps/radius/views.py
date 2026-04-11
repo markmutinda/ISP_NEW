@@ -175,6 +175,33 @@ class RadiusActiveSessionsView(APIView):
             .order_by('-activated_at')
         )
 
+        # --- APPLY FIX HERE ---
+        # For synthetic sessions, look up last known radacct data
+        # (the row that got swept) to show IP and usage
+        hotspot_usernames = [s.access_code for s in active_hotspot]
+        
+        # Get last known data from closed radacct rows for these users
+        last_known = {}
+        if hotspot_usernames:
+            recent_closed = (
+                RadAcct.objects
+                .filter(
+                    username__in=hotspot_usernames,
+                    acctstoptime__isnull=False,
+                )
+                .order_by('username', '-acctstoptime')
+                .distinct('username')  # PostgreSQL: get latest per username
+            )
+            for row in recent_closed:
+                total_bytes = (row.acctinputoctets or 0) + (row.acctoutputoctets or 0)
+                mb = total_bytes / (1024 * 1024)
+                usage_str = f"{mb / 1024:.2f} GB" if mb >= 1024 else f"{mb:.2f} MB"
+                last_known[row.username] = {
+                    'ip_address': row.framedipaddress or '',
+                    'usage': usage_str,
+                    'mac_address': row.callingstationid or '',
+                }
+
         synthetic_sessions = []
         for session in active_hotspot:
             client = session.hotspot_client
@@ -189,26 +216,28 @@ class RadiusActiveSessionsView(APIView):
             minutes, secs = divmod(rem, 60)
             uptime_str = f"{hours}h {minutes}m" if hours > 0 else f"{minutes}m {secs}s"
 
-            # Data usage from session record
+            # Use last known radacct data if available, else fall back to session data
+            known = last_known.get(session.access_code, {})
+            
             data_mb = session.data_used_mb or 0
-            usage_str = f"{data_mb / 1024:.2f} GB" if data_mb >= 1024 else f"{data_mb:.2f} MB"
+            fallback_usage = f"{data_mb / 1024:.2f} GB" if data_mb >= 1024 else f"{data_mb:.2f} MB"
 
             synthetic_sessions.append({
                 "radacctid": f"hs_{session.session_id}",
                 "acctsessionid": session.session_id,
                 "username": session.access_code,
-                "full_name": session.access_code,  # canonical_username IS the identity
+                "full_name": session.access_code,
                 "phone_number": canonical_phone or session.phone_number or "",
-                "mac_address": session.mac_address or "",
-                "ip_address": "",  # Not assigned yet at this stage
+                "mac_address": known.get('mac_address') or session.mac_address or "",
+                "ip_address": known.get('ip_address', ''),
                 "router": session.router.name if session.router else "",
                 "uptime": uptime_str,
-                "usage": usage_str,
+                "usage": known.get('usage', fallback_usage),
                 "service_type": "HOTSPOT",
                 "canonical_username": session.access_code,
-                # Flag so frontend knows this is from subscription, not live radacct
                 "accounting_pending": True,
             })
+        # --- END FIX ---
 
         all_sessions = list(radacct_data) + synthetic_sessions
 
