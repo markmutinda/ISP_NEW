@@ -2223,6 +2223,9 @@ class RouterHotspotConfigureView(APIView):
             server = config.get('server', {})
             branding = config.get('branding', {})
 
+            # FIX: Use safe defaults that don't prematurely disconnect users
+            # idle_timeout defaults to 'none' (no idle disconnect)
+            # keepalive_timeout defaults to '10m' (10 minutes, tolerant of network hiccups)
             setup_config = {
                 'interface':         config['interface'],
                 'gateway':           network.get('network_address', '10.5.50.1'),
@@ -2231,8 +2234,8 @@ class RouterHotspotConfigureView(APIView):
                 'pool_range':        network.get('pool_range', '10.5.50.10-10.5.50.254'),
                 'dns_server':        network.get('dns_server', '8.8.8.8'),
                 'server_name':       server.get('name', 'hotspot1'),
-                'idle_timeout':      server.get('idle_timeout', '5m'),
-                'keepalive_timeout': server.get('keepalive_timeout', '2m'),
+                'idle_timeout':      server.get('idle_timeout', 'none'),
+                'keepalive_timeout': server.get('keepalive_timeout', '10m'),
                 'login_by':          ','.join(server.get('login_by', ['mac', 'http-chap'])),
                 'dns_name':          branding.get('dns_name', ''),
             }
