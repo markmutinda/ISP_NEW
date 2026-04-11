@@ -100,6 +100,7 @@ TENANT_APPS = (
     'apps.vpn',                        # VPN/OpenVPN Management
     'apps.radius',                     # RADIUS/FreeRADIUS Integration
     'apps.fup',
+    'apps.loyalty',                    # Loyalty/Rewards Program
 )
 
 # ────────────────────────────────────────────────────────────────

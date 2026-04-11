@@ -86,6 +86,9 @@ api_urlpatterns = [
     
     # FUP (Fair Usage Policy) app
     path('fup/', include('apps.fup.urls')),
+
+    # Loyalty Program (Phase 15 - Points & Rewards)
+    path('loyalty/', include('apps.loyalty.urls')),
     
     # ==========================
     # TUMA ADMIN ENDPOINTS (Protected - requires authentication)
