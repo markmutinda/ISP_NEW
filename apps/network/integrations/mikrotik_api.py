@@ -432,8 +432,8 @@ class MikrotikAPI:
             
             for user in active_users:
                 if user.get('user') == username:
-                    # Remove the active session
-                    self.api.path('/ip/hotspot/active').remove(**{'.id': user['.id']})
+                    # Remove the active session - pass ID directly
+                    self.api.path('/ip/hotspot/active').remove(user['.id'])
                     logger.info(f"Kicked hotspot user {username} from {self.device.name}")
                     return True
             
@@ -474,8 +474,8 @@ class MikrotikAPI:
             
             for session in active_sessions:
                 if session.get('name') == username:
-                    # Remove the active session
-                    self.api.path('/ppp/active').remove(**{'.id': session['.id']})
+                    # Remove the active session - pass ID directly
+                    self.api.path('/ppp/active').remove(session['.id'])
                     logger.info(f"Kicked PPPoE user {username} from {self.device.name}")
                     return True
             
@@ -747,7 +747,7 @@ class MikrotikAPI:
                 # Remove existing IP on this interface first
                 for addr in self.api.path('ip', 'address'):
                     if addr.get('interface') == iface:
-                        self.api.path('ip', 'address').remove(**{'.id': addr['.id']})
+                        self.api.path('ip', 'address').remove(addr['.id'])
                 self.api.path('ip', 'address').add(
                     address=f'{gateway}/{mask}',
                     interface=iface,
@@ -762,7 +762,7 @@ class MikrotikAPI:
                 # Remove existing pool if same name
                 for pool in self.api.path('ip', 'pool'):
                     if pool.get('name') == pool_name:
-                        self.api.path('ip', 'pool').remove(**{'.id': pool['.id']})
+                        self.api.path('ip', 'pool').remove(pool['.id'])
                 self.api.path('ip', 'pool').add(
                     name=pool_name,
                     ranges=pool_range,
@@ -776,7 +776,7 @@ class MikrotikAPI:
             try:
                 for p in self.api.path('ip', 'hotspot', 'profile'):
                     if p.get('name') == prof_name:
-                        self.api.path('ip', 'hotspot', 'profile').remove(**{'.id': p['.id']})
+                        self.api.path('ip', 'hotspot', 'profile').remove(p['.id'])
                 add_args = {
                     'name': prof_name,
                     'hotspot-address': gateway,
@@ -796,7 +796,7 @@ class MikrotikAPI:
             try:
                 for srv in self.api.path('ip', 'hotspot'):
                     if srv.get('name') == srv_name:
-                        self.api.path('ip', 'hotspot').remove(**{'.id': srv['.id']})
+                        self.api.path('ip', 'hotspot').remove(srv['.id'])
                 self.api.path('ip', 'hotspot').add(
                     name=srv_name,
                     interface=iface,
@@ -849,7 +849,7 @@ class MikrotikAPI:
             existing = list(self.api.path('/interface/bridge/port'))
             for port in existing:
                 if port.get('interface') == interface_name:
-                    self.api.path('/interface/bridge/port').remove(**{'.id': port['.id']})
+                    self.api.path('/interface/bridge/port').remove(port['.id'])
                     logger.info(f"Removed {interface_name} from bridge {port.get('bridge')}")
             # Add to our bridge
             self.api.path('/interface/bridge/port').add(bridge=bridge_name, interface=interface_name)
@@ -869,7 +869,7 @@ class MikrotikAPI:
             ports = list(self.api.path('/interface/bridge/port'))
             for port in ports:
                 if port.get('interface') == interface_name:
-                    self.api.path('/interface/bridge/port').remove(**{'.id': port['.id']})
+                    self.api.path('/interface/bridge/port').remove(port['.id'])
                     logger.info(f"Removed {interface_name} from bridge {port.get('bridge')}")
             return True
         except Exception as e:
