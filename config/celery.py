@@ -184,6 +184,29 @@ app.conf.beat_schedule = {
         'schedule': crontab(minute=15),  # Every hour at :15
         'options': {'queue': 'radius'}
     },
+
+    # ════════════════════════════════════════════════════════════════
+    # LOYALTY — Monthly tenure bonus & auto-enrollment catch-all
+    # ════════════════════════════════════════════════════════════════
+    'loyalty-monthly-tenure-bonus-daily': {
+        'task': 'apps.loyalty.tasks.award_monthly_tenure_bonus',
+        'schedule': crontab(hour=9, minute=0),  # Daily at 9:00 AM
+        'options': {'queue': 'default'}
+    },
+    'loyalty-enroll-missing-customers-hourly': {
+        'task': 'apps.loyalty.tasks.enroll_missing_customers',
+        'schedule': crontab(minute=45),  # Every hour at :45
+        'options': {'queue': 'default'}
+    },
+
+    # ════════════════════════════════════════════════════════════════
+    # BILLING EMAIL REMINDERS — Daily at 10 AM
+    # ════════════════════════════════════════════════════════════════
+    'send-billing-reminder-emails-daily': {
+        'task': 'apps.billing.tasks.send_billing_reminder_emails',
+        'schedule': crontab(hour=10, minute=0),  # Daily at 10:00 AM
+        'options': {'queue': 'billing'}
+    },
 }
 
 # ════════════════════════════════════════════════════════════════════════════

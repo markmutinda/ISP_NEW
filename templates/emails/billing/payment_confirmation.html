@@ -1,0 +1,59 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+body{margin:0;padding:0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;background:#f1f5f9;color:#334155;}
+.wrapper{max-width:600px;margin:0 auto;background:#fff;border-radius:12px;overflow:hidden;box-shadow:0 4px 12px rgba(0,0,0,0.08);}
+.header{background:linear-gradient(135deg,#059669,#047857);padding:32px 24px;text-align:center;color:#fff;}
+.header h1{margin:0;font-size:22px;}
+.header p{margin:8px 0 0;font-size:14px;opacity:.85;}
+.body{padding:24px;}
+.body p{line-height:1.7;margin:0 0 16px;font-size:15px;}
+.info-box{background:#f0fdf4;border:1px solid #86efac;border-radius:8px;padding:20px;margin:16px 0;}
+.info-row{display:flex;justify-content:space-between;padding:8px 0;font-size:14px;}
+.info-label{color:#64748b;}
+.info-value{font-weight:600;color:#0f172a;}
+.amount{font-size:32px;font-weight:800;color:#059669;}
+.success{background:#d1fae5;border:1px solid #6ee7b7;border-radius:8px;padding:16px;margin:16px 0;font-size:14px;text-align:center;}
+.footer{background:#f1f5f9;padding:16px 24px;text-align:center;font-size:12px;color:#94a3b8;}
+</style>
+</head>
+<body>
+<div class="wrapper">
+  <div class="header">
+    <h1>✅ Payment Received</h1>
+    <p>{{ company_name }}</p>
+  </div>
+  <div class="body">
+    <p>Dear {{ customer_name }},</p>
+    <p>We've received your payment. Thank you!</p>
+
+    <div class="info-box">
+      <p style="text-align:center;margin:0 0 12px;"><span class="amount">KES {{ amount_paid }}</span></p>
+      {% if reference %}
+      <div class="info-row"><span class="info-label">Reference</span><span class="info-value">{{ reference }}</span></div>
+      {% endif %}
+      {% if payment_method %}
+      <div class="info-row"><span class="info-label">Method</span><span class="info-value">{{ payment_method }}</span></div>
+      {% endif %}
+      <div class="info-row"><span class="info-label">Date</span><span class="info-value">{{ payment_date|date:"M d, Y H:i" }}</span></div>
+      {% if remaining_balance > 0 %}
+      <div class="info-row" style="border-top:1px solid #e2e8f0;padding-top:8px;">
+        <span class="info-label">Remaining Balance</span>
+        <span class="info-value">KES {{ remaining_balance }}</span>
+      </div>
+      {% endif %}
+    </div>
+
+    <div class="success">
+      <strong>🎉 Your account is in good standing!</strong>
+    </div>
+
+    <p style="font-size:13px;color:#64748b;">This is an automated confirmation. For questions, contact your ISP administrator.</p>
+  </div>
+  <div class="footer">
+    <p>{{ company_name }} — Powered by Netily</p>
+  </div>
+</div>
+</body>
+</html>

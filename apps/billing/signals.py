@@ -67,6 +67,21 @@ def handle_payment_completion(sender, instance, created, **kwargs):
             except Exception:
                 pass
 
+        # Auto Email: payment confirmation
+        if customer:
+            try:
+                from django.db import connection
+                from apps.billing.tasks import send_payment_confirmation_email
+                send_payment_confirmation_email.delay(
+                    customer_id=customer.id,
+                    amount=float(instance.amount),
+                    reference=instance.reference or '',
+                    payment_method=getattr(instance, 'payment_method', '') or '',
+                    tenant_schema=connection.schema_name,
+                )
+            except Exception:
+                pass
+
 
 @receiver(post_save, sender=Voucher)
 def handle_voucher_sale(sender, instance, created, **kwargs):
