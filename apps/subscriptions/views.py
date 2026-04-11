@@ -547,23 +547,30 @@ class SubscriptionPaymentViewSet(viewsets.ReadOnlyModelViewSet):
                 'completed_at': payment.completed_at,
             })
         
-        # If pending with PayHero, check status
+        # If pending with Tuma, check status via Tuma query API
         if payment.payhero_checkout_id:
             try:
-                client = PayHeroClient()
-                status_response = client.get_payment_status(payment.payhero_checkout_id)
-                
-                if status_response.status == PaymentStatus.SUCCESS:
-                    # ─── P0 FIX: UNIFIED LIFECYCLE ENGINE ───
-                    # Ensure this runs in a transaction just like the webhook
+                client = TumaClient()
+                token = client.get_master_token()
+                status_response = client.query_payment_status(
+                    token=token,
+                    checkout_request_id=payment.payhero_checkout_id,
+                )
+
+                resp_data = status_response.get('data', status_response)
+                result_code = str(resp_data.get('result_code', ''))
+                is_success = result_code == '0'
+                is_failed = result_code != '' and result_code != '0'
+
+                if is_success:
+                    receipt = resp_data.get('mpesa_receipt_number', '')
+                    # ─── UNIFIED LIFECYCLE ENGINE ───
                     with transaction.atomic():
-                        # Lock the row to prevent race condition with the webhook
                         locked_payment = SubscriptionPayment.objects.select_for_update().get(id=payment.id)
-                        
-                        # Only process if still pending (prevent double-processing)
+
                         if locked_payment.status in ['pending', 'processing']:
-                            locked_payment.mark_completed(status_response.mpesa_receipt)
-                            
+                            locked_payment.mark_completed(mpesa_receipt=receipt)
+
                             subscription = locked_payment.subscription
                             if subscription.is_trial:
                                 subscription.convert_from_trial(billing_period=subscription.billing_period)
@@ -571,13 +578,12 @@ class SubscriptionPaymentViewSet(viewsets.ReadOnlyModelViewSet):
                             else:
                                 subscription.extend_subscription()
                                 logger.info(f"Subscription extended via Polling: {subscription.company.name}")
-                            
-                            # Send cycle activation email (async)
+
                             from .tasks import send_cycle_activated_email
                             send_cycle_activated_email.delay(subscription.company_id)
-                            
-                            payment = locked_payment  # Update reference for response
-                    
+
+                            payment = locked_payment
+
                     return Response({
                         'payment_id': str(payment.id),
                         'status': 'completed',
@@ -585,19 +591,22 @@ class SubscriptionPaymentViewSet(viewsets.ReadOnlyModelViewSet):
                         'mpesa_receipt': payment.mpesa_receipt,
                         'completed_at': payment.completed_at,
                     })
-                
-                elif status_response.status == PaymentStatus.FAILED:
-                    payment.mark_failed(status_response.failure_reason)
+
+                elif is_failed:
+                    reason = resp_data.get('result_desc', '') or 'Payment failed'
+                    payment.mark_failed(reason)
                     return Response({
                         'payment_id': str(payment.id),
                         'status': 'failed',
-                        'message': status_response.failure_reason or 'Payment failed',
+                        'message': reason,
                         'mpesa_receipt': None,
                         'completed_at': None,
                     })
-            
-            except PayHeroError as e:
-                logger.error(f"Error checking payment status: {e.message}")
+
+            except TumaError as e:
+                logger.error(f"Error checking Tuma payment status: {e}")
+            except Exception as e:
+                logger.error(f"Error checking payment status: {e}")
         
         # Still pending
         return Response({

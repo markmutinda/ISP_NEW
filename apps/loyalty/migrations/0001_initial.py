@@ -214,22 +214,22 @@ class Migration(migrations.Migration):
         ),
         migrations.AddIndex(
             model_name='loyaltymember',
-            index=models.Index(fields=['-lifetime_points'], name='loyalty_loy_lifetim_idx'),
+            index=models.Index(fields=['-lifetime_points'], name='loyalty_loy_lifetim_8c27db_idx'),
         ),
         migrations.AddIndex(
             model_name='loyaltymember',
-            index=models.Index(fields=['-total_spent'], name='loyalty_loy_total_s_idx'),
+            index=models.Index(fields=['-total_spent'], name='loyalty_loy_total_s_d2db7b_idx'),
         ),
         migrations.AddIndex(
             model_name='loyaltymember',
-            index=models.Index(fields=['-total_payments'], name='loyalty_loy_total_p_idx'),
+            index=models.Index(fields=['-total_payments'], name='loyalty_loy_total_p_c6fa29_idx'),
         ),
         migrations.AddIndex(
             model_name='pointstransaction',
-            index=models.Index(fields=['-created_at'], name='loyalty_poi_created_idx'),
+            index=models.Index(fields=['-created_at'], name='loyalty_poi_created_5288cf_idx'),
         ),
         migrations.AddIndex(
             model_name='pointstransaction',
-            index=models.Index(fields=['transaction_type'], name='loyalty_poi_transac_idx'),
+            index=models.Index(fields=['transaction_type'], name='loyalty_poi_transac_bf42d3_idx'),
         ),
     ]
