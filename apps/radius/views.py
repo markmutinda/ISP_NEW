@@ -129,16 +129,15 @@ class RadiusActiveSessionsView(APIView):
     GET /api/v1/radius/sessions/active/
     
     List all active RADIUS sessions.
+    
+    FIX: Removed synthetic sessions for hotspot users with active DB subscription
+    but no open radacct row. Now only users with an open radacct row
+    (genuinely online) appear in the list.
     """
     permission_classes = [IsAuthenticated, HasCompanyAccess]
 
     def get(self, request):
-        from apps.billing.models.hotspot_models import HotspotSession
-        from django.utils import timezone
-
-        now = timezone.now()
-
-        # ── 1. Real RADIUS sessions (PPPoE + hotspot that have radacct rows) ──
+        # ── Real RADIUS sessions only (users with open radacct rows = truly online) ──
         radacct_qs = (
             RadAcct.objects
             .filter(acctstoptime__isnull=True)
@@ -156,96 +155,11 @@ class RadiusActiveSessionsView(APIView):
 
         radacct_data = OnlineUserSerializer(radacct_qs[:200], many=True).data
 
-        # Build a set of usernames already represented in radacct
-        radacct_usernames = {s['username'] for s in radacct_data}
-
-        # ── 2. Active HotspotSessions NOT yet in radacct ──
-        # These are paying customers who are connected but whose accounting
-        # start packet hasn't arrived yet (or was swept by ghost cleaner).
-        active_hotspot = (
-            HotspotSession.objects
-            .filter(
-                status='active',
-                expires_at__gt=now,
-            )
-            .exclude(access_code__in=radacct_usernames)
-            .exclude(access_code__isnull=True)
-            .exclude(access_code='')
-            .select_related('plan', 'router', 'hotspot_client')
-            .order_by('-activated_at')
-        )
-
-        # --- APPLY FIX HERE ---
-        # For synthetic sessions, look up last known radacct data
-        # (the row that got swept) to show IP and usage
-        hotspot_usernames = [s.access_code for s in active_hotspot]
-        
-        # Get last known data from closed radacct rows for these users
-        last_known = {}
-        if hotspot_usernames:
-            recent_closed = (
-                RadAcct.objects
-                .filter(
-                    username__in=hotspot_usernames,
-                    acctstoptime__isnull=False,
-                )
-                .order_by('username', '-acctstoptime')
-                .distinct('username')  # PostgreSQL: get latest per username
-            )
-            for row in recent_closed:
-                total_bytes = (row.acctinputoctets or 0) + (row.acctoutputoctets or 0)
-                mb = total_bytes / (1024 * 1024)
-                usage_str = f"{mb / 1024:.2f} GB" if mb >= 1024 else f"{mb:.2f} MB"
-                last_known[row.username] = {
-                    'ip_address': row.framedipaddress or '',
-                    'usage': usage_str,
-                    'mac_address': row.callingstationid or '',
-                }
-
-        synthetic_sessions = []
-        for session in active_hotspot:
-            client = session.hotspot_client
-            canonical_phone = None
-            if client and client.canonical_phone:
-                p = client.canonical_phone
-                canonical_phone = p if not p.startswith("MAC-") else None
-
-            activated_at = session.activated_at or session.created_at
-            duration_seconds = int((now - activated_at).total_seconds()) if activated_at else 0
-            hours, rem = divmod(duration_seconds, 3600)
-            minutes, secs = divmod(rem, 60)
-            uptime_str = f"{hours}h {minutes}m" if hours > 0 else f"{minutes}m {secs}s"
-
-            # Use last known radacct data if available, else fall back to session data
-            known = last_known.get(session.access_code, {})
-            
-            data_mb = session.data_used_mb or 0
-            fallback_usage = f"{data_mb / 1024:.2f} GB" if data_mb >= 1024 else f"{data_mb:.2f} MB"
-
-            synthetic_sessions.append({
-                "radacctid": f"hs_{session.session_id}",
-                "acctsessionid": session.session_id,
-                "username": session.access_code,
-                "full_name": session.access_code,
-                "phone_number": canonical_phone or session.phone_number or "",
-                "mac_address": known.get('mac_address') or session.mac_address or "",
-                "ip_address": known.get('ip_address', ''),
-                "router": session.router.name if session.router else "",
-                "uptime": uptime_str,
-                "usage": known.get('usage', fallback_usage),
-                "service_type": "HOTSPOT",
-                "canonical_username": session.access_code,
-                "accounting_pending": True,
-            })
-        # --- END FIX ---
-
-        all_sessions = list(radacct_data) + synthetic_sessions
-
         return Response({
-            "count": len(all_sessions),
+            "count": len(radacct_data),
             "radacct_count": radacct_qs.count(),
-            "pending_accounting_count": len(synthetic_sessions),
-            "sessions": all_sessions,
+            "pending_accounting_count": 0,
+            "sessions": radacct_data,
         })
 
 
