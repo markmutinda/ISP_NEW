@@ -144,30 +144,19 @@ def _mark_sessions_terminated_for_tenant(expired_users: list, tenant_schema: str
 @shared_task(bind=True, max_retries=2)
 def cleanup_stale_sessions(self):
     """
-    Closes ghost RADIUS sessions - sessions where:
-    1. acctstoptime IS NULL (still "open")
-    2. acctupdatetime hasn't been updated in > configured minutes (NAS stopped sending)
+    Closes ghost RADIUS sessions ONLY when the user has no active subscription.
     
-    This is the ONLY guaranteed way to catch ghost sessions without
-    relying on Accounting-Stop packets from the router.
-    
-    FIX 1: Raised ghost threshold from 15 to 30 minutes to accommodate
-    MikroTik routers with longer interim update intervals (5-15 minutes typical).
-    A 30-minute threshold gives a bigger buffer before assuming a session is a ghost.
-    
-    FIX 3: Exclude usernames that have an active HotspotSession from being ghost-closed.
-    Even if interim updates are delayed, if a HotspotSession with status='active' 
-    and future expires_at exists, the radacct row stays open so users remain visible 
-    in the Online tab.
+    Rules:
+    - PPPoE users: protected if they have a valid Expiration attribute in the future
+    - Hotspot users: protected if they have an active HotspotSession (status=active/paid, expires_at > now)
+    - If user has active subscription → NEVER close their session, even if NAS goes silent
+    - Only close if subscription is expired OR user has no subscription record at all
     """
     from django_tenants.utils import get_tenant_model, schema_context
     
     TenantModel = get_tenant_model()
     now = timezone.now()
     
-    # FIX 1: Increased ghost threshold from 15 to 30 minutes
-    # This prevents premature termination of valid sessions on routers with
-    # longer interim-update intervals (e.g., 5-15 minutes configured)
     ghost_minutes = int(getattr(settings, "RADIUS_GHOST_MINUTES", 30))
     stale_hours = int(getattr(settings, "RADIUS_STALE_HOURS", 4))
     
@@ -183,20 +172,31 @@ def cleanup_stale_sessions(self):
         try:
             with schema_context(schema_name):
                 with connection.cursor() as cursor:
-                    # GHOST sessions: had interim updates but NAS went silent
-                    # CRITICAL FIX: Protect ANY session where the HotspotSession
-                    # subscription is still valid (active OR paid, not expired).
-                    # This prevents VPN tunnel hiccups from kicking valid users.
+
+                    # ── GHOST sessions ──────────────────────────────────────────
+                    # Had interim updates but NAS went silent.
+                    # ONLY close if the user has NO active subscription.
+                    # A user with active sub whose router rebooted should NOT be evicted.
                     cursor.execute("""
                         UPDATE radacct
                         SET
-                            acctstoptime     = acctupdatetime,
+                            acctstoptime       = acctupdatetime,
                             acctterminatecause = 'NAS-Reboot',
-                            acctsessiontime  = EXTRACT(EPOCH FROM (acctupdatetime - acctstarttime))::bigint
+                            acctsessiontime    = EXTRACT(
+                                EPOCH FROM (acctupdatetime - acctstarttime)
+                            )::bigint
                         WHERE
                             acctstoptime IS NULL
                             AND acctupdatetime IS NOT NULL
                             AND acctupdatetime < %s
+                            -- Protect PPPoE users with future Expiration attribute
+                            AND username NOT IN (
+                                SELECT DISTINCT rc.username
+                                FROM radcheck rc
+                                WHERE rc.attribute = 'Expiration'
+                                  AND TO_TIMESTAMP(rc.value, 'Mon DD YYYY HH24:MI:SS') > NOW()
+                            )
+                            -- Protect hotspot users with active/paid sessions
                             AND username NOT IN (
                                 SELECT access_code
                                 FROM billing_hotspotsession
@@ -204,23 +204,33 @@ def cleanup_stale_sessions(self):
                                   AND expires_at > NOW()
                                   AND access_code IS NOT NULL
                             )
-                        RETURNING radacctid
                     """, [ghost_threshold])
                     ghost_count = cursor.rowcount
                     total_ghost += ghost_count
 
-                    # STALE sessions: never got any interim update
-                    # Also protect hotspot sessions here
+                    # ── STALE sessions ─────────────────────────────────────────
+                    # Never received any interim update.
+                    # Same protection rules apply.
                     cursor.execute("""
                         UPDATE radacct
                         SET
-                            acctstoptime     = NOW(),
+                            acctstoptime       = NOW(),
                             acctterminatecause = 'Stale-Session-Cleanup',
-                            acctsessiontime  = EXTRACT(EPOCH FROM (NOW() - acctstarttime))::bigint
+                            acctsessiontime    = EXTRACT(
+                                EPOCH FROM (NOW() - acctstarttime)
+                            )::bigint
                         WHERE
                             acctstoptime IS NULL
                             AND acctupdatetime IS NULL
                             AND acctstarttime < %s
+                            -- Protect PPPoE users with future Expiration attribute
+                            AND username NOT IN (
+                                SELECT DISTINCT rc.username
+                                FROM radcheck rc
+                                WHERE rc.attribute = 'Expiration'
+                                  AND TO_TIMESTAMP(rc.value, 'Mon DD YYYY HH24:MI:SS') > NOW()
+                            )
+                            -- Protect hotspot users with active/paid sessions
                             AND username NOT IN (
                                 SELECT access_code
                                 FROM billing_hotspotsession
@@ -235,14 +245,14 @@ def cleanup_stale_sessions(self):
                     if ghost_count or stale_count:
                         logger.info(
                             f"[CLEANUP] {schema_name}: closed {ghost_count} ghost + "
-                            f"{stale_count} stale sessions"
+                            f"{stale_count} stale sessions (subscription-expired only)"
                         )
         except Exception as e:
             logger.error(f"[CLEANUP] Error in schema {schema_name}: {e}")
 
     # ── Public schema sweep ──────────────────────────────────────────────────
-    # NOTE: Accounting is now tenant-correct. This public schema sweep is disabled
-    # by default and only runs if ENABLE_PUBLIC_RADACCT_SWEEP=True in settings.
+    # This sweep protects PPPoE users via Expiration attribute check.
+    # Hotspot protection is not applicable in public schema.
     if getattr(settings, "ENABLE_PUBLIC_RADACCT_SWEEP", False):
         try:
             with connection.cursor() as cursor:
@@ -260,10 +270,10 @@ def cleanup_stale_sessions(self):
                         AND acctupdatetime IS NOT NULL
                         AND acctupdatetime < %s
                         AND username NOT IN (
-                            SELECT access_code
-                            FROM public.radcheck
-                            WHERE attribute = 'Expiration'
-                            AND TO_TIMESTAMP(value, 'Mon DD YYYY HH24:MI:SS') > NOW()
+                            SELECT DISTINCT rc.username
+                            FROM public.radcheck rc
+                            WHERE rc.attribute = 'Expiration'
+                              AND TO_TIMESTAMP(rc.value, 'Mon DD YYYY HH24:MI:SS') > NOW()
                         )
                 """, [ghost_threshold])
                 public_ghost = cursor.rowcount
@@ -282,13 +292,19 @@ def cleanup_stale_sessions(self):
                         acctstoptime    IS NULL
                         AND acctupdatetime IS NULL
                         AND acctstarttime  < %s
+                        AND username NOT IN (
+                            SELECT DISTINCT rc.username
+                            FROM public.radcheck rc
+                            WHERE rc.attribute = 'Expiration'
+                              AND TO_TIMESTAMP(rc.value, 'Mon DD YYYY HH24:MI:SS') > NOW()
+                        )
                 """, [stale_threshold])
                 public_stale = cursor.rowcount
                 total_stale += public_stale
 
                 if public_ghost or public_stale:
                     logger.info(
-                        "[CLEANUP] public schema: closed %d ghost + %d stale sessions",
+                        "[CLEANUP] public schema: closed %d ghost + %d stale sessions (subscription-expired only)",
                         public_ghost, public_stale,
                     )
         except Exception as e:
