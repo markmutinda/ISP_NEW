@@ -109,8 +109,13 @@ class HotspotRadiusService:
                 except (ValueError, TypeError):
                     logger.warning(f"Invalid data limit for plan {plan.name}: {plan.data_limit_mb}")
             
-            # Idle timeout (disconnect after 5 min idle)
-            reply_attributes['Idle-Timeout'] = '300'
+            # FIX: Idle timeout - only set if the plan explicitly defines one.
+            # Do NOT set a hardcoded idle timeout — it kicks users off when their
+            # phone screen locks or traffic briefly drops, even mid-subscription.
+            # The Session-Timeout attribute (from plan.duration_minutes) already 
+            # handles the hard time limit correctly. Expiration provides a second layer.
+            if hasattr(plan, 'session_timeout') and plan.session_timeout and plan.session_timeout > 0:
+                reply_attributes['Idle-Timeout'] = str(plan.session_timeout * 60)
             
             # Create the RADIUS user via the sync service
             self.sync_service.create_radius_user(

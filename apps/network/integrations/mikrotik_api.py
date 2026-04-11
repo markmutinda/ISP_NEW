@@ -705,6 +705,11 @@ class MikrotikAPI:
           4. Hotspot server
           5. IP address on interface
 
+        IMPORTANT:
+        Do not use short defaults (like 5m/2m) here.
+        They can terminate active hotspot users within a few minutes,
+        even when their paid subscription is still valid.
+
         Args:
             config: {
                 'interface':       'ether2',
@@ -715,8 +720,8 @@ class MikrotikAPI:
                 'dns_server':      '8.8.8.8',
                 'server_name':     'hotspot1',
                 'profile_name':    'hs-profile-1',
-                'idle_timeout':    '5m',
-                'keepalive_timeout': '2m',
+                'idle_timeout':    'none',      # FIXED: Default to 'none' instead of '5m'
+                'keepalive_timeout': '10m',     # FIXED: Use longer keepalive (10m) instead of '2m'
                 'login_by':        'mac,http-chap',
                 'dns_name':        'hotspot.local',
             }
@@ -737,8 +742,16 @@ class MikrotikAPI:
             dns         = config.get('dns_server', '8.8.8.8')
             srv_name    = config.get('server_name', 'hotspot1')
             prof_name   = config.get('profile_name', f'{srv_name}-profile')
-            idle        = config.get('idle_timeout', '5m')
-            keepalive   = config.get('keepalive_timeout', '2m')
+            
+            # FIX: Use 'none' for idle timeout by default (no idle disconnect)
+            # This prevents users from being kicked when their phone screen locks
+            # or traffic briefly stops while their subscription is still valid.
+            idle        = config.get('idle_timeout', 'none')
+            
+            # FIX: Use longer keepalive timeout (10 minutes) to prevent premature
+            # session termination during temporary network hiccups.
+            keepalive   = config.get('keepalive_timeout', '10m')
+            
             login_by    = config.get('login_by', 'mac,http-chap')
             dns_name    = config.get('dns_name', '')
 

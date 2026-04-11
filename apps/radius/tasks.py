@@ -10,7 +10,7 @@ These tasks handle:
 
 import logging
 import time
-from datetime import timedelta
+from datetime import timedelta, datetime, timezone as dt_timezone
 from celery import shared_task
 from django.utils import timezone
 from django.db import connection
@@ -25,6 +25,10 @@ def disconnect_expired_users(self):
     """
     Find users with expired subscriptions who still have active RADIUS sessions,
     then kick them off MikroTik routers across all tenants.
+    
+    FIX: The expiration string is stored as UTC. Using timezone.make_aware()
+    would interpret the UTC string as Africa/Nairobi time, making every session
+    appear expired 3 hours early. Now we treat it as UTC directly.
     """
     from apps.network.models import Router
     from apps.network.integrations.mikrotik_api import MikrotikAPI
@@ -74,9 +78,12 @@ def disconnect_expired_users(self):
                     username, nas_ip, session_id, expiration_str = row
                     stats['checked'] += 1
                     try:
-                        from datetime import datetime
+                        # ── FIX: The expiration string is stored as UTC.
+                        # DO NOT use timezone.make_aware() here — it would
+                        # interpret the UTC string as Africa/Nairobi time,
+                        # making every session appear expired 3 hours early.
                         expiration = datetime.strptime(expiration_str, "%b %d %Y %H:%M:%S")
-                        expiration = timezone.make_aware(expiration)
+                        expiration = expiration.replace(tzinfo=dt_timezone.utc)  # ← CHANGED LINE
                         
                         if expiration <= now:
                             stats['expired_found'] += 1

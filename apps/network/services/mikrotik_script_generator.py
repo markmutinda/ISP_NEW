@@ -381,8 +381,10 @@ class MikrotikScriptGenerator:
 {profile_cmd}
 {server_cmd}
 
-# Anti-sharing: one device per account, quick disconnect on idle
-/ip hotspot user profile set [find name="default"] shared-users=1 keepalive-timeout=2m
+# Anti-sharing: one device per account
+# FIX: Use longer keepalive-timeout (10m) to prevent premature disconnections
+# when users are idle or experience temporary network hiccups
+/ip hotspot user profile set [find name="default"] shared-users=1 keepalive-timeout=10m
 
 # Enable RADIUS accounting with 3-minute interim updates
 # The router will automatically send accounting updates every 3 minutes
