@@ -4,6 +4,7 @@ Loyalty Signals — auto-award points on payment, auto-enroll customers.
 import logging
 from django.db.models.signals import post_save
 from django.dispatch import receiver
+from django.db import transaction
 
 logger = logging.getLogger(__name__)
 
@@ -11,7 +12,8 @@ logger = logging.getLogger(__name__)
 @receiver(post_save, sender='billing.Payment')
 def award_loyalty_points_on_payment(sender, instance, created, **kwargs):
     """
-    When a payment is marked COMPLETED, award loyalty points based on amount.
+    When a payment is marked COMPLETED, award loyalty points.
+    Uses on_commit so the award runs after the Payment row is committed.
     """
     if instance.status != 'COMPLETED':
         return
@@ -19,74 +21,113 @@ def award_loyalty_points_on_payment(sender, instance, created, **kwargs):
     if not customer:
         return
 
-    try:
-        from .models import LoyaltySettings, LoyaltyMember
+    payment_id = instance.pk
 
-        settings_obj = LoyaltySettings.load()
-        if not settings_obj.program_active:
-            return
+    def _do_award():
+        try:
+            from apps.billing.models.payment_models import Payment as P
+            from .models import LoyaltySettings, LoyaltyMember
 
-        member, _ = LoyaltyMember.objects.get_or_create(customer=customer)
-        # Update spent tracking
-        amount = float(instance.amount)
-        member.total_spent += instance.amount
-        member.total_payments += 1
-        member.save(update_fields=['total_spent', 'total_payments', 'updated_at'])
+            try:
+                inst = P.objects.get(pk=payment_id)
+            except P.DoesNotExist:
+                return
 
-        # Calculate points: (amount / currency_unit) * points_per_currency
-        if settings_obj.currency_unit > 0:
-            base_points = int(amount / settings_obj.currency_unit) * settings_obj.points_per_currency
-        else:
-            base_points = 0
+            settings_obj = LoyaltySettings.load()
+            if not settings_obj.program_active:
+                return
 
-        if base_points > 0:
-            member.award_points(
-                points=base_points,
-                description=f'Payment of KES {amount:,.2f} (ref: {instance.reference or ""})',
-                transaction_type='earned',
-            )
+            member, _ = LoyaltyMember.objects.get_or_create(customer=inst.customer)
+            amount = float(inst.amount)
+            member.total_spent += inst.amount
+            member.total_payments += 1
+            member.save(update_fields=['total_spent', 'total_payments', 'updated_at'])
 
-            # SMS notification
-            if settings_obj.notify_points_earned:
-                try:
-                    from apps.messaging.tasks import send_loyalty_notification_sms
-                    send_loyalty_notification_sms.delay(
-                        customer_id=customer.id,
-                        message_type='points_earned',
-                        points=base_points,
-                        reason=f'Payment KES {amount:,.2f}',
-                    )
-                except Exception:
-                    pass
+            if settings_obj.currency_unit > 0:
+                base_points = int(amount / settings_obj.currency_unit) * settings_obj.points_per_currency
+            else:
+                base_points = 0
 
-    except Exception as e:
-        logger.error(f'Loyalty points on payment failed: {e}')
+            if base_points > 0:
+                member.award_points(
+                    points=base_points,
+                    description=f'Payment of KES {amount:,.2f} (ref: {inst.reference or ""})',
+                    transaction_type='earned',
+                )
+
+                if settings_obj.notify_points_earned:
+                    try:
+                        from apps.messaging.tasks import send_loyalty_notification_sms
+                        send_loyalty_notification_sms.delay(
+                            customer_id=inst.customer.id,
+                            message_type='points_earned',
+                            points=base_points,
+                            reason=f'Payment KES {amount:,.2f}',
+                        )
+                    except Exception:
+                        pass
+
+        except Exception as e:
+            logger.error(f'Loyalty points on payment (deferred) failed: {e}')
+
+    transaction.on_commit(_do_award)
 
 
 @receiver(post_save, sender='customers.Customer')
 def auto_enroll_customer_in_loyalty(sender, instance, created, **kwargs):
     """
-    Auto-enroll new customers into the loyalty program with signup bonus.
+    Auto-enroll new customers and award signup bonus.
+    Uses on_commit so the award runs after the Customer row is committed —
+    this prevents the bonus from being rolled back if the outer transaction
+    encounters an error.
     """
     if not created:
         return
-    try:
-        from .models import LoyaltySettings, LoyaltyMember, LoyaltyTier
 
-        settings_obj = LoyaltySettings.load()
-        if not settings_obj.program_active or not settings_obj.auto_enroll_new_customers:
-            return
+    customer_id = instance.pk
 
-        bronze = LoyaltyTier.objects.filter(level='bronze').first()
-        member, was_created = LoyaltyMember.objects.get_or_create(
-            customer=instance,
-            defaults={'tier': bronze}
-        )
-        if was_created and settings_obj.signup_bonus > 0:
-            member.award_points(
-                points=settings_obj.signup_bonus,
-                description='Welcome bonus',
-                transaction_type='bonus',
+    def _do_enroll():
+        try:
+            from apps.customers.models import Customer
+            from .models import LoyaltySettings, LoyaltyMember, LoyaltyTier
+
+            try:
+                cust = Customer.objects.get(pk=customer_id)
+            except Customer.DoesNotExist:
+                return
+
+            settings_obj = LoyaltySettings.load()
+            if not settings_obj.program_active or not settings_obj.auto_enroll_new_customers:
+                return
+
+            # Ensure standard tiers exist for this tenant
+            tier_defaults = [
+                ('bronze',   'Bronze',   0,    49,   '1.00', 'bg-amber-500'),
+                ('silver',   'Silver',   50,   199,  '1.25', 'bg-slate-400'),
+                ('gold',     'Gold',     200,  499,  '1.50', 'bg-yellow-500'),
+                ('platinum', 'Platinum', 500,  999,  '2.00', 'bg-slate-600'),
+                ('diamond',  'Diamond',  1000, None, '3.00', 'bg-cyan-500'),
+            ]
+            for level, name, min_p, max_p, mult, color in tier_defaults:
+                LoyaltyTier.objects.get_or_create(level=level, defaults={
+                    'name': name, 'min_points': min_p, 'max_points': max_p,
+                    'points_multiplier': mult, 'color': color,
+                })
+
+            bronze = LoyaltyTier.objects.filter(level='bronze').first()
+            member, was_created = LoyaltyMember.objects.get_or_create(
+                customer=cust,
+                defaults={'tier': bronze}
             )
-    except Exception as e:
-        logger.error(f'Loyalty auto-enroll failed: {e}')
+            if was_created and settings_obj.signup_bonus > 0:
+                member.award_points(
+                    points=settings_obj.signup_bonus,
+                    description='Welcome bonus',
+                    transaction_type='bonus',
+                )
+                logger.info(f'Loyalty: enrolled {cust} with {settings_obj.signup_bonus} pts')
+
+        except Exception as e:
+            logger.error(f'Loyalty auto-enroll failed for customer_id={customer_id}: {e}', exc_info=True)
+
+    transaction.on_commit(_do_enroll)

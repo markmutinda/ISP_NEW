@@ -93,3 +93,12 @@ def _enroll_missing_for_tenant():
                 description='Welcome bonus (auto-enrolled)',
                 transaction_type='bonus',
             )
+
+    # Also fix any members with 0 lifetime_points who missed their signup bonus
+    if settings_obj.signup_bonus > 0:
+        for member in LoyaltyMember.objects.filter(lifetime_points=0):
+            member.award_points(
+                points=settings_obj.signup_bonus,
+                description='Welcome bonus (retroactive)',
+                transaction_type='bonus',
+            )
