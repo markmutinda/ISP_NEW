@@ -493,26 +493,20 @@ class SMSTopupInitiateView(APIView):
     """
     permission_classes = [IsAuthenticated, IsAdminUser]
 
-    # Pricing tiers (units → price per unit in KES)
-    TIERS = [
-        (5000, _Decimal('0.50')),
-        (2000, _Decimal('0.55')),
-        (0,    _Decimal('0.60')),
-    ]
+    # FIX 3: Flat pricing at KES 0.40 per unit
+    UNIT_PRICE = _Decimal('0.40')
 
     def _price_for(self, units: int) -> _Decimal:
-        for min_units, price in self.TIERS:
-            if units >= min_units:
-                return price
-        return _Decimal('0.60')
+        return self.UNIT_PRICE
 
     def post(self, request):
         units = int(request.data.get('units', 0))
         phone = request.data.get('phone_number', '')
 
-        if units < 100:
+        # FIX 4: Minimum top-up is 25 units (KES 10)
+        if units < 25:
             return Response(
-                {'error': 'Minimum top-up is 100 units'},
+                {'error': 'Minimum top-up is 25 units (KES 10)'},
                 status=status.HTTP_400_BAD_REQUEST,
             )
         if not phone:

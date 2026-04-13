@@ -206,6 +206,15 @@ class SMSGatewayConfig(models.Model):
             return f"Inbuilt System Gateway ({'active' if self.is_active else 'inactive'})"
         return f"{self.get_provider_display()} ({'active' if self.is_active else 'inactive'})"
 
+    def save(self, *args, **kwargs):
+        # Enforce: only one active gateway at a time
+        if self.is_active:
+            SMSGatewayConfig.objects.exclude(pk=self.pk).update(is_active=False)
+        # If using inbuilt, provider field doesn't matter but set it to bytewave
+        if self.use_inbuilt_system:
+            self.provider = 'bytewave'
+        super().save(*args, **kwargs)
+
 
 class TenantSMSWallet(models.Model):
     """
@@ -219,7 +228,7 @@ class TenantSMSWallet(models.Model):
     )
     sell_price_per_unit = models.DecimalField(
         max_digits=10, decimal_places=4,
-        default=Decimal('0.6000'),  # your resale price, editable
+        default=Decimal('0.4000'),  # your resale price, editable - updated from 0.6000 to 0.4000
         validators=[MinValueValidator(Decimal('0.0000'))]
     )
     is_active = models.BooleanField(default=True)

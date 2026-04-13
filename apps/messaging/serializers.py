@@ -212,11 +212,25 @@ class SMSGatewayConfigWriteSerializer(serializers.ModelSerializer):
         ]
 
     def validate(self, attrs):
-        # If activating, deactivate all others
-        if attrs.get('is_active'):
-            SMSGatewayConfig.objects.exclude(
-                pk=self.instance.pk if self.instance else None
-            ).update(is_active=False)
+        use_inbuilt = attrs.get('use_inbuilt_system', 
+                                self.instance.use_inbuilt_system if self.instance else False)
+        
+        # If using inbuilt, credentials are not required
+        if not use_inbuilt:
+            # Only validate api_key if NOT inbuilt and NOT updating (or explicitly provided)
+            if not self.instance and not attrs.get('api_key'):
+                raise serializers.ValidationError({
+                    'api_key': 'API key is required when not using inbuilt system.'
+                })
+        
+        # Force activate when saving (only one allowed)
+        attrs['is_active'] = True
+        
+        # Deactivate all others
+        SMSGatewayConfig.objects.exclude(
+            pk=self.instance.pk if self.instance else None
+        ).update(is_active=False)
+        
         return attrs
 
 
