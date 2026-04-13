@@ -34,7 +34,8 @@ class Command(BaseCommand):
             tenants = tenants.filter(schema_name=options['tenant'])
 
         for tenant in tenants:
-            self.stdout.write(f'\n=== Tenant: {tenant.schema_name} ({tenant.name}) ===')
+            tenant_label = getattr(tenant, 'name', None) or getattr(getattr(tenant, 'company', None), 'name', tenant.schema_name)
+            self.stdout.write(f'\n=== Tenant: {tenant.schema_name} ({tenant_label}) ===')
             with tenant_context(tenant):
                 self._populate_tenant(
                     retroactive=options['retroactive'],
@@ -49,20 +50,21 @@ class Command(BaseCommand):
         settings_obj = LoyaltySettings.load()
 
         # Ensure default tiers exist
+        # Thresholds calibrated for small ISPs (KES 1000-3000/mo → 10-30 pts/mo)
         default_tiers = [
-            {'name': 'Bronze', 'level': 'bronze', 'min_points': 0, 'max_points': 499,
+            {'name': 'Bronze', 'level': 'bronze', 'min_points': 0, 'max_points': 49,
              'points_multiplier': '1.00', 'color': 'bg-amber-500',
              'benefits': ['Basic support', '1x points earning']},
-            {'name': 'Silver', 'level': 'silver', 'min_points': 500, 'max_points': 1999,
+            {'name': 'Silver', 'level': 'silver', 'min_points': 50, 'max_points': 199,
              'points_multiplier': '1.25', 'color': 'bg-slate-400',
              'benefits': ['Priority support', '1.25x points', '5% plan discount']},
-            {'name': 'Gold', 'level': 'gold', 'min_points': 2000, 'max_points': 4999,
+            {'name': 'Gold', 'level': 'gold', 'min_points': 200, 'max_points': 499,
              'points_multiplier': '1.50', 'color': 'bg-yellow-500',
              'benefits': ['24/7 support', '1.5x points', '10% plan discount', 'Free speed boost (1 day/month)']},
-            {'name': 'Platinum', 'level': 'platinum', 'min_points': 5000, 'max_points': 14999,
+            {'name': 'Platinum', 'level': 'platinum', 'min_points': 500, 'max_points': 999,
              'points_multiplier': '2.00', 'color': 'bg-slate-600',
              'benefits': ['Dedicated account manager', '2x points', '15% plan discount', 'Free speed boost (3 days/month)', 'Early access to new plans']},
-            {'name': 'Diamond', 'level': 'diamond', 'min_points': 15000, 'max_points': None,
+            {'name': 'Diamond', 'level': 'diamond', 'min_points': 1000, 'max_points': None,
              'points_multiplier': '3.00', 'color': 'bg-cyan-500',
              'benefits': ['VIP support', '3x points', '25% plan discount', 'Unlimited speed boosts', 'Free plan upgrades', 'Referral super-bonus']},
         ]

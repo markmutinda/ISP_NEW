@@ -1,0 +1,67 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+body{margin:0;padding:0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;background:#f1f5f9;color:#334155;}
+.wrapper{max-width:600px;margin:0 auto;background:#fff;border-radius:12px;overflow:hidden;box-shadow:0 4px 12px rgba(0,0,0,0.08);}
+.header{background:linear-gradient(135deg,#2563eb,#1d4ed8);padding:32px 24px;text-align:center;color:#fff;}
+.header h1{margin:0;font-size:22px;}
+.header p{margin:8px 0 0;font-size:14px;opacity:.85;}
+.body{padding:24px;}
+.body p{line-height:1.7;margin:0 0 16px;font-size:15px;}
+.info-box{background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;padding:20px;margin:16px 0;}
+.info-row{display:flex;justify-content:space-between;padding:8px 0;font-size:14px;}
+.info-label{color:#64748b;}
+.info-value{font-weight:600;color:#0f172a;}
+.amount{font-size:32px;font-weight:800;color:#2563eb;}
+.btn{display:inline-block;padding:14px 32px;background:#2563eb;color:#fff;text-decoration:none;border-radius:8px;font-weight:600;font-size:15px;}
+.warning{background:#fef3c7;border:1px solid #fbbf24;border-radius:8px;padding:16px;margin:16px 0;font-size:14px;}
+.footer{background:#f1f5f9;padding:16px 24px;text-align:center;font-size:12px;color:#94a3b8;}
+</style>
+</head>
+<body>
+<div class="wrapper">
+  <div class="header">
+    <h1>⏰ Payment Reminder</h1>
+    <p>{{ company_name }}</p>
+  </div>
+  <div class="body">
+    <p>Dear {{ customer_name }},</p>
+    <p>This is a friendly reminder that your invoice <strong>#{{ invoice_number }}</strong> is due{% if due_date %} on <strong>{{ due_date|date:"M d, Y" }}</strong>{% endif %}.</p>
+
+    <div class="info-box">
+      <p style="text-align:center;margin:0 0 12px;"><span class="amount">KES {{ amount_due }}</span></p>
+      {% if plan_name %}
+      <div class="info-row"><span class="info-label">Plan</span><span class="info-value">{{ plan_name }}</span></div>
+      {% endif %}
+      <div class="info-row"><span class="info-label">Invoice #</span><span class="info-value">{{ invoice_number }}</span></div>
+      {% if due_date %}
+      <div class="info-row"><span class="info-label">Due Date</span><span class="info-value">{{ due_date|date:"M d, Y" }}</span></div>
+      {% endif %}
+      <div class="info-row" style="font-weight:700;border-top:2px solid #e2e8f0;padding-top:8px;">
+        <span class="info-label" style="color:#111;">Amount Due</span>
+        <span class="info-value" style="font-size:18px;color:#2563eb;">KES {{ amount_due }}</span>
+      </div>
+    </div>
+
+    {% if days_overdue > 0 %}
+    <div class="warning">
+      <strong>⚠️ This invoice is {{ days_overdue }} day{{ days_overdue|pluralize }} overdue.</strong>
+      Please make your payment as soon as possible to avoid service interruption.
+    </div>
+    {% endif %}
+
+    {% if payment_link %}
+    <p style="text-align:center;margin:24px 0;">
+      <a href="{{ payment_link }}" class="btn">Pay Now →</a>
+    </p>
+    {% endif %}
+
+    <p style="font-size:13px;color:#64748b;">If you've already made this payment, please disregard this email. For questions, contact your ISP administrator.</p>
+  </div>
+  <div class="footer">
+    <p>{{ company_name }} — Powered by Netily</p>
+  </div>
+</div>
+</body>
+</html>

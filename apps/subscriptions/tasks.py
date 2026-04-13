@@ -241,9 +241,6 @@ def _send_lifecycle_email(tenant, template, subject, context):
     text_body = strip_tags(html_body)
     from_email = getattr(settings, 'DEFAULT_FROM_EMAIL', 'billing@netily.co.ke')
 
-    # For Resend, use a dedicated from address on the verified domain
-    resend_from = getattr(settings, 'RESEND_FROM_EMAIL', 'Netily <billing@netily.co.ke>')
-
     # Collect admin emails from the company
     admin_emails = []
     try:
@@ -264,25 +261,7 @@ def _send_lifecycle_email(tenant, template, subject, context):
         logger.warning(f"[{tenant.name}] No admin emails found, cannot send lifecycle email: {subject}")
         return
 
-    # Try Resend first, fall back to Django SMTP
-    resend_key = getattr(settings, 'RESEND_API_KEY', None)
-    if resend_key:
-        try:
-            import resend
-            resend.api_key = resend_key
-            resend.Emails.send({
-                'from': resend_from,
-                'to': admin_emails,
-                'subject': subject,
-                'html': html_body,
-                'text': text_body,
-            })
-            logger.info(f"[{tenant.name}] Sent lifecycle email via Resend: {subject}")
-            return
-        except Exception as e:
-            logger.warning(f"[{tenant.name}] Resend failed, falling back to SMTP: {e}")
-
-    # Fallback: Django SMTP
+    # Send via Gmail SMTP
     msg = EmailMultiAlternatives(subject, text_body, from_email, admin_emails)
     msg.attach_alternative(html_body, 'text/html')
     msg.send(fail_silently=True)
