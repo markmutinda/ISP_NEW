@@ -186,11 +186,18 @@ class SMSGatewayConfigSerializer(serializers.ModelSerializer):
         read_only_fields = ['created_at', 'updated_at']
 
     def get_field_labels(self, obj):
+        if obj.use_inbuilt_system:
+            return {}  # No fields needed for inbuilt
         return PROVIDER_FIELDS.get(obj.provider, {})
 
     def to_representation(self, instance):
         data = super().to_representation(instance)
-        # Mask secrets: show only last 4 chars
+        # Don't show masked keys for inbuilt system (there are none)
+        if instance.use_inbuilt_system:
+            data['api_key'] = ''
+            data['api_secret'] = ''
+            return data
+        # Mask secrets for custom providers
         for field in ('api_key', 'api_secret'):
             val = data.get(field) or ''
             if len(val) > 4:
@@ -212,25 +219,30 @@ class SMSGatewayConfigWriteSerializer(serializers.ModelSerializer):
         ]
 
     def validate(self, attrs):
-        use_inbuilt = attrs.get('use_inbuilt_system', 
-                                self.instance.use_inbuilt_system if self.instance else False)
-        
-        # If using inbuilt, credentials are not required
+        use_inbuilt = attrs.get(
+            'use_inbuilt_system',
+            self.instance.use_inbuilt_system if self.instance else False
+        )
+
         if not use_inbuilt:
-            # Only validate api_key if NOT inbuilt and NOT updating (or explicitly provided)
+            # Only require api_key for custom providers on first creation
             if not self.instance and not attrs.get('api_key'):
                 raise serializers.ValidationError({
-                    'api_key': 'API key is required when not using inbuilt system.'
+                    'api_key': 'API key is required when not using the inbuilt system.'
                 })
-        
-        # Force activate when saving (only one allowed)
+
+        # Force inbuilt to use bytewave provider internally
+        if use_inbuilt:
+            attrs['provider'] = 'bytewave'
+            attrs['api_key'] = attrs.get('api_key', '')
+            attrs['api_secret'] = attrs.get('api_secret', '')
+
+        # Activate and deactivate others
         attrs['is_active'] = True
-        
-        # Deactivate all others
         SMSGatewayConfig.objects.exclude(
             pk=self.instance.pk if self.instance else None
         ).update(is_active=False)
-        
+
         return attrs
 
 
