@@ -1,6 +1,6 @@
 # apps/messaging/serializers.py
 from rest_framework import serializers
-from .models import SMSMessage, SMSTemplate, SMSCampaign, SMSGatewayConfig
+from .models import SMSMessage, SMSTemplate, SMSCampaign, SMSGatewayConfig, SMSNotificationSettings, SMSUnitTopup, TenantSMSWallet
 from .services.gateway_dispatcher import PROVIDER_FIELDS
 from apps.customers.serializers.customer_serializers import CustomerListSerializer
 
@@ -175,7 +175,7 @@ class SMSGatewayConfigSerializer(serializers.ModelSerializer):
     class Meta:
         model = SMSGatewayConfig
         fields = [
-            'id', 'provider', 'provider_display', 'is_active',
+            'id', 'provider', 'provider_display', 'is_active', 'use_inbuilt_system',
             'api_key', 'api_secret', 'username', 'sender_id',
             'extra_config',
             'auto_payment_confirmation', 'auto_expiry_reminder',
@@ -204,7 +204,7 @@ class SMSGatewayConfigWriteSerializer(serializers.ModelSerializer):
     class Meta:
         model = SMSGatewayConfig
         fields = [
-            'provider', 'is_active',
+            'provider', 'is_active', 'use_inbuilt_system',
             'api_key', 'api_secret', 'username', 'sender_id',
             'extra_config',
             'auto_payment_confirmation', 'auto_expiry_reminder',
@@ -218,3 +218,46 @@ class SMSGatewayConfigWriteSerializer(serializers.ModelSerializer):
                 pk=self.instance.pk if self.instance else None
             ).update(is_active=False)
         return attrs
+
+
+# ============================================================
+# NEW SERIALIZERS ADDED BELOW
+# ============================================================
+
+class SMSNotificationSettingsSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = SMSNotificationSettings
+        fields = [
+            'use_inbuilt_system',
+            # hotspot
+            'hotspot_new_subscription', 'hotspot_welcome',
+            'hotspot_session_expiry', 'hotspot_expiry_minutes_before',
+            'hotspot_payment_failed', 'hotspot_session_expired',
+            # pppoe
+            'pppoe_welcome', 'pppoe_payment_confirmation',
+            'pppoe_expiry_reminder', 'pppoe_expiry_days_before',
+            'pppoe_service_suspended', 'pppoe_service_resumed',
+            'pppoe_plan_changed', 'pppoe_renewal_confirmation',
+            'pppoe_new_subscription',
+            'updated_at',
+        ]
+        read_only_fields = ['updated_at']
+
+
+class SMSUnitTopupSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = SMSUnitTopup
+        fields = [
+            'id', 'units_purchased', 'amount_paid',
+            'payment_reference', 'payment_method',
+            'status', 'checkout_request_id', 'notes',
+            'created_at',
+        ]
+        read_only_fields = ['id', 'status', 'created_at']
+
+
+class SMSWalletSerializer(serializers.Serializer):
+    """Combines wallet balance + topup history."""
+    sms_units = serializers.DecimalField(max_digits=14, decimal_places=2)
+    sell_price_per_unit = serializers.DecimalField(max_digits=10, decimal_places=4)
+    topup_history = SMSUnitTopupSerializer(many=True)

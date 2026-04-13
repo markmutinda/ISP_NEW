@@ -414,6 +414,15 @@ TWILIO_AUTH_TOKEN = os.getenv('TWILIO_AUTH_TOKEN', '')
 TWILIO_PHONE_NUMBER = os.getenv('TWILIO_PHONE_NUMBER', '')
 
 # ────────────────────────────────────────────────────────────────
+#  INBUILT SYSTEM SMS GATEWAY (BYTEWAVE MASTER ACCOUNT)
+#  Used as the system's own SMS gateway for internal notifications,
+#  tenant SMS wallet top-ups, and fallback when no tenant gateway is configured.
+# ────────────────────────────────────────────────────────────────
+BYTEWAVE_API_TOKEN = os.getenv('BYTEWAVE_API_TOKEN', '')
+BYTEWAVE_SENDER_ID = os.getenv('BYTEWAVE_SENDER_ID', 'BytewaveSMS')
+BYTEWAVE_BASE_URL = os.getenv('BYTEWAVE_BASE_URL', 'https://portal.bytewavenetworks.com/api/v3')
+
+# ────────────────────────────────────────────────────────────────
 #  PAYHERO CONFIG (Netily Master Account)
 #  All customer payments flow through this account.
 #  ISPs receive settlements after 5% commission deduction.

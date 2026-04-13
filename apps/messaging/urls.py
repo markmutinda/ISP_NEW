@@ -9,6 +9,10 @@ from .views import (
     SMSStatsView,
     SMSBalanceView,
     SMSGatewayConfigViewSet,
+    SMSNotificationSettingsView,
+    SMSWalletView,
+    SMSTopupInitiateView,
+    SMSTopupCallbackView,
 )
 
 router = DefaultRouter()
@@ -18,25 +22,30 @@ router.register(r'campaigns', SMSCampaignViewSet, basename='sms-campaign')
 router.register(r'gateway', SMSGatewayConfigViewSet, basename='sms-gateway')
 
 urlpatterns = [
-    # All standard CRUD from router
     path('', include(router.urls)),
 
-    # Bulk send (custom action)
+    # Single / bulk send
     path('sms/bulk/', SMSMessageViewSet.as_view({'post': 'bulk_send'}), name='sms-bulk-send'),
-
-    # Retry single message
     path('sms/<int:pk>/retry/', SMSMessageViewSet.as_view({'post': 'retry'}), name='sms-retry'),
 
-    # Start / cancel campaign
+    # Campaign control
     path('campaigns/<int:pk>/start/', SMSCampaignViewSet.as_view({'post': 'start'}), name='campaign-start'),
     path('campaigns/<int:pk>/cancel/', SMSCampaignViewSet.as_view({'post': 'cancel'}), name='campaign-cancel'),
 
-    # Stats & balance
+    # Stats & balance (live provider balance)
     path('sms/stats/', SMSStatsView.as_view(), name='sms-stats'),
     path('sms/balance/', SMSBalanceView.as_view(), name='sms-balance'),
 
-    # Gateway config actions
+    # Gateway CRUD + test
     path('gateway/<int:pk>/activate/', SMSGatewayConfigViewSet.as_view({'post': 'activate'}), name='gateway-activate'),
     path('gateway/<int:pk>/test/', SMSGatewayConfigViewSet.as_view({'post': 'test_connection'}), name='gateway-test'),
     path('gateway/providers/', SMSGatewayConfigViewSet.as_view({'get': 'list_providers'}), name='gateway-providers'),
+
+    # Notification settings (hotspot + pppoe toggles)
+    path('notification-settings/', SMSNotificationSettingsView.as_view(), name='sms-notification-settings'),
+
+    # Internal wallet
+    path('wallet/', SMSWalletView.as_view(), name='sms-wallet'),
+    path('topup/initiate/', SMSTopupInitiateView.as_view(), name='sms-topup-initiate'),
+    path('topup/callback/', SMSTopupCallbackView.as_view(), name='sms-topup-callback'),  # public
 ]

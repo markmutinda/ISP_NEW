@@ -20,6 +20,7 @@ import time
 from decimal import Decimal
 from typing import Dict, Any, Optional, Tuple
 
+from django.conf import settings
 from django.utils import timezone
 
 logger = logging.getLogger(__name__)
@@ -264,7 +265,7 @@ BACKENDS = {
     'beem': BeemBackend,
     'advanta': AdvantaBackend,
     'hubtel': HubtelBackend,
-    'bytewave': BytewaveBackend,  # NEW
+    'bytewave': BytewaveBackend,
 }
 
 # Human-readable field labels per provider
@@ -276,7 +277,7 @@ PROVIDER_FIELDS = {
     'beem':           {'api_key': 'API Key', 'api_secret': 'Secret Key', 'sender_id': 'Sender Name'},
     'advanta':        {'api_key': 'API Key', 'sender_id': 'Short Code'},
     'hubtel':         {'api_key': 'Client ID', 'api_secret': 'Client Secret', 'sender_id': 'Sender ID'},
-    'bytewave':       {'api_key': 'API Token', 'sender_id': 'Sender ID'},  # NEW
+    'bytewave':       {'api_key': 'API Token', 'sender_id': 'Sender ID'},
 }
 
 
@@ -284,36 +285,91 @@ PROVIDER_FIELDS = {
 
 class GatewayDispatcher:
     """
-    Reads the active SMSGatewayConfig for the current tenant and dispatches
-    send/balance calls to the matching provider backend.
+    Reads the active SMSGatewayConfig for the current tenant. 
+    If using the inbuilt system, it routes via Master Bytewave and deducts credits.
+    Otherwise, uses the tenant's custom API keys.
     """
 
     def __init__(self):
         from apps.messaging.models import SMSGatewayConfig
         self.config = SMSGatewayConfig.objects.filter(is_active=True).first()
+        
         if not self.config:
             raise ValueError("No active SMS gateway configured. Go to Settings → SMS to set one up.")
-        cls = BACKENDS.get(self.config.provider)
-        if not cls:
-            raise ValueError(f"Unknown SMS provider: {self.config.provider}")
-        self.backend = cls(
-            api_key=self.config.api_key,
-            api_secret=self.config.api_secret,
-            username=self.config.username,
-            sender_id=self.config.sender_id,
-            extra_config=self.config.extra_config,
-        )
+            
+        self.use_inbuilt = self.config.use_inbuilt_system
+
+        if self.use_inbuilt:
+            # 1. USE MASTER CREDENTIALS (Inbuilt Mode)
+            cls = BACKENDS.get('bytewave')
+            if not cls:
+                raise ValueError("Bytewave backend not found for inbuilt system")
+            self.backend = cls(
+                api_key=settings.BYTEWAVE_API_TOKEN,
+                sender_id=settings.BYTEWAVE_SENDER_ID,
+                extra_config={'base_url': settings.BYTEWAVE_BASE_URL}
+            )
+        else:
+            # 2. USE TENANT CREDENTIALS (BYOK - Bring Your Own Key)
+            cls = BACKENDS.get(self.config.provider)
+            if not cls:
+                raise ValueError(f"Unknown SMS provider: {self.config.provider}")
+            self.backend = cls(
+                api_key=self.config.api_key,
+                api_secret=self.config.api_secret,
+                username=self.config.username,
+                sender_id=self.config.sender_id,
+                extra_config=self.config.extra_config,
+            )
 
     def send_sms(self, to: str, message: str) -> Dict[str, Any]:
         phone = _fmt_phone(to)
+        
+        # --- CAPPING LOGIC: Check Wallet if using inbuilt system ---
+        from apps.messaging.models import TenantSMSWallet, SMSCreditLedger
+        wallet = None
+        
+        if self.use_inbuilt:
+            wallet = TenantSMSWallet.objects.filter(is_active=True).first()
+            if not wallet or wallet.sms_units < Decimal('1.0000'):
+                logger.warning("SMS failed: Tenant has insufficient inbuilt SMS credits.")
+                return {'success': False, 'error': 'Insufficient SMS credits. Please top up your wallet.', 'status': 'failed'}
+
         try:
+            # Dispatch the SMS to Bytewave (or Custom Provider)
             ok, msg_id, cost = self.backend.send(phone, message)
+            
+            # --- CAPPING LOGIC: Deduct from Wallet ---
+            if ok and self.use_inbuilt and wallet:
+                # Deduct 1 unit per message (you can enhance this later to calculate multipart SMS)
+                units_used = Decimal('1.0000')
+                wallet.sms_units -= units_used
+                wallet.save(update_fields=['sms_units'])
+                
+                # Record the transaction in the ledger
+                SMSCreditLedger.objects.create(
+                    wallet=wallet,
+                    entry_type='debit',
+                    units=-units_used,
+                    notes=f"SMS sent to {phone}"
+                )
+
             return {'success': ok, 'provider_id': msg_id, 'cost': cost, 'status': 'sent' if ok else 'failed'}
+            
         except Exception as e:
-            logger.error(f"[{self.config.provider}] SMS send failed: {e}")
+            provider_name = 'INBUILT-BYTEWAVE' if self.use_inbuilt else self.config.provider
+            logger.error(f"[{provider_name}] SMS send failed: {e}")
             return {'success': False, 'error': str(e), 'status': 'failed'}
 
     def get_balance(self) -> Dict[str, Any]:
+        # If using inbuilt system, return the Tenant's wallet balance, NOT your actual Bytewave bank balance!
+        if self.use_inbuilt:
+            from apps.messaging.models import TenantSMSWallet
+            wallet = TenantSMSWallet.objects.filter(is_active=True).first()
+            units = float(wallet.sms_units) if wallet else 0.0
+            return {'success': True, 'provider': 'Netily Default', 'balance': units, 'currency': 'SMS Units'}
+            
+        # Otherwise, fetch balance from their custom provider
         try:
             data = self.backend.get_balance()
             data['success'] = True
@@ -321,7 +377,7 @@ class GatewayDispatcher:
             return data
         except Exception as e:
             logger.error(f"[{self.config.provider}] Balance check failed: {e}")
-            return {'success': False, 'error': str(e), 'balance': 0, 'currency': 'KES'}
+            return {'success': False, 'error': str(e), 'balance': 0, 'currency': 'Unknown'}
 
     def get_config_summary(self) -> Dict[str, Any]:
         return {
@@ -329,4 +385,5 @@ class GatewayDispatcher:
             'provider_display': self.config.get_provider_display(),
             'sender_id': self.config.sender_id,
             'is_active': self.config.is_active,
+            'use_inbuilt_system': self.config.use_inbuilt_system,
         }

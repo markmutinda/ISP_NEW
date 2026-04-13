@@ -430,3 +430,210 @@ class SMSGatewayConfigViewSet(viewsets.ModelViewSet):
     def list_providers(self, request):
         """List available providers and their required fields."""
         return Response(PROVIDER_FIELDS)
+
+
+# ============================================================
+# NEW VIEWS ADDED BELOW
+# ============================================================
+
+from decimal import Decimal as _Decimal
+from .models import SMSNotificationSettings, SMSUnitTopup, TenantSMSWallet
+from .serializers import (
+    SMSNotificationSettingsSerializer,
+    SMSUnitTopupSerializer,
+    SMSWalletSerializer,
+)
+
+
+class SMSNotificationSettingsView(APIView):
+    """
+    GET  /api/v1/messaging/notification-settings/
+    PATCH /api/v1/messaging/notification-settings/
+    """
+    permission_classes = [IsAuthenticated, IsAdminUser]
+
+    def get(self, request):
+        settings_obj = SMSNotificationSettings.get_settings()
+        return Response(SMSNotificationSettingsSerializer(settings_obj).data)
+
+    def patch(self, request):
+        settings_obj = SMSNotificationSettings.get_settings()
+        serializer = SMSNotificationSettingsSerializer(
+            settings_obj, data=request.data, partial=True
+        )
+        serializer.is_valid(raise_exception=True)
+        serializer.save()
+        return Response(serializer.data)
+
+
+class SMSWalletView(APIView):
+    """
+    GET /api/v1/messaging/wallet/
+    Returns current balance + last 20 topup records.
+    """
+    permission_classes = [IsAuthenticated, IsAdminUser]
+
+    def get(self, request):
+        wallet = TenantSMSWallet.objects.filter(is_active=True).first()
+        topups = SMSUnitTopup.objects.order_by('-created_at')[:20]
+        data = {
+            'sms_units': wallet.sms_units if wallet else _Decimal('0'),
+            'sell_price_per_unit': wallet.sell_price_per_unit if wallet else _Decimal('0.60'),
+            'topup_history': SMSUnitTopupSerializer(topups, many=True).data,
+        }
+        return Response(data)
+
+
+class SMSTopupInitiateView(APIView):
+    """
+    POST /api/v1/messaging/topup/initiate/
+    Body: { "units": 1000, "phone_number": "254712345678" }
+
+    Calculates cost, creates a pending topup record, initiates STK push.
+    """
+    permission_classes = [IsAuthenticated, IsAdminUser]
+
+    # Pricing tiers (units → price per unit in KES)
+    TIERS = [
+        (5000, _Decimal('0.50')),
+        (2000, _Decimal('0.55')),
+        (0,    _Decimal('0.60')),
+    ]
+
+    def _price_for(self, units: int) -> _Decimal:
+        for min_units, price in self.TIERS:
+            if units >= min_units:
+                return price
+        return _Decimal('0.60')
+
+    def post(self, request):
+        units = int(request.data.get('units', 0))
+        phone = request.data.get('phone_number', '')
+
+        if units < 100:
+            return Response(
+                {'error': 'Minimum top-up is 100 units'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if not phone:
+            return Response(
+                {'error': 'phone_number is required'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        price_per_unit = self._price_for(units)
+        total_amount = (price_per_unit * units).quantize(_Decimal('0.01'))
+
+        topup = SMSUnitTopup.objects.create(
+            units_purchased=units,
+            amount_paid=total_amount,
+            payment_method='mpesa_stk',
+            status='pending',
+        )
+
+        # Kick off STK push via Tuma (reuse billing payment flow)
+        try:
+            from django.conf import settings as _settings
+            from django.db import connection
+            from apps.billing.models.payment_models import TenantTumaConfig, InvoiceItemPayment, Payment
+            from apps.billing.services.tuma_service import TumaClient
+            import time
+
+            schema = connection.schema_name
+            cfg = TenantTumaConfig.objects.filter(schema_name=schema, is_active=True).first()
+            if not cfg or not cfg.tuma_business_email:
+                topup.status = 'failed'
+                topup.notes = 'Tuma not configured'
+                topup.save()
+                return Response(
+                    {'error': 'Payment gateway not configured'},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+            client = TumaClient()
+            token = client.get_token(cfg.tuma_business_email, cfg.tuma_business_api_key)
+            callback_url = getattr(_settings, 'TUMA_CALLBACK_URL', '')
+            desc = f"SMS-UNITS-{topup.id}"
+
+            res = client.stk_push(
+                token=token,
+                amount=float(total_amount),
+                phone=phone,
+                callback_url=callback_url,
+                description=desc,
+            )
+
+            if res.get('success'):
+                d = res.get('data', {})
+                topup.checkout_request_id = d.get('checkout_request_id', '')
+                topup.payment_reference = d.get('merchant_request_id', '')
+                topup.save()
+                return Response({
+                    'topup_id': topup.id,
+                    'units': units,
+                    'amount': str(total_amount),
+                    'checkout_request_id': topup.checkout_request_id,
+                    'message': 'STK push sent. Enter your M-Pesa PIN to complete.',
+                }, status=status.HTTP_202_ACCEPTED)
+            else:
+                topup.status = 'failed'
+                topup.notes = res.get('message', 'STK failed')
+                topup.save()
+                return Response({'error': topup.notes}, status=status.HTTP_400_BAD_REQUEST)
+
+        except Exception as e:
+            topup.status = 'failed'
+            topup.notes = str(e)
+            topup.save()
+            return Response({'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+class SMSTopupCallbackView(APIView):
+    """
+    POST /api/v1/messaging/topup/callback/
+    Called by Tuma when the SMS top-up payment completes.
+    PUBLIC — no auth.
+    """
+    authentication_classes = []
+    permission_classes = []
+
+    def post(self, request):
+        data = request.data
+        checkout_id = data.get('checkout_request_id', '')
+        result_code = str(data.get('result_code', ''))
+
+        topup = SMSUnitTopup.objects.filter(checkout_request_id=checkout_id).first()
+        if not topup:
+            return Response({'ok': True})
+
+        if result_code == '0':
+            topup.status = 'completed'
+            topup.save()
+
+            # Credit the wallet
+            wallet, _ = TenantSMSWallet.objects.get_or_create(
+                pk=1,
+                defaults={'sms_units': _Decimal('0'), 'sell_price_per_unit': _Decimal('0.60')},
+            )
+            from django.db import transaction as _tx
+            with _tx.atomic():
+                w = TenantSMSWallet.objects.select_for_update().get(pk=wallet.pk)
+                w.sms_units += _Decimal(str(topup.units_purchased))
+                w.save(update_fields=['sms_units', 'updated_at'])
+
+            from .models import SMSCreditLedger
+            SMSCreditLedger.objects.create(
+                wallet=wallet,
+                entry_type='topup',
+                units=_Decimal(str(topup.units_purchased)),
+                unit_price=wallet.sell_price_per_unit,
+                amount=topup.amount_paid,
+                reference=topup.payment_reference,
+                notes=f'Top-up #{topup.id}',
+            )
+        else:
+            topup.status = 'failed'
+            topup.notes = data.get('result_desc', 'Payment failed')
+            topup.save()
+
+        return Response({'ok': True})

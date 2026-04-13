@@ -166,14 +166,20 @@ class SMSGatewayConfig(models.Model):
         ('beem', 'Beem Africa'),
         ('advanta', 'Advanta SMS'),
         ('hubtel', 'Hubtel'),
-        ('bytewave', 'Bytewave'),  # NEW
+        ('bytewave', 'Bytewave'),
     )
 
     provider = models.CharField(max_length=30, choices=PROVIDER_CHOICES)
     is_active = models.BooleanField(default=False)
 
-    # Common fields
-    api_key = models.CharField(max_length=255)
+    # ADD THIS NEW FIELD:
+    use_inbuilt_system = models.BooleanField(
+        default=False, 
+        help_text="Use the platform's default SMS gateway (Deducts from Tenant Wallet)"
+    )
+
+    # MODIFY THIS FIELD to allow blank keys if they use the inbuilt system
+    api_key = models.CharField(max_length=255, blank=True, default='')
     api_secret = models.CharField(max_length=255, blank=True, default='')
     username = models.CharField(max_length=100, blank=True, default='')
     sender_id = models.CharField(max_length=20, blank=True, default='')
@@ -196,6 +202,8 @@ class SMSGatewayConfig(models.Model):
         verbose_name_plural = 'SMS Gateway Configs'
 
     def __str__(self):
+        if self.use_inbuilt_system:
+            return f"Inbuilt System Gateway ({'active' if self.is_active else 'inactive'})"
         return f"{self.get_provider_display()} ({'active' if self.is_active else 'inactive'})"
 
 
@@ -253,3 +261,101 @@ class SMSCreditLedger(models.Model):
 
     def __str__(self):
         return f"{self.entry_type}: {self.units} units @ {self.unit_price}"
+
+
+# ============================================================
+# NEW MODELS ADDED BELOW
+# ============================================================
+
+class SMSNotificationSettings(models.Model):
+    """
+    Per-tenant SMS notification toggles for Hotspot and PPPoE/Static services.
+    One row per tenant (singleton via get_or_create).
+    """
+
+    # ── INBUILT SYSTEM TOGGLE ─────────────────────────────────────────────
+    use_inbuilt_system = models.BooleanField(
+        default=False,
+        help_text="If True, use Netily's built-in Bytewave gateway instead of custom provider"
+    )
+
+    # ── HOTSPOT NOTIFICATIONS ─────────────────────────────────────────────
+    hotspot_new_subscription = models.BooleanField(default=True,
+        help_text="SMS when a hotspot user makes a new purchase")
+    hotspot_welcome = models.BooleanField(default=True,
+        help_text="Welcome SMS when a hotspot session activates")
+    hotspot_session_expiry = models.BooleanField(default=True,
+        help_text="Notify hotspot user when their session is about to expire")
+    hotspot_expiry_minutes_before = models.PositiveIntegerField(default=15,
+        help_text="How many minutes before expiry to send the hotspot reminder")
+    hotspot_payment_failed = models.BooleanField(default=True,
+        help_text="Notify when hotspot STK push payment fails")
+    hotspot_session_expired = models.BooleanField(default=True,
+        help_text="Notify when hotspot session has fully expired")
+
+    # ── PPPOE / STATIC NOTIFICATIONS ─────────────────────────────────────
+    pppoe_welcome = models.BooleanField(default=True,
+        help_text="Welcome SMS when a new PPPoE/Static customer is activated")
+    pppoe_payment_confirmation = models.BooleanField(default=True,
+        help_text="SMS confirmation after a PPPoE payment is received")
+    pppoe_expiry_reminder = models.BooleanField(default=True,
+        help_text="Remind PPPoE customer before subscription expires")
+    pppoe_expiry_days_before = models.PositiveIntegerField(default=4,
+        help_text="How many days before expiry to send the PPPoE reminder")
+    pppoe_service_suspended = models.BooleanField(default=True,
+        help_text="Notify when PPPoE service is suspended")
+    pppoe_service_resumed = models.BooleanField(default=True,
+        help_text="Notify when PPPoE service is restored")
+    pppoe_plan_changed = models.BooleanField(default=True,
+        help_text="Notify customer when their plan is changed")
+    pppoe_renewal_confirmation = models.BooleanField(default=True,
+        help_text="Confirm successful subscription renewal")
+    pppoe_new_subscription = models.BooleanField(default=True,
+        help_text="SMS when admin creates a new PPPoE subscription for a customer")
+
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        app_label = 'messaging'
+        verbose_name = 'SMS Notification Settings'
+        verbose_name_plural = 'SMS Notification Settings'
+
+    def __str__(self):
+        return f"SMS Settings (inbuilt={self.use_inbuilt_system})"
+
+    @classmethod
+    def get_settings(cls):
+        obj, _ = cls.objects.get_or_create(pk=1)
+        return obj
+
+
+class SMSUnitTopup(models.Model):
+    """
+    Record of SMS unit top-up purchases by a tenant.
+    Units flow into TenantSMSWallet after payment confirmation.
+    """
+    STATUS_CHOICES = (
+        ('pending', 'Pending'),
+        ('completed', 'Completed'),
+        ('failed', 'Failed'),
+    )
+
+    units_purchased = models.PositiveIntegerField()
+    amount_paid = models.DecimalField(max_digits=10, decimal_places=2)
+    payment_reference = models.CharField(max_length=100, blank=True)
+    payment_method = models.CharField(max_length=50, default='mpesa')
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='pending')
+    checkout_request_id = models.CharField(max_length=120, blank=True)
+    notes = models.TextField(blank=True)
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        app_label = 'messaging'
+        ordering = ['-created_at']
+        verbose_name = 'SMS Unit Top-up'
+        verbose_name_plural = 'SMS Unit Top-ups'
+
+    def __str__(self):
+        return f"{self.units_purchased} units — {self.status}"
