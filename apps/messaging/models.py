@@ -1,3 +1,5 @@
+from decimal import Decimal
+from django.core.validators import MinValueValidator
 from django.db import models
 from django.utils import timezone
 from django.conf import settings
@@ -164,6 +166,7 @@ class SMSGatewayConfig(models.Model):
         ('beem', 'Beem Africa'),
         ('advanta', 'Advanta SMS'),
         ('hubtel', 'Hubtel'),
+        ('bytewave', 'Bytewave'),  # NEW
     )
 
     provider = models.CharField(max_length=30, choices=PROVIDER_CHOICES)
@@ -194,3 +197,59 @@ class SMSGatewayConfig(models.Model):
 
     def __str__(self):
         return f"{self.get_provider_display()} ({'active' if self.is_active else 'inactive'})"
+
+
+class TenantSMSWallet(models.Model):
+    """
+    Internal SMS wallet (your own credits ledger per tenant/account in your system).
+    This is what tenants buy from (M-Pesa/wallet/etc), not Bytewave directly.
+    """
+    sms_units = models.DecimalField(
+        max_digits=14, decimal_places=4,
+        default=Decimal('0.0000'),
+        validators=[MinValueValidator(Decimal('0.0000'))]
+    )
+    sell_price_per_unit = models.DecimalField(
+        max_digits=10, decimal_places=4,
+        default=Decimal('0.6000'),  # your resale price, editable
+        validators=[MinValueValidator(Decimal('0.0000'))]
+    )
+    is_active = models.BooleanField(default=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        app_label = 'messaging'
+        verbose_name = 'Tenant SMS Wallet'
+        verbose_name_plural = 'Tenant SMS Wallets'
+
+    def __str__(self):
+        return f"Wallet(units={self.sms_units})"
+
+
+class SMSCreditLedger(models.Model):
+    ENTRY_TYPES = (
+        ('topup', 'Topup'),
+        ('debit', 'Debit'),
+        ('refund', 'Refund'),
+        ('adjustment', 'Adjustment'),
+    )
+
+    wallet = models.ForeignKey(TenantSMSWallet, on_delete=models.CASCADE, related_name='entries')
+    entry_type = models.CharField(max_length=20, choices=ENTRY_TYPES)
+    units = models.DecimalField(max_digits=14, decimal_places=4)  # positive for topup/refund, negative for debit
+    unit_price = models.DecimalField(max_digits=10, decimal_places=4, default=Decimal('0.0000'))
+    amount = models.DecimalField(max_digits=12, decimal_places=2, default=Decimal('0.00'))  # money value
+    reference = models.CharField(max_length=120, blank=True, default='')
+    notes = models.TextField(blank=True, default='')
+
+    # links
+    sms_message = models.ForeignKey('messaging.SMSMessage', null=True, blank=True, on_delete=models.SET_NULL)
+
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        app_label = 'messaging'
+        ordering = ['-created_at']
+
+    def __str__(self):
+        return f"{self.entry_type}: {self.units} units @ {self.unit_price}"

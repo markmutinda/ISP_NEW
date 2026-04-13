@@ -12,6 +12,7 @@ Supported providers:
   5. Beem Africa
   6. Advanta SMS
   7. Hubtel
+  8. Bytewave
 """
 import logging
 import requests
@@ -192,6 +193,67 @@ class HubtelBackend:
         return {'balance': 0, 'currency': 'GHS', 'note': 'Check Hubtel dashboard'}
 
 
+class BytewaveBackend:
+    """
+    Bytewave API v3 backend
+    Auth: Authorization: Bearer {token}
+    """
+    def __init__(self, api_key: str, sender_id: str = '', extra_config: dict = None, **kw):
+        self.api_token = api_key
+        self.sender_id = sender_id
+        cfg = extra_config or {}
+        self.base_url = cfg.get('base_url', 'https://portal.bytewavenetworks.com/api/v3').rstrip('/')
+
+    def _headers(self):
+        return {
+            "Authorization": f"Bearer {self.api_token}",
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+        }
+
+    def send(self, to: str, message: str) -> Tuple[bool, str, Decimal]:
+        payload = {
+            "recipient": to.lstrip('+'),   # Bytewave examples are digits only
+            "sender_id": self.sender_id,
+            "type": "plain",
+            "message": message,
+        }
+        resp = requests.post(f"{self.base_url}/sms/send", json=payload, headers=self._headers(), timeout=20)
+        data = resp.json()
+
+        if resp.status_code >= 400 or data.get("status") != "success":
+            err = data.get("message", f"HTTP {resp.status_code}")
+            raise RuntimeError(err)
+
+        # API docs are generic; infer fields safely
+        report = data.get("data", {}) if isinstance(data.get("data"), dict) else {}
+        provider_uid = report.get("uid") or report.get("message_id") or ""
+        # cost may be unavailable from send endpoint; fallback 0, later reconcile from /sms/{uid}
+        cost = Decimal(str(report.get("cost", "0")))
+        return True, provider_uid, cost
+
+    def get_balance(self) -> Dict[str, Any]:
+        resp = requests.get(f"{self.base_url}/balance", headers=self._headers(), timeout=15)
+        data = resp.json()
+
+        if resp.status_code >= 400 or data.get("status") != "success":
+            err = data.get("message", f"HTTP {resp.status_code}")
+            raise RuntimeError(err)
+
+        bal_data = data.get("data", {})
+        # tolerate multiple possible shapes
+        if isinstance(bal_data, dict):
+            units = bal_data.get("sms_unit") or bal_data.get("units") or bal_data.get("balance") or 0
+        else:
+            units = bal_data
+
+        return {
+            "balance": float(units),    # here balance means SMS units
+            "currency": "SMS_UNITS",
+            "unit_cost": Decimal("1.00"),  # not money; 1 unit == 1 sms unit
+        }
+
+
 # ─── PROVIDER REGISTRY ─────────────────────────────────────────
 
 BACKENDS = {
@@ -202,6 +264,7 @@ BACKENDS = {
     'beem': BeemBackend,
     'advanta': AdvantaBackend,
     'hubtel': HubtelBackend,
+    'bytewave': BytewaveBackend,  # NEW
 }
 
 # Human-readable field labels per provider
@@ -213,6 +276,7 @@ PROVIDER_FIELDS = {
     'beem':           {'api_key': 'API Key', 'api_secret': 'Secret Key', 'sender_id': 'Sender Name'},
     'advanta':        {'api_key': 'API Key', 'sender_id': 'Short Code'},
     'hubtel':         {'api_key': 'Client ID', 'api_secret': 'Client Secret', 'sender_id': 'Sender ID'},
+    'bytewave':       {'api_key': 'API Token', 'sender_id': 'Sender ID'},  # NEW
 }
 
 
