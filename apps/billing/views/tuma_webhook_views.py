@@ -52,23 +52,27 @@ class TumaWebhookView(APIView):
                     checkout_request_id=checkout_id
                 ).first()
 
+        # FIX 1: Wrap mapping block in try/except to handle ProgrammingError
         if mapping:
             logger.info(f"Found TumaCallbackMap mapping for merchant_id={merchant_id}, schema={mapping.schema_name}")
-            with schema_context(mapping.schema_name):
-                payment = None
-                if merchant_id:
-                    payment = Payment.objects.filter(
-                        tuma_merchant_request_id=merchant_id
-                    ).first()
-                if not payment and checkout_id:
-                    payment = Payment.objects.filter(
-                        tuma_checkout_request_id=checkout_id
-                    ).first()
-                if payment:
-                    logger.info(f"Found payment via lookup map in schema: {mapping.schema_name}")
-                    return payment, mapping.schema_name
-                else:
-                    logger.warning(f"Mapping exists but payment not found in schema {mapping.schema_name}")
+            try:
+                with schema_context(mapping.schema_name):
+                    payment = None
+                    if merchant_id:
+                        payment = Payment.objects.filter(
+                            tuma_merchant_request_id=merchant_id
+                        ).first()
+                    if not payment and checkout_id:
+                        payment = Payment.objects.filter(
+                            tuma_checkout_request_id=checkout_id
+                        ).first()
+                    if payment:
+                        logger.info(f"Found payment via lookup map in schema: {mapping.schema_name}")
+                        return payment, mapping.schema_name
+                    else:
+                        logger.warning(f"Mapping exists but payment not found in schema {mapping.schema_name}")
+            except ProgrammingError as e:
+                logger.debug(f"ProgrammingError in mapping schema {mapping.schema_name}: {e}")
 
         # ============================================================
         # 2) Fallback: Search all tenant schemas (legacy callbacks without map)
@@ -98,6 +102,84 @@ class TumaWebhookView(APIView):
                     continue
 
         return None, None
+
+    def _handle_sms_topup_callback(self, merchant_id, checkout_id, data, result_code):
+        """
+        Handle SMS topup callbacks that arrive at the main Tuma webhook.
+        
+        FIX 2: This method processes SMS unit top-up payments that come through
+        the same Tuma webhook endpoint. SMS topups use TUMA_CALLBACK_URL and
+        need to be credited to the tenant's SMS wallet.
+        
+        Returns:
+            JsonResponse if processed, None otherwise
+        """
+        from django_tenants.utils import schema_context, get_public_schema_name
+        from django.db.models import Q
+        from apps.core.models import TumaCallbackMap
+        from django.db.utils import ProgrammingError
+
+        # Find mapping that belongs to an SMS topup
+        with schema_context(get_public_schema_name()):
+            mapping = TumaCallbackMap.objects.filter(
+                Q(merchant_request_id=merchant_id) | Q(checkout_request_id=checkout_id)
+            ).first()
+
+        if not mapping:
+            return None
+        if not (mapping.payment_reference or '').startswith('SMS-TOPUP-'):
+            return None
+
+        # It's an SMS topup — process it in the correct tenant schema
+        from apps.messaging.models import SMSUnitTopup, TenantSMSWallet, SMSCreditLedger
+        from decimal import Decimal
+        from django.db import transaction as _tx
+
+        target_schema = mapping.schema_name
+        co_id = mapping.checkout_request_id
+
+        try:
+            with schema_context(target_schema):
+                topup = SMSUnitTopup.objects.filter(checkout_request_id=co_id).first()
+                if not topup or topup.status == 'completed':
+                    return JsonResponse({'success': True, 'message': 'Already processed'}, status=200)
+
+                if str(result_code) == '0':
+                    topup.status = 'completed'
+                    topup.save()
+
+                    with _tx.atomic():
+                        wallet, _ = TenantSMSWallet.objects.get_or_create(
+                            is_active=True,
+                            defaults={
+                                'sms_units': Decimal('0'),
+                                'sell_price_per_unit': Decimal('0.40'),
+                            }
+                        )
+                        w = TenantSMSWallet.objects.select_for_update().get(pk=wallet.pk)
+                        w.sms_units += Decimal(str(topup.units_purchased))
+                        w.save(update_fields=['sms_units', 'updated_at'])
+
+                    SMSCreditLedger.objects.create(
+                        wallet=wallet,
+                        entry_type='topup',
+                        units=Decimal(str(topup.units_purchased)),
+                        unit_price=wallet.sell_price_per_unit,
+                        amount=topup.amount_paid,
+                        reference=topup.payment_reference or '',
+                        notes=f'Top-up #{topup.id} ({topup.units_purchased} units)',
+                    )
+                    logger.info(f"Credited {topup.units_purchased} SMS units to {target_schema}")
+                else:
+                    topup.status = 'failed'
+                    topup.notes = data.get('result_desc', 'Payment failed')
+                    topup.save()
+
+            return JsonResponse({'success': True, 'sms_topup_processed': True}, status=200)
+
+        except ProgrammingError as e:
+            logger.error(f"DB error processing SMS topup for {target_schema}: {e}")
+            return None
 
     def post(self, request):
         """
@@ -133,7 +215,13 @@ class TumaWebhookView(APIView):
         # Find the payment and its tenant schema
         payment, payment_schema = self._find_payment_and_schema(merchant_id, checkout_id)
         
+        # FIX 2: Check if this is an SMS topup callback before returning 404
         if not payment or not payment_schema:
+            # Handle SMS topup callbacks
+            sms_result = self._handle_sms_topup_callback(merchant_id, checkout_id, data, result_code)
+            if sms_result:
+                return sms_result
+
             logger.warning(f"Payment not found for merchant_id={merchant_id}, checkout_id={checkout_id}")
             return JsonResponse(
                 {"success": False, "message": "Payment not found"}, 

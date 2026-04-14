@@ -37,9 +37,16 @@ class CreditBillingService:
     @staticmethod
     @transaction.atomic
     def debit_for_sms(message_text: str, sms_message=None) -> Decimal:
-        wallet = TenantSMSWallet.objects.select_for_update().filter(is_active=True).first()
+        # FIX 3: Auto-create wallet if it doesn't exist (tenant just hasn't topped up yet)
+        wallet = TenantSMSWallet.objects.filter(is_active=True).first()
         if not wallet:
-            raise ValidationError("SMS wallet not configured.")
+            # Auto-create wallet with zero balance — tenant just hasn't topped up yet
+            wallet = TenantSMSWallet.objects.create(
+                sms_units=Decimal('0.0000'),
+                sell_price_per_unit=Decimal('0.4000'),
+                is_active=True
+            )
+        wallet = TenantSMSWallet.objects.select_for_update().get(pk=wallet.pk)
 
         units = CreditBillingService.sms_units_for_message(message_text)
         if wallet.sms_units < units:
