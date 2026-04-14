@@ -323,39 +323,33 @@ class GatewayDispatcher:
             )
 
     def send_sms(self, to: str, message: str) -> Dict[str, Any]:
+        """
+        Send an SMS through the configured gateway.
+        
+        Balance pre-check only — no deduction here.
+        - Manual sends: deducted by CreditBillingService in ViewSet
+        - Automated sends: deducted by notification_sender._dispatch
+        """
         phone = _fmt_phone(to)
-        
-        # --- CAPPING LOGIC: Check Wallet if using inbuilt system ---
-        from apps.messaging.models import TenantSMSWallet, SMSCreditLedger
-        wallet = None
-        
+
+        # Balance pre-check only — no deduction here.
+        # Manual sends: deducted by CreditBillingService in ViewSet
+        # Automated sends: deducted by notification_sender._dispatch
         if self.use_inbuilt:
+            from apps.messaging.models import TenantSMSWallet
+            from apps.messaging.services.credit_billing_service import CreditBillingService
             wallet = TenantSMSWallet.objects.filter(is_active=True).first()
-            if not wallet or wallet.sms_units < Decimal('1.0000'):
-                logger.warning("SMS failed: Tenant has insufficient inbuilt SMS credits.")
-                return {'success': False, 'error': 'Insufficient SMS credits. Please top up your wallet.', 'status': 'failed'}
+            required = CreditBillingService.sms_units_for_message(message)
+            if not wallet or wallet.sms_units < required:
+                return {
+                    'success': False,
+                    'error': 'Insufficient SMS credits. Please top up your wallet.',
+                    'status': 'failed',
+                }
 
         try:
-            # Dispatch the SMS to Bytewave (or Custom Provider)
             ok, msg_id, cost = self.backend.send(phone, message)
-            
-            # --- CAPPING LOGIC: Deduct from Wallet ---
-            if ok and self.use_inbuilt and wallet:
-                # Deduct 1 unit per message (you can enhance this later to calculate multipart SMS)
-                units_used = Decimal('1.0000')
-                wallet.sms_units -= units_used
-                wallet.save(update_fields=['sms_units'])
-                
-                # Record the transaction in the ledger
-                SMSCreditLedger.objects.create(
-                    wallet=wallet,
-                    entry_type='debit',
-                    units=-units_used,
-                    notes=f"SMS sent to {phone}"
-                )
-
             return {'success': ok, 'provider_id': msg_id, 'cost': cost, 'status': 'sent' if ok else 'failed'}
-            
         except Exception as e:
             provider_name = 'INBUILT-BYTEWAVE' if self.use_inbuilt else self.config.provider
             logger.error(f"[{provider_name}] SMS send failed: {e}")

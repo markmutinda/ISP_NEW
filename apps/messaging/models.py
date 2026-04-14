@@ -14,6 +14,15 @@ class SMSTemplate(models.Model):
     usage_count = models.PositiveIntegerField(default=0)
     is_active = models.BooleanField(default=True)
     
+    # FIX 2: Default templates in Templates tab
+    is_system = models.BooleanField(
+        default=False,
+        help_text='Platform default template — still editable by tenant'
+    )
+    event_type = models.CharField(
+        max_length=50, blank=True, default='',
+        help_text='Automation event this template is linked to'
+    )
 
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -356,6 +365,14 @@ class SMSUnitTopup(models.Model):
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='pending')
     checkout_request_id = models.CharField(max_length=120, blank=True)
     notes = models.TextField(blank=True)
+    
+    # Tenant tracking: which tenant schema initiated this top-up
+    schema_name = models.SlugField(
+        max_length=63, 
+        blank=True, 
+        default='',
+        help_text='Tenant schema that initiated this topup'
+    )
 
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)

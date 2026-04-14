@@ -13,6 +13,7 @@ from .views import (
     SMSWalletView,
     SMSTopupInitiateView,
     SMSTopupCallbackView,
+    CustomerSearchView,
 )
 
 router = DefaultRouter()
@@ -48,4 +49,7 @@ urlpatterns = [
     path('wallet/', SMSWalletView.as_view(), name='sms-wallet'),
     path('topup/initiate/', SMSTopupInitiateView.as_view(), name='sms-topup-initiate'),
     path('topup/callback/', SMSTopupCallbackView.as_view(), name='sms-topup-callback'),  # public
+
+    # Customer search for SMS compose dialog
+    path('customers/search/', CustomerSearchView.as_view(), name='customer-search'),
 ]

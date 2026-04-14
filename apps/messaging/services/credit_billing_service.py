@@ -14,12 +14,24 @@ class CreditBillingService:
 
     @staticmethod
     def sms_units_for_message(text: str) -> Decimal:
-        # simple GSM rule approximation:
-        # 1 unit = up to 160 chars
+        """
+        Calculate SMS units required for a message.
+        
+        Rules:
+        - First segment: up to 160 characters
+        - Subsequent segments: up to 153 characters each
+        - Multi-part SMS: first part 160, subsequent 153 chars each
+        
+        Example:
+        - 0-160 chars -> 1 unit
+        - 161-313 chars -> 2 units (160 + 153)
+        - 314-466 chars -> 3 units (160 + 153 + 153)
+        """
         length = len(text or "")
         if length <= 160:
             return Decimal("1")
-        segments = (length + 152) // 153
+        # Multi-part SMS: first part 160, subsequent 153 chars each
+        segments = 1 + ((length - 160 + 152) // 153)
         return Decimal(str(segments))
 
     @staticmethod

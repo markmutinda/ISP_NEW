@@ -12,6 +12,7 @@ Usage:
 
 import logging
 from decimal import Decimal
+from django.core.cache import cache as _cache
 
 logger = logging.getLogger(__name__)
 
@@ -29,11 +30,23 @@ def _dispatch(phone: str, message: str) -> bool:
     try:
         from apps.messaging.services.gateway_dispatcher import GatewayDispatcher
         dispatcher = GatewayDispatcher()
+
+        # For inbuilt system, deduct units before sending (automated path)
+        if dispatcher.use_inbuilt:
+            from apps.messaging.services.credit_billing_service import CreditBillingService
+            from django.db import transaction
+            try:
+                with transaction.atomic():
+                    CreditBillingService.debit_for_sms(message_text=message)
+            except Exception as e:
+                logger.warning(f"Automated SMS skipped — insufficient credits: {e}")
+                return False
+
         result = dispatcher.send_sms(to=phone, message=message)
         if result.get("success"):
-            logger.info(f"SMS sent to {phone[:7]}***")
+            logger.info(f"SMS sent to {phone[:6]}***")
             return True
-        logger.warning(f"SMS failed to {phone[:7]}***: {result.get('error')}")
+        logger.warning(f"SMS failed to {phone[:6]}***: {result.get('error')}")
         return False
     except ValueError as e:
         # No active gateway configured
@@ -42,6 +55,18 @@ def _dispatch(phone: str, message: str) -> bool:
     except Exception as e:
         logger.error(f"SMS dispatch error: {e}", exc_info=True)
         return False
+
+
+def _send_once(dedup_key: str, phone: str, message: str, ttl: int = 600) -> bool:
+    """Send SMS exactly once within the TTL window for the given dedup_key."""
+    full_key = f"sms_once:{dedup_key}"
+    if _cache.get(full_key):
+        logger.debug(f"SMS deduped (key={full_key})")
+        return False
+    result = _dispatch(phone, message)
+    if result:
+        _cache.set(full_key, 1, ttl)
+    return result
 
 
 def _fmt_phone(phone: str) -> str:
@@ -117,7 +142,8 @@ class SMSNotifier:
             f"Your WiFi session ({session.access_code}) expires in "
             f"{mins} minute(s). Buy another plan to stay connected."
         )
-        return _dispatch(phone, msg)
+        # Dedup within 8 minutes — prevents double-send if task fires late
+        return _send_once(f"hotspot_expiry:{session.session_id}", phone, msg, ttl=480)
 
     @staticmethod
     def hotspot_session_expired(session) -> bool:
@@ -235,7 +261,8 @@ class SMSNotifier:
             f"Hi {name}, your internet subscription{plan_txt} expires in "
             f"{days_left} day(s). Please renew to avoid interruption."
         )
-        return _dispatch(phone, msg)
+        # Dedup per customer per day (86400s)
+        return _send_once(f"pppoe_expiry:{customer.id}:{days_left}", phone, msg, ttl=86400)
 
     @staticmethod
     def pppoe_suspended(customer, reason: str = "") -> bool:

@@ -241,6 +241,7 @@ app.conf.task_routes = {
     'apps.notifications.tasks.*': {'queue': 'notifications'},
     'apps.billing.tasks.*': {'queue': 'billing'},
     'apps.subscriptions.tasks.*': {'queue': 'billing'},  # Added subscription routing
+    'apps.messaging.tasks.*': {'queue': 'messaging'},    # SMS campaign tasks
     'apps.vpn.tasks.*': {'queue': 'default'},
     'apps.fup.tasks.*': {'queue': 'radius'},  # FUP tasks use radius queue
     'apps.network.tasks.*': {'queue': 'default'},  # Network tasks (router status)

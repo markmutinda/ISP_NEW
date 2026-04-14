@@ -193,3 +193,59 @@ def send_loyalty_notification_sms(self, customer_id, message_type='points_earned
     except Exception as e:
         logger.error(f"loyalty_notification_sms error: {e}")
         raise self.retry(exc=e)
+
+
+# FIX 5: Campaign bulk SMS — Celery task
+@shared_task(bind=True, max_retries=2)
+def process_campaign_sms(self, campaign_id: int, phones: list, message: str):
+    """
+    Send bulk campaign SMS and update campaign stats.
+    
+    Args:
+        campaign_id: ID of the SMSCampaign record
+        phones: List of phone numbers to send to
+        message: SMS content to send
+    """
+    from apps.messaging.models import SMSCampaign
+    from apps.messaging.services.notification_sender import _dispatch
+    from django.utils import timezone
+
+    try:
+        campaign = SMSCampaign.objects.get(id=campaign_id)
+    except SMSCampaign.DoesNotExist:
+        logger.warning(f"[CAMPAIGN] Campaign {campaign_id} not found")
+        return
+
+    sent = 0
+    failed = 0
+
+    logger.info(f"[CAMPAIGN {campaign_id}] Starting bulk send to {len(phones)} recipients")
+
+    for idx, phone in enumerate(phones):
+        try:
+            ok = _dispatch(phone, message)
+            if ok:
+                sent += 1
+            else:
+                failed += 1
+        except Exception as e:
+            logger.error(f"[CAMPAIGN {campaign_id}] Failed to send to {phone}: {e}")
+            failed += 1
+
+        # Log progress every 100 messages
+        if (idx + 1) % 100 == 0:
+            logger.info(
+                f"[CAMPAIGN {campaign_id}] Progress: {idx + 1}/{len(phones)} "
+                f"(sent={sent}, failed={failed})"
+            )
+
+    campaign.delivered_count = sent
+    campaign.failed_count = failed
+    campaign.status = 'completed'
+    campaign.completed_at = timezone.now()
+    campaign.save(update_fields=['delivered_count', 'failed_count', 'status', 'completed_at'])
+
+    logger.info(
+        f"[CAMPAIGN {campaign_id}] Completed: Sent={sent}, Failed={failed}, "
+        f"Total={len(phones)}"
+    )

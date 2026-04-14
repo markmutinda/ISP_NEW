@@ -136,6 +136,9 @@ def delete_credentials_from_radius(sender, instance, **kwargs):
 def auto_create_radius_for_service(sender, instance, created, **kwargs):
     """
     Automatically create RADIUS credentials when a service connection is created.
+    
+    NOTE: Welcome SMS (pppoe_welcome) is sent from service_views.activate,
+    NOT from this signal, to avoid duplicate SMS.
     """
     # 🛑 RECURSION GUARD for ServiceConnection as well
     if getattr(instance, '_is_processing_radius', False):
@@ -184,12 +187,7 @@ def auto_create_radius_for_service(sender, instance, created, **kwargs):
                 needs_save = True
                 logger.info(f"Re-enabled RADIUS for customer: {customer.customer_code}")
                 
-                # ── SMS: service resumed (after renewal) ──
-                try:
-                    from apps.messaging.services.notification_sender import SMSNotifier
-                    SMSNotifier.pppoe_resumed(customer)
-                except Exception as e:
-                    logger.warning(f"Renewal/resume SMS failed: {e}")
+                # NOTE: pppoe_resumed SMS is sent from service_views.activate, not here
                 
             elif instance.status in ['SUSPENDED', 'TERMINATED'] and credentials.is_enabled:
                 credentials.is_enabled = False
@@ -212,12 +210,7 @@ def auto_create_radius_for_service(sender, instance, created, **kwargs):
                     needs_save = True
                     logger.info(f"Updated bandwidth profile for: {credentials.username}")
                     
-                    # ── SMS: plan changed ──
-                    try:
-                        from apps.messaging.services.notification_sender import SMSNotifier
-                        SMSNotifier.pppoe_plan_changed(customer, old_plan=None, new_plan=instance.plan)
-                    except Exception as e:
-                        logger.warning(f"Plan change SMS failed: {e}")
+                    # NOTE: pppoe_plan_changed SMS is sent from service_views.activate, not here
             
             # 🎯 Handle ROUTER / IP POOL / ASSIGNED IP update from service creation form
             radius_router_id = getattr(instance, '_radius_router_id', None)
@@ -364,17 +357,8 @@ def auto_create_radius_for_service(sender, instance, created, **kwargs):
                      f"{f', ip_pool={radius_ip_pool}' if radius_ip_pool else ''}"
                      f"{f', assigned_ip={assigned_ip_obj.ip_address}' if assigned_ip_obj else ''}")
         
-        # ── SMS: new subscription / welcome (when service is ACTIVE) ──
-        if instance.status == 'ACTIVE':
-            try:
-                from apps.messaging.services.notification_sender import SMSNotifier
-                SMSNotifier.pppoe_welcome(
-                    customer=customer,
-                    username=username,
-                    password=password,
-                )
-            except Exception as e:
-                logger.warning(f"PPPoE welcome SMS failed: {e}")
+        # NOTE: Welcome SMS (pppoe_welcome) is sent from service_views.activate,
+        # NOT from this signal, to avoid duplicate SMS.
         
     except Exception as e:
         logger.error(f"Failed to auto-create RADIUS for service {instance.id}: {e}")
@@ -489,13 +473,8 @@ def sync_customer_status_to_radius(sender, instance, **kwargs):
                 credentials.save()
                 logger.info(f"Enabled RADIUS for active customer: {instance.customer_code}")
                 
-                # ── SMS: service resumed ──
-                try:
-                    from apps.messaging.services.notification_sender import SMSNotifier
-                    SMSNotifier.pppoe_resumed(instance)
-                except Exception as e:
-                    logger.warning(f"Resume SMS failed: {e}")
-                    
+                # NOTE: pppoe_resumed SMS is sent from service_views.activate, not here
+                
     except Exception as e:
         logger.error(f"Failed to sync customer status to RADIUS: {e}")
     finally:
@@ -620,12 +599,7 @@ def handle_invoice_status_radius(sender, instance, **kwargs):
                 credentials.save()
                 logger.info(f"Restored RADIUS after payment: {instance.id}")
                 
-                # ── SMS: service resumed after payment ──
-                try:
-                    from apps.messaging.services.notification_sender import SMSNotifier
-                    SMSNotifier.pppoe_resumed(customer)
-                except Exception as e:
-                    logger.warning(f"Resume after payment SMS failed: {e}")
+                # NOTE: pppoe_resumed SMS is sent from service_views.activate, not here
                 
     except Exception as e:
         logger.error(f"Failed to handle invoice status for RADIUS: {e}")

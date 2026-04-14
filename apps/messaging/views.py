@@ -3,7 +3,7 @@ from decimal import Decimal
 from rest_framework import viewsets, status
 from rest_framework.decorators import action
 from rest_framework.response import Response
-from rest_framework.permissions import IsAuthenticated, IsAdminUser
+from rest_framework.permissions import IsAuthenticated
 from rest_framework.views import APIView
 from django.db import transaction
 from django.db.models import Count, Sum, Q
@@ -12,6 +12,9 @@ from datetime import timedelta
 from rest_framework import serializers
 from django_filters.rest_framework import DjangoFilterBackend
 from rest_framework import filters
+import logging
+
+logger = logging.getLogger(__name__)
 
 from .models import SMSMessage, SMSTemplate, SMSCampaign, SMSGatewayConfig
 from .serializers import (
@@ -30,6 +33,9 @@ from .serializers import (
 from .services.gateway_dispatcher import GatewayDispatcher, PROVIDER_FIELDS
 from .services.credit_billing_service import CreditBillingService
 
+# Import custom permission
+from apps.core.permissions import IsAdminOrStaff
+
 
 class SMSMessageViewSet(viewsets.ModelViewSet):
     """
@@ -38,7 +44,7 @@ class SMSMessageViewSet(viewsets.ModelViewSet):
     """
     queryset = SMSMessage.objects.select_related('template', 'campaign', 'customer').order_by('-created_at')
     serializer_class = SMSMessageSerializer
-    permission_classes = [IsAuthenticated, IsAdminUser]
+    permission_classes = [IsAuthenticated, IsAdminOrStaff]
     filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
     filterset_fields = ['status', 'type', 'provider', 'campaign__id']
     search_fields = ['recipient', 'message', 'recipient_name', 'error_message']
@@ -243,7 +249,7 @@ class SMSMessageViewSet(viewsets.ModelViewSet):
 class SMSTemplateViewSet(viewsets.ModelViewSet):
     queryset = SMSTemplate.objects.order_by('-created_at')
     serializer_class = SMSTemplateSerializer
-    permission_classes = [IsAuthenticated, IsAdminUser]
+    permission_classes = [IsAuthenticated, IsAdminOrStaff]
     filter_backends = [filters.SearchFilter]
     search_fields = ['name', 'content']
 
@@ -252,11 +258,19 @@ class SMSTemplateViewSet(viewsets.ModelViewSet):
             return SMSTemplateCreateUpdateSerializer
         return SMSTemplateSerializer
 
+    def list(self, request, *args, **kwargs):
+        """Auto-seed default templates on first view."""
+        # Auto-seed on first view
+        if not SMSTemplate.objects.filter(is_system=True).exists():
+            from apps.messaging.template_defaults import seed_default_templates
+            seed_default_templates()
+        return super().list(request, *args, **kwargs)
+
 
 class SMSCampaignViewSet(viewsets.ModelViewSet):
     queryset = SMSCampaign.objects.order_by('-created_at')
     serializer_class = SMSCampaignSerializer
-    permission_classes = [IsAuthenticated, IsAdminUser]
+    permission_classes = [IsAuthenticated, IsAdminOrStaff]
     filter_backends = [DjangoFilterBackend, filters.SearchFilter]
     filterset_fields = ['status']
     search_fields = ['name']
@@ -310,6 +324,63 @@ class SMSCampaignViewSet(viewsets.ModelViewSet):
             "status": campaign.status
         }, status=status.HTTP_200_OK)
 
+    # FIX 5: Campaign bulk SMS — send to group
+    @action(detail=False, methods=['post'], url_path='send-to-group')
+    def send_to_group(self, request):
+        """
+        Send a bulk SMS to all customers of a given type.
+        Body: { "name": "May Promo", "message": "...", "group": "pppoe|hotspot|all" }
+        """
+        group = request.data.get('group', 'all')
+        message = (request.data.get('message') or '').strip()
+        name = request.data.get('name') or f'Bulk {group} — {timezone.now().strftime("%d %b %Y")}'
+
+        if not message:
+            return Response({'error': 'message is required'}, status=status.HTTP_400_BAD_REQUEST)
+        if group not in ('pppoe', 'hotspot', 'all'):
+            return Response({'error': 'group must be pppoe, hotspot, or all'}, status=status.HTTP_400_BAD_REQUEST)
+
+        phones = set()
+
+        if group in ('pppoe', 'all'):
+            from apps.customers.models import Customer
+            for phone in Customer.objects.filter(
+                status='ACTIVE'
+            ).values_list('user__phone_number', flat=True):
+                if phone:
+                    phones.add(phone)
+
+        if group in ('hotspot', 'all'):
+            from apps.billing.models.hotspot_models import HotspotClient
+            for phone in HotspotClient.objects.filter(
+                canonical_phone__isnull=False
+            ).exclude(
+                canonical_phone__startswith='MAC-'
+            ).values_list('canonical_phone', flat=True):
+                if phone:
+                    phones.add(phone)
+
+        phones = list(phones)
+        campaign = SMSCampaign.objects.create(
+            name=name,
+            message=message,
+            recipient_count=len(phones),
+            recipient_filter={'group': group},
+            status='running',
+            started_at=timezone.now(),
+        )
+
+        from apps.messaging.tasks import process_campaign_sms
+        process_campaign_sms.delay(campaign.id, phones, message)
+
+        return Response({
+            'campaign_id': campaign.id,
+            'name': name,
+            'group': group,
+            'recipient_count': len(phones),
+            'message': 'Campaign is being sent in the background.',
+        }, status=status.HTTP_202_ACCEPTED)
+
 
 # ────────────────────────────────────────────────
 # Stats & Balance – using APIView (no .as_view(actions) needed)
@@ -319,7 +390,7 @@ class SMSStatsView(APIView):
     """
     GET /api/v1/messaging/sms/stats/
     """
-    permission_classes = [IsAuthenticated, IsAdminUser]
+    permission_classes = [IsAuthenticated, IsAdminOrStaff]
 
     def get(self, request):
         today = timezone.now().replace(hour=0, minute=0, second=0, microsecond=0)
@@ -360,7 +431,7 @@ class SMSBalanceView(APIView):
     GET /api/v1/messaging/sms/balance/
     Uses the active gateway's provider SDK to fetch real balance.
     """
-    permission_classes = [IsAuthenticated, IsAdminUser]
+    permission_classes = [IsAuthenticated, IsAdminOrStaff]
 
     def get(self, request):
         try:
@@ -389,7 +460,7 @@ class SMSGatewayConfigViewSet(viewsets.ModelViewSet):
     CRUD for per-tenant SMS gateway configuration.
     """
     queryset = SMSGatewayConfig.objects.order_by('-is_active', '-updated_at')
-    permission_classes = [IsAuthenticated, IsAdminUser]
+    permission_classes = [IsAuthenticated, IsAdminOrStaff]
 
     def get_serializer_class(self):
         if self.action in ('create', 'update', 'partial_update'):
@@ -403,6 +474,11 @@ class SMSGatewayConfigViewSet(viewsets.ModelViewSet):
         SMSGatewayConfig.objects.exclude(pk=config.pk).update(is_active=False)
         config.is_active = True
         config.save(update_fields=['is_active'])
+        
+        # Seed templates if first time
+        from apps.messaging.template_defaults import seed_default_templates
+        seed_default_templates()
+        
         return Response(SMSGatewayConfigSerializer(config).data)
 
     @action(detail=True, methods=['post'], url_path='test')
@@ -450,7 +526,7 @@ class SMSNotificationSettingsView(APIView):
     GET  /api/v1/messaging/notification-settings/
     PATCH /api/v1/messaging/notification-settings/
     """
-    permission_classes = [IsAuthenticated, IsAdminUser]
+    permission_classes = [IsAuthenticated, IsAdminOrStaff]
 
     def get(self, request):
         settings_obj = SMSNotificationSettings.get_settings()
@@ -501,7 +577,7 @@ class SMSWalletView(APIView):
     GET /api/v1/messaging/wallet/
     Returns current balance + last 20 topup records.
     """
-    permission_classes = [IsAuthenticated, IsAdminUser]
+    permission_classes = [IsAuthenticated, IsAdminOrStaff]
 
     def get(self, request):
         wallet = TenantSMSWallet.objects.filter(is_active=True).first()
@@ -517,42 +593,86 @@ class SMSWalletView(APIView):
 class SMSTopupInitiateView(APIView):
     """
     POST /api/v1/messaging/topup/initiate/
-    Body: { "units": 1000, "phone_number": "254712345678" }
+    Body: { "units": 1000, "phone_number": "254712345678" } 
+           OR { "amount_kes": 100, "phone_number": "254712345678" }
 
-    Calculates cost, creates a pending topup record, initiates STK push.
+    Calculates cost using tiered pricing, creates a pending topup record, initiates STK push.
     """
-    permission_classes = [IsAuthenticated, IsAdminUser]
+    permission_classes = [IsAuthenticated, IsAdminOrStaff]
 
-    # FIX 3: Flat pricing at KES 0.40 per unit
-    UNIT_PRICE = _Decimal('0.40')
+    # FIX 7: Tiered pricing
+    TIERS = [
+        (1000, Decimal('0.30')),   # 1000+ units
+        (500,  Decimal('0.35')),   # 500–999 units
+        (25,   Decimal('0.40')),   # 25–499 units
+    ]
+    MIN_AMOUNT_KES = Decimal('10')
 
-    def _price_for(self, units: int) -> _Decimal:
-        return self.UNIT_PRICE
+    def _price_for(self, units: int) -> Decimal:
+        """Get price per unit based on tiered pricing."""
+        for threshold, price in self.TIERS:
+            if units >= threshold:
+                return price
+        return Decimal('0.40')
 
     def post(self, request):
-        units = int(request.data.get('units', 0))
-        phone = request.data.get('phone_number', '')
+        phone = request.data.get('phone_number', '').strip()
 
-        # FIX 4: Minimum top-up is 25 units (KES 10)
-        if units < 25:
+        # Support both units-based and amount-based topup
+        units = request.data.get('units')
+        amount_kes = request.data.get('amount_kes')
+
+        if amount_kes:
+            # Calculate units from KES amount (use 0.40 base rate for custom amounts)
+            try:
+                amount_kes = Decimal(str(amount_kes)).quantize(Decimal('0.01'))
+            except Exception:
+                return Response({'error': 'Invalid amount_kes'}, status=status.HTTP_400_BAD_REQUEST)
+            
+            if amount_kes < self.MIN_AMOUNT_KES:
+                return Response(
+                    {'error': f'Minimum amount is KES {self.MIN_AMOUNT_KES}'},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+            # Calculate units at 0.40/unit (base rate) for custom amount
+            units = int(amount_kes / Decimal('0.40'))
+            if units < 25:
+                units = 25
+            price_per_unit = self._price_for(units)
+            total_amount = (price_per_unit * units).quantize(Decimal('0.01'))
+        elif units:
+            try:
+                units = int(units)
+            except (ValueError, TypeError):
+                return Response({'error': 'Invalid units'}, status=status.HTTP_400_BAD_REQUEST)
+            
+            if units < 25:
+                return Response(
+                    {'error': 'Minimum top-up is 25 units (KES 10)'},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+            price_per_unit = self._price_for(units)
+            total_amount = (price_per_unit * units).quantize(Decimal('0.01'))
+        else:
             return Response(
-                {'error': 'Minimum top-up is 25 units (KES 10)'},
-                status=status.HTTP_400_BAD_REQUEST,
+                {'error': 'Provide either units or amount_kes'},
+                status=status.HTTP_400_BAD_REQUEST
             )
+
         if not phone:
             return Response(
                 {'error': 'phone_number is required'},
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        price_per_unit = self._price_for(units)
-        total_amount = (price_per_unit * units).quantize(_Decimal('0.01'))
-
+        # FIX 6: Save schema_name and register in callback map
+        from django.db import connection as _conn
         topup = SMSUnitTopup.objects.create(
             units_purchased=units,
             amount_paid=total_amount,
             payment_method='mpesa_stk',
             status='pending',
+            schema_name=_conn.schema_name,  # ← ADD THIS
         )
 
         # ─────────────────────────────────────────────────────────────────────
@@ -563,7 +683,6 @@ class SMSTopupInitiateView(APIView):
         try:
             from django.conf import settings as _settings
             from apps.billing.services.tuma_service import TumaClient
-            import time
 
             # Instantiate the Tuma client
             client = TumaClient()
@@ -597,10 +716,28 @@ class SMSTopupInitiateView(APIView):
                 topup.checkout_request_id = d.get('checkout_request_id', '')
                 topup.payment_reference = d.get('merchant_request_id', '')
                 topup.save()
+                
+                # Register for fast callback lookup
+                try:
+                    from apps.core.models import TumaCallbackMap
+                    from django_tenants.utils import schema_context, get_public_schema_name
+                    with schema_context(get_public_schema_name()):
+                        TumaCallbackMap.objects.update_or_create(
+                            checkout_request_id=topup.checkout_request_id,
+                            defaults={
+                                'merchant_request_id': topup.payment_reference,
+                                'schema_name': _conn.schema_name,
+                                'payment_reference': f'SMS-TOPUP-{topup.id}',
+                            }
+                        )
+                except Exception as e:
+                    logger.warning(f"TumaCallbackMap registration failed for SMS topup: {e}")
+                
                 return Response({
                     'topup_id': topup.id,
                     'units': units,
                     'amount': str(total_amount),
+                    'price_per_unit': str(price_per_unit),
                     'checkout_request_id': topup.checkout_request_id,
                     'message': 'STK push sent. Enter your M-Pesa PIN to complete.',
                 }, status=status.HTTP_202_ACCEPTED)
@@ -632,38 +769,161 @@ class SMSTopupCallbackView(APIView):
         checkout_id = data.get('checkout_request_id', '')
         result_code = str(data.get('result_code', ''))
 
-        topup = SMSUnitTopup.objects.filter(checkout_request_id=checkout_id).first()
-        if not topup:
+        if not checkout_id:
             return Response({'ok': True})
 
-        if result_code == '0':
-            topup.status = 'completed'
-            topup.save()
+        # FIX 6: Resolve tenant schema from the public callback map
+        target_schema = None
+        try:
+            from apps.core.models import TumaCallbackMap
+            from django_tenants.utils import schema_context, get_public_schema_name
+            with schema_context(get_public_schema_name()):
+                mapping = TumaCallbackMap.objects.filter(
+                    checkout_request_id=checkout_id,
+                    payment_reference__startswith='SMS-TOPUP-'
+                ).first()
+                if mapping:
+                    target_schema = mapping.schema_name
+        except Exception as e:
+            logger.warning(f"SMSTopup callback: TumaCallbackMap lookup failed: {e}")
 
-            # Credit the wallet
-            wallet, _ = TenantSMSWallet.objects.get_or_create(
-                pk=1,
-                defaults={'sms_units': _Decimal('0'), 'sell_price_per_unit': _Decimal('0.60')},
-            )
-            from django.db import transaction as _tx
-            with _tx.atomic():
-                w = TenantSMSWallet.objects.select_for_update().get(pk=wallet.pk)
-                w.sms_units += _Decimal(str(topup.units_purchased))
-                w.save(update_fields=['sms_units', 'updated_at'])
+        # Fallback: scan tenant schemas (for topups before this fix was deployed)
+        if not target_schema:
+            try:
+                from apps.core.models import Tenant
+                from django_tenants.utils import schema_context, get_public_schema_name
+                with schema_context(get_public_schema_name()):
+                    schemas = list(Tenant.objects.filter(
+                        is_active=True
+                    ).exclude(schema_name='public').values_list('schema_name', flat=True))
+                for s in schemas:
+                    with schema_context(s):
+                        exists = SMSUnitTopup.objects.filter(
+                            checkout_request_id=checkout_id
+                        ).exists()
+                        if exists:
+                            target_schema = s
+                            break
+            except Exception as e:
+                logger.error(f"SMSTopup schema scan failed: {e}")
 
-            from .models import SMSCreditLedger
-            SMSCreditLedger.objects.create(
-                wallet=wallet,
-                entry_type='topup',
-                units=_Decimal(str(topup.units_purchased)),
-                unit_price=wallet.sell_price_per_unit,
-                amount=topup.amount_paid,
-                reference=topup.payment_reference,
-                notes=f'Top-up #{topup.id}',
-            )
-        else:
-            topup.status = 'failed'
-            topup.notes = data.get('result_desc', 'Payment failed')
-            topup.save()
+        if not target_schema:
+            logger.warning(f"SMSTopup callback: no schema found for checkout {checkout_id}")
+            return Response({'ok': True})
+
+        # Process the topup in the correct tenant schema
+        from django_tenants.utils import schema_context
+        with schema_context(target_schema):
+            topup = SMSUnitTopup.objects.filter(checkout_request_id=checkout_id).first()
+            if not topup or topup.status == 'completed':
+                return Response({'ok': True})  # idempotent
+
+            if result_code == '0':
+                topup.status = 'completed'
+                topup.save()
+
+                # Credit wallet in the correct tenant schema
+                from django.db import transaction as _tx
+                with _tx.atomic():
+                    wallet, _ = TenantSMSWallet.objects.get_or_create(
+                        is_active=True,
+                        defaults={
+                            'sms_units': Decimal('0'),
+                            'sell_price_per_unit': Decimal('0.40'),
+                        },
+                    )
+                    w = TenantSMSWallet.objects.select_for_update().get(pk=wallet.pk)
+                    w.sms_units += Decimal(str(topup.units_purchased))
+                    w.save(update_fields=['sms_units', 'updated_at'])
+
+                from .models import SMSCreditLedger
+                SMSCreditLedger.objects.create(
+                    wallet=wallet,
+                    entry_type='topup',
+                    units=Decimal(str(topup.units_purchased)),
+                    unit_price=wallet.sell_price_per_unit,
+                    amount=topup.amount_paid,
+                    reference=topup.payment_reference,
+                    notes=f'Top-up #{topup.id} ({topup.units_purchased} units)',
+                )
+                logger.info(f"Credited {topup.units_purchased} SMS units to {target_schema}")
+            else:
+                topup.status = 'failed'
+                topup.notes = data.get('result_desc', 'Payment failed')
+                topup.save()
 
         return Response({'ok': True})
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# FIX 4: Customer Search Endpoint
+# ─────────────────────────────────────────────────────────────────────────────
+
+class CustomerSearchView(APIView):
+    """
+    GET /api/v1/messaging/customers/search/?q=john&type=pppoe&limit=20
+    
+    Search customers for the SMS compose dialog.
+    type: pppoe | hotspot | all
+    """
+    permission_classes = [IsAuthenticated, IsAdminOrStaff]
+
+    def get(self, request):
+        q = request.query_params.get('q', '').strip()
+        ctype = request.query_params.get('type', 'all')
+        limit = min(int(request.query_params.get('limit', 20)), 100)
+
+        results = []
+
+        if ctype in ('pppoe', 'all'):
+            from apps.customers.models import Customer
+            from django.db.models import Q
+            qs = Customer.objects.filter(status='ACTIVE').select_related('user')
+            if q:
+                qs = qs.filter(
+                    Q(user__first_name__icontains=q)
+                    | Q(user__last_name__icontains=q)
+                    | Q(user__phone_number__icontains=q)
+                    | Q(customer_code__icontains=q)
+                )
+            for c in qs[:limit]:
+                phone = getattr(c.user, 'phone_number', '') or ''
+                if phone:
+                    results.append({
+                        'id': str(c.id),
+                        'name': c.full_name,
+                        'phone': phone,
+                        'code': c.customer_code,
+                        'type': 'pppoe',
+                    })
+
+        if ctype in ('hotspot', 'all'):
+            from apps.billing.models.hotspot_models import HotspotClient
+            from django.db.models import Q
+            qs = HotspotClient.objects.filter(
+                canonical_phone__isnull=False
+            ).exclude(canonical_phone__startswith='MAC-')
+            if q:
+                qs = qs.filter(
+                    Q(canonical_phone__icontains=q)
+                    | Q(canonical_username__icontains=q)
+                    | Q(email__icontains=q)
+                )
+            for hc in qs[:limit]:
+                results.append({
+                    'id': str(hc.id),
+                    'name': hc.canonical_username or hc.canonical_phone,
+                    'phone': hc.canonical_phone,
+                    'code': hc.canonical_username,
+                    'type': 'hotspot',
+                })
+
+        # Deduplicate by phone
+        seen = set()
+        unique = []
+        for r in results:
+            if r['phone'] not in seen:
+                seen.add(r['phone'])
+                unique.append(r)
+
+        return Response({'results': unique[:limit], 'count': len(unique)})
