@@ -36,9 +36,6 @@ from .services.credit_billing_service import CreditBillingService
 # Import custom permission
 from apps.core.permissions import IsAdminOrStaff
 
-# FIX 1: Add ProgrammingError import for handling missing tables
-from django.db.utils import ProgrammingError
-
 
 class SMSMessageViewSet(viewsets.ModelViewSet):
     """
@@ -830,28 +827,18 @@ class SMSTopupCallbackView(APIView):
             except Exception as e:
                 logger.error(f"SMSTopup schema scan failed: {e}")
 
-        # FIX 1: Add ProgrammingError guard and schema validation
-        if not target_schema or target_schema == 'public':
-            logger.warning(f"SMSTopup: invalid schema '{target_schema}' for checkout {checkout_id}")
+        if not target_schema:
+            logger.warning(f"SMSTopup callback: no schema found for checkout {checkout_id}")
             return Response({'ok': True})
 
         # Process the topup in the correct tenant schema
         from django_tenants.utils import schema_context
         with schema_context(target_schema):
-            try:
-                topup = SMSUnitTopup.objects.filter(checkout_request_id=checkout_id).first()
-            except ProgrammingError:
-                logger.error(
-                    f"messaging_smsunittopup missing in schema={target_schema}. "
-                    f"Run: python manage.py migrate_schemas --schema={target_schema}",
-                    exc_info=True,
-                )
-                return Response({'ok': True, 'warning': 'schema_not_migrated'})
-
+            topup = SMSUnitTopup.objects.filter(checkout_request_id=checkout_id).first()
             if not topup or topup.status == 'completed':
-                return Response({'ok': True})
+                return Response({'ok': True})  # idempotent
 
-            if str(result_code) == '0':
+            if result_code == '0':
                 topup.status = 'completed'
                 topup.save()
 
@@ -959,5 +946,5 @@ class CustomerSearchView(APIView):
                 seen.add(r['phone'])
                 unique.append(r)
 
-        return Response({'results': unique[:limit], 'count': len(unique)})})
+        return Response({'results': unique[:limit], 'count': len(unique)})
     

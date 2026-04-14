@@ -138,19 +138,9 @@ class TumaWebhookView(APIView):
         target_schema = mapping.schema_name
         co_id = mapping.checkout_request_id
 
-        # FIX 3: Add ProgrammingError guard for missing messaging_smsunittopup table
         try:
             with schema_context(target_schema):
-                try:
-                    topup = SMSUnitTopup.objects.filter(checkout_request_id=co_id).first()
-                except ProgrammingError:
-                    logger.error(
-                        f"messaging_smsunittopup missing in schema={target_schema}. "
-                        f"Run: python manage.py migrate_schemas --schema={target_schema}",
-                        exc_info=True,
-                    )
-                    return None
-
+                topup = SMSUnitTopup.objects.filter(checkout_request_id=co_id).first()
                 if not topup or topup.status == 'completed':
                     return JsonResponse({'success': True, 'message': 'Already processed'}, status=200)
 
