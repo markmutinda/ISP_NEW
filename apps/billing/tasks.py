@@ -6,6 +6,8 @@ Periodic tasks for:
 - Expiring stale pending payments
 - Sending billing reminder emails to customers
 - Sending payment confirmation emails
+- Sending hotspot expiry warnings
+- Notifying expired hotspot sessions
 
 NOTE: billing models live in TENANT_APPS, so every query must
 run inside the correct tenant schema.  We iterate over all tenants
@@ -83,7 +85,7 @@ def expire_stale_pending_payments():
     def _expire(tenant):
         from apps.billing.models.hotspot_models import HotspotSession
 
-        cutoff = timezone.now() - timezone.timedelta(minutes=10)
+        cutoff = timezone.now() - timedelta(minutes=10)
         stale_sessions = HotspotSession.objects.filter(
             status='pending',
             created_at__lt=cutoff
@@ -99,6 +101,86 @@ def expire_stale_pending_payments():
         return _for_each_tenant(_expire)
     except Exception as e:
         logger.error(f"Stale payment cleanup task failed: {e}", exc_info=True)
+        return {'error': str(e)}
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# HOTSPOT EXPIRY WARNINGS (SMS)
+# ═══════════════════════════════════════════════════════════════════════════
+
+@shared_task(name='apps.billing.tasks.send_hotspot_expiry_warnings')
+def send_hotspot_expiry_warnings():
+    """
+    Send expiry warning SMS to hotspot users whose sessions are about
+    to expire (based on SMSNotificationSettings.hotspot_expiry_minutes_before).
+    Runs every 5 minutes via Celery Beat.
+    """
+    def _warn(tenant):
+        from apps.billing.models.hotspot_models import HotspotSession
+        from apps.messaging.models import SMSNotificationSettings
+        from apps.messaging.services.notification_sender import SMSNotifier
+        
+        s = SMSNotificationSettings.get_settings()
+        if not s.hotspot_session_expiry:
+            return {'warned': 0}
+
+        mins = s.hotspot_expiry_minutes_before
+        now = timezone.now()
+        warn_at = now + timedelta(minutes=mins)
+        # Only warn sessions expiring in the next window (avoid repeat warnings)
+        lower = now + timedelta(minutes=mins - 2)
+
+        sessions = HotspotSession.objects.filter(
+            status='active',
+            expires_at__gte=lower,
+            expires_at__lte=warn_at,
+        )
+        count = 0
+        for session in sessions:
+            try:
+                SMSNotifier.hotspot_expiry_warning(session)
+                count += 1
+            except Exception as e:
+                logger.warning(f"Expiry warning SMS failed for {session.session_id}: {e}")
+        return {'warned': count}
+
+    try:
+        return _for_each_tenant(_warn)
+    except Exception as e:
+        logger.error(f"Hotspot expiry warning task failed: {e}", exc_info=True)
+        return {'error': str(e)}
+
+
+@shared_task(name='apps.billing.tasks.notify_expired_hotspot_sessions')
+def notify_expired_hotspot_sessions():
+    """
+    Send 'session expired' SMS after marking sessions expired.
+    Runs every 5 minutes (chained with cleanup task).
+    """
+    def _notify(tenant):
+        from apps.billing.models.hotspot_models import HotspotSession
+        from apps.messaging.services.notification_sender import SMSNotifier
+
+        # Find sessions that just expired (within last 10 min) and haven't been notified
+        now = timezone.now()
+        recently_expired = HotspotSession.objects.filter(
+            status='expired',
+            expires_at__gte=now - timedelta(minutes=10),
+            expires_at__lte=now,
+        )
+        count = 0
+        for session in recently_expired:
+            try:
+                SMSNotifier.hotspot_session_expired(session)
+                count += 1
+            except Exception as e:
+                logger.warning(f"Expired SMS failed for {session.session_id}: {e}")
+        return {'notified': count}
+
+    try:
+        return _for_each_tenant(_notify)
+    except Exception as e:
+        logger.error(f"Notify expired sessions task failed: {e}", exc_info=True)
         return {'error': str(e)}
 
 

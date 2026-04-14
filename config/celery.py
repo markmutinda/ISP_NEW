@@ -119,6 +119,29 @@ app.conf.beat_schedule = {
     },
 
     # ════════════════════════════════════════════════════════════════
+    # HOTSPOT SMS NOTIFICATIONS (Expiry warnings & expired alerts)
+    # ════════════════════════════════════════════════════════════════
+    'hotspot-expiry-warnings-every-5-min': {
+        'task': 'apps.billing.tasks.send_hotspot_expiry_warnings',
+        'schedule': crontab(minute='*/5'),
+        'options': {'queue': 'billing'},
+    },
+    'notify-expired-hotspot-every-5-min': {
+        'task': 'apps.billing.tasks.notify_expired_hotspot_sessions',
+        'schedule': crontab(minute='*/5'),
+        'options': {'queue': 'billing'},
+    },
+
+    # ════════════════════════════════════════════════════════════════
+    # PPPOE SMS NOTIFICATIONS (Expiry reminders - daily at 9am)
+    # ════════════════════════════════════════════════════════════════
+    'pppoe-expiry-reminders-daily': {
+        'task': 'apps.radius.tasks.send_pppoe_expiry_reminders',
+        'schedule': crontab(hour=9, minute=0),
+        'options': {'queue': 'radius'},
+    },
+
+    # ════════════════════════════════════════════════════════════════
     # CLOUD CONTROLLER — VPN Tunnel Monitoring
     # ════════════════════════════════════════════════════════════════
     'monitor-vpn-tunnels-every-2-min': {

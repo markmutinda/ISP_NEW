@@ -662,3 +662,64 @@ def notify_expiring_soon(hours_before: int = 24):
     
     logger.info(f"[EXPIRY NOTICE] Complete: {stats}")
     return stats
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# PPPOE EXPIRY REMINDERS (SMS)
+# ════════════════════════════════════════════════════════════════════════════
+
+@shared_task(name='apps.radius.tasks.send_pppoe_expiry_reminders')
+def send_pppoe_expiry_reminders():
+    """
+    Send SMS reminders to PPPoE customers whose subscriptions are expiring soon.
+    Reads SMSNotificationSettings.pppoe_expiry_days_before for the threshold.
+    """
+    TenantModel = get_tenant_model()
+    
+    for tenant in TenantModel.objects.exclude(schema_name='public'):
+        try:
+            with schema_context(tenant.schema_name):
+                from apps.messaging.models import SMSNotificationSettings
+                from apps.messaging.services.notification_sender import SMSNotifier
+                from apps.radius.models import CustomerRadiusCredentials
+                
+                s = SMSNotificationSettings.get_settings()
+                if not s.pppoe_expiry_reminder:
+                    continue
+                
+                days = s.pppoe_expiry_days_before
+                now = timezone.now()
+                threshold = now + timedelta(days=days)
+                lower = now + timedelta(days=days - 1)  # 1-day window to avoid repeat
+
+                expiring = CustomerRadiusCredentials.objects.filter(
+                    is_enabled=True,
+                    expiration_date__gte=lower,
+                    expiration_date__lte=threshold,
+                ).select_related('customer__user', 'bandwidth_profile')
+
+                for cred in expiring:
+                    try:
+                        customer = cred.customer
+                        days_left = max(
+                            1,
+                            int((cred.expiration_date - now).total_seconds() / 86400)
+                        )
+                        plan_name = (
+                            cred.bandwidth_profile.name
+                            if cred.bandwidth_profile else ""
+                        )
+                        SMSNotifier.pppoe_expiry_reminder(
+                            customer=customer,
+                            days_left=days_left,
+                            plan_name=plan_name,
+                        )
+                    except Exception as e:
+                        logger.warning(
+                            f"PPPoE expiry reminder failed for "
+                            f"{getattr(cred, 'username', '?')}: {e}"
+                        )
+        except Exception as e:
+            logger.error(f"PPPoE expiry reminders error in {tenant.schema_name}: {e}")
+    
+    return {'status': 'done'}

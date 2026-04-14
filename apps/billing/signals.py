@@ -5,6 +5,9 @@ from .models.billing_models import Invoice, InvoiceItem
 from .models.payment_models import Payment
 from .models.voucher_models import Voucher
 from .integrations.africastalking import SMSService
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 @receiver(pre_save, sender=Invoice)
@@ -36,9 +39,10 @@ def handle_payment_completion(sender, instance, created, **kwargs):
         # Update customer balance
         customer = instance.customer
         if customer:
+            from decimal import Decimal
             customer.outstanding_balance = max(
-                0,
-                customer.outstanding_balance - instance.amount
+                Decimal('0'),
+                (customer.outstanding_balance or Decimal('0')) - instance.amount
             )
             customer.save(update_fields=['outstanding_balance', 'updated_at'])
         
@@ -55,19 +59,19 @@ def handle_payment_completion(sender, instance, created, **kwargs):
             
             invoice.save()
 
-        # Auto SMS: payment confirmation
+        # ── SMS: payment confirmation (uses SMSNotifier with internal toggle checks) ──
         if customer:
             try:
-                from apps.messaging.tasks import send_payment_confirmation_sms
-                send_payment_confirmation_sms.delay(
-                    customer_id=customer.id,
+                from apps.messaging.services.notification_sender import SMSNotifier
+                SMSNotifier.pppoe_payment(
+                    customer=customer,
                     amount=float(instance.amount),
-                    reference=instance.reference or '',
+                    reference=instance.payment_reference or instance.mpesa_receipt or '',
                 )
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning(f"Payment confirmation SMS failed: {e}")
 
-        # Auto Email: payment confirmation
+        # Email confirmation (async)
         if customer:
             try:
                 from django.db import connection
@@ -75,25 +79,30 @@ def handle_payment_completion(sender, instance, created, **kwargs):
                 send_payment_confirmation_email.delay(
                     customer_id=customer.id,
                     amount=float(instance.amount),
-                    reference=instance.reference or '',
-                    payment_method=getattr(instance, 'payment_method', '') or '',
+                    reference=instance.payment_reference or '',
+                    payment_method=str(instance.payment_method) if instance.payment_method else '',
                     tenant_schema=connection.schema_name,
                 )
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning(f"Payment email task failed: {e}")
 
 
 @receiver(post_save, sender=Voucher)
 def handle_voucher_sale(sender, instance, created, **kwargs):
     """Handle actions when voucher is sold"""
     if instance.sold_to and instance.sold_at:
-        # Send voucher PIN via SMS
+        # Send voucher PIN via SMS using SMSNotifier
         try:
-            sms_service = SMSService(instance.batch.company)
-            sms_service.send_voucher_pin(instance.sold_to, instance)
+            from apps.messaging.services.notification_sender import SMSNotifier
+            # Check if the voucher is for hotspot or PPPoE
+            if hasattr(instance, 'batch') and instance.batch and instance.batch.hotspot_plan:
+                # Hotspot voucher
+                SMSNotifier.hotspot_voucher_sold(instance)
+            else:
+                # Generic voucher
+                SMSNotifier.voucher_sold(instance)
         except Exception as e:
-            # Log error but don't raise
-            pass
+            logger.warning(f"Voucher SMS failed: {e}")
 
 
 @receiver(post_save, sender=Invoice)
@@ -117,18 +126,11 @@ def send_invoice_notification(sender, instance, created, **kwargs):
         
         if created or status_just_changed:
             try:
-                # Get the company - either directly on invoice or via customer
-                company = getattr(instance, 'company', None)
-                if not company and instance.customer:
-                    # If customer has a company relationship
-                    company = getattr(instance.customer, 'company', None)
-                
-                if company:
-                    sms_service = SMSService(company)
-                    sms_service.send_invoice_reminder(instance.customer, instance)
+                # Get the customer
+                customer = instance.customer
+                if customer:
+                    # Use SMSNotifier for invoice notification
+                    from apps.messaging.services.notification_sender import SMSNotifier
+                    SMSNotifier.pppoe_invoice_issued(customer, instance)
             except Exception as e:
-                # Log error but don't raise
-                # In production, use proper logging
-                import logging
-                logger = logging.getLogger(__name__)
                 logger.error(f"Failed to send invoice notification: {e}")

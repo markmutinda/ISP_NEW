@@ -687,6 +687,15 @@ class HotspotPurchaseView(APIView):
                 )
 
             # ============================================================
+            # SMS: new subscription initiated (after STK push succeeds)
+            # ============================================================
+            try:
+                from apps.messaging.services.notification_sender import SMSNotifier
+                SMSNotifier.hotspot_new_subscription(session)
+            except Exception as e:
+                logger.warning(f"Hotspot new-subscription SMS failed: {e}")
+
+            # ============================================================
             # OPTIONALLY invalidate used TV code after successful payment init
             # ============================================================
             if tv_code:
@@ -848,6 +857,13 @@ class HotspotPurchaseStatusView(APIView):
                 except Exception as e:
                     logger.error(f"RADIUS activation failed for paid session {session.session_id}: {e}")
                 
+                # ── SMS: welcome with access code ──
+                try:
+                    from apps.messaging.services.notification_sender import SMSNotifier
+                    SMSNotifier.hotspot_welcome(session)
+                except Exception as e:
+                    logger.warning(f"Hotspot welcome SMS failed: {e}")
+                
                 return Response({
                     'status': 'success',
                     'message': 'Payment received! You are now connected.',
@@ -902,6 +918,13 @@ class HotspotPurchaseStatusView(APIView):
                             exc_info=True
                         )
                     
+                    # ── SMS: welcome ──
+                    try:
+                        from apps.messaging.services.notification_sender import SMSNotifier
+                        SMSNotifier.hotspot_welcome(session)
+                    except Exception as e:
+                        logger.warning(f"Hotspot welcome SMS failed: {e}")
+                    
                     return Response({
                         'status': 'success',
                         'message': 'Payment received! You are now connected.',
@@ -914,6 +937,12 @@ class HotspotPurchaseStatusView(APIView):
                 
                 elif status == 'failed':
                     session.mark_failed(message)
+                    # ── SMS: payment failed ──
+                    try:
+                        from apps.messaging.services.notification_sender import SMSNotifier
+                        SMSNotifier.hotspot_payment_failed(session, message)
+                    except Exception as e:
+                        logger.warning(f"Hotspot failed SMS error: {e}")
                     return Response({
                         'status': 'failed',
                         'message': message or 'Payment failed. Please try again.',
@@ -1130,6 +1159,14 @@ class HotspotVoucherRedeemView(APIView):
                     mac_address=mac_address,
                 )
                 logger.info(f"VOUCHER REDEEM: {voucher.code} -> user {friendly_username} at {router.name} (plan: {plan.name})")
+                
+                # ── SMS: welcome for voucher redemption ──
+                try:
+                    from apps.messaging.services.notification_sender import SMSNotifier
+                    SMSNotifier.hotspot_welcome(session)
+                except Exception as e:
+                    logger.warning(f"Hotspot voucher welcome SMS failed: {e}")
+                    
             except Exception as e:
                 logger.error(f"RADIUS activation failed for voucher: {e}")
                 return Response({'error': 'Activation failed'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)

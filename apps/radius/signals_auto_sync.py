@@ -184,11 +184,25 @@ def auto_create_radius_for_service(sender, instance, created, **kwargs):
                 needs_save = True
                 logger.info(f"Re-enabled RADIUS for customer: {customer.customer_code}")
                 
+                # ── SMS: service resumed (after renewal) ──
+                try:
+                    from apps.messaging.services.notification_sender import SMSNotifier
+                    SMSNotifier.pppoe_resumed(customer)
+                except Exception as e:
+                    logger.warning(f"Renewal/resume SMS failed: {e}")
+                
             elif instance.status in ['SUSPENDED', 'TERMINATED'] and credentials.is_enabled:
                 credentials.is_enabled = False
                 credentials.disabled_reason = f"Service {instance.status.lower()}"
                 needs_save = True
                 logger.info(f"Disabled RADIUS for customer: {customer.customer_code}")
+                
+                # ── SMS: service suspended ──
+                try:
+                    from apps.messaging.services.notification_sender import SMSNotifier
+                    SMSNotifier.pppoe_suspended(customer)
+                except Exception as e:
+                    logger.warning(f"Suspension SMS failed: {e}")
             
             # 🎯 Handle PLAN CHANGE: Update bandwidth profile and expiration
             if instance.plan:
@@ -197,6 +211,13 @@ def auto_create_radius_for_service(sender, instance, created, **kwargs):
                     credentials.bandwidth_profile = profile
                     needs_save = True
                     logger.info(f"Updated bandwidth profile for: {credentials.username}")
+                    
+                    # ── SMS: plan changed ──
+                    try:
+                        from apps.messaging.services.notification_sender import SMSNotifier
+                        SMSNotifier.pppoe_plan_changed(customer, old_plan=None, new_plan=instance.plan)
+                    except Exception as e:
+                        logger.warning(f"Plan change SMS failed: {e}")
             
             # 🎯 Handle ROUTER / IP POOL / ASSIGNED IP update from service creation form
             radius_router_id = getattr(instance, '_radius_router_id', None)
@@ -343,6 +364,18 @@ def auto_create_radius_for_service(sender, instance, created, **kwargs):
                      f"{f', ip_pool={radius_ip_pool}' if radius_ip_pool else ''}"
                      f"{f', assigned_ip={assigned_ip_obj.ip_address}' if assigned_ip_obj else ''}")
         
+        # ── SMS: new subscription / welcome (when service is ACTIVE) ──
+        if instance.status == 'ACTIVE':
+            try:
+                from apps.messaging.services.notification_sender import SMSNotifier
+                SMSNotifier.pppoe_welcome(
+                    customer=customer,
+                    username=username,
+                    password=password,
+                )
+            except Exception as e:
+                logger.warning(f"PPPoE welcome SMS failed: {e}")
+        
     except Exception as e:
         logger.error(f"Failed to auto-create RADIUS for service {instance.id}: {e}")
     finally:
@@ -433,22 +466,36 @@ def sync_customer_status_to_radius(sender, instance, **kwargs):
             return
         
         credentials = instance.radius_credentials
-        status = (instance.status or '').upper()
+        cust_status = (instance.status or '').upper()
         
-        if status in ['SUSPENDED', 'INACTIVE', 'TERMINATED']:
+        if cust_status in ['SUSPENDED', 'INACTIVE', 'TERMINATED']:
             if credentials.is_enabled:
                 credentials.is_enabled = False
-                credentials.disabled_reason = f"Customer {status.lower()}"
+                credentials.disabled_reason = f"Customer {cust_status.lower()}"
                 credentials.save()
-                logger.info(f"Disabled RADIUS for {status.lower()} customer: {instance.customer_code}")
+                logger.info(f"Disabled RADIUS for {cust_status.lower()} customer: {instance.customer_code}")
                 
-        elif status == 'ACTIVE':
+                # ── SMS: service suspended ──
+                try:
+                    from apps.messaging.services.notification_sender import SMSNotifier
+                    SMSNotifier.pppoe_suspended(instance)
+                except Exception as e:
+                    logger.warning(f"Suspension SMS failed: {e}")
+                    
+        elif cust_status == 'ACTIVE':
             if not credentials.is_enabled:
                 credentials.is_enabled = True
                 credentials.disabled_reason = ''
                 credentials.save()
                 logger.info(f"Enabled RADIUS for active customer: {instance.customer_code}")
                 
+                # ── SMS: service resumed ──
+                try:
+                    from apps.messaging.services.notification_sender import SMSNotifier
+                    SMSNotifier.pppoe_resumed(instance)
+                except Exception as e:
+                    logger.warning(f"Resume SMS failed: {e}")
+                    
     except Exception as e:
         logger.error(f"Failed to sync customer status to RADIUS: {e}")
     finally:
@@ -555,6 +602,13 @@ def handle_invoice_status_radius(sender, instance, **kwargs):
                 credentials.save()
                 logger.info(f"Suspended RADIUS for overdue invoice: {instance.id}")
                 
+                # ── SMS: service suspended due to overdue invoice ──
+                try:
+                    from apps.messaging.services.notification_sender import SMSNotifier
+                    SMSNotifier.pppoe_suspended(customer, reason="Invoice overdue")
+                except Exception as e:
+                    logger.warning(f"Overdue suspension SMS failed: {e}")
+                
         elif status == 'PAID':
             pending = customer.invoices.filter(
                 status__in=['PENDING', 'OVERDUE', 'pending', 'overdue']
@@ -565,6 +619,13 @@ def handle_invoice_status_radius(sender, instance, **kwargs):
                 credentials.disabled_reason = ''
                 credentials.save()
                 logger.info(f"Restored RADIUS after payment: {instance.id}")
+                
+                # ── SMS: service resumed after payment ──
+                try:
+                    from apps.messaging.services.notification_sender import SMSNotifier
+                    SMSNotifier.pppoe_resumed(customer)
+                except Exception as e:
+                    logger.warning(f"Resume after payment SMS failed: {e}")
                 
     except Exception as e:
         logger.error(f"Failed to handle invoice status for RADIUS: {e}")

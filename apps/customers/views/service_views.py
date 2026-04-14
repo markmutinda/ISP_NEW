@@ -1,4 +1,4 @@
-#apps/customers/views/service_views.py
+# apps/customers/views/service_views.py
 from rest_framework import viewsets, status
 from rest_framework.decorators import action
 from rest_framework.response import Response
@@ -264,19 +264,32 @@ class ServiceConnectionViewSet(viewsets.ModelViewSet):
             customer.save()
         
         # Refresh credentials reference after creation
+        creds_for_sms = None
         try:
             customer.refresh_from_db()
-            creds = customer.radius_credentials
+            creds_for_sms = customer.radius_credentials
             creds_data = {
-                'username': creds.username,
-                'password': creds.password if hasattr(creds, 'password') else None,
-                'expiration': creds.expiration_date.isoformat() if creds.expiration_date else None,
-                'is_enabled': creds.is_enabled,
+                'username': creds_for_sms.username,
+                'password': creds_for_sms.password if hasattr(creds_for_sms, 'password') else None,
+                'expiration': creds_for_sms.expiration_date.isoformat() if creds_for_sms.expiration_date else None,
+                'is_enabled': creds_for_sms.is_enabled,
             }
-            if hasattr(creds, 'framed_ip_address'):
-                creds_data['framed_ip_address'] = creds.framed_ip_address
+            if hasattr(creds_for_sms, 'framed_ip_address'):
+                creds_data['framed_ip_address'] = creds_for_sms.framed_ip_address
         except Exception:
             creds_data = None
+        
+        # ── SMS: new subscription activated ──
+        try:
+            from apps.messaging.services.notification_sender import SMSNotifier
+            SMSNotifier.pppoe_new_subscription(
+                customer=customer,
+                plan_name=service.plan.name if service.plan else "",
+                amount=float(service.monthly_price or 0),
+                expires_at=creds_for_sms.expiration_date if creds_for_sms else None,
+            )
+        except Exception as e:
+            logger.warning(f"New subscription SMS failed: {e}")
         
         response_data = {
             'status': 'success',
@@ -435,6 +448,7 @@ class ServiceConnectionViewSet(viewsets.ModelViewSet):
         # Handle optional plan change
         plan_changed = False
         new_plan = None
+        old_plan_name = None
         if plan_id:
             try:
                 new_plan = Plan.objects.get(id=plan_id, is_active=True)
@@ -444,7 +458,7 @@ class ServiceConnectionViewSet(viewsets.ModelViewSet):
                     status=status.HTTP_400_BAD_REQUEST
                 )
             if service.plan_id != new_plan.id:
-                old_plan_name = service.plan.name if service.plan else 'None'
+                old_plan_name = service.plan.name if service.plan else 'previous plan'
                 service.plan = new_plan
                 service.download_speed = new_plan.download_speed or service.download_speed
                 service.upload_speed = new_plan.upload_speed or service.upload_speed
@@ -536,6 +550,29 @@ class ServiceConnectionViewSet(viewsets.ModelViewSet):
             service.status = 'ACTIVE'
             service.activation_date = service.activation_date or now
             service.save()
+        
+        # ── SMS: renewal confirmation ──
+        try:
+            from apps.messaging.services.notification_sender import SMSNotifier
+            SMSNotifier.pppoe_renewal(
+                customer=customer,
+                plan_name=new_plan.name if new_plan else (service.plan.name if service.plan else ""),
+                expires_at=credentials.expiration_date,
+            )
+        except Exception as e:
+            logger.warning(f"Renewal SMS failed: {e}")
+
+        # ── SMS: plan changed (only if plan actually changed) ──
+        if plan_changed and new_plan:
+            try:
+                from apps.messaging.services.notification_sender import SMSNotifier
+                SMSNotifier.pppoe_plan_changed(
+                    customer=customer,
+                    old_plan=old_plan_name,
+                    new_plan=new_plan.name,
+                )
+            except Exception as e:
+                logger.warning(f"Plan change SMS failed: {e}")
         
         msg_parts = [f'Subscription extended by {human_label}']
         if plan_changed:
