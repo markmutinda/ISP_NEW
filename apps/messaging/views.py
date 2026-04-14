@@ -700,7 +700,15 @@ class SMSTopupInitiateView(APIView):
                     status=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 )
 
-            callback_url = getattr(_settings, 'TUMA_CALLBACK_URL', '')
+            # FIX 1: Use dedicated SMS topup callback URL
+            # Route SMS-topup callbacks to the dedicated handler instead of the generic
+            # TumaWebhookView, which can fail silently because it looks for a Payment row
+            # that doesn't exist for SMS topups.
+            base_url = getattr(_settings, 'BASE_URL', '').rstrip('/')
+            if base_url:
+                callback_url = f"{base_url}/api/v1/messaging/topup/callback/"
+            else:
+                callback_url = getattr(_settings, 'TUMA_CALLBACK_URL', '')
             desc = f"SMS-UNITS-{topup.id}"
 
             res = client.stk_push(
@@ -769,8 +777,15 @@ class SMSTopupCallbackView(APIView):
         checkout_id = data.get('checkout_request_id', '')
         result_code = str(data.get('result_code', ''))
 
+        # FIX 2: Add logging for missing checkout_id
         if not checkout_id:
+            logger.warning("SMSTopupCallbackView: missing checkout_request_id in payload")
             return Response({'ok': True})
+
+        logger.info(
+            f"SMSTopupCallbackView received: checkout_id={checkout_id}, "
+            f"result_code={result_code}"
+        )
 
         # FIX 6: Resolve tenant schema from the public callback map
         target_schema = None
@@ -785,7 +800,12 @@ class SMSTopupCallbackView(APIView):
                 if mapping:
                     target_schema = mapping.schema_name
         except Exception as e:
-            logger.warning(f"SMSTopup callback: TumaCallbackMap lookup failed: {e}")
+            # FIX 2: Use error level logging with full traceback for TumaCallbackMap failures
+            logger.error(
+                f"SMSTopup callback: TumaCallbackMap lookup failed for "
+                f"checkout_id={checkout_id}: {e}",
+                exc_info=True,
+            )
 
         # Fallback: scan tenant schemas (for topups before this fix was deployed)
         if not target_schema:
@@ -927,3 +947,4 @@ class CustomerSearchView(APIView):
                 unique.append(r)
 
         return Response({'results': unique[:limit], 'count': len(unique)})
+    
