@@ -555,32 +555,37 @@ class SMSTopupInitiateView(APIView):
             status='pending',
         )
 
-        # Kick off STK push via Tuma (reuse billing payment flow)
+        # ─────────────────────────────────────────────────────────────────────
+        # FIX: Use Master Tuma Token (platform's account, not tenant's)
+        # This ensures SMS top-up payments go to the platform's bank/paybill
+        # instead of the tenant's individual account.
+        # ─────────────────────────────────────────────────────────────────────
         try:
             from django.conf import settings as _settings
-            from django.db import connection
-            from apps.billing.models.payment_models import TenantTumaConfig, InvoiceItemPayment, Payment
             from apps.billing.services.tuma_service import TumaClient
             import time
 
-            schema = connection.schema_name
-            cfg = TenantTumaConfig.objects.filter(schema_name=schema, is_active=True).first()
-            if not cfg or not cfg.tuma_business_email:
+            # Instantiate the Tuma client
+            client = TumaClient()
+            
+            # --- USE MASTER TOKEN (platform's own Tuma account) ---
+            try:
+                token = client.get_master_token()
+            except Exception as e:
+                logger.error(f"Failed to get master token for SMS topup: {e}")
                 topup.status = 'failed'
-                topup.notes = 'Tuma not configured'
+                topup.notes = 'Platform payment gateway error'
                 topup.save()
                 return Response(
-                    {'error': 'Payment gateway not configured'},
-                    status=status.HTTP_400_BAD_REQUEST,
+                    {'error': 'Platform payment gateway not configured correctly'},
+                    status=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 )
 
-            client = TumaClient()
-            token = client.get_token(cfg.tuma_business_email, cfg.tuma_business_api_key)
             callback_url = getattr(_settings, 'TUMA_CALLBACK_URL', '')
             desc = f"SMS-UNITS-{topup.id}"
 
             res = client.stk_push(
-                token=token,
+                token=token,  # This now uses the master token
                 amount=float(total_amount),
                 phone=phone,
                 callback_url=callback_url,
@@ -606,6 +611,7 @@ class SMSTopupInitiateView(APIView):
                 return Response({'error': topup.notes}, status=status.HTTP_400_BAD_REQUEST)
 
         except Exception as e:
+            logger.error(f"SMS topup STK push failed: {e}")
             topup.status = 'failed'
             topup.notes = str(e)
             topup.save()
