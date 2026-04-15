@@ -665,14 +665,46 @@ class SMSTopupInitiateView(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        # FIX 6: Save schema_name and register in callback map
+        # ─────────────────────────────────────────────────────────────────────
+        # PERMANENT FIX: Use request.tenant (reliable) instead of connection
+        # ─────────────────────────────────────────────────────────────────────
         from django.db import connection as _conn
+        
+        # Reliably get the tenant schema (fallback to connection if needed)
+        current_schema = request.tenant.schema_name if hasattr(request, 'tenant') and request.tenant else _conn.schema_name
+
+        # Reject top-ups that accidentally hit the public portal
+        if current_schema in ('public', None, ''):
+            return Response(
+                {'error': 'Cannot initiate top-up from the public portal. Please do this from your tenant dashboard.'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        # OPTIONAL HARDENING: Validate schema exists and is active in public Tenant table
+        try:
+            from apps.core.models import Tenant
+            from django_tenants.utils import schema_context, get_public_schema_name
+            with schema_context(get_public_schema_name()):
+                tenant_exists = Tenant.objects.filter(
+                    schema_name=current_schema,
+                    is_active=True
+                ).exists()
+                if not tenant_exists:
+                    logger.warning(f"SMSTopupInitiateView: schema '{current_schema}' is not an active tenant")
+                    return Response(
+                        {'error': 'Invalid tenant schema. Please contact support.'},
+                        status=status.HTTP_400_BAD_REQUEST
+                    )
+        except Exception as e:
+            logger.error(f"SMSTopupInitiateView: tenant validation failed for {current_schema}: {e}")
+            # Continue anyway - don't block on validation error, but log it
+
         topup = SMSUnitTopup.objects.create(
             units_purchased=units,
             amount_paid=total_amount,
             payment_method='mpesa_stk',
             status='pending',
-            schema_name=_conn.schema_name,  # ← ADD THIS
+            schema_name=current_schema,  # ← Uses the reliable schema from request.tenant
         )
 
         # ─────────────────────────────────────────────────────────────────────
@@ -734,7 +766,7 @@ class SMSTopupInitiateView(APIView):
                             checkout_request_id=topup.checkout_request_id,
                             defaults={
                                 'merchant_request_id': topup.payment_reference,
-                                'schema_name': _conn.schema_name,
+                                'schema_name': current_schema,  # ← Ensure accurate schema is saved here
                                 'payment_reference': f'SMS-TOPUP-{topup.id}',
                             }
                         )
@@ -957,4 +989,3 @@ class CustomerSearchView(APIView):
                 unique.append(r)
 
         return Response({'results': unique[:limit], 'count': len(unique)})
-    
