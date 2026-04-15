@@ -195,11 +195,12 @@ def send_loyalty_notification_sms(self, customer_id, message_type='points_earned
         raise self.retry(exc=e)
 
 
-# FIX 5: Campaign bulk SMS — Celery task
+# FIX 5: Campaign bulk SMS — Celery task with tenant context
 @shared_task(bind=True, max_retries=2)
 def process_campaign_sms(self, campaign_id: int, phones: list, message: str):
     """
     Send bulk campaign SMS and update campaign stats.
+    Wrapped with tenant schema context to ensure correct database routing.
     
     Args:
         campaign_id: ID of the SMSCampaign record
@@ -209,43 +210,63 @@ def process_campaign_sms(self, campaign_id: int, phones: list, message: str):
     from apps.messaging.models import SMSCampaign
     from apps.messaging.services.notification_sender import _dispatch
     from django.utils import timezone
+    from django_tenants.utils import schema_context, get_public_schema_name
+    from apps.core.models import Tenant
 
-    try:
-        campaign = SMSCampaign.objects.get(id=campaign_id)
-    except SMSCampaign.DoesNotExist:
-        logger.warning(f"[CAMPAIGN] Campaign {campaign_id} not found")
+    # Find which tenant owns this campaign
+    target_schema = None
+    with schema_context(get_public_schema_name()):
+        for tenant in Tenant.objects.filter(is_active=True).exclude(schema_name='public'):
+            with schema_context(tenant.schema_name):
+                try:
+                    if SMSCampaign.objects.filter(id=campaign_id).exists():
+                        target_schema = tenant.schema_name
+                        break
+                except Exception:
+                    continue
+
+    if not target_schema:
+        logger.error(f"[CAMPAIGN {campaign_id}] Could not find tenant schema")
         return
 
-    sent = 0
-    failed = 0
-
-    logger.info(f"[CAMPAIGN {campaign_id}] Starting bulk send to {len(phones)} recipients")
-
-    for idx, phone in enumerate(phones):
+    # Execute the campaign in the correct tenant schema
+    with schema_context(target_schema):
         try:
-            ok = _dispatch(phone, message)
-            if ok:
-                sent += 1
-            else:
+            campaign = SMSCampaign.objects.get(id=campaign_id)
+        except SMSCampaign.DoesNotExist:
+            logger.warning(f"[CAMPAIGN {campaign_id}] Campaign not found in schema {target_schema}")
+            return
+
+        sent = 0
+        failed = 0
+
+        logger.info(f"[CAMPAIGN {campaign_id}] Starting bulk send to {len(phones)} recipients in {target_schema}")
+
+        for idx, phone in enumerate(phones):
+            try:
+                ok = _dispatch(phone, message)
+                if ok:
+                    sent += 1
+                else:
+                    failed += 1
+            except Exception as e:
+                logger.error(f"[CAMPAIGN {campaign_id}] Failed to send to {phone}: {e}")
                 failed += 1
-        except Exception as e:
-            logger.error(f"[CAMPAIGN {campaign_id}] Failed to send to {phone}: {e}")
-            failed += 1
 
-        # Log progress every 100 messages
-        if (idx + 1) % 100 == 0:
-            logger.info(
-                f"[CAMPAIGN {campaign_id}] Progress: {idx + 1}/{len(phones)} "
-                f"(sent={sent}, failed={failed})"
-            )
+            # Log progress every 100 messages
+            if (idx + 1) % 100 == 0:
+                logger.info(
+                    f"[CAMPAIGN {campaign_id}] Progress: {idx + 1}/{len(phones)} "
+                    f"(sent={sent}, failed={failed})"
+                )
 
-    campaign.delivered_count = sent
-    campaign.failed_count = failed
-    campaign.status = 'completed'
-    campaign.completed_at = timezone.now()
-    campaign.save(update_fields=['delivered_count', 'failed_count', 'status', 'completed_at'])
+        campaign.delivered_count = sent
+        campaign.failed_count = failed
+        campaign.status = 'completed'
+        campaign.completed_at = timezone.now()
+        campaign.save(update_fields=['delivered_count', 'failed_count', 'status', 'completed_at'])
 
-    logger.info(
-        f"[CAMPAIGN {campaign_id}] Completed: Sent={sent}, Failed={failed}, "
-        f"Total={len(phones)}"
-    )
+        logger.info(
+            f"[CAMPAIGN {campaign_id}] Completed: Sent={sent}, Failed={failed}, "
+            f"Total={len(phones)}"
+        )

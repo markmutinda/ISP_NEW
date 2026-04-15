@@ -235,13 +235,15 @@ app.conf.beat_schedule = {
 # ════════════════════════════════════════════════════════════════════════════
 # QUEUE ROUTING
 # ════════════════════════════════════════════════════════════════════════════
-
+# FIX: Route messaging tasks to 'default' queue instead of non-existent 'messaging'
+# This ensures SMS campaign tasks are picked up by the celery-worker container
+# which listens to 'default' queue by default.
 app.conf.task_routes = {
     'apps.radius.tasks.*': {'queue': 'radius'},
     'apps.notifications.tasks.*': {'queue': 'notifications'},
     'apps.billing.tasks.*': {'queue': 'billing'},
     'apps.subscriptions.tasks.*': {'queue': 'billing'},  # Added subscription routing
-    'apps.messaging.tasks.*': {'queue': 'messaging'},    # SMS campaign tasks
+    'apps.messaging.tasks.*': {'queue': 'default'},      # ← Changed from 'messaging' to 'default'
     'apps.vpn.tasks.*': {'queue': 'default'},
     'apps.fup.tasks.*': {'queue': 'radius'},  # FUP tasks use radius queue
     'apps.network.tasks.*': {'queue': 'default'},  # Network tasks (router status)
