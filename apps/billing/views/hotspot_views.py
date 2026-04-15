@@ -659,17 +659,15 @@ class HotspotPurchaseView(APIView):
                 err_text = str(e)
                 logger.error(f"STK initiation failed for session {session.session_id}: {err_text}", exc_info=True)
 
-                payment.status = 'FAILED'
-                payment.tuma_status = 'failed'
-                payment.failure_reason = err_text
-                payment.save(update_fields=['status', 'tuma_status', 'failure_reason'])
-                session.mark_failed(payment.failure_reason)
-
                 # Classify transient upstream failures as retriable
                 retriable_markers = ["404", "429", "502", "503", "504", "timed out", "connection", "temporar"]
                 is_retriable = any(m in err_text.lower() for m in retriable_markers)
 
                 if is_retriable:
+                    # Keep session/payment retryable instead of hard failing user flow
+                    payment.failure_reason = err_text[:250]
+                    payment.save(update_fields=['failure_reason'])
+
                     return Response(
                         {
                             "error": "Payment gateway is temporarily unavailable. Please retry in 5-10 seconds.",
@@ -677,6 +675,12 @@ class HotspotPurchaseView(APIView):
                         },
                         status=status.HTTP_503_SERVICE_UNAVAILABLE,
                     )
+
+                payment.status = 'FAILED'
+                payment.tuma_status = 'failed'
+                payment.failure_reason = err_text
+                payment.save(update_fields=['status', 'tuma_status', 'failure_reason'])
+                session.mark_failed(payment.failure_reason)
 
                 return Response(
                     {

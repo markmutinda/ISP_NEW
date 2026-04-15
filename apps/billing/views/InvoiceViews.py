@@ -236,44 +236,49 @@ class PlanViewSet(viewsets.ModelViewSet):
         
         return Plan.objects.none()
 
+
 class BillingCycleViewSet(viewsets.ModelViewSet):
     """
     ViewSet for managing billing cycles
     """
     queryset = BillingCycle.objects.all()
     serializer_class = BillingCycleSerializer
-    permission_classes = [IsAuthenticated, IsCompanyStaff]  # Changed to IsCompanyStaff
+    permission_classes = [IsAuthenticated, IsCompanyStaff]
     filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
-    filterset_fields = ['status', 'is_locked', 'company']
+    filterset_fields = ['status', 'is_locked', 'schema_name']
     search_fields = ['cycle_code', 'name', 'notes']
     ordering_fields = ['start_date', 'end_date', 'created_at']
-    
+
     def get_queryset(self):
+        """
+        BillingCycle is tenant-scoped by schema.
+        Avoid filtering by nonexistent `company` field.
+        """
+        qs = BillingCycle.objects.all()
         user = self.request.user
+
+        # Optional filtering only on real model fields
+        status_param = self.request.query_params.get('status')
+        if status_param:
+            qs = qs.filter(status=status_param)
+
+        is_locked_param = self.request.query_params.get('is_locked')
+        if is_locked_param is not None:
+            if str(is_locked_param).lower() in ('true', '1'):
+                qs = qs.filter(is_locked=True)
+            elif str(is_locked_param).lower() in ('false', '0'):
+                qs = qs.filter(is_locked=False)
+
         if user.is_superuser:
-            company_id = self.request.query_params.get('company_id')
-            if company_id:
-                return BillingCycle.objects.filter(company_id=company_id)
-            return BillingCycle.objects.all()
-        
-        if hasattr(user, 'company') and user.company:
-            return BillingCycle.objects.filter(company=user.company)
-        
-        return BillingCycle.objects.none()
+            schema_name = self.request.query_params.get('schema_name')
+            if schema_name:
+                qs = qs.filter(schema_name=schema_name)
+
+        return qs
 
     def perform_create(self, serializer):
-        user = self.request.user
-        if user.is_superuser:
-            serializer.save(created_by=user)
-        else:
-            if hasattr(user, 'company') and user.company:
-                serializer.save(
-                    created_by=user,
-                    company=user.company
-                )
-            else:
-                raise serializers.ValidationError("No company assigned")
-    
+        serializer.save(created_by=self.request.user)
+
     @action(detail=True, methods=['post'])
     def close_cycle(self, request, pk=None):
         """Close billing cycle"""
@@ -315,15 +320,12 @@ class BillingCycleViewSet(viewsets.ModelViewSet):
         """Get billing cycle summary"""
         billing_cycle = self.get_object()
         
-        # Calculate summary
+        # Calculate summary - removed company reference
         from ..models.payment_models import Payment
         from customers.models import Customer
         
-        total_customers = Customer.objects.filter(company=billing_cycle.company).count()
-        active_customers = Customer.objects.filter(
-            company=billing_cycle.company,
-            status='ACTIVE'
-        ).count()
+        total_customers = Customer.objects.count()
+        active_customers = Customer.objects.filter(status='ACTIVE').count()
         
         total_invoices = billing_cycle.invoices.count()
         paid_invoices = billing_cycle.invoices.filter(status='PAID').count()
@@ -350,28 +352,13 @@ class BillingCycleViewSet(viewsets.ModelViewSet):
         
         return Response(summary)
 
-    def get_queryset(self):
-        """Filter billing cycles by company"""
-        user = self.request.user
-        
-        if user.is_superuser:
-            company_id = self.request.query_params.get('company_id')
-            if company_id:
-                return BillingCycle.objects.filter(company_id=company_id)
-            return BillingCycle.objects.all()
-        
-        # Non-superusers can only see their company's billing cycles
-        if hasattr(user, 'company') and user.company:
-            return BillingCycle.objects.filter(company=user.company)
-        
-        return BillingCycle.objects.none()
 
 class InvoiceViewSet(viewsets.ModelViewSet):
     """
     ViewSet for managing invoices
     """
     queryset = Invoice.objects.all()
-    permission_classes = [IsAuthenticated, IsCompanyStaff]  # Changed to IsCompanyStaff
+    permission_classes = [IsAuthenticated, IsCompanyStaff]
     filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
     filterset_fields = ['status', 'is_overdue', 'customer', 'billing_cycle']
     search_fields = ['invoice_number', 'customer__customer_code', 'customer__user__first_name', 'customer__user__last_name']
@@ -390,13 +377,13 @@ class InvoiceViewSet(viewsets.ModelViewSet):
         if user.is_superuser:
             company_id = self.request.query_params.get('company_id')
             if company_id:
-                return InvoiceItem.objects.filter(invoice__company_id=company_id)
-            return InvoiceItem.objects.all()
+                return Invoice.objects.filter(company_id=company_id)
+            return Invoice.objects.all()
         
         if hasattr(user, 'company') and user.company:
-            return InvoiceItem.objects.filter(invoice__company=user.company)
+            return Invoice.objects.filter(company=user.company)
         
-        return InvoiceItem.objects.none()
+        return Invoice.objects.none()
 
     def perform_create(self, serializer):
         user = self.request.user
@@ -623,13 +610,14 @@ class InvoiceViewSet(viewsets.ModelViewSet):
         
         return Invoice.objects.none()
 
+
 class InvoiceItemViewSet(viewsets.ModelViewSet):
     """
     ViewSet for managing invoice items
     """
     queryset = InvoiceItem.objects.all()
     serializer_class = InvoiceItemSerializer
-    permission_classes = [IsAuthenticated, IsCompanyStaff]  # Changed to IsCompanyStaff
+    permission_classes = [IsAuthenticated, IsCompanyStaff]
     filter_backends = [DjangoFilterBackend]
     filterset_fields = ['invoice']
     

@@ -747,8 +747,15 @@ class HotspotSession(models.Model):
         """
         Mark session as active after successful payment.
         Uses select_for_update to prevent concurrent double-activation.
+        Safe to call both inside and outside an existing transaction.
         """
+        from django.db import transaction
         from apps.billing.models.hotspot_models import HotspotSession  # avoid circular at module level
+
+        # Guarantee a transaction for select_for_update()
+        if not transaction.get_connection().in_atomic_block:
+            with transaction.atomic():
+                return self.activate(access_code)
 
         # Atomic idempotency guard — re-fetch with a row lock
         locked = (
@@ -783,6 +790,7 @@ class HotspotSession(models.Model):
             from django_tenants.utils import schema_context, get_public_schema_name
             from apps.subscriptions.models import BillingCycle
             from apps.core.models import Tenant
+            from decimal import Decimal
 
             tenant_schema = connection.schema_name
 

@@ -4,6 +4,8 @@ import requests
 import logging
 import random
 import time
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 from django.conf import settings
 from django.core.cache import cache
 from requests.exceptions import RequestException, HTTPError, ConnectionError, Timeout
@@ -236,7 +238,7 @@ class TumaClient:
 
     def stk_push(self, token, amount, phone, callback_url, description):
         """
-        Initiates an STK Push.
+        Initiates an STK Push with retry/backoff for transient failures (503, 502, etc.)
         
         Args:
             token: Child business authentication token
@@ -257,22 +259,41 @@ class TumaClient:
         safe_desc = str(description).replace(" ", "-").replace("/", "-")[:10]
         unique_reference = f"{safe_desc}-{int(time.time())}"
 
-        response = requests.post(
+        # 3. Configure retry strategy for transient failures
+        retry = Retry(
+            total=3,
+            connect=3,
+            read=3,
+            status=3,
+            backoff_factor=1.0,  # 1s, 2s, 4s
+            status_forcelist=[429, 500, 502, 503, 504],
+            allowed_methods=frozenset(["POST"]),
+            raise_on_status=False,
+        )
+
+        # 4. Create session with retry adapter
+        session = requests.Session()
+        session.mount("https://", HTTPAdapter(max_retries=retry))
+        session.mount("http://", HTTPAdapter(max_retries=retry))
+
+        # 5. Make request with retry session
+        response = session.post(
             f"{self.base}/payment/stk-push",
             headers={"Authorization": f"Bearer {token}"},
             json={
-                "amount": clean_amount, 
+                "amount": clean_amount,
                 "phone": phone,
                 "callback_url": callback_url,
-                "description": unique_reference,  # This is now perfectly safe
+                "description": unique_reference,
             },
-            timeout=20
+            timeout=20,
         )
-        
-        # If Tuma returns 400, this helps us see exactly why in the logs
+
+        # 6. Log non-200 responses for debugging
         if response.status_code != 200:
-            logging.error(f"TUMA API ERROR: {response.text}")
-            
+            logging.error("TUMA API ERROR (%s): %s", response.status_code, response.text)
+
+        # 7. Raise for status (will raise after retries exhausted)
         response.raise_for_status()
         return response.json()
 
