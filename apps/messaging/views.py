@@ -827,14 +827,24 @@ class SMSTopupCallbackView(APIView):
             except Exception as e:
                 logger.error(f"SMSTopup schema scan failed: {e}")
 
-        if not target_schema:
-            logger.warning(f"SMSTopup callback: no schema found for checkout {checkout_id}")
-            return Response({'ok': True})
+        # ============================================================
+        # FIX: Validate target_schema is not public before switching
+        # ============================================================
+        if not target_schema or target_schema in ('public', ''):
+            logger.warning(f"SMSTopup callback: target_schema is '{target_schema}', rejecting safely")
+            return Response({'ok': True, 'warning': 'invalid_target_schema'})
 
         # Process the topup in the correct tenant schema
         from django_tenants.utils import schema_context
+        from django.db.utils import ProgrammingError
+        
         with schema_context(target_schema):
-            topup = SMSUnitTopup.objects.filter(checkout_request_id=checkout_id).first()
+            try:
+                topup = SMSUnitTopup.objects.filter(checkout_request_id=checkout_id).first()
+            except ProgrammingError:
+                logger.error(f"messaging_smsunittopup table missing in schema={target_schema}")
+                return Response({'ok': True, 'warning': 'schema_not_migrated'})
+
             if not topup or topup.status == 'completed':
                 return Response({'ok': True})  # idempotent
 
@@ -946,5 +956,5 @@ class CustomerSearchView(APIView):
                 seen.add(r['phone'])
                 unique.append(r)
 
-        return Response({'results': unique[:limit], 'count': len(unique)})
+        return Response({'results': unique[:limit], 'count': len(unique)})})
     
