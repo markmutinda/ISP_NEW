@@ -25,9 +25,8 @@ def refresh_router_statuses():
         tenant_start = time.perf_counter()
         try:
             with schema_context(tenant.schema_name):
-                routers = Router.objects.filter(is_active=True).only(
-                    'id', 'name', 'status', 'last_seen', 'ip_address', 'vpn_ip_address', 'api_port', 'vpn_provisioned'
-                )
+                # Removed .only() so the entire router object (including auth_key) loads into memory
+                routers = Router.objects.filter(is_active=True)
 
                 for router in routers:
                     try:
