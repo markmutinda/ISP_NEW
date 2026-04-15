@@ -956,5 +956,5 @@ class CustomerSearchView(APIView):
                 seen.add(r['phone'])
                 unique.append(r)
 
-        return Response({'results': unique[:limit], 'count': len(unique)})})
+        return Response({'results': unique[:limit], 'count': len(unique)})
     
