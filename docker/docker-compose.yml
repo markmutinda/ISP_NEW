@@ -179,7 +179,14 @@ services:
       dockerfile: docker/Dockerfile.radius
     container_name: netily_radius
     restart: unless-stopped
-    command: freeradius -f -X
+    # FIX: Removed -X flag to turn off debug mode (reduces log verbosity)
+    command: freeradius -f
+    # FIX: Added log rotation to prevent disk space exhaustion
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "3"
     cap_add:
       - NET_ADMIN
     env_file: ../.env
