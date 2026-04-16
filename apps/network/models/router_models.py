@@ -219,6 +219,11 @@ class Router(AuditMixin):
         max_length=255, blank=True, default='',
         help_text="Short banner message on the captive portal (e.g. 'Buy 24h for KES 50!')"
     )
+    logo = models.ImageField(
+        upload_to='router_logos/',
+        null=True, blank=True,
+        help_text="ISP logo displayed on the captive portal"
+    )
 
     pppoe_pool = models.CharField(max_length=50, default='192.40.2.10-192.40.2.254')
     pppoe_local_address = models.GenericIPAddressField(

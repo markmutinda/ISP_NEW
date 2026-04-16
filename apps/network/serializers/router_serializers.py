@@ -55,7 +55,7 @@ class RouterSerializer(serializers.ModelSerializer):
             'pppoe_pool', 'pppoe_local_address',
             'config_type',
             # Captive Portal Customisation
-            'template_id', 'hotspot_name', 'support_phone', 'announcement_text',
+            'template_id', 'hotspot_name', 'support_phone', 'announcement_text', 'logo',
             'created_at', 'updated_at',
         ]
         extra_kwargs = {
@@ -97,6 +97,7 @@ class RouterSerializer(serializers.ModelSerializer):
             'hotspot_name': {'required': False, 'allow_blank': True},
             'support_phone': {'required': False, 'allow_blank': True},
             'announcement_text': {'required': False, 'allow_blank': True},
+            'logo': {'required': False, 'allow_null': True},
         }
 
     def get_auth_status(self, obj):

@@ -117,6 +117,17 @@ class ServiceCreateSerializer(serializers.ModelSerializer):
             "use the /activate/ endpoint later to start the timer."
         )
     )
+    activation_delay_minutes = serializers.IntegerField(
+        default=0,
+        required=False,
+        write_only=True,
+        help_text=(
+            "When activate_now=True and this is > 0, the service is created "
+            "as PENDING and auto-activated after the specified minutes (e.g. 60 "
+            "for a 1-hour testing window). The expiration timer starts only "
+            "after the delay."
+        )
+    )
     
     class Meta:
         model = ServiceConnection
@@ -129,6 +140,7 @@ class ServiceCreateSerializer(serializers.ModelSerializer):
             'monthly_price', 'setup_fee', 'prorated_billing',
             'auto_renew', 'contract_period', 'status',
             'radius_password', 'router', 'ip_pool', 'assigned_ip', 'activate_now',
+            'activation_delay_minutes',
         ]
     
     def validate_mac_address(self, value):
@@ -151,9 +163,15 @@ class ServiceCreateSerializer(serializers.ModelSerializer):
         """
         radius_password = validated_data.pop('radius_password', None)
         activate_now = validated_data.pop('activate_now', True)
+        activation_delay_minutes = validated_data.pop('activation_delay_minutes', 0)
         radius_router_id = validated_data.pop('router', None)
         radius_ip_pool = validated_data.pop('ip_pool', None)
         assigned_ip_id = validated_data.pop('assigned_ip', None)
+        
+        # Delayed activation: create as PENDING, schedule auto-activation
+        if activate_now and activation_delay_minutes > 0:
+            activate_now = False
+            validated_data['status'] = 'PENDING'
         
         # If activate_now is False, force status to PENDING
         if not activate_now:
@@ -186,6 +204,14 @@ class ServiceCreateSerializer(serializers.ModelSerializer):
             # trigger a save so the signal can update existing credentials
             instance._force_radius_creation = True
             instance.save()
+        
+        # Schedule delayed activation via Celery if requested
+        if activation_delay_minutes > 0:
+            from apps.customers.tasks import delayed_service_activation
+            delayed_service_activation.apply_async(
+                args=[instance.id],
+                countdown=activation_delay_minutes * 60,
+            )
         
         return instance
     

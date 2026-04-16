@@ -384,10 +384,10 @@ class CompanySubscription(models.Model):
         now = timezone.now()
         trial_end = now + timedelta(days=cls.TRIAL_DURATION_DAYS)
         
-        # Default to Professional plan for trials (best features to try)
+        # Default to Metered plan for trials (pay-as-you-go, lowest barrier)
         if plan is None:
             try:
-                plan = NetilyPlan.objects.get(code='professional', is_active=True)
+                plan = NetilyPlan.objects.get(code='metered', is_active=True)
             except NetilyPlan.DoesNotExist:
                 # Fallback to any active plan
                 plan = NetilyPlan.objects.filter(is_active=True).first()
