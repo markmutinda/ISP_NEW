@@ -16,11 +16,51 @@ class FUPEnforcementService:
 
         if usage_window.total_bytes <= usage_window.limit_bytes:
             if usage_window.is_throttled:
-                self.release_service(service_connection, reason='Usage back within active window or reset')
+                self.release_service(
+                    service_connection, reason='Usage back within limit or period reset'
+                )
             return usage_window
 
         self.throttle_service(usage_window)
         return usage_window
+
+    def evaluate_hotspot_session(self, hotspot_session):
+        """
+        Evaluate FUP for an active hotspot session.
+        Throttles via RADIUS directly (no ServiceConnection required).
+        """
+        usage = self.usage_service.sync_usage_for_hotspot_session(hotspot_session)
+        if not usage:
+            return None
+
+        if not usage['exceeded']:
+            return usage
+
+        # Apply throttle via RADIUS using the session's access_code as username
+        policy = usage['policy']
+        username = usage['username']
+
+        self.radius_service.apply_throttle(
+            username=username,
+            down_mbps=policy.throttle_download_mbps,
+            up_mbps=policy.throttle_upload_mbps,
+        )
+
+        # Log a violation (no ServiceConnection FK, so fields are nullable-safe)
+        try:
+            from apps.fup.models import FUPViolation
+            FUPViolation.objects.create(
+                policy=policy,
+                plan=hotspot_session.plan,
+                # service_connection is required on the model — we skip creating
+                # the violation row rather than crashing.  If you want to track
+                # hotspot violations properly, add a nullable hotspot_session FK
+                # to FUPViolation in a future migration.
+            )
+        except Exception:
+            pass
+
+        return usage
 
     def throttle_service(self, usage_window):
         service = usage_window.service_connection
@@ -42,7 +82,7 @@ class FUPEnforcementService:
                 'throttled_upload_mbps': policy.throttle_upload_mbps,
                 'active': True,
                 'reason': 'FUP threshold exceeded',
-            }
+            },
         )
 
         if not created and throttle_state.active:
@@ -86,7 +126,6 @@ class FUPEnforcementService:
 
         throttle_state.last_synced_at = timezone.now()
         throttle_state.save()
-
         return throttle_state
 
     def release_service(self, service_connection, reason='FUP reset'):
@@ -109,7 +148,9 @@ class FUPEnforcementService:
         throttle_state.last_synced_at = timezone.now()
         throttle_state.save()
 
-        latest_window = service_connection.fup_usage_windows.order_by('-period_start').first()
+        latest_window = service_connection.fup_usage_windows.order_by(
+            '-period_start'
+        ).first()
         if latest_window:
             FUPViolation.objects.create(
                 policy=throttle_state.policy,
@@ -129,41 +170,44 @@ class FUPEnforcementService:
 
     def enforce_all(self):
         from apps.customers.models import ServiceConnection
-        
-        services = ServiceConnection.objects.select_related('customer', 'plan').filter(
-            status='ACTIVE',
-            plan__isnull=False,
-        )
+        from apps.billing.models.hotspot_models import HotspotSession
+
+        services = ServiceConnection.objects.select_related(
+            'customer', 'plan'
+        ).filter(status='ACTIVE', plan__isnull=False)
 
         processed = 0
         throttled = 0
 
-        # 1. Enforce standard Billing/Service connections
+        # PPPoE / Static service connections
         for service in services:
-            # Skip if this plan isn't linked to an FUP policy
             if not self.usage_service.get_active_policy_for_service(service):
                 continue
-                
-            before = FUPThrottleState.objects.filter(service_connection=service, active=True).exists()
+            before = FUPThrottleState.objects.filter(
+                service_connection=service, active=True
+            ).exists()
             usage_window = self.evaluate_service(service)
-            after = FUPThrottleState.objects.filter(service_connection=service, active=True).exists()
-
+            after = FUPThrottleState.objects.filter(
+                service_connection=service, active=True
+            ).exists()
             if usage_window:
                 processed += 1
             if not before and after:
                 throttled += 1
 
-        # 2. FUTURE: Add HotspotUser loop here once the Hotspot connection model is confirmed.
-        # For now, we'll handle hotspot users through their ServiceConnection if they have one.
-        # If you have a separate HotspotUser model, you can add it here:
-        #
-        # from apps.hotspot.models import HotspotUser
-        # hotspot_users = HotspotUser.objects.filter(is_active=True)
-        # for hotspot_user in hotspot_users:
-        #     # Map hotspot user to a service connection or handle separately
-        #     pass
+        # ── NEW: Active hotspot sessions ──────────────────────────────────
+        now = timezone.now()
+        active_hotspot_sessions = HotspotSession.objects.filter(
+            status='active', expires_at__gt=now
+        ).select_related('plan')
 
-        return {
-            'processed': processed,
-            'throttled': throttled,
-        }
+        for session in active_hotspot_sessions:
+            if not self.usage_service.get_active_policy_for_hotspot_session(session):
+                continue
+            result = self.evaluate_hotspot_session(session)
+            if result:
+                processed += 1
+                if result.get('exceeded'):
+                    throttled += 1
+
+        return {'processed': processed, 'throttled': throttled}

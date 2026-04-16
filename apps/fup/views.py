@@ -262,28 +262,54 @@ class FUPPolicyViewSet(viewsets.ModelViewSet):
     def available_plans(self, request, pk=None):
         policy = self.get_object()
         linked_billing_ids = set(policy.plan_links.values_list('plan_id', flat=True))
-        billing_plans = Plan.objects.filter(is_active=True).annotate(total_subs=Count('service_connections'))
         linked_hotspot_ids = set(policy.hotspot_plan_links.values_list('hotspot_plan_id', flat=True))
-        hotspot_plans = HotspotPlan.objects.filter(is_active=True)
-        
+
+        billing_plans = Plan.objects.filter(is_active=True).annotate(
+            total_subs=Count('service_connections', distinct=True)
+        )
+        hotspot_plans = HotspotPlan.objects.filter(is_active=True).select_related('router')
+
+        billing_data = []
+        for p in billing_plans:
+            billing_data.append({
+                'id': p.id,
+                'name': p.name,
+                'plan_type': p.plan_type,
+                'base_price': str(p.base_price),
+                'validity_display': p.validity_display,
+                'validity_type': p.validity_type,
+                'duration_days': p.duration_days,
+                'validity_hours': p.validity_hours,
+                'validity_minutes': p.validity_minutes,
+                'validity_months': p.validity_months,
+                'download_speed': p.download_speed,
+                'upload_speed': p.upload_speed,
+                'subscriber_count': p.total_subs,
+                'is_active': p.is_active,
+                'already_linked': p.id in linked_billing_ids,
+            })
+
+        hotspot_data = []
+        for p in hotspot_plans:
+            hotspot_data.append({
+                'id': str(p.id),
+                'name': p.name,
+                'plan_type': 'HOTSPOT',
+                'base_price': str(p.price),
+                'validity_display': p.duration_display,
+                'validity_type': p.validity_type,
+                'validity_value': p.validity_value,
+                'download_speed': p.download_speed,
+                'upload_speed': p.upload_speed,
+                'speed_unit': p.speed_unit,
+                'subscriber_count': p.sessions.filter(status='active').count(),
+                'is_active': p.is_active,
+                'already_linked': p.id in linked_hotspot_ids,
+            })
+
         return Response({
-            'billing_plans': [
-                {
-                    'id': p.id,
-                    'name': p.name,
-                    'subscriber_count': p.total_subs,
-                    'already_linked': p.id in linked_billing_ids,
-                }
-                for p in billing_plans
-            ],
-            'hotspot_plans': [
-                {
-                    'id': p.id,
-                    'name': p.name,
-                    'already_linked': p.id in linked_hotspot_ids,
-                }
-                for p in hotspot_plans
-            ]
+            'billing_plans': billing_data,
+            'hotspot_plans': hotspot_data,
         })
 
     @action(detail=True, methods=['post'])

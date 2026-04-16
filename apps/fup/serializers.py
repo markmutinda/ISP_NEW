@@ -228,6 +228,9 @@ class LinkPlansSerializer(serializers.Serializer):
     )
 
     def validate(self, data):
+        # Allow either list to be non-empty — don't require both
         if not data.get('plan_ids') and not data.get('hotspot_plan_ids'):
-            raise serializers.ValidationError("You must provide at least one plan_id or hotspot_plan_id.")
+            raise serializers.ValidationError(
+                "Provide at least one plan_id or hotspot_plan_id."
+            )
         return data
