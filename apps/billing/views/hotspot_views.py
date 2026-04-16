@@ -431,14 +431,12 @@ class HotspotPurchaseView(APIView):
         """
         Resolve tenant's active payment method for hotspot checkout.
 
-        Accepts ANY active M-Pesa-capable method type:
-          - MPESA_STK   (Daraja STK Push or Tuma)
-          - MPESA_PAYBILL (Daraja Paybill with own keys)
-          - MPESA_TILL  (Tuma Till)
-          - MOBILE_MONEY (Tuma or Daraja)
-
+        Accepts ANY active M-Pesa-capable method type.
         Priority: default first, then most recently updated active method.
+        Falls back to ANY active method if no specific M-Pesa type found,
+        since Tuma-configured methods may have various types.
         """
+        # First try: explicit M-Pesa capable types
         method = (
             InvoiceItemPayment.objects
             .filter(
@@ -450,6 +448,27 @@ class HotspotPurchaseView(APIView):
             .order_by('-is_default', '-updated_at')
             .first()
         )
+        
+        if method:
+            return method
+        
+        # Fallback: any active method that has a tuma_configuration OR mpesa_configuration
+        method = (
+            InvoiceItemPayment.objects
+            .filter(
+                schema_name=schema_name,
+                is_active=True,
+            )
+            .filter(
+                Q(tuma_configuration__isnull=False) |
+                Q(mpesa_configuration__isnull=False) |
+                Q(is_payhero_enabled=True)
+            )
+            .select_related('mpesa_configuration', 'tuma_configuration')
+            .order_by('-is_default', '-updated_at')
+            .first()
+        )
+        
         return method
 
     def _ensure_mpesa_stk_callback_url(self, mpesa_cfg):
@@ -650,11 +669,13 @@ class HotspotPurchaseView(APIView):
             )
 
             # ===============================
-            # Provider branch: M-Pesa first, else Tuma
+            # Provider branch: Daraja (own keys) first, else Tuma
             # ===============================
             try:
                 # Branch 1: Tenant's own Daraja credentials (MpesaConfiguration)
-                if payment_method.mpesa_configuration and payment_method.mpesa_configuration.is_active:
+                # This is the ONLY case where we bypass Tuma
+                if (payment_method.mpesa_configuration and 
+                    payment_method.mpesa_configuration.is_active):
                     mpesa_cfg = payment_method.mpesa_configuration
                     self._ensure_mpesa_stk_callback_url(mpesa_cfg)
 
@@ -674,16 +695,46 @@ class HotspotPurchaseView(APIView):
                         session.mark_failed(payment.failure_reason)
                         return Response({'error': payment.failure_reason}, status=status.HTTP_400_BAD_REQUEST)
 
-                    # Optional: mirror IDs to hotspot session for easy status traces
                     d = mpesa_result.get('data', {})
-                    session.tuma_merchant_request_id = d.get('merchant_request_id', '')  # harmless reuse of fields
+                    session.tuma_merchant_request_id = d.get('merchant_request_id', '')
                     session.tuma_checkout_request_id = d.get('checkout_request_id', '')
                     session.payment = payment
                     session.save(update_fields=['tuma_merchant_request_id', 'tuma_checkout_request_id', 'payment'])
 
-                # Branch 2: Tuma configuration
-                elif payment_method.tuma_configuration and payment_method.tuma_configuration.is_active:
-                    cfg = payment_method.tuma_configuration
+                else:
+                    # Branch 2: Tuma — resolve config from method FK first,
+                    # then fall back to tenant-level TenantTumaConfig
+                    cfg = None
+                    
+                    if (payment_method.tuma_configuration and 
+                        payment_method.tuma_configuration.is_active):
+                        cfg = payment_method.tuma_configuration
+                    else:
+                        # Fallback: look up TenantTumaConfig directly by schema
+                        try:
+                            cfg = TenantTumaConfig.objects.get(
+                                schema_name=tenant.schema_name,
+                                is_active=True
+                            )
+                        except TenantTumaConfig.DoesNotExist:
+                            cfg = None
+                    
+                    if not cfg:
+                        payment.status = 'FAILED'
+                        payment.failure_reason = "No payment gateway configured (Tuma not set up)"
+                        payment.save(update_fields=['status', 'failure_reason'])
+                        session.mark_failed(payment.failure_reason)
+                        return Response(
+                            {
+                                'error': (
+                                    'No active payment gateway configured. '
+                                    'Please set up a payment method in the admin dashboard under '
+                                    'Billing → Payment Methods.'
+                                )
+                            },
+                            status=status.HTTP_400_BAD_REQUEST
+                        )
+
                     if not cfg.tuma_business_email or not cfg.tuma_business_api_key:
                         payment.status = 'FAILED'
                         payment.failure_reason = "Tuma gateway credentials missing"
@@ -734,13 +785,6 @@ class HotspotPurchaseView(APIView):
                     session.tuma_checkout_request_id = payment.tuma_checkout_request_id
                     session.payment = payment
                     session.save(update_fields=['tuma_merchant_request_id', 'tuma_checkout_request_id', 'payment'])
-
-                else:
-                    payment.status = 'FAILED'
-                    payment.failure_reason = "Active payment method has no valid provider configuration"
-                    payment.save(update_fields=['status', 'failure_reason'])
-                    session.mark_failed(payment.failure_reason)
-                    return Response({'error': payment.failure_reason}, status=status.HTTP_400_BAD_REQUEST)
 
                 logger.info(
                     f"STK Push initiated for session {session.session_id}, "
