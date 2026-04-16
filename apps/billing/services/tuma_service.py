@@ -696,6 +696,7 @@ def deactivate_tuma_collections(schema_name):
     Sets is_active=False on the remote Tuma business and the local config.
     """
     from apps.billing.models.payment_models import TenantTumaConfig
+    import requests
 
     try:
         cfg = TenantTumaConfig.objects.get(schema_name=schema_name)
@@ -713,10 +714,16 @@ def deactivate_tuma_collections(schema_name):
         if not res.get("success"):
             raise TumaError(res.get("message", "Failed to deactivate Tuma business"))
     except TumaNotFound:
-        # Business was already deleted on Tuma — clear local config
         logger.warning(f"Tuma business gone for {schema_name} during deactivate, clearing local config")
         _clear_tuma_config(cfg)
         return
+    except requests.HTTPError as e:
+        # convert HTTP-level failures to domain error so caller handles gracefully
+        logger.warning(f"Tuma HTTP error during deactivate for {schema_name}: {e}")
+        raise TumaError(f"Tuma deactivate failed: {e}")
+    except Exception as e:
+        logger.warning(f"Tuma unexpected error during deactivate for {schema_name}: {e}")
+        raise TumaError(f"Tuma deactivate failed: {e}")
 
     cfg.is_active = False
     cfg.save(update_fields=['is_active', 'updated_at'])

@@ -49,20 +49,21 @@ class MpesaConfigurationViewSet(viewsets.ModelViewSet):
     ordering_fields = ['created_at', 'updated_at']
 
     def get_queryset(self):
-        """Return only configurations for the current tenant"""
+        """Return only configurations for the current tenant with stable ordering for pagination."""
         from ..models.payment_models import MpesaConfiguration
         
         user = self.request.user
         
         if user.is_superuser:
-            # Superusers can see all configurations across tenants
             schema_name = self.request.query_params.get('schema_name')
             if schema_name:
-                return MpesaConfiguration.objects.filter(schema_name=schema_name)
-            return MpesaConfiguration.objects.all()
+                qs = MpesaConfiguration.objects.filter(schema_name=schema_name)
+            else:
+                qs = MpesaConfiguration.objects.all()
+        else:
+            qs = MpesaConfiguration.objects.filter(schema_name=connection.schema_name)
         
-        # Regular users only see their tenant's configurations
-        return MpesaConfiguration.objects.filter(schema_name=connection.schema_name)
+        return qs.order_by('-updated_at', '-id')
 
     def get_serializer_class(self):
         if self.action == 'retrieve':

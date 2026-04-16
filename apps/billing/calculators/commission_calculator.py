@@ -1,5 +1,5 @@
 from decimal import Decimal
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, time
 from django.utils import timezone
 from django.db.models import Sum, Q, Count
 from apps.customers.models import Customer
@@ -208,11 +208,19 @@ class CommissionCalculator:
     @staticmethod
     def generate_commission_report(company, month, year):
         """Generate monthly commission report for all staff"""
-        start_date = datetime(year, month, 1)
+        tz = timezone.get_current_timezone()
+        
+        start_date = timezone.make_aware(datetime(year, month, 1, 0, 0, 0), tz)
+        
         if month == 12:
-            end_date = datetime(year + 1, 1, 1) - timedelta(days=1)
+            month_end_date = datetime(year + 1, 1, 1) - timedelta(days=1)
         else:
-            end_date = datetime(year, month + 1, 1) - timedelta(days=1)
+            month_end_date = datetime(year, month + 1, 1) - timedelta(days=1)
+        
+        end_date = timezone.make_aware(
+            datetime.combine(month_end_date.date(), time(23, 59, 59)),
+            tz
+        )
         
         # Get all staff in the company
         from core.models import User
