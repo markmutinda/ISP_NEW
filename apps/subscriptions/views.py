@@ -371,15 +371,15 @@ class InitiateSubscriptionPaymentView(APIView):
             }
         )
         
-        if not created:
-            # Updating existing subscription
-            subscription.plan = plan
-            subscription.billing_period = billing_period
-            subscription.save()
+        # NOTE: Do NOT update subscription.plan here.
+        # The plan switch is deferred to payment success (webhook/polling)
+        # to prevent phantom plan changes from unpaid STK pushes.
         
-        # Create payment record
+        # Create payment record with intended plan
         payment = SubscriptionPayment.objects.create(
             subscription=subscription,
+            intended_plan=plan,
+            intended_billing_period=billing_period,
             amount=amount,
             payment_method=payment_method,
             phone_number=phone_number,
@@ -570,6 +570,9 @@ class SubscriptionPaymentViewSet(viewsets.ReadOnlyModelViewSet):
 
                         if locked_payment.status in ['pending', 'processing']:
                             locked_payment.mark_completed(mpesa_receipt=receipt)
+
+                            # Apply intended plan (only on successful payment)
+                            locked_payment.apply_intended_plan()
 
                             subscription = locked_payment.subscription
                             if subscription.is_trial:

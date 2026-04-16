@@ -141,6 +141,9 @@ class PayHeroSubscriptionWebhookView(PayHeroWebhookMixin, APIView):
                 payment.mpesa_receipt = payload['mpesa_receipt']
                 payment.save(update_fields=['status', 'completed_at', 'mpesa_receipt'])
                 
+                # ─── APPLY INTENDED PLAN (only on successful payment) ───
+                payment.apply_intended_plan()
+                
                 # ─── SINGLE LIFECYCLE TRANSITION ───
                 subscription = payment.subscription
                 if subscription.is_trial:

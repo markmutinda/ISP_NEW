@@ -440,6 +440,23 @@ class SubscriptionPayment(models.Model):
         related_name='payments'
     )
     
+    # The plan + billing period this payment is FOR (applied only on success)
+    intended_plan = models.ForeignKey(
+        NetilyPlan,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='intended_payments',
+        help_text="Plan to switch to upon successful payment"
+    )
+    intended_billing_period = models.CharField(
+        max_length=20,
+        choices=CompanySubscription.BILLING_PERIOD_CHOICES,
+        blank=True,
+        default='',
+        help_text="Billing period to apply upon successful payment"
+    )
+    
     # Payment Details
     amount = models.DecimalField(max_digits=10, decimal_places=2)
     currency = models.CharField(max_length=3, default='KES')
@@ -503,6 +520,18 @@ class SubscriptionPayment(models.Model):
         self.status = 'failed'
         self.failure_reason = reason
         self.save()
+
+    def apply_intended_plan(self):
+        """
+        Apply the intended plan/billing period to the subscription.
+        Called ONLY after payment success (webhook or polling).
+        """
+        if self.intended_plan:
+            self.subscription.plan = self.intended_plan
+        if self.intended_billing_period:
+            self.subscription.billing_period = self.intended_billing_period
+        if self.intended_plan or self.intended_billing_period:
+            self.subscription.save(update_fields=['plan', 'billing_period'])
 
 
 class ISPPayoutConfig(models.Model):
