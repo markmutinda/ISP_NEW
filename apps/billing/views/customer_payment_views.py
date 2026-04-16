@@ -464,14 +464,14 @@ class PaymentMethodDetailView(APIView):
         serializer.is_valid(raise_exception=True)
         method = serializer.save(updated_by=request.user)
 
-        # If the active method's settlement details changed, sync to Tuma
+        # If the active method's settlement details changed, sync to Tuma (non-fatal)
         tuma_synced = False
         if method.is_active:
             from apps.billing.services.tuma_service import sync_active_method_to_tuma, TumaError
             try:
                 result = sync_active_method_to_tuma(method.schema_name, method)
-                tuma_synced = bool(result)
-            except TumaError as e:
+                tuma_synced = bool(result and result.get('tuma_synced'))
+            except Exception as e:
                 logger.warning(f"Tuma sync on update failed for {method.schema_name}: {e}")
 
         data = serializer.data
@@ -562,7 +562,7 @@ class PaymentMethodToggleActiveView(APIView):
         method.is_active = new_state
         method.save(update_fields=['is_active', 'updated_at'])
 
-        # Sync to Tuma — return detailed feedback
+        # Sync to Tuma — return detailed feedback but NEVER crash the toggle
         sync_details = {'tuma_synced': False}
         try:
             if new_state:
@@ -573,10 +573,17 @@ class PaymentMethodToggleActiveView(APIView):
                     schema_name=connection.schema_name, is_active=True,
                 ).exists()
                 if not has_active:
-                    deactivate_tuma_collections(connection.schema_name)
+                    try:
+                        deactivate_tuma_collections(connection.schema_name)
+                    except Exception as e:
+                        logger.warning(f"Tuma deactivate failed (non-fatal): {e}")
                 sync_details = {'tuma_synced': True, 'settlement_channel': 'None (all deactivated)'}
         except TumaError as e:
             logger.warning(f"Tuma sync on toggle failed for {connection.schema_name}: {e}")
+            sync_details = {'tuma_synced': False, 'tuma_error': str(e)}
+        except Exception as e:
+            # Catch-all: Tuma being down (503, ConnectionError, etc.) must not prevent toggling
+            logger.warning(f"Tuma sync unexpected error for {connection.schema_name}: {e}")
             sync_details = {'tuma_synced': False, 'tuma_error': str(e)}
 
         from apps.billing.serializers.payment_serializers import PaymentMethodSerializer

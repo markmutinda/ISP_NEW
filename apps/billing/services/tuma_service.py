@@ -590,14 +590,25 @@ def sync_active_method_to_tuma(schema_name, method):
     """
     Sync an activated payment method (settlement account) to the Tuma business.
 
-    Updates the remote Tuma business with the correct bank_id + account_number
-    derived from the method's type and config. This is what determines WHERE
-    customer payments actually settle.
+    SKIP: If the method uses direct Daraja credentials (mpesa_configuration),
+    it routes through Safaricom directly — Tuma sync is irrelevant.
 
     Returns:
-        dict with sync details for frontend feedback, or None if no config.
+        dict with sync details, or None if no config / skipped.
     """
     from apps.billing.models.payment_models import TenantTumaConfig
+
+    # ── Skip Tuma sync if this method uses its own Daraja credentials ──
+    if method.mpesa_configuration and method.mpesa_configuration.is_active:
+        logger.info(
+            f"sync_active_method_to_tuma: method '{method.name}' uses direct Daraja "
+            f"(shortcode {method.mpesa_configuration.business_shortcode}) — skipping Tuma sync."
+        )
+        return {
+            'tuma_synced': False,
+            'settlement_channel': f"Direct M-Pesa (Daraja {method.mpesa_configuration.business_shortcode})",
+            'note': 'Payment routed via your own Daraja credentials, not Tuma.',
+        }
 
     try:
         cfg = TenantTumaConfig.objects.get(schema_name=schema_name)
@@ -607,17 +618,35 @@ def sync_active_method_to_tuma(schema_name, method):
 
     if not cfg.tuma_business_id:
         # No business yet — provision one now
-        cfg = ensure_child_business(schema_name, method=method)
+        try:
+            cfg = ensure_child_business(schema_name, method=method)
+        except TumaError as e:
+            logger.warning(f"sync_active_method_to_tuma: could not provision for {schema_name}: {e}")
+            return {'tuma_synced': False, 'tuma_error': str(e)}
         if not cfg.tuma_business_id:
-            logger.warning(f"sync_active_method_to_tuma: could not provision for {schema_name}")
+            logger.warning(f"sync_active_method_to_tuma: provisioning returned no business id for {schema_name}")
             return None
 
     client = TumaClient()
-    master_token = client.get_master_token()
 
-    # Resolve bank reference from method config
-    banks_data = client.list_banks(master_token)
-    banks_list = banks_data.get("data", [])
+    # ── Get master token ──
+    try:
+        master_token = client.get_master_token()
+    except TumaError as e:
+        logger.warning(f"sync_active_method_to_tuma: master auth failed for {schema_name}: {e}")
+        return {'tuma_synced': False, 'tuma_error': f"Tuma auth failed: {e}"}
+
+    # ── Fetch bank list (Tuma may be down — don't crash) ──
+    banks_list = []
+    try:
+        banks_data = client.list_banks(master_token)
+        banks_list = banks_data.get("data", [])
+    except Exception as e:
+        logger.warning(
+            f"sync_active_method_to_tuma: list_banks failed for {schema_name} ({e}). "
+            f"Proceeding without bank list — settlement channel won't be resolved."
+        )
+
     bank_id, account_number, desc = _resolve_bank_for_method(method, banks_list)
 
     logger.info(
@@ -626,7 +655,7 @@ def sync_active_method_to_tuma(schema_name, method):
         f"resolved bank_id={bank_id}, account={account_number}, desc={desc}"
     )
 
-    # Build update payload
+    # ── Build update payload ──
     name, email, mobile = _resolve_tenant_identity(schema_name)
     method_config = method.config_json or {}
     if method_config.get('phone_number'):
@@ -663,22 +692,30 @@ def sync_active_method_to_tuma(schema_name, method):
         cfg.collection_account_number = account_number
         sync_details["account_number"] = account_number
     else:
-        # Method type not directly mappable (e.g. PAYMENT_LINK) — just activate
-        sync_details["note"] = "Payment link is not a Tuma settlement channel"
+        sync_details["note"] = "Payment link or unresolved type — not a direct Tuma settlement channel."
 
+    # ── Push update to Tuma (non-fatal if Tuma is down) ──
     try:
         res = client.update_business(master_token, cfg.tuma_business_id, update_payload)
+        if not res.get("success"):
+            raise TumaError(res.get("message", "Failed to sync method to Tuma"))
     except TumaNotFound:
-        # Business was deleted externally — re-provision and retry
         logger.warning(f"Tuma business gone for {schema_name}, re-provisioning...")
         _clear_tuma_config(cfg)
-        cfg = ensure_child_business(schema_name, method=method)
-        if not cfg.tuma_business_id:
-            raise TumaError("Failed to re-provision Tuma business")
-        res = client.update_business(master_token, cfg.tuma_business_id, update_payload)
-
-    if not res.get("success"):
-        raise TumaError(res.get("message", "Failed to sync method to Tuma"))
+        try:
+            cfg = ensure_child_business(schema_name, method=method)
+            if cfg.tuma_business_id:
+                client.update_business(master_token, cfg.tuma_business_id, update_payload)
+        except TumaError as e:
+            logger.warning(f"Re-provision also failed for {schema_name}: {e}")
+            return {'tuma_synced': False, 'tuma_error': str(e)}
+    except Exception as e:
+        # Tuma is down (503, timeout, etc.) — log but don't crash the toggle
+        logger.warning(
+            f"sync_active_method_to_tuma: Tuma update failed for {schema_name} ({e}). "
+            f"Method activated locally; Tuma sync will retry on next activation."
+        )
+        return {'tuma_synced': False, 'tuma_error': str(e)}
 
     cfg.is_active = True
     cfg.save()

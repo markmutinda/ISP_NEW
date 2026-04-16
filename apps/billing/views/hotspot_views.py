@@ -40,6 +40,12 @@ from apps.subscriptions.models import CommissionLedger
 logger = logging.getLogger(__name__)
 
 
+# ── At the top of the file, add this constant after the imports ──
+MPESA_CAPABLE_METHOD_TYPES = [
+    'MPESA_STK', 'MPESA_PAYBILL', 'MPESA_TILL', 'MOBILE_MONEY', 'MPESA',
+]
+
+
 # ============================================================
 # HELPER UTILITIES
 # ============================================================
@@ -423,14 +429,21 @@ class HotspotPurchaseView(APIView):
 
     def _get_active_hotspot_payment_method(self, schema_name: str):
         """
-        Resolve tenant's active/default MPESA_STK method for hotspot checkout.
-        Priority: active + default first, then latest active.
+        Resolve tenant's active payment method for hotspot checkout.
+
+        Accepts ANY active M-Pesa-capable method type:
+          - MPESA_STK   (Daraja STK Push or Tuma)
+          - MPESA_PAYBILL (Daraja Paybill with own keys)
+          - MPESA_TILL  (Tuma Till)
+          - MOBILE_MONEY (Tuma or Daraja)
+
+        Priority: default first, then most recently updated active method.
         """
         method = (
             InvoiceItemPayment.objects
             .filter(
                 schema_name=schema_name,
-                method_type='MPESA_STK',
+                method_type__in=MPESA_CAPABLE_METHOD_TYPES,
                 is_active=True,
             )
             .select_related('mpesa_configuration', 'tuma_configuration')
@@ -606,9 +619,15 @@ class HotspotPurchaseView(APIView):
             # Resolve active/default tenant payment method (MPESA_STK)
             payment_method = self._get_active_hotspot_payment_method(tenant.schema_name)
             if not payment_method:
-                session.mark_failed("No active MPESA_STK payment method configured")
+                session.mark_failed("No active M-Pesa payment method configured")
                 return Response(
-                    {'error': 'No active M-Pesa STK payment method configured'},
+                    {
+                        'error': (
+                            'No active M-Pesa payment method configured. '
+                            'Please set up a payment method in the admin dashboard under '
+                            'Billing → Payment Methods.'
+                        )
+                    },
                     status=status.HTTP_400_BAD_REQUEST
                 )
 
