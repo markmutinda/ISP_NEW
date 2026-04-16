@@ -32,6 +32,7 @@ from apps.billing.models.billing_models import Plan
 from apps.billing.models.payment_models import Payment, TenantTumaConfig, InvoiceItemPayment
 from apps.billing.models.voucher_models import Voucher
 from apps.billing.services.tuma_service import TumaClient
+from apps.billing.integrations.mpesa_integration import MpesaSTKPush
 from apps.core.models import TumaCallbackMap
 from apps.network.models.router_models import Router
 from apps.subscriptions.models import CommissionLedger
@@ -420,6 +421,36 @@ class HotspotPurchaseView(APIView):
             if not HotspotSession.objects.filter(access_code=code).exists():
                 return code
 
+    def _get_active_hotspot_payment_method(self, schema_name: str):
+        """
+        Resolve tenant's active/default MPESA_STK method for hotspot checkout.
+        Priority: active + default first, then latest active.
+        """
+        method = (
+            InvoiceItemPayment.objects
+            .filter(
+                schema_name=schema_name,
+                method_type='MPESA_STK',
+                is_active=True,
+            )
+            .select_related('mpesa_configuration', 'tuma_configuration')
+            .order_by('-is_default', '-updated_at')
+            .first()
+        )
+        return method
+
+    def _ensure_mpesa_stk_callback_url(self, mpesa_cfg):
+        """
+        Ensure STK callback URL points to the STK callback endpoint, not C2B.
+        """
+        if mpesa_cfg.callback_url:
+            return
+
+        base_url = getattr(settings, 'BASE_URL', '').rstrip('/')
+        if base_url:
+            mpesa_cfg.callback_url = f"{base_url}/api/v1/billing/mpesa/callback/"
+            mpesa_cfg.save(update_fields=['callback_url', 'updated_at'])
+
     @transaction.atomic
     def post(self, request):
         tenant_subdomain = request.data.get('tenant') or request.query_params.get('tenant')
@@ -572,29 +603,20 @@ class HotspotPurchaseView(APIView):
                 hotspot_client=hotspot_client,  # Link to transient client
             )
 
-            cfg = TenantTumaConfig.objects.filter(schema_name=tenant.schema_name, is_active=True).first()
-            if not cfg or not cfg.tuma_business_email or not cfg.tuma_business_api_key:
-                session.mark_failed("Tuma gateway not configured")
-                return Response({'error': 'Payment gateway not configured'}, status=status.HTTP_400_BAD_REQUEST)
-
-            payment_method, _ = InvoiceItemPayment.objects.get_or_create(
-                schema_name=tenant.schema_name,
-                code='HOTSPOT_TUMA_STK',
-                defaults={
-                    'name': 'Hotspot M-Pesa STK (Tuma)',
-                    'method_type': 'MPESA_STK',
-                    'is_active': True,
-                    'minimum_amount': 1,
-                    'maximum_amount': 1000000,
-                    'tuma_configuration': cfg,
-                }
-            )
+            # Resolve active/default tenant payment method (MPESA_STK)
+            payment_method = self._get_active_hotspot_payment_method(tenant.schema_name)
+            if not payment_method:
+                session.mark_failed("No active MPESA_STK payment method configured")
+                return Response(
+                    {'error': 'No active M-Pesa STK payment method configured'},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
 
             payment_ref = f"HS-{session.session_id}-{int(time.time())}".replace(" ", "-")
-            
-            # Create payment with NO customer (Hotspot-only)
+
+            # Create payment linked to selected method
             payment = Payment.objects.create(
-                customer=None,  # Hotspot payments don't create permanent Customer records
+                customer=None,
                 payment_method=payment_method,
                 amount=plan.price,
                 transaction_fee=0,
@@ -608,63 +630,112 @@ class HotspotPurchaseView(APIView):
                 tuma_status='pending',
             )
 
+            # ===============================
+            # Provider branch: M-Pesa first, else Tuma
+            # ===============================
             try:
-                client = TumaClient()
-                token = client.get_token(cfg.tuma_business_email, cfg.tuma_business_api_key)
-                description = f"HS-{session.session_id}"
-                
-                callback_url = getattr(settings, 'TUMA_CALLBACK_URL', None)
-                if not callback_url:
-                    callback_url = f"https://{tenant_subdomain}.netily.co.ke/api/v1/billing/tuma/callback/"
-                
-                tuma_res = client.stk_push(
-                    token=token,
-                    amount=float(plan.price),
-                    phone=phone_number,
-                    callback_url=callback_url,
-                    description=description,
-                )
-                
-                if not tuma_res.get("success"):
+                # Branch 1: Tenant's own Daraja credentials (MpesaConfiguration)
+                if payment_method.mpesa_configuration and payment_method.mpesa_configuration.is_active:
+                    mpesa_cfg = payment_method.mpesa_configuration
+                    self._ensure_mpesa_stk_callback_url(mpesa_cfg)
+
+                    mpesa_service = MpesaSTKPush(config=mpesa_cfg)
+                    mpesa_result = mpesa_service.initiate_stk_push(
+                        phone_number=phone_number,
+                        amount=plan.price,
+                        account_reference=session.session_id[:12],
+                        transaction_desc="Hotspot Access",
+                        payment=payment,
+                    )
+
+                    if not mpesa_result.get('success'):
+                        payment.status = 'FAILED'
+                        payment.failure_reason = mpesa_result.get('message', 'M-Pesa STK initiation failed')
+                        payment.save(update_fields=['status', 'failure_reason'])
+                        session.mark_failed(payment.failure_reason)
+                        return Response({'error': payment.failure_reason}, status=status.HTTP_400_BAD_REQUEST)
+
+                    # Optional: mirror IDs to hotspot session for easy status traces
+                    d = mpesa_result.get('data', {})
+                    session.tuma_merchant_request_id = d.get('merchant_request_id', '')  # harmless reuse of fields
+                    session.tuma_checkout_request_id = d.get('checkout_request_id', '')
+                    session.payment = payment
+                    session.save(update_fields=['tuma_merchant_request_id', 'tuma_checkout_request_id', 'payment'])
+
+                # Branch 2: Tuma configuration
+                elif payment_method.tuma_configuration and payment_method.tuma_configuration.is_active:
+                    cfg = payment_method.tuma_configuration
+                    if not cfg.tuma_business_email or not cfg.tuma_business_api_key:
+                        payment.status = 'FAILED'
+                        payment.failure_reason = "Tuma gateway credentials missing"
+                        payment.save(update_fields=['status', 'failure_reason'])
+                        session.mark_failed(payment.failure_reason)
+                        return Response({'error': payment.failure_reason}, status=status.HTTP_400_BAD_REQUEST)
+
+                    client = TumaClient()
+                    token = client.get_token(cfg.tuma_business_email, cfg.tuma_business_api_key)
+                    description = f"HS-{session.session_id}"
+
+                    callback_url = getattr(settings, 'TUMA_CALLBACK_URL', None)
+                    if not callback_url:
+                        callback_url = f"https://{tenant_subdomain}.netily.co.ke/api/v1/billing/tuma/callback/"
+
+                    tuma_res = client.stk_push(
+                        token=token,
+                        amount=float(plan.price),
+                        phone=phone_number,
+                        callback_url=callback_url,
+                        description=description,
+                    )
+
+                    if not tuma_res.get("success"):
+                        payment.status = 'FAILED'
+                        payment.tuma_status = 'failed'
+                        payment.failure_reason = tuma_res.get("message", "STK initiation failed")
+                        payment.save(update_fields=['status', 'tuma_status', 'failure_reason'])
+                        session.mark_failed(payment.failure_reason)
+                        return Response({'error': payment.failure_reason}, status=status.HTTP_400_BAD_REQUEST)
+
+                    d = tuma_res.get("data", {})
+                    payment.tuma_merchant_request_id = d.get("merchant_request_id", "")
+                    payment.tuma_checkout_request_id = d.get("checkout_request_id", "")
+                    payment.save(update_fields=['tuma_merchant_request_id', 'tuma_checkout_request_id'])
+
+                    with schema_context(get_public_schema_name()):
+                        TumaCallbackMap.objects.update_or_create(
+                            merchant_request_id=payment.tuma_merchant_request_id,
+                            defaults={
+                                "checkout_request_id": payment.tuma_checkout_request_id,
+                                "schema_name": tenant.schema_name,
+                                "payment_reference": payment.payment_number,
+                            },
+                        )
+
+                    session.tuma_merchant_request_id = payment.tuma_merchant_request_id
+                    session.tuma_checkout_request_id = payment.tuma_checkout_request_id
+                    session.payment = payment
+                    session.save(update_fields=['tuma_merchant_request_id', 'tuma_checkout_request_id', 'payment'])
+
+                else:
                     payment.status = 'FAILED'
-                    payment.tuma_status = 'failed'
-                    payment.failure_reason = tuma_res.get("message", "STK initiation failed")
-                    payment.save(update_fields=['status', 'tuma_status', 'failure_reason'])
+                    payment.failure_reason = "Active payment method has no valid provider configuration"
+                    payment.save(update_fields=['status', 'failure_reason'])
                     session.mark_failed(payment.failure_reason)
                     return Response({'error': payment.failure_reason}, status=status.HTTP_400_BAD_REQUEST)
-                
-                d = tuma_res.get("data", {})
-                payment.tuma_merchant_request_id = d.get("merchant_request_id", "")
-                payment.tuma_checkout_request_id = d.get("checkout_request_id", "")
-                payment.save(update_fields=['tuma_merchant_request_id', 'tuma_checkout_request_id'])
-                
-                with schema_context(get_public_schema_name()):
-                    TumaCallbackMap.objects.update_or_create(
-                        merchant_request_id=payment.tuma_merchant_request_id,
-                        defaults={
-                            "checkout_request_id": payment.tuma_checkout_request_id,
-                            "schema_name": tenant.schema_name,
-                            "payment_reference": payment.payment_number,
-                        },
-                    )
-                
-                session.tuma_merchant_request_id = payment.tuma_merchant_request_id
-                session.tuma_checkout_request_id = payment.tuma_checkout_request_id
-                session.payment = payment
-                session.save(update_fields=['tuma_merchant_request_id', 'tuma_checkout_request_id', 'payment'])
-                
-                logger.info(f"STK Push initiated for session {session.session_id}, payment {payment.payment_number}")
-                
+
+                logger.info(
+                    f"STK Push initiated for session {session.session_id}, "
+                    f"payment {payment.payment_number}, method={payment_method.code}"
+                )
+
             except Exception as e:
                 err_text = str(e)
                 logger.error(f"STK initiation failed for session {session.session_id}: {err_text}", exc_info=True)
 
-                # Classify transient upstream failures as retriable
                 retriable_markers = ["404", "429", "502", "503", "504", "timed out", "connection", "temporar"]
                 is_retriable = any(m in err_text.lower() for m in retriable_markers)
 
                 if is_retriable:
-                    # Keep session/payment retryable instead of hard failing user flow
                     payment.failure_reason = err_text[:250]
                     payment.save(update_fields=['failure_reason'])
 

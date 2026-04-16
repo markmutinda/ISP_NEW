@@ -181,11 +181,15 @@ class MpesaConfiguration(AuditMixin):
         return "sandbox" if self.is_sandbox else "production"
     
     def get_callback_url(self, request=None):
+        """
+        Default STK callback URL.
+        NOTE: C2B callbacks are separate and should be configured explicitly where needed.
+        """
         if self.callback_url:
             return self.callback_url
-        
+
         sub_domain = self.schema_name.replace('tenant_', '')
-        return f"https://{sub_domain}.netily.co.ke/api/v1/billing/mpesa/c2b-callback/"
+        return f"https://{sub_domain}.netily.co.ke/api/v1/billing/mpesa/callback/"
     
     def get_timeout_url(self, request=None):
         if self.timeout_url:
