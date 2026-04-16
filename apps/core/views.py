@@ -26,6 +26,8 @@ from django.utils.html import strip_tags  # For plain text email
 from .models import Domain   # ← This is your custom Domain in core/models.
 import logging
 from django.shortcuts import get_object_or_404  # Add this import
+from django.core.cache import cache  # For OTP storage
+import secrets  # For secure OTP generation
 
 from .models import User, Company, SystemSettings, AuditLog, Tenant, Changelog, FeatureRequest, FeatureUpvote  # Add FeatureRequest and FeatureUpvote here
 from .serializers import (
@@ -937,3 +939,126 @@ class ToggleUpvoteView(APIView):
                 "action": action, 
                 "count": feature.upvotes_count
             })
+
+
+class SendOTPView(APIView):
+    """
+    Send a 6-digit OTP to the authenticated user's email.
+    OTP is stored in Django cache with a 5-minute TTL.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        user = request.user
+        email = user.email
+        if not email:
+            return Response({"error": "No email associated with this account."}, status=status.HTTP_400_BAD_REQUEST)
+
+        # Rate limit: one OTP per 60 seconds per user
+        rate_key = f"otp_rate_{user.id}"
+        if cache.get(rate_key):
+            return Response({"error": "Please wait 60 seconds before requesting a new OTP."}, status=status.HTTP_429_TOO_MANY_REQUESTS)
+
+        # Generate a secure 6-digit code
+        otp_code = f"{secrets.randbelow(900000) + 100000}"
+
+        # Store in cache with 5-minute TTL
+        cache_key = f"otp_{user.id}"
+        cache.set(cache_key, otp_code, timeout=300)
+
+        # Set rate limit (60 seconds)
+        cache.set(rate_key, True, timeout=60)
+
+        # Send via email
+        try:
+            send_mail(
+                subject="Your Netily Verification Code",
+                message=f"Your verification code is: {otp_code}\n\nThis code expires in 5 minutes. Do not share it with anyone.",
+                from_email=settings.DEFAULT_FROM_EMAIL,
+                recipient_list=[email],
+                fail_silently=False,
+            )
+        except Exception as e:
+            logger.error(f"Failed to send OTP email to {email}: {e}")
+            return Response({"error": "Failed to send OTP. Please try again."}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+        # Mask the email for the response
+        parts = email.split("@")
+        masked = parts[0][:2] + "***@" + parts[1] if len(parts) == 2 else "***"
+
+        return Response({
+            "message": "OTP sent successfully.",
+            "email": masked,
+        })
+
+
+class VerifyOTPView(APIView):
+    """
+    Verify a 6-digit OTP for the authenticated user.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        otp_code = request.data.get("otp", "").strip()
+        if not otp_code or len(otp_code) != 6:
+            return Response({"error": "Please provide a valid 6-digit OTP."}, status=status.HTTP_400_BAD_REQUEST)
+
+        cache_key = f"otp_{request.user.id}"
+        stored_otp = cache.get(cache_key)
+
+        if not stored_otp:
+            return Response({"error": "OTP has expired. Please request a new one."}, status=status.HTTP_400_BAD_REQUEST)
+
+        if stored_otp != otp_code:
+            return Response({"error": "Invalid OTP. Please try again."}, status=status.HTTP_400_BAD_REQUEST)
+
+        # OTP is valid — delete it so it can't be reused
+        cache.delete(cache_key)
+
+        return Response({
+            "message": "OTP verified successfully.",
+            "verified": True,
+        })
+
+
+class SubmitLeadView(APIView):
+    """
+    Public endpoint for capturing leads from the landing page.
+    No authentication required.
+    """
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        name = request.data.get("name", "").strip()
+        email = request.data.get("email", "").strip()
+        phone = request.data.get("phone", "").strip()
+        company = request.data.get("company", "").strip()
+
+        if not name or not email:
+            return Response({"error": "Name and email are required."}, status=status.HTTP_400_BAD_REQUEST)
+
+        # Store lead in the public schema
+        with schema_context(get_public_schema_name()):
+            from .models import Lead
+            Lead.objects.create(
+                name=name,
+                email=email,
+                phone=phone,
+                company_name=company,
+            )
+
+        # Send notification email to admin
+        try:
+            send_mail(
+                subject=f"New Lead: {name} ({company or 'No company'})",
+                message=f"New lead submitted:\n\nName: {name}\nEmail: {email}\nPhone: {phone}\nCompany: {company}",
+                from_email=settings.DEFAULT_FROM_EMAIL,
+                recipient_list=[settings.DEFAULT_FROM_EMAIL],
+                fail_silently=True,
+            )
+        except Exception:
+            pass
+
+        return Response({
+            "message": "Thank you! We'll be in touch shortly.",
+        }, status=status.HTTP_201_CREATED)

@@ -782,3 +782,22 @@ class TumaCallbackMap(models.Model):
 
     def __str__(self):
         return f"{self.schema_name} | {self.checkout_request_id}"
+
+
+class Lead(models.Model):
+    """
+    Stores leads from the public landing page.
+    Lives in the public schema.
+    """
+    name = models.CharField(max_length=200)
+    email = models.EmailField()
+    phone = models.CharField(max_length=20, blank=True, default="")
+    company_name = models.CharField(max_length=200, blank=True, default="")
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        app_label = "core"
+        ordering = ["-created_at"]
+
+    def __str__(self):
+        return f"{self.name} ({self.email})"

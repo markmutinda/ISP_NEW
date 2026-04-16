@@ -44,6 +44,13 @@ urlpatterns = [
     path('feature-requests/', views.CommunityFeatureRequestView.as_view(), name='feature-requests'),
     path('feature-requests/<int:pk>/toggle-upvote/', views.ToggleUpvoteView.as_view(), name='toggle-upvote'),
     
+    # OTP endpoints
+    path('auth/otp/send/', views.SendOTPView.as_view(), name='send-otp'),
+    path('auth/otp/verify/', views.VerifyOTPView.as_view(), name='verify-otp'),
+    
+    # Lead capture (public)
+    path('leads/submit/', views.SubmitLeadView.as_view(), name='submit-lead'),
+    
     # Include router URLs
     path('', include(router.urls)),
 ]
