@@ -11,6 +11,7 @@ from .views import (
     NetilyPlanViewSet,
     CurrentSubscriptionView,
     SubscriptionUsageView,
+    MeteredBillingEstimateView,
     InitiateSubscriptionPaymentView,
     SubscriptionPaymentViewSet,
     CancelSubscriptionView,
@@ -34,6 +35,7 @@ urlpatterns = [
     # Subscription management
     path('current/', CurrentSubscriptionView.as_view(), name='current'),
     path('usage/', SubscriptionUsageView.as_view(), name='usage'),
+    path('metered-estimate/', MeteredBillingEstimateView.as_view(), name='metered-estimate'),
     path('pay/', InitiateSubscriptionPaymentView.as_view(), name='pay'),
     path('cancel/', CancelSubscriptionView.as_view(), name='cancel'),
 

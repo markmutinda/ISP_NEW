@@ -296,6 +296,83 @@ class SubscriptionUsageView(APIView):
         return Response(serializer.data)
 
 
+class MeteredBillingEstimateView(APIView):
+    """
+    Real-time estimate of the current billing cycle cost for metered plans.
+
+    GET /api/v1/subscriptions/metered-estimate/
+    Returns base fee, PPPoE charge breakdown, hotspot share %, and total estimate.
+    For non-metered plans returns is_metered: false with no breakdown.
+    Result is cached in Redis for 8 hours; Celery task refreshes it 3× / day.
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    def _get_company(self, request):
+        tenant = getattr(request, 'tenant', None)
+        if tenant:
+            company = getattr(tenant, 'company', None)
+            if company:
+                return company
+        user = request.user
+        if hasattr(user, 'company') and user.company:
+            return user.company
+        return None
+
+    def get(self, request):
+        company = self._get_company(request)
+        if not company:
+            return Response({'error': 'No company associated with your account'},
+                            status=status.HTTP_400_BAD_REQUEST)
+
+        cache_key = f'metered_estimate:{company.pk}'
+        from django.core.cache import cache
+        cached = cache.get(cache_key)
+        if cached:
+            return Response(cached)
+
+        with schema_context('public'):
+            try:
+                subscription = CompanySubscription.objects.select_related('plan').get(
+                    company=company
+                )
+                plan = subscription.plan
+            except CompanySubscription.DoesNotExist:
+                return Response({'error': 'No active subscription'}, status=status.HTTP_404_NOT_FOUND)
+
+        if not plan.is_metered:
+            return Response({'is_metered': False, 'plan_name': plan.name})
+
+        # Count unique PPPoE subscribers active this billing cycle
+        from apps.customers.models import Customer
+        pppoe_count = Customer.objects.count()
+
+        pppoe_min = int(plan.pppoe_min_clients)
+        pppoe_unit = Decimal(str(plan.pppoe_unit_price))
+        base_fee = Decimal(str(plan.base_license_fee))
+        hotspot_share_pct = Decimal(str(plan.hotspot_revenue_share_pct))
+
+        billable_pppoe = max(pppoe_count, pppoe_min)
+        pppoe_charge = Decimal(billable_pppoe) * pppoe_unit
+        total_estimate = base_fee + pppoe_charge
+
+        data = {
+            'is_metered': True,
+            'plan_name': plan.name,
+            'base_fee': str(base_fee),
+            'pppoe_count': pppoe_count,
+            'pppoe_min_clients': pppoe_min,
+            'pppoe_unit_price': str(pppoe_unit),
+            'billable_pppoe': billable_pppoe,
+            'pppoe_charge': str(pppoe_charge),
+            'hotspot_share_pct': str(hotspot_share_pct),
+            'total_estimate': str(total_estimate),
+            'note': 'Hotspot revenue share calculated at cycle close and not included in total_estimate.',
+        }
+        cache.set(cache_key, data, timeout=60 * 60 * 8)  # 8-hour TTL
+        return Response(data)
+
+
 class InitiateSubscriptionPaymentView(APIView):
     """
     Initiate payment for subscription via PayHero.

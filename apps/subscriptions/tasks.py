@@ -594,3 +594,61 @@ def reconcile_hotspot_accumulators():
             logger.error(f"[{cycle.tenant.schema_name}] Reconciliation failed: {e}")
 
     return f"Reconciled {reconciled}/{active_cycles.count()} active cycles"
+
+
+@shared_task(name='apps.subscriptions.tasks.refresh_metered_billing_estimates')
+def refresh_metered_billing_estimates():
+    """
+    Periodic task: pre-compute metered billing estimates for all active
+    metered-plan tenants and cache them in Redis for 8 hours.
+
+    Scheduled 3× / day (see config/celery.py beat_schedule).
+    """
+    from django.core.cache import cache
+    from apps.core.models import Company
+
+    active_companies = Company.objects.filter(
+        subscription__plan__is_metered=True,
+        subscription__status__in=['active', 'trialing'],
+    ).select_related('subscription__plan')
+
+    refreshed = 0
+    for company in active_companies:
+        try:
+            plan = company.subscription.plan
+            schema = company.schema_name if hasattr(company, 'schema_name') else None
+            if not schema:
+                continue
+
+            with schema_context(schema):
+                from apps.customers.models import Customer
+                pppoe_count = Customer.objects.count()
+
+            pppoe_min = int(plan.pppoe_min_clients)
+            pppoe_unit = Decimal(str(plan.pppoe_unit_price))
+            base_fee = Decimal(str(plan.base_license_fee))
+            hotspot_share_pct = Decimal(str(plan.hotspot_revenue_share_pct))
+            billable_pppoe = max(pppoe_count, pppoe_min)
+            pppoe_charge = Decimal(billable_pppoe) * pppoe_unit
+            total_estimate = base_fee + pppoe_charge
+
+            data = {
+                'is_metered': True,
+                'plan_name': plan.name,
+                'base_fee': str(base_fee),
+                'pppoe_count': pppoe_count,
+                'pppoe_min_clients': pppoe_min,
+                'pppoe_unit_price': str(pppoe_unit),
+                'billable_pppoe': billable_pppoe,
+                'pppoe_charge': str(pppoe_charge),
+                'hotspot_share_pct': str(hotspot_share_pct),
+                'total_estimate': str(total_estimate),
+                'note': 'Hotspot revenue share calculated at cycle close and not included in total_estimate.',
+            }
+            cache_key = f'metered_estimate:{company.pk}'
+            cache.set(cache_key, data, timeout=60 * 60 * 9)  # 9-hour TTL (> 8 h so never cold)
+            refreshed += 1
+        except Exception as exc:
+            logger.error(f"refresh_metered_billing_estimates failed for company {company.pk}: {exc}")
+
+    return f"Refreshed metered estimate cache for {refreshed} tenant(s)"

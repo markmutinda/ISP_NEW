@@ -190,6 +190,17 @@ app.conf.beat_schedule = {
     },
 
     # ────────────────────────────────────────────────────────────────
+    # Metered Billing Estimate Cache — 3× / day
+    # Pre-computes and caches billing estimates for metered plan tenants
+    # so the admin Usage tab loads instantly from Redis.
+    # ────────────────────────────────────────────────────────────────
+    'refresh-metered-billing-estimates-3x-daily': {
+        'task': 'apps.subscriptions.tasks.refresh_metered_billing_estimates',
+        'schedule': crontab(hour='8,14,20', minute=0),  # 8 AM, 2 PM, 8 PM
+        'options': {'queue': 'billing'}
+    },
+
+    # ────────────────────────────────────────────────────────────────
     # FUP Automation - Every 10 minutes
     # ────────────────────────────────────────────────────────────────
     'sync-fup-usage-every-10-min': {
