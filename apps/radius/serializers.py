@@ -221,42 +221,41 @@ class OnlineUserSerializer(serializers.ModelSerializer):
 
     def get_usage(self, obj) -> str:
         """
-        Calculate data usage since the START of the user's CURRENT subscription period.
-
-        For PPPoE users:   anchored to CustomerRadiusCredentials.subscription_activated_at
-        For hotspot users: anchored to the most-recent HotspotSession.activated_at
-
-        This means usage resets to 0 every time a new subscription is purchased,
-        regardless of what happened in previous periods.
+        FIX: PPPoE usage no longer resets when user reconnects.
+        We now use subscription_activated_at as the anchor, falling back
+        to the start of the current calendar month (NOT obj.acctstarttime).
         """
         from django.db.models import Sum
+        import datetime
 
-        # ── Step 1: determine the period-start anchor ──────────────────────
         period_start = None
 
-        # PPPoE path — explicit renewal timestamp stored on credentials
+        # ── PPPoE path: use explicit subscription activation timestamp ──
         try:
             from apps.radius.models import CustomerRadiusCredentials
-            creds = CustomerRadiusCredentials.objects.filter(
-                username=obj.username
-            ).first()
+            creds = CustomerRadiusCredentials.objects.filter(username=obj.username).first()
             if creds and creds.subscription_activated_at:
                 period_start = creds.subscription_activated_at
+            elif creds and creds.customer:
+                # Fallback: look for service activation date
+                service = creds.customer.services.filter(
+                    status='ACTIVE'
+                ).order_by('-activation_date').first()
+                if service and getattr(service, 'activation_date', None):
+                    ad = service.activation_date
+                    if isinstance(ad, datetime.date) and not isinstance(ad, datetime.datetime):
+                        ad = datetime.datetime(ad.year, ad.month, ad.day, tzinfo=datetime.timezone.utc)
+                    period_start = ad
         except Exception:
             pass
 
-        # Hotspot path — use the most-recent session's activated_at.
-        # This is the exact moment the customer paid for the current period.
+        # ── Hotspot path: anchor to session activation ──────────────────
         if period_start is None:
             try:
                 from apps.billing.models.hotspot_models import HotspotSession
                 hs = (
                     HotspotSession.objects
-                    .filter(
-                        access_code=obj.username,
-                        status__in=('active', 'paid'),
-                        activated_at__isnull=False,
-                    )
+                    .filter(access_code=obj.username, status__in=('active', 'paid'), activated_at__isnull=False)
                     .order_by('-activated_at')
                     .first()
                 )
@@ -265,13 +264,15 @@ class OnlineUserSerializer(serializers.ModelSerializer):
             except Exception:
                 pass
 
-        # Last resort: scope to the current open RADIUS session only.
-        # This guarantees we never accumulate across subscription periods
-        # even if the anchors above are unavailable.
+        # ── FIX: Never use obj.acctstarttime as fallback for PPPoE!
+        #         That resets usage to 0 on every reconnect.
+        #         Use start of current calendar month instead. ──────────
         if period_start is None:
-            period_start = obj.acctstarttime
+            from django.utils import timezone as _tz
+            _now = _tz.now()
+            period_start = _now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
 
-        # ── Step 2: sum closed sessions since period_start ─────────────────
+        # ── Sum all closed sessions since period_start ──────────────────
         historical = RadAcct.objects.filter(
             username=obj.username,
             acctstoptime__isnull=False,
@@ -281,7 +282,7 @@ class OnlineUserSerializer(serializers.ModelSerializer):
             total_out=Sum('acctoutputoctets'),
         )
 
-        # ── Step 3: add the current open session ───────────────────────────
+        # ── Add the current open session ────────────────────────────────
         current_in  = obj.acctinputoctets  or 0
         current_out = obj.acctoutputoctets or 0
         hist_in     = historical['total_in']  or 0

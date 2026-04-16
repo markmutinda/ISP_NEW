@@ -458,7 +458,9 @@ class FUPUsageWindowViewSet(viewsets.ReadOnlyModelViewSet):
     - current_only: Only show current windows (default: true)
     """
     queryset = FUPUsageWindow.objects.select_related(
-        'customer', 'policy', 'plan', 'service_connection'
+        'customer', 'policy', 'plan', 'service_connection',
+        'hotspot_session', 'hotspot_session__plan',
+        'hotspot_plan',
     ).all()
     serializer_class = FUPUsageWindowSerializer
     permission_classes = [IsAuthenticated]
@@ -486,7 +488,8 @@ class FUPUsageWindowViewSet(viewsets.ReadOnlyModelViewSet):
                 Q(customer__customer_code__icontains=search) |
                 Q(customer__user__first_name__icontains=search) |
                 Q(customer__user__last_name__icontains=search) |
-                Q(policy__name__icontains=search)
+                Q(policy__name__icontains=search) |
+                Q(hotspot_session__access_code__icontains=search)
             )
 
         if current_only == 'true':

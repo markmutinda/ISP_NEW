@@ -10,7 +10,8 @@ class FUPPolicy(models.Model):
         ('DAILY', 'Daily'),
         ('WEEKLY', 'Weekly'),
         ('MONTHLY', 'Monthly'),
-        ('SUBSCRIPTION', 'Subscription'),
+        ('SUBSCRIPTION', 'Subscription Period'),
+        ('PEAK_HOURS', 'Peak Hours Only'),
     ]
 
     STATUS_CHOICES = [
@@ -28,26 +29,22 @@ class FUPPolicy(models.Model):
     throttle_upload_mbps = models.PositiveIntegerField(default=1)
 
     reset_period = models.CharField(max_length=20, choices=PERIOD_CHOICES)
-    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='DRAFT')
+    peak_hour_start = models.TimeField(
+        null=True, blank=True,
+        help_text='Peak hours start time (24h EAT, Nairobi). e.g. 19:00 = 7 PM'
+    )
+    peak_hour_end = models.TimeField(
+        null=True, blank=True,
+        help_text='Peak hours end time (24h EAT, Nairobi). e.g. 22:00 = 10 PM'
+    )
 
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='DRAFT')
     auto_enforce = models.BooleanField(default=True)
     notify_on_violation = models.BooleanField(default=True)
     is_active = models.BooleanField(default=True)
 
-    created_by = models.ForeignKey(
-        'core.User',
-        null=True,
-        blank=True,
-        on_delete=models.SET_NULL,
-        related_name='created_fup_policies',
-    )
-    updated_by = models.ForeignKey(
-        'core.User',
-        null=True,
-        blank=True,
-        on_delete=models.SET_NULL,
-        related_name='updated_fup_policies',
-    )
+    created_by = models.ForeignKey('core.User', null=True, blank=True, on_delete=models.SET_NULL, related_name='created_fup_policies')
+    updated_by = models.ForeignKey('core.User', null=True, blank=True, on_delete=models.SET_NULL, related_name='updated_fup_policies')
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -152,26 +149,16 @@ class FUPUsageWindow(models.Model):
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
 
-    policy = models.ForeignKey(
-        'fup.FUPPolicy',
-        on_delete=models.CASCADE,
-        related_name='usage_windows'
-    )
-    plan = models.ForeignKey(
-        'billing.Plan',
-        on_delete=models.PROTECT,
-        related_name='fup_usage_windows'
-    )
-    service_connection = models.ForeignKey(
-        'customers.ServiceConnection',
-        on_delete=models.CASCADE,
-        related_name='fup_usage_windows'
-    )
-    customer = models.ForeignKey(
-        'customers.Customer',
-        on_delete=models.CASCADE,
-        related_name='fup_usage_windows'
-    )
+    policy = models.ForeignKey('fup.FUPPolicy', on_delete=models.CASCADE, related_name='usage_windows')
+
+    # PPPoE / Static fields (nullable to support hotspot)
+    plan = models.ForeignKey('billing.Plan', on_delete=models.PROTECT, null=True, blank=True, related_name='fup_usage_windows')
+    service_connection = models.ForeignKey('customers.ServiceConnection', on_delete=models.CASCADE, null=True, blank=True, related_name='fup_usage_windows')
+    customer = models.ForeignKey('customers.Customer', on_delete=models.CASCADE, null=True, blank=True, related_name='fup_usage_windows')
+
+    # Hotspot fields
+    hotspot_session = models.ForeignKey('billing.HotspotSession', on_delete=models.SET_NULL, null=True, blank=True, related_name='fup_usage_windows')
+    hotspot_plan = models.ForeignKey('billing.HotspotPlan', on_delete=models.SET_NULL, null=True, blank=True, related_name='fup_usage_windows')
 
     period_start = models.DateTimeField()
     period_end = models.DateTimeField()
@@ -195,18 +182,23 @@ class FUPUsageWindow(models.Model):
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
-        unique_together = [('policy', 'service_connection', 'period_start', 'period_end')]
         ordering = ['-period_start']
         indexes = [
             models.Index(fields=['status']),
             models.Index(fields=['is_throttled']),
             models.Index(fields=['period_start', 'period_end']),
+            models.Index(fields=['policy', 'service_connection']),
+            models.Index(fields=['policy', 'hotspot_session']),
         ]
         verbose_name = 'FUP Usage Window'
         verbose_name_plural = 'FUP Usage Windows'
 
     def __str__(self):
-        return f'{self.customer.customer_code} - {self.policy.name}'
+        if self.customer:
+            return f'{self.customer.customer_code} - {self.policy.name}'
+        if self.hotspot_session:
+            return f'Hotspot {self.hotspot_session.access_code} - {self.policy.name}'
+        return f'Unknown - {self.policy.name}'
 
     @property
     def total_gb(self):
@@ -234,31 +226,17 @@ class FUPViolation(models.Model):
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
 
-    policy = models.ForeignKey(
-        'fup.FUPPolicy',
-        on_delete=models.CASCADE,
-        related_name='violations'
-    )
-    plan = models.ForeignKey(
-        'billing.Plan',
-        on_delete=models.PROTECT,
-        related_name='fup_violations'
-    )
-    service_connection = models.ForeignKey(
-        'customers.ServiceConnection',
-        on_delete=models.CASCADE,
-        related_name='fup_violations'
-    )
-    customer = models.ForeignKey(
-        'customers.Customer',
-        on_delete=models.CASCADE,
-        related_name='fup_violations'
-    )
-    usage_window = models.ForeignKey(
-        'fup.FUPUsageWindow',
-        on_delete=models.CASCADE,
-        related_name='violations'
-    )
+    policy = models.ForeignKey('fup.FUPPolicy', on_delete=models.CASCADE, related_name='violations')
+    usage_window = models.ForeignKey('fup.FUPUsageWindow', on_delete=models.CASCADE, null=True, blank=True, related_name='violations')
+
+    # PPPoE / Static (nullable)
+    plan = models.ForeignKey('billing.Plan', on_delete=models.PROTECT, null=True, blank=True, related_name='fup_violations')
+    service_connection = models.ForeignKey('customers.ServiceConnection', on_delete=models.CASCADE, null=True, blank=True, related_name='fup_violations')
+    customer = models.ForeignKey('customers.Customer', on_delete=models.CASCADE, null=True, blank=True, related_name='fup_violations')
+
+    # Hotspot
+    hotspot_session = models.ForeignKey('billing.HotspotSession', on_delete=models.SET_NULL, null=True, blank=True, related_name='fup_violations')
+    hotspot_plan = models.ForeignKey('billing.HotspotPlan', on_delete=models.SET_NULL, null=True, blank=True, related_name='fup_violations')
 
     total_usage_bytes = models.BigIntegerField()
     limit_bytes = models.BigIntegerField()
@@ -281,26 +259,29 @@ class FUPViolation(models.Model):
         verbose_name_plural = 'FUP Violations'
 
     def __str__(self):
-        return f'{self.customer.customer_code} - {self.policy.name} - {self.action_taken}'
+        subject = self.customer.customer_code if self.customer else (self.hotspot_session.access_code if self.hotspot_session else 'Unknown')
+        return f'{subject} - {self.policy.name} - {self.action_taken}'
 
 
 class FUPThrottleState(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
 
-    policy = models.ForeignKey(
-        'fup.FUPPolicy',
-        on_delete=models.CASCADE,
-        related_name='throttle_states'
-    )
+    policy = models.ForeignKey('fup.FUPPolicy', on_delete=models.CASCADE, related_name='throttle_states')
+
+    # PPPoE / Static (nullable to support hotspot)
     service_connection = models.OneToOneField(
-        'customers.ServiceConnection',
-        on_delete=models.CASCADE,
-        related_name='fup_throttle_state'
+        'customers.ServiceConnection', on_delete=models.CASCADE,
+        null=True, blank=True, related_name='fup_throttle_state'
     )
     customer = models.ForeignKey(
-        'customers.Customer',
-        on_delete=models.CASCADE,
-        related_name='fup_throttle_states'
+        'customers.Customer', on_delete=models.CASCADE,
+        null=True, blank=True, related_name='fup_throttle_states'
+    )
+
+    # Hotspot
+    hotspot_session = models.OneToOneField(
+        'billing.HotspotSession', on_delete=models.SET_NULL,
+        null=True, blank=True, related_name='fup_throttle_state'
     )
 
     original_download_mbps = models.PositiveIntegerField()
@@ -325,7 +306,10 @@ class FUPThrottleState(models.Model):
         verbose_name_plural = 'FUP Throttle States'
 
     def __str__(self):
-        return f'{self.customer.customer_code} throttled={self.active}'
+        subject = self.customer.customer_code if self.customer else (
+            self.hotspot_session.access_code if self.hotspot_session else 'Unknown'
+        )
+        return f'{subject} throttled={self.active}'
 
 
 class FUPAuditLog(models.Model):
