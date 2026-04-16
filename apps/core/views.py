@@ -1033,6 +1033,7 @@ class SubmitLeadView(APIView):
         email = request.data.get("email", "").strip()
         phone = request.data.get("phone", "").strip()
         company = request.data.get("company", "").strip()
+        message = request.data.get("message", "").strip()
 
         if not name or not email:
             return Response({"error": "Name and email are required."}, status=status.HTTP_400_BAD_REQUEST)
@@ -1045,13 +1046,14 @@ class SubmitLeadView(APIView):
                 email=email,
                 phone=phone,
                 company_name=company,
+                message=message,
             )
 
         # Send notification email to admin
         try:
             send_mail(
                 subject=f"New Lead: {name} ({company or 'No company'})",
-                message=f"New lead submitted:\n\nName: {name}\nEmail: {email}\nPhone: {phone}\nCompany: {company}",
+                message=f"New lead submitted:\n\nName: {name}\nEmail: {email}\nPhone: {phone}\nCompany: {company}\nMessage: {message}",
                 from_email=settings.DEFAULT_FROM_EMAIL,
                 recipient_list=[settings.DEFAULT_FROM_EMAIL],
                 fail_silently=True,

@@ -793,6 +793,7 @@ class Lead(models.Model):
     email = models.EmailField()
     phone = models.CharField(max_length=20, blank=True, default="")
     company_name = models.CharField(max_length=200, blank=True, default="")
+    message = models.TextField(blank=True, default="")
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:

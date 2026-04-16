@@ -55,6 +55,16 @@ CELERY_BROKER_URL = REDIS_URL
 CELERY_RESULT_BACKEND = 'django-db'
 
 # ────────────────────────────────────────────────────────────────
+#  CACHE — Redis (required for OTP, rate-limiting, etc.)
+# ────────────────────────────────────────────────────────────────
+CACHES = {
+    'default': {
+        'BACKEND': 'django.core.cache.backends.redis.RedisCache',
+        'LOCATION': REDIS_URL,
+    }
+}
+
+# ────────────────────────────────────────────────────────────────
 #  STATIC FILES — WhiteNoise (no nginx on Railway)
 # ────────────────────────────────────────────────────────────────
 STATICFILES_STORAGE = 'whitenoise.storage.CompressedManifestStaticFilesStorage'

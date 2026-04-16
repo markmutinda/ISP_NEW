@@ -54,6 +54,29 @@ jobs:
             echo "==> Collecting static files..."
             docker compose exec web python manage.py collectstatic --noinput || true
 
+            echo "==> Verifying web container is healthy..."
+            for i in 1 2 3 4 5; do
+              STATUS=$(docker compose ps web --format '{{.Status}}' 2>/dev/null)
+              echo "  Attempt $i: web status = $STATUS"
+              if echo "$STATUS" | grep -q "Up"; then
+                echo "  ✅ Web container is running!"
+                break
+              fi
+              if [ "$i" = "5" ]; then
+                echo "  ❌ Web container failed to start. Dumping logs:"
+                docker compose logs --tail=50 web
+                exit 1
+              fi
+              sleep 3
+            done
+
+            echo "==> Health check: testing Django responds..."
+            docker compose exec web python -c "import django; django.setup(); print('Django OK')" || {
+              echo "❌ Django setup check failed. Dumping logs:"
+              docker compose logs --tail=50 web
+              exit 1
+            }
+
             echo "==> Cleaning up old Docker images..."
             docker image prune -f
 
