@@ -2190,3 +2190,91 @@ class SubscriptionStkCallbackView(APIView):
                 logger.warning("Subscription payment %s failed: %s", payment.id, reason)
 
         return Response({"success": True})
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  LEADS
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+
+class LeadListView(APIView):
+    """List leads from the public schema with pagination."""
+    permission_classes = SUPERADMIN_PERMS
+
+    def get(self, request):
+        _ensure_public()
+        from apps.core.models import Lead
+
+        page = int(request.query_params.get("page", 1))
+        page_size = int(request.query_params.get("page_size", PAGE_SIZE))
+        search = request.query_params.get("search", "").strip()
+
+        qs = Lead.objects.all().order_by("-created_at")
+        if search:
+            qs = qs.filter(
+                Q(name__icontains=search) |
+                Q(email__icontains=search) |
+                Q(company_name__icontains=search) |
+                Q(phone__icontains=search)
+            )
+
+        total = qs.count()
+        start = (page - 1) * page_size
+        leads = qs[start:start + page_size]
+
+        results = [
+            {
+                "id": l.id,
+                "name": l.name,
+                "email": l.email,
+                "phone": l.phone,
+                "company_name": l.company_name,
+                "message": l.message,
+                "created_at": l.created_at.isoformat(),
+            }
+            for l in leads
+        ]
+
+        return Response({
+            "count": total,
+            "next": None if (start + page_size) >= total else f"?page={page + 1}",
+            "previous": None if page <= 1 else f"?page={page - 1}",
+            "results": results,
+        })
+
+
+class LeadStatsView(APIView):
+    """Lead analytics — totals, recent counts, and trend."""
+    permission_classes = SUPERADMIN_PERMS
+
+    def get(self, request):
+        _ensure_public()
+        from apps.core.models import Lead
+
+        now = timezone.now()
+        total = Lead.objects.count()
+        this_month = Lead.objects.filter(created_at__gte=now.replace(day=1, hour=0, minute=0, second=0)).count()
+        last_30 = Lead.objects.filter(created_at__gte=now - timedelta(days=30)).count()
+        last_7 = Lead.objects.filter(created_at__gte=now - timedelta(days=7)).count()
+
+        # Monthly trend for last 6 months
+        trend = []
+        for i in range(5, -1, -1):
+            month_start = (now.replace(day=1) - timedelta(days=30 * i)).replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+            if i > 0:
+                month_end = (month_start.replace(day=28) + timedelta(days=4)).replace(day=1)
+            else:
+                month_end = now
+            count = Lead.objects.filter(created_at__gte=month_start, created_at__lt=month_end).count()
+            trend.append({
+                "month": month_start.strftime("%b %Y"),
+                "count": count,
+            })
+
+        return Response({
+            "total": total,
+            "this_month": this_month,
+            "last_30_days": last_30,
+            "last_7_days": last_7,
+            "trend": trend,
+        })

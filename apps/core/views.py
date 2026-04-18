@@ -1049,17 +1049,20 @@ class SubmitLeadView(APIView):
                 message=message,
             )
 
-        # Send notification email to admin
-        try:
-            send_mail(
-                subject=f"New Lead: {name} ({company or 'No company'})",
-                message=f"New lead submitted:\n\nName: {name}\nEmail: {email}\nPhone: {phone}\nCompany: {company}\nMessage: {message}",
-                from_email=settings.DEFAULT_FROM_EMAIL,
-                recipient_list=[settings.DEFAULT_FROM_EMAIL],
-                fail_silently=True,
-            )
-        except Exception:
-            pass
+        # Send notification email to admin (in background thread to avoid blocking response)
+        import threading
+        def _send_lead_email():
+            try:
+                send_mail(
+                    subject=f"New Lead: {name} ({company or 'No company'})",
+                    message=f"New lead submitted:\n\nName: {name}\nEmail: {email}\nPhone: {phone}\nCompany: {company}\nMessage: {message}",
+                    from_email=settings.DEFAULT_FROM_EMAIL,
+                    recipient_list=[settings.DEFAULT_FROM_EMAIL],
+                    fail_silently=True,
+                )
+            except Exception:
+                pass
+        threading.Thread(target=_send_lead_email, daemon=True).start()
 
         return Response({
             "message": "Thank you! We'll be in touch shortly.",

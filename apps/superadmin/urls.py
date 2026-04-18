@@ -77,4 +77,8 @@ urlpatterns = [
 
     # Subscription Payments (Tuma STK Push)
     path("subscriptions/pay/", views.SubscriptionStkPushView.as_view(), name="subscription-stk-push"),
+
+    # Leads
+    path("leads/", views.LeadListView.as_view(), name="lead-list"),
+    path("leads/stats/", views.LeadStatsView.as_view(), name="lead-stats"),
 ]
