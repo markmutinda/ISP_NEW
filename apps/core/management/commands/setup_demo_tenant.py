@@ -77,17 +77,41 @@ class Command(BaseCommand):
         self.stdout.write('  Switched to demo schema')
 
         # ── 5. Admin user ───────────────────────────────────────────────
+        # Note: core.0002_create_superadmin migration auto-creates a user
+        # with phone +254700000001 in every new schema. We adopt it for demo.
         admin_email = 'admin@demo.netily.co.ke'
         admin_password = 'DemoAdmin2026!'
+        admin_user = None
+
+        # Try by email first
         try:
             admin_user = User.objects.get(email=admin_email)
             admin_user.set_password(admin_password)
             admin_user.save(update_fields=['password'])
             self.stdout.write(f'  Admin user: exists — password reset')
         except User.DoesNotExist:
+            pass
+
+        # Try to adopt the auto-created superadmin from migration
+        if admin_user is None:
+            try:
+                admin_user = User.objects.get(phone_number='+254700000001')
+                admin_user.email = admin_email
+                admin_user.first_name = 'Demo'
+                admin_user.last_name = 'Admin'
+                admin_user.role = 'admin'
+                admin_user.is_staff = True
+                admin_user.set_password(admin_password)
+                admin_user.save(update_fields=['email', 'first_name', 'last_name', 'role', 'is_staff', 'password'])
+                self.stdout.write(self.style.SUCCESS(f'  Admin user: ADOPTED migration superadmin — {admin_email}'))
+            except User.DoesNotExist:
+                pass
+
+        # Create fresh if still not found
+        if admin_user is None:
             admin_user = User.objects.create_user(
                 email=admin_email,
-                phone_number='+254700000001',
+                phone_number='+254799000001',
                 first_name='Demo',
                 last_name='Admin',
                 password=admin_password,
