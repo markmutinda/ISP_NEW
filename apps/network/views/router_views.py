@@ -2906,14 +2906,27 @@ class RouterPortManagerView(APIView):
             return Response({'error': 'Router not found'}, status=404)
         connection.set_tenant(tenant)
 
-        # Try to sync status first, then check
+        # Try sync_status first (fast socket check)
         try:
             router.sync_status(force=True)
         except Exception:
             pass
 
+        # If sync_status still says offline, attempt a real API connection as fallback.
+        # The TCP socket check in sync_status can fail due to firewall rules even when
+        # the MikroTik API is fully reachable over the VPN tunnel.
         if router.status != 'online':
-            return Response({'error': 'Router must be online to scan ports'}, status=400)
+            try:
+                api_test = mikrotik_api_module.MikrotikAPI(router)
+                if api_test.connect():
+                    api_test.disconnect()
+                    router.status = 'online'
+                    router.save(update_fields=['status', 'last_seen', 'updated_at'])
+                else:
+                    return Response({'error': 'Router is not reachable. Check VPN tunnel.'}, status=400)
+            except Exception as e:
+                logger.warning(f"Port manager API fallback check failed for router {pk}: {e}")
+                return Response({'error': 'Router is not reachable. Check VPN tunnel.'}, status=400)
 
         try:
             api_wrapper = mikrotik_api_module.MikrotikAPI(router)
