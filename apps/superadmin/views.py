@@ -531,6 +531,10 @@ class UserListView(ListAPIView):
         if tenant:
             qs = qs.filter(tenant_subdomain=tenant)
 
+        is_active = self.request.query_params.get("is_active")
+        if is_active is not None:
+            qs = qs.filter(is_active=is_active.lower() == "true")
+
         ordering = self.request.query_params.get("ordering", "-date_joined")
         qs = qs.order_by(ordering)
         return qs
