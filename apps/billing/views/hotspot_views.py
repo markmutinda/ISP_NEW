@@ -230,11 +230,8 @@ class CaptivePortalView(APIView):
 
         try:
             with schema_context(tenant.schema_name):
-                # Router lookup with minimal selected columns
-                router_qs = Router.objects.filter(is_active=True).only(
-                    'id', 'name', 'template_id', 'hotspot_name',
-                    'support_phone', 'announcement_text', 'gateway_ip', 'location'
-                )
+                # Router lookup - safe fallback without field restrictions
+                router_qs = Router.objects.filter(is_active=True)
 
                 router = None
                 try:
