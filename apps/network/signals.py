@@ -246,3 +246,82 @@ def cleanup_router_tenant_index(sender, instance, **kwargs):
                 logger.debug(f"[INDEX CLEANUP] Removed index entry for router {instance.name} (ID: {instance.id})")
     except Exception as e:
         logger.error(f"[INDEX CLEANUP] Failed for {instance.name}: {e}")
+
+
+# ────────────────────────────────────────────────────────────────
+# AUTO-CLONE GLOBAL HOTSPOT PLANS TO NEW ROUTERS
+# ────────────────────────────────────────────────────────────────
+
+@receiver(post_save, sender=Router)
+def clone_global_hotspot_plans_to_new_router(sender, instance, created, **kwargs):
+    """
+    When a new Router is created, find all HotspotPlans marked as
+    is_global_template=True and clone one copy of each unique plan
+    name to this new router.
+    """
+    if not created:
+        return
+
+    try:
+        from apps.billing.models.hotspot_models import HotspotPlan
+
+        seen_names = set()
+        plans_cloned = 0
+
+        # Grab one representative plan per unique name from global templates
+        for plan in HotspotPlan.objects.filter(
+            is_global_template=True
+        ).order_by('name', 'sort_order', 'id'):
+
+            if plan.name in seen_names:
+                continue  # Skip duplicates — same plan exists on multiple routers
+            seen_names.add(plan.name)
+
+            # Don't overwrite if new router already has a plan with this name
+            if HotspotPlan.objects.filter(router=instance, name=plan.name).exists():
+                continue
+
+            HotspotPlan.objects.create(
+                router=instance,
+                name=plan.name,
+                description=plan.description,
+                price=plan.price,
+                currency=plan.currency,
+                validity_type=plan.validity_type,
+                validity_value=plan.validity_value,
+                duration_minutes=plan.duration_minutes,
+                limitation_type=plan.limitation_type,
+                data_limit_value=plan.data_limit_value,
+                data_limit_unit=plan.data_limit_unit,
+                data_limit_mb=plan.data_limit_mb,
+                download_speed=plan.download_speed,
+                upload_speed=plan.upload_speed,
+                speed_unit=plan.speed_unit,
+                speed_limit_mbps=plan.speed_limit_mbps,
+                simultaneous_devices=plan.simultaneous_devices,
+                valid_monday=plan.valid_monday,
+                valid_tuesday=plan.valid_tuesday,
+                valid_wednesday=plan.valid_wednesday,
+                valid_thursday=plan.valid_thursday,
+                valid_friday=plan.valid_friday,
+                valid_saturday=plan.valid_saturday,
+                valid_sunday=plan.valid_sunday,
+                is_active=plan.is_active,
+                is_popular=plan.is_popular,
+                sort_order=plan.sort_order,
+                is_global_template=False,  # Clones are NOT templates themselves
+                created_by=plan.created_by,
+            )
+            plans_cloned += 1
+
+        if plans_cloned:
+            logger.info(
+                f"Auto-cloned {plans_cloned} global hotspot plan(s) "
+                f"to new router '{instance.name}' (id={instance.id})"
+            )
+
+    except Exception as e:
+        logger.error(
+            f"Failed to clone global hotspot plans to router {instance.id}: {e}",
+            exc_info=True,
+        )

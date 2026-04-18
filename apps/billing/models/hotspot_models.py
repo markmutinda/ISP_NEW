@@ -216,6 +216,10 @@ class HotspotPlan(models.Model):
     # Display
     is_active = models.BooleanField(default=True)
     is_popular = models.BooleanField(default=False)
+    is_global_template = models.BooleanField(
+        default=False,
+        help_text="If True, this plan is cloned automatically to any new router that gets created"
+    )
     sort_order = models.PositiveIntegerField(default=0)
     
     # Metadata
