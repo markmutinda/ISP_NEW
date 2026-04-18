@@ -65,9 +65,18 @@ class CustomerDashboardView(APIView):
             
             if active_service and active_service.plan:
                 plan = active_service.plan
-                expiry_date = getattr(active_service, 'expiry_date', None) or getattr(active_service, 'expires_at', None)
-                days_remaining = None
                 
+                # Calculate expiry: first try stored fields, then compute from activation + plan validity
+                expiry_date = getattr(active_service, 'expiry_date', None) or getattr(active_service, 'expires_at', None)
+                
+                if not expiry_date and active_service.activation_date:
+                    # Calculate from activation_date + plan validity
+                    try:
+                        expiry_date = plan.calculate_expiration(start_time=active_service.activation_date)
+                    except Exception:
+                        pass
+                
+                days_remaining = None
                 if expiry_date:
                     if isinstance(expiry_date, str):
                         expiry_date = datetime.fromisoformat(expiry_date.replace('Z', '+00:00'))
@@ -85,14 +94,27 @@ class CustomerDashboardView(APIView):
             elif customer.plan:
                 # Fallback to customer.plan if no active service
                 plan = customer.plan
+                # Try to compute expiry from customer activation + plan validity
+                expiry_date = None
+                days_remaining = None
+                activation = getattr(customer, 'activation_date', None)
+                if activation:
+                    try:
+                        act_dt = timezone.make_aware(datetime.combine(activation, datetime.min.time())) if not hasattr(activation, 'hour') else activation
+                        expiry_date = plan.calculate_expiration(start_time=act_dt)
+                        if expiry_date:
+                            days_remaining = max(0, (expiry_date.date() - timezone.now().date()).days)
+                    except Exception:
+                        pass
+                
                 current_plan = {
                     'id': plan.id,
                     'name': plan.name,
                     'price': str(plan.price),
                     'speed_down': str(getattr(plan, 'download_speed', '') or getattr(plan, 'speed_down', '') or ''),
                     'speed_up': str(getattr(plan, 'upload_speed', '') or getattr(plan, 'speed_up', '') or ''),
-                    'expiry_date': None,
-                    'days_remaining': None,
+                    'expiry_date': expiry_date.isoformat() if expiry_date else None,
+                    'days_remaining': days_remaining,
                 }
         except Exception:
             pass
@@ -106,12 +128,30 @@ class CustomerDashboardView(APIView):
         # Get pending invoices
         pending_invoices = self._get_pending_invoices(customer)
         
+        # Get company branding
+        branding = None
+        try:
+            if hasattr(request, 'tenant') and hasattr(request.tenant, 'company') and request.tenant.company:
+                company = request.tenant.company
+                logo_url = None
+                if company.logo:
+                    logo_url = request.build_absolute_uri(company.logo.url)
+                branding = {
+                    'company_name': company.name,
+                    'logo_url': logo_url,
+                    'phone': getattr(company, 'phone_number', ''),
+                    'email': getattr(company, 'email', ''),
+                }
+        except Exception:
+            pass
+        
         return Response({
             'customer': customer_data,
             'current_plan': current_plan,
             'usage': usage,
             'recent_payments': recent_payments,
             'pending_invoices': pending_invoices,
+            'branding': branding,
         })
     
     def _get_usage(self, customer):

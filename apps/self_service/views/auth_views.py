@@ -375,33 +375,46 @@ class AvailablePlansView(APIView):
                 'error': 'Must access from ISP subdomain'
             }, status=status.HTTP_400_BAD_REQUEST)
         
-        # Get active plans
-        plans = Plan.objects.filter(is_active=True).order_by('price')
+        # Get active, public plans
+        plans = Plan.objects.filter(is_active=True, is_public=True).order_by('base_price')
         
         plans_data = [
             {
                 'id': plan.id,
                 'name': plan.name,
-                'description': plan.description,
-                'price': float(plan.price),
-                'billing_cycle': plan.billing_cycle,
-                'speed_mbps': getattr(plan, 'speed_mbps', None),
-                'data_limit_gb': getattr(plan, 'data_limit_gb', None),
+                'description': plan.description or '',
+                'price': str(plan.base_price),
+                'speed_down': plan.download_speed,
+                'speed_up': plan.upload_speed,
+                'speed_unit': plan.speed_unit or 'MBPS',
+                'data_limit': plan.data_limit,
+                'validity_days': plan.duration_days,
+                'validity_display': plan.validity_display,
+                'speed_display': plan.speed_display,
+                'plan_type': plan.plan_type,
                 'is_popular': getattr(plan, 'is_popular', False),
+                'features': plan.features or [],
+                'is_active': plan.is_active,
             }
             for plan in plans
         ]
         
         # Get ISP branding info
         branding = None
-        if hasattr(request, 'tenant') and request.tenant.company:
-            company = request.tenant.company
-            branding = {
-                'company_name': company.name,
-                'logo_url': getattr(company, 'logo_url', None),
-                'phone': company.phone_number,
-                'email': company.email,
-            }
+        try:
+            if hasattr(request, 'tenant') and hasattr(request.tenant, 'company') and request.tenant.company:
+                company = request.tenant.company
+                logo_url = None
+                if company.logo:
+                    logo_url = request.build_absolute_uri(company.logo.url)
+                branding = {
+                    'company_name': company.name,
+                    'logo_url': logo_url,
+                    'phone': company.phone_number,
+                    'email': company.email,
+                }
+        except Exception:
+            pass
         
         return Response({
             'plans': plans_data,
