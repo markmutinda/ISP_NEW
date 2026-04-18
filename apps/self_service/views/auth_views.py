@@ -162,17 +162,28 @@ class CustomerLoginView(APIView):
         
         # Try to find user by phone number
         if phone_number:
-            # Normalize phone number
+            # Normalize to +254XXXXXXXXX format (how phones are stored in DB)
             phone = phone_number.replace(' ', '').replace('-', '')
-            if phone.startswith('0'):
-                phone = '254' + phone[1:]
-            if phone.startswith('+'):
-                phone = phone[1:]
-            
+            digits = ''.join(c for c in phone if c.isdigit())
+            if digits.startswith('0') and len(digits) >= 9:
+                phone = '+254' + digits[1:]
+            elif digits.startswith('254') and len(digits) >= 12:
+                phone = '+' + digits
+            elif len(digits) == 9:
+                phone = '+254' + digits
+            elif phone.startswith('+'):
+                phone = phone  # already has +, keep as-is
+            else:
+                phone = '+' + digits
+
             try:
                 user = User.objects.get(phone_number=phone)
             except User.DoesNotExist:
-                pass
+                # Fallback: try without the + (in case some records stored without it)
+                try:
+                    user = User.objects.get(phone_number=phone.lstrip('+'))
+                except User.DoesNotExist:
+                    pass
         
         # Try to find user by email if not found by phone
         if not user and email:
