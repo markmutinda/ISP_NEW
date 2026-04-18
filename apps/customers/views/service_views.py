@@ -201,100 +201,35 @@ class ServiceConnectionViewSet(viewsets.ModelViewSet):
                     status=status.HTTP_400_BAD_REQUEST
                 )
         
-        # Check if RADIUS credentials exist
-        has_credentials = False
-        try:
-            credentials = customer.radius_credentials
-            has_credentials = True
-        except CustomerRadiusCredentials.DoesNotExist:
-            has_credentials = False
-        
-        if has_credentials:
-            # Update existing credentials
-            credentials.expiration_date = new_expiration
-            credentials.is_enabled = True
-            credentials.disabled_reason = ''
-            
-            # Update framed_ip_address if this is a STATIC IP service
-            if assigned_ip and service.auth_connection_type == 'STATIC':
-                credentials.framed_ip_address = assigned_ip
-            
-            credentials.save()  # Triggers sync_credentials_to_radius signal
-            
-            logger.info(
-                f"Activated service {service.id} for {customer.customer_code}: "
-                f"Updated existing RADIUS credentials. "
-                f"Plan={service.plan.name if service.plan else 'None'}, "
-                f"Expiration={new_expiration.isoformat() if new_expiration else 'Unlimited'}"
-                f"{f', Static IP={assigned_ip}' if assigned_ip and service.auth_connection_type == 'STATIC' else ''}"
-            )
-        else:
-            # Create RADIUS credentials — this is the key fix for "Activate Later"
-            auth_type = (service.auth_connection_type or '').upper()
-            if auth_type in ['PPPOE', 'HOTSPOT', 'STATIC']:
-                username = generate_pppoe_username(customer)
-                password = generate_password(8)
-                conn_type = 'PPPOE' if auth_type == 'PPPOE' else ('HOTSPOT' if auth_type == 'HOTSPOT' else 'STATIC')
-                profile = _get_or_create_bandwidth_profile(service) if service.plan else None
-                
-                credentials_data = {
-                    'customer': customer,
-                    'username': username,
-                    'password': password,
-                    'bandwidth_profile': profile,
-                    'connection_type': conn_type,
-                    'is_enabled': True,
-                    'simultaneous_use': 1,
-                    'expiration_date': new_expiration,
-                }
-                
-                # Add framed_ip_address for STATIC IP services
-                if assigned_ip and auth_type == 'STATIC':
-                    credentials_data['framed_ip_address'] = assigned_ip
-                
-                credentials = CustomerRadiusCredentials.objects.create(**credentials_data)
-                
-                logger.info(
-                    f"Activated service {service.id} for {customer.customer_code}: "
-                    f"Created RADIUS credentials username={username}. "
-                    f"Plan={service.plan.name if service.plan else 'None'}, "
-                    f"Expiration={new_expiration.isoformat() if new_expiration else 'Unlimited'}"
-                    f"{f', Static IP={assigned_ip}' if assigned_ip and auth_type == 'STATIC' else ''}"
-                )
-            else:
-                logger.info(
-                    f"Activated service {service.id} for {customer.customer_code} "
-                    f"(non-RADIUS connection type: {auth_type})"
-                )
-        
-        # Activate the service (sets status=ACTIVE, activation_date=now)
+        # ── STEP 1: Activate the service (sets status=ACTIVE) ──────────────────
         service.activate_service(request.user)
-        
-        # Update customer status to ACTIVE if still PENDING
+
+        # Update customer status to ACTIVE if still PENDING/LEAD
         if customer.status in ('PENDING', 'LEAD'):
             customer.status = 'ACTIVE'
             customer.save()
-        
-        # ────────────────────────────────────────────────────────────────
-        # OPTIONAL: RECORD INITIAL PAYMENT
-        # ────────────────────────────────────────────────────────────────
+
+        # ── STEP 2: Record initial payment IMMEDIATELY after activation ─────────
+        # Payment is recorded here so it is ALWAYS captured even if RADIUS setup
+        # fails below.  Previously the payment lived after the RADIUS block, so
+        # any RADIUS exception silently swallowed the payment.
         from apps.billing.models.payment_models import Payment, InvoiceItemPayment
-        
+
         record_payment = request.data.get('record_payment', False)
         payment_obj = None
-        
+
         if record_payment:
             payment_amount = request.data.get('payment_amount')
             payment_method_id = request.data.get('payment_method_id')
             payment_reference = request.data.get('payment_reference', '')
             payment_notes = request.data.get('payment_notes', 'Initial payment recorded on service activation')
-            
+
             if not payment_amount:
                 return Response(
                     {'error': 'payment_amount is required when record_payment=true'},
                     status=status.HTTP_400_BAD_REQUEST
                 )
-            
+
             try:
                 payment_amount = Decimal(str(payment_amount))
                 if payment_amount <= 0:
@@ -304,8 +239,8 @@ class ServiceConnectionViewSet(viewsets.ModelViewSet):
                     {'error': 'Invalid payment_amount'},
                     status=status.HTTP_400_BAD_REQUEST
                 )
-            
-            # Get payment method - FIX 4: Always provide a valid unique code for CASH
+
+            # Resolve payment method ──────────────────────────────────────────
             if payment_method_id:
                 try:
                     pay_method = InvoiceItemPayment.objects.get(id=payment_method_id)
@@ -315,20 +250,26 @@ class ServiceConnectionViewSet(viewsets.ModelViewSet):
                         status=status.HTTP_400_BAD_REQUEST
                     )
             else:
-                # Default to CASH with proper unique code using get_or_create
-                pay_method, _ = InvoiceItemPayment.objects.get_or_create(
+                # Default to CASH – use filter().first() to avoid unique constraint races
+                pay_method = InvoiceItemPayment.objects.filter(
                     method_type='CASH',
                     schema_name=db_conn.schema_name,
-                    defaults={
-                        'name': 'Cash',
-                        'code': f'CASH_{db_conn.schema_name[:15]}',
-                        'is_active': True,
-                        'minimum_amount': Decimal('1.00'),
-                        'maximum_amount': Decimal('9999999.00'),
-                    }
-                )
-            
-            # FIX 4: Enhanced payment creation with proper fields and manual entry fallback
+                ).first()
+                if not pay_method:
+                    import random as _random
+                    import string as _string
+                    _suffix = ''.join(_random.choices(_string.ascii_uppercase + _string.digits, k=8))
+                    pay_method = InvoiceItemPayment.objects.create(
+                        method_type='CASH',
+                        schema_name=db_conn.schema_name,
+                        name='Cash',
+                        code=f'CASH_{_suffix}',
+                        is_active=True,
+                        minimum_amount=Decimal('1.00'),
+                        maximum_amount=Decimal('9999999.00'),
+                    )
+
+            # Create the payment record ───────────────────────────────────────
             payment_obj = Payment.objects.create(
                 customer=customer,
                 amount=payment_amount,
@@ -346,56 +287,119 @@ class ServiceConnectionViewSet(viewsets.ModelViewSet):
                 created_by=request.user,
                 schema_name=db_conn.schema_name,
             )
-            
-            # Update customer outstanding balance
+
+            # Adjust customer outstanding balance
             if customer.outstanding_balance is not None:
                 customer.outstanding_balance = max(
                     Decimal('0'),
                     customer.outstanding_balance - payment_amount
                 )
                 customer.save(update_fields=['outstanding_balance'])
-        
-        # Refresh credentials reference after creation
-        creds_for_sms = None
+
+        # ── STEP 3: Create/update RADIUS credentials ────────────────────────────
+        # Wrapped in try/except so a RADIUS failure never prevents the payment
+        # or the service activation from being visible.
+        creds_data = None
         try:
+            has_credentials = False
+            try:
+                credentials = customer.radius_credentials
+                has_credentials = True
+            except CustomerRadiusCredentials.DoesNotExist:
+                has_credentials = False
+
+            if has_credentials:
+                credentials.expiration_date = new_expiration
+                credentials.is_enabled = True
+                credentials.disabled_reason = ''
+
+                if assigned_ip and service.auth_connection_type == 'STATIC':
+                    credentials.framed_ip_address = assigned_ip
+
+                credentials.save()
+
+                logger.info(
+                    f"Activated service {service.id} for {customer.customer_code}: "
+                    f"Updated existing RADIUS credentials. "
+                    f"Plan={service.plan.name if service.plan else 'None'}, "
+                    f"Expiration={new_expiration.isoformat() if new_expiration else 'Unlimited'}"
+                )
+            else:
+                auth_type = (service.auth_connection_type or '').upper()
+                if auth_type in ['PPPOE', 'HOTSPOT', 'STATIC']:
+                    username = generate_pppoe_username(customer)
+                    password = generate_password(8)
+                    conn_type = 'PPPOE' if auth_type == 'PPPOE' else (
+                        'HOTSPOT' if auth_type == 'HOTSPOT' else 'STATIC'
+                    )
+                    profile = _get_or_create_bandwidth_profile(service) if service.plan else None
+
+                    credentials_data = {
+                        'customer': customer,
+                        'username': username,
+                        'password': password,
+                        'bandwidth_profile': profile,
+                        'connection_type': conn_type,
+                        'is_enabled': True,
+                        'simultaneous_use': 1,
+                        'expiration_date': new_expiration,
+                    }
+
+                    if assigned_ip and auth_type == 'STATIC':
+                        credentials_data['framed_ip_address'] = assigned_ip
+
+                    credentials = CustomerRadiusCredentials.objects.create(**credentials_data)
+
+                    logger.info(
+                        f"Activated service {service.id} for {customer.customer_code}: "
+                        f"Created RADIUS credentials username={username}."
+                    )
+
+            # Refresh for response
             customer.refresh_from_db()
-            creds_for_sms = customer.radius_credentials
+            creds_obj = customer.radius_credentials
             creds_data = {
-                'username': creds_for_sms.username,
-                'password': creds_for_sms.password if hasattr(creds_for_sms, 'password') else None,
-                'expiration': creds_for_sms.expiration_date.isoformat() if creds_for_sms.expiration_date else None,
-                'is_enabled': creds_for_sms.is_enabled,
+                'username': creds_obj.username,
+                'expiration': creds_obj.expiration_date.isoformat() if creds_obj.expiration_date else None,
+                'is_enabled': creds_obj.is_enabled,
             }
-            if hasattr(creds_for_sms, 'framed_ip_address'):
-                creds_data['framed_ip_address'] = creds_for_sms.framed_ip_address
-        except Exception:
-            creds_data = None
-        
-        # ── SMS: new subscription activated ──
+
+        except Exception as radius_err:
+            # RADIUS failure is logged but must NOT roll back the payment or
+            # prevent a successful response – admins can fix RADIUS manually.
+            logger.error(
+                f"RADIUS setup failed for service {service.id} "
+                f"(customer {customer.customer_code}): {radius_err}",
+                exc_info=True,
+            )
+
+        # ── SMS: new subscription activated ─────────────────────────────────────
         try:
             from apps.messaging.services.notification_sender import SMSNotifier
             SMSNotifier.pppoe_new_subscription(
                 customer=customer,
                 plan_name=service.plan.name if service.plan else "",
                 amount=float(service.monthly_price or 0),
-                expires_at=creds_for_sms.expiration_date if creds_for_sms else None,
+                expires_at=new_expiration,
             )
         except Exception as e:
             logger.warning(f"New subscription SMS failed: {e}")
-        
+
+        # ── Build response ───────────────────────────────────────────────────────
+        service.refresh_from_db()
         response_data = {
             'status': 'success',
             'message': f'Service activated for {customer.customer_code}',
             'activation_date': service.activation_date.isoformat() if service.activation_date else None,
+            # ↓ Fix for Issue 2 – frontend uses this to show the Paybill account toast
+            'billing_account_number': service.billing_account_number,
             'radius_credentials': creds_data,
         }
-        
-        # Include assigned IP in response
+
         if assigned_ip:
             response_data['assigned_ip'] = assigned_ip
             response_data['ip_pool'] = service.plan.ip_pool.name if service.plan and service.plan.ip_pool else None
-        
-        # Include payment info in response
+
         if payment_obj:
             response_data['payment'] = {
                 'id': payment_obj.id,
@@ -403,7 +407,7 @@ class ServiceConnectionViewSet(viewsets.ModelViewSet):
                 'amount': float(payment_obj.amount),
                 'status': payment_obj.status,
             }
-        
+
         return Response(response_data)
     
     @action(detail=True, methods=['post'])

@@ -47,11 +47,18 @@ class ServiceConnectionSerializer(serializers.ModelSerializer):
             'monthly_price', 'setup_fee', 'prorated_billing',
             'auto_renew', 'contract_period',
             'activation_date', 'suspension_date', 'termination_date',
+            # ↓ These three lines are the fix for Issue 2
+            'billing_account_number',
+            'mpesa_account_number',
+            'paybill_account_number',
             'created_at', 'updated_at'
         ]
         read_only_fields = [
             'activation_date', 'suspension_date', 'termination_date',
-            'installed_by', 'created_at', 'updated_at'
+            'installed_by', 'created_at', 'updated_at',
+            'billing_account_number',   # auto-generated, never set by callers
+            'mpesa_account_number',      # auto-generated, never set by callers
+            'paybill_account_number',    # auto-generated, never set by callers
         ]
 
 
