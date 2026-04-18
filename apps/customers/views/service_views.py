@@ -287,7 +287,7 @@ class ServiceConnectionViewSet(viewsets.ModelViewSet):
             payment_amount = request.data.get('payment_amount')
             payment_method_id = request.data.get('payment_method_id')
             payment_reference = request.data.get('payment_reference', '')
-            payment_notes = request.data.get('payment_notes', 'Initial payment on service activation')
+            payment_notes = request.data.get('payment_notes', 'Initial payment recorded on service activation')
             
             if not payment_amount:
                 return Response(
@@ -305,7 +305,7 @@ class ServiceConnectionViewSet(viewsets.ModelViewSet):
                     status=status.HTTP_400_BAD_REQUEST
                 )
             
-            # Get payment method
+            # Get payment method - FIX 4: Always provide a valid unique code for CASH
             if payment_method_id:
                 try:
                     pay_method = InvoiceItemPayment.objects.get(id=payment_method_id)
@@ -315,27 +315,34 @@ class ServiceConnectionViewSet(viewsets.ModelViewSet):
                         status=status.HTTP_400_BAD_REQUEST
                     )
             else:
-                # Default to CASH
+                # Default to CASH with proper unique code using get_or_create
                 pay_method, _ = InvoiceItemPayment.objects.get_or_create(
                     method_type='CASH',
                     schema_name=db_conn.schema_name,
                     defaults={
                         'name': 'Cash',
-                        'code': f'CASH_{db_conn.schema_name[:10]}',
+                        'code': f'CASH_{db_conn.schema_name[:15]}',
                         'is_active': True,
+                        'minimum_amount': Decimal('1.00'),
+                        'maximum_amount': Decimal('9999999.00'),
                     }
                 )
             
+            # FIX 4: Enhanced payment creation with proper fields and manual entry fallback
             payment_obj = Payment.objects.create(
                 customer=customer,
                 amount=payment_amount,
                 payment_method=pay_method,
                 status='COMPLETED',
-                payment_reference=payment_reference,
+                payment_reference=payment_reference or 'MANUAL-ENTRY',
                 payment_date=timezone.now(),
                 processed_at=timezone.now(),
+                is_reconciled=True,
+                reconciled_at=timezone.now(),
                 payer_name=customer.full_name,
-                notes=payment_notes,
+                mpesa_name=customer.full_name,
+                payer_phone=customer.user.phone_number if customer.user else '',
+                notes=payment_notes or 'Initial payment recorded on service activation',
                 created_by=request.user,
                 schema_name=db_conn.schema_name,
             )
