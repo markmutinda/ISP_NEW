@@ -1,5 +1,6 @@
 """
-Customer Signals — RADIUS cleanup, IP release, & User cleanup on customer deletion.
+Customer Signals — RADIUS cleanup, IP release, User cleanup on customer deletion,
+and auto-generation of billing account numbers for PPPoE/Static services.
 
 When a Customer is deleted (via API or admin):
 1. pre_delete: Remove RADIUS credentials from radcheck/radreply (FreeRADIUS)
@@ -10,11 +11,14 @@ When a Customer is deleted (via API or admin):
 When a ServiceConnection is terminated or deleted:
 - Release any associated IP addresses back to the available pool
 
-This ensures no orphaned RADIUS entries, IP addresses, or User accounts remain.
+When a ServiceConnection is created (PPPoE/Static):
+- Auto-generate a billing_account_number if one hasn't been assigned yet
+
+This ensures no orphaned RADIUS entries, IP addresses, User accounts, or missing billing numbers.
 """
 
 import logging
-from django.db.models.signals import pre_delete, post_delete, post_save
+from django.db.models.signals import pre_delete, post_delete, post_save, pre_save
 from django.dispatch import receiver
 
 # Import the actual model classes for direct references
@@ -184,6 +188,42 @@ def cleanup_ip_on_service_deletion(sender, instance, **kwargs):
                         continue
     except Exception as e:
         logger.error(f"Error releasing IPs for deleted service {instance.id}: {e}")
+
+
+# ========== BILLING ACCOUNT NUMBER AUTO-GENERATION ==========
+
+@receiver(pre_save, sender=ServiceConnection)
+def auto_generate_billing_account_number(sender, instance, **kwargs):
+    """
+    Auto-generate billing_account_number for PPPoE/Static services
+    if one hasn't been assigned yet.
+    
+    This runs before save so the account number is available immediately
+    after creation.
+    """
+    # Only for PPPoE and Static connection types
+    auth_type = (instance.auth_connection_type or '').upper()
+    if auth_type not in ('PPPOE', 'STATIC'):
+        return
+
+    # Don't overwrite if already set
+    if instance.billing_account_number and instance.billing_account_number.strip():
+        return
+
+    # Skip if no PK yet on customer (shouldn't happen, but guard)
+    if not instance.customer_id:
+        return
+
+    try:
+        from apps.customers.billing_account import generate_billing_account_number
+        account_number = generate_billing_account_number(instance.customer, instance)
+        instance.billing_account_number = account_number
+        logger.info(
+            f"Auto-generated billing account number {account_number} "
+            f"for customer {instance.customer_id}"
+        )
+    except Exception as e:
+        logger.error(f"Failed to auto-generate billing account number: {e}")
 
 
 # ========== OPTIONAL AUDIT SIGNAL ==========

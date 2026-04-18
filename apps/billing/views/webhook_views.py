@@ -446,67 +446,96 @@ class PayHeroBillingWebhookView(PayHeroWebhookMixin, APIView):
         return Response({'status': 'received'})
 
 
+# ═══════════════════════════════════════════════════════════════════
+# ENHANCED M-PESA C2B WEBHOOK WITH PLAN-QUANTITY CALCULATION
+# ═══════════════════════════════════════════════════════════════════
+
 class MpesaC2BWebhookView(APIView):
     """
-    Production-Grade M-Pesa C2B Webhook.
-    Handles RADIUS Expiry Extension, Unique ID Generation, and MikroTik Session Kick.
+    Production-Grade M-Pesa C2B Webhook — now with plan-quantity calculation.
+
+    When a customer pays via Paybill using their billing account number:
+    - Exact plan amount → 1 period of the plan
+    - 2× plan amount → 2 periods (stacked/queued)
+    - Partial amount → recorded but service NOT activated (requires full plan amount)
     
     POST /api/v1/webhooks/mpesa/c2b-callback/
-    
-    Expected Payload:
-    {
-        "TransactionType": "Pay Bill",
-        "TransID": "RKTQDM7W6S",
-        "TransTime": "20191114121845",
-        "TransAmount": "1000.00",
-        "BusinessShortCode": "123456",
-        "BillRefNumber": "CUST12345",
-        "InvoiceNumber": "",
-        "OrgAccountBalance": "50000.00",
-        "ThirdPartyTransID": "",
-        "MSISDN": "254712345678",
-        "FirstName": "John",
-        "MiddleName": "Doe",
-        "LastName": "Smith"
-    }
     """
     permission_classes = [AllowAny]
     authentication_classes = []
-    
+
+    def _calculate_renewal_expiry(self, service, amount, current_expiry=None):
+        """
+        Calculate new expiry date based on payment amount vs plan price.
+        
+        Returns: (quantity, new_expiry_datetime) or (0, None) if insufficient amount.
+        """
+        from decimal import Decimal
+        from django.utils import timezone
+
+        plan = service.plan
+        if not plan:
+            return 0, None
+
+        plan_price = Decimal(str(plan.base_price or 0))
+        if plan_price <= 0:
+            return 0, None
+
+        amount = Decimal(str(amount))
+        if amount < plan_price:
+            logger.info(
+                f"Payment {amount} < plan price {plan_price} — "
+                f"insufficient for activation of {service.id}"
+            )
+            return 0, None
+
+        # Calculate how many full plan periods the amount covers
+        quantity = int(amount / plan_price)
+        if quantity < 1:
+            return 0, None
+
+        # Start from: current expiry (if active) or now
+        now = timezone.now()
+        if current_expiry and current_expiry > now:
+            # Stack onto existing subscription
+            start = current_expiry
+        else:
+            start = now
+
+        # Get plan validity as timedelta
+        validity_delta = plan.get_validity_timedelta()
+        if not validity_delta:
+            # Unlimited plan — just activate
+            new_expiry = None
+        else:
+            new_expiry = start + (validity_delta * quantity)
+
+        logger.info(
+            f"Plan renewal: amount={amount}, price={plan_price}, "
+            f"quantity={quantity}, start={start}, new_expiry={new_expiry}"
+        )
+        return quantity, new_expiry
+
     def trigger_mikrotik_reactivation(self, service):
-        """
-        Safely connects to the MikroTik router and clears the session.
-        Uses getattr to prevent 'RelatedObjectDoesNotExist' errors.
-        """
+        """Force MikroTik to reconnect the user immediately with updated RADIUS."""
         try:
             from apps.network.integrations.mikrotik_api import MikrotikAPI
-            
-            # 1. Safely check for related RADIUS credentials
-            # This returns None if the relationship doesn't exist instead of crashing
+
             radius_cred = getattr(service, 'pppoe_user', None) or getattr(service, 'hotspot_user', None)
-            
             if not radius_cred:
-                logger.warning(f"Skipping MikroTik kick: No RADIUS credentials linked to service {service.id}")
+                logger.warning(f"No RADIUS credentials linked to service {service.id}")
                 return
-            
             if not radius_cred.router:
-                logger.warning(f"Skipping MikroTik kick: No router assigned to RADIUS user {radius_cred.username}")
+                logger.warning(f"No router for RADIUS user {radius_cred.username}")
                 return
 
-            # 2. Connect to the router assigned to the RADIUS credentials
             api = MikrotikAPI(radius_cred.router)
-            
-            # 3. Kick the user
             success = api.kick_pppoe_user(radius_cred.username)
-            
             if success:
-                logger.info(f"MikroTik: Kicked session for {radius_cred.username} on {radius_cred.router.name}")
-            else:
-                logger.info(f"MikroTik: No active session for {radius_cred.username}")
-
+                logger.info(f"MikroTik kicked {radius_cred.username} on {radius_cred.router.name}")
         except Exception as e:
-            logger.error(f"Failed MikroTik kick for service {service.id}: {str(e)}", exc_info=True)
-    
+            logger.error(f"MikroTik kick failed for service {service.id}: {e}", exc_info=True)
+
     def post(self, request, *args, **kwargs):
         data = request.data
         trans_id = data.get('TransID')
@@ -515,21 +544,18 @@ class MpesaC2BWebhookView(APIView):
         amount = Decimal(str(data.get('TransAmount', 0)))
         msisdn = data.get('MSISDN', '')
 
-        # Mask PII in logs
         safe_phone = f"****{msisdn[-4:]}" if msisdn and len(msisdn) >= 4 else "Unknown"
-        logger.info(f"C2B Webhook: ID={trans_id} | Ref={bill_ref} | SC={shortcode} | Phone={safe_phone}")
+        logger.info(f"C2B Webhook: ID={trans_id} | Ref={bill_ref} | SC={shortcode} | Phone={safe_phone} | Amount={amount}")
 
-        # Validate required fields
         if not trans_id:
             logger.error("M-Pesa callback missing TransID")
             return Response(
                 {"ResultCode": 1, "ResultDesc": "Missing ID"},
-                status=status.HTTP_200_OK  # Always return 200 to Safaricom
+                status=status.HTTP_200_OK
             )
-        
+
         if not bill_ref:
             logger.warning(f"Payment {trans_id} has no BillRefNumber")
-            # Return success to Safaricom but flag for manual reconciliation
             return Response(
                 {"ResultCode": 0, "ResultDesc": "Success - No Account Reference"},
                 status=status.HTTP_200_OK
@@ -541,8 +567,9 @@ class MpesaC2BWebhookView(APIView):
             for tenant in Tenant.objects.exclude(schema_name='public'):
                 with schema_context(tenant.schema_name):
                     try:
-                        # Find if this ISP owns the shortcode and the customer
-                        if MpesaConfiguration.objects.filter(business_shortcode=shortcode, is_active=True).exists():
+                        if MpesaConfiguration.objects.filter(
+                            business_shortcode=shortcode, is_active=True
+                        ).exists():
                             if ServiceConnection.objects.filter(
                                 models.Q(billing_account_number__iexact=bill_ref) |
                                 models.Q(mpesa_account_number__iexact=bill_ref)
@@ -551,66 +578,59 @@ class MpesaC2BWebhookView(APIView):
                                 logger.info(f"Found matching tenant: {tenant.schema_name}")
                                 break
                     except Exception as e:
-                        # Skip if the table doesn't exist in this specific schema yet
-                        logger.debug(f"Error checking tenant {tenant.schema_name}: {str(e)}")
+                        logger.debug(f"Error checking tenant {tenant.schema_name}: {e}")
                         continue
         else:
             target_tenant_schema = connection.schema_name
 
-        # 2. IF NO TENANT FOUND, LOG ONLY (Don't try to save to DB)
         if not target_tenant_schema:
             logger.warning(
                 f"UNMATCHED PAYMENT: ID={trans_id}, Account={bill_ref}, SC={shortcode}. "
-                f"No DB record created. Manual reconciliation required."
+                "No tenant matched. Manual reconciliation required."
             )
             return Response(
                 {"ResultCode": 0, "ResultDesc": "Account Not Found"},
                 status=status.HTTP_200_OK
             )
 
-        # 3. PROCESS INSIDE TENANT SCHEMA
+        # 2. PROCESS INSIDE TENANT SCHEMA
         with schema_context(target_tenant_schema):
             try:
                 with transaction.atomic():
-                    # Get the service connection
-                    # FIXED: Removed 'router' from select_related - router is accessed via RADIUS credentials
+                    # --- Find service ---
                     service = ServiceConnection.objects.filter(
                         models.Q(billing_account_number__iexact=bill_ref) |
                         models.Q(mpesa_account_number__iexact=bill_ref)
                     ).select_related(
-                        'customer', 
-                        'plan', 
-                        'pppoe_user',      # Include PPPoE credentials
-                        'hotspot_user'      # Include Hotspot credentials
+                        'customer', 'plan',
+                        'pppoe_user', 'hotspot_user'
                     ).first()
 
                     if not service:
-                        logger.warning(f"Service not found for account {bill_ref} in tenant {target_tenant_schema}")
+                        logger.warning(f"Service not found for account {bill_ref} in {target_tenant_schema}")
                         return Response(
                             {"ResultCode": 0, "ResultDesc": "Account Missing"},
                             status=status.HTTP_200_OK
                         )
 
-                    # Get the M-Pesa configuration
                     config = MpesaConfiguration.objects.filter(
-                        business_shortcode=shortcode, 
-                        is_active=True
+                        business_shortcode=shortcode, is_active=True
                     ).first()
 
                     if not config:
-                        logger.error(f"Active M-Pesa configuration not found for shortcode: {shortcode}")
+                        logger.error(f"No active M-Pesa config for shortcode {shortcode}")
                         return Response(
                             {"ResultCode": 1, "ResultDesc": "Configuration Error"},
                             status=status.HTTP_200_OK
                         )
 
-                    # A. Idempotent Transaction Log (FIXED: Added Unique Merchant/Checkout IDs)
+                    # --- Idempotency: deduplicate by TransID ---
                     try:
                         mpesa_txn = MpesaTransaction.objects.create(
                             configuration=config,
                             transaction_id=trans_id,
-                            merchant_request_id=f"C2B-{trans_id}",  # Unique merchant_request_id
-                            checkout_request_id=f"C2B-{trans_id}",  # Unique checkout_request_id
+                            merchant_request_id=f"C2B-{trans_id}",
+                            checkout_request_id=f"C2B-{trans_id}",
                             transaction_type='C2B',
                             amount=amount,
                             phone_number=msisdn,
@@ -621,24 +641,24 @@ class MpesaC2BWebhookView(APIView):
                             schema_name=target_tenant_schema
                         )
                     except IntegrityError:
-                        logger.info(f"Duplicate callback ignored: {trans_id}")
+                        logger.info(f"Duplicate C2B callback ignored: {trans_id}")
                         return Response(
                             {"ResultCode": 0, "ResultDesc": "Duplicate"},
                             status=status.HTTP_200_OK
                         )
 
-                    # B. Find or create payment method
+                    # --- Find or create payment method ---
                     method, _ = InvoiceItemPayment.objects.get_or_create(
                         method_type='MPESA_PAYBILL',
+                        schema_name=target_tenant_schema,
                         defaults={
                             'name': 'M-Pesa Paybill',
-                            'code': 'MPESA_PAYBILL',
+                            'code': f'MPESA_PAYBILL_{target_tenant_schema[:10]}',
                             'is_active': True,
-                            'schema_name': target_tenant_schema
                         }
                     )
-                    
-                    # C. Record Payment
+
+                    # --- Record payment ---
                     payment = Payment.objects.create(
                         customer=service.customer,
                         amount=amount,
@@ -648,104 +668,153 @@ class MpesaC2BWebhookView(APIView):
                         mpesa_receipt=trans_id,
                         mpesa_phone=msisdn,
                         payer_phone=msisdn,
-                        payment_date=timezone.now(),
                         mpesa_transaction=mpesa_txn,
-                        schema_name=target_tenant_schema
+                        payment_date=timezone.now(),
+                        schema_name=target_tenant_schema,
+                        notes=f"C2B payment via Paybill. Account: {bill_ref}. Ref: {trans_id}"
+                    )
+                    mpesa_txn.payment = payment
+                    mpesa_txn.save(update_fields=['payment'])
+
+                    # --- Apply to outstanding invoices ---
+                    from apps.billing.models.billing_models import Invoice
+                    pending_invoices = Invoice.objects.filter(
+                        customer=service.customer,
+                        status__in=['ISSUED', 'OVERDUE', 'PARTIAL'],
+                        balance__gt=0
+                    ).order_by('due_date')
+
+                    remaining_amount = amount
+                    for invoice in pending_invoices:
+                        if remaining_amount <= 0:
+                            break
+                        apply = min(remaining_amount, invoice.balance)
+                        invoice.add_payment(apply, method)
+                        remaining_amount -= apply
+                        logger.info(f"Applied {apply} to invoice {invoice.invoice_number}")
+
+                    # Update customer outstanding balance
+                    customer = service.customer
+                    if customer.outstanding_balance is None:
+                        customer.outstanding_balance = Decimal('0')
+                    customer.outstanding_balance = max(
+                        Decimal('0'),
+                        customer.outstanding_balance - amount
+                    )
+                    customer.save(update_fields=['outstanding_balance'])
+
+                    # --- PLAN-BASED QUANTITY RENEWAL ---
+                    from apps.radius.models import CustomerRadiusCredentials
+
+                    radius_cred = CustomerRadiusCredentials.objects.filter(
+                        customer=customer
+                    ).first()
+
+                    # Get current expiry from RADIUS credentials
+                    current_expiry = radius_cred.expiration_date if radius_cred else None
+
+                    quantity, new_expiry = self._calculate_renewal_expiry(
+                        service, amount, current_expiry
                     )
 
-                    # Link the M-Pesa transaction to the payment
-                    mpesa_txn.payment = payment
-                    mpesa_txn.save()
+                    if quantity >= 1:
+                        # Activate/renew the service
+                        service.status = 'ACTIVE'
+                        service.save(update_fields=['status'])
 
-                    # D. Apply payment to customer's account
-                    customer = service.customer
-                    
-                    # Look for pending invoices for this customer
-                    from apps.billing.models.billing_models import Invoice
-                    pending_invoice = Invoice.objects.filter(
-                        customer=customer,
-                        status__in=['ISSUED', 'OVERDUE'],
-                        balance__lte=amount + 1  # Allow small rounding differences
-                    ).order_by('due_date').first()
-                    
-                    if pending_invoice:
-                        # Apply to the oldest pending invoice
-                        payment.invoice = pending_invoice
-                        payment.save()
-                        pending_invoice.add_payment(amount, method)
-                        logger.info(f"Payment {trans_id} applied to invoice {pending_invoice.invoice_number}")
-                    else:
-                        # Use 'outstanding_balance' and reduce it by the payment amount
-                        # Ensure we handle None/Null values
-                        if customer.outstanding_balance is None:
-                            customer.outstanding_balance = Decimal('0')
-                        
-                        # Reduce the outstanding balance by the payment amount
-                        customer.outstanding_balance -= amount
-                        customer.save(update_fields=['outstanding_balance'])
-                        logger.info(f"Payment {trans_id} reduced outstanding balance to {customer.outstanding_balance}")
-
-                    # E. RADIUS ACTIVATION & EXPIRY EXTENSION
-                    monthly_price = Decimal(str(service.monthly_price)) if service.monthly_price else Decimal('0')
-                    
-                    if amount >= monthly_price:
-                        service.activate_service()
-                        
-                        if service.plan:
-                            # Import the correct model name - CustomerRadiusCredentials
-                            from apps.radius.models import CustomerRadiusCredentials
-                            new_expiry = service.plan.calculate_expiration()
-                            
-                            radius_cred = CustomerRadiusCredentials.objects.filter(customer=customer).first()
-                            if radius_cred:
-                                radius_cred.expiration_date = new_expiry
-                                radius_cred.is_enabled = True
-                                radius_cred.save()
-                                logger.info(f"Extended Expiry for {bill_ref} to {new_expiry}")
-                            else:
-                                logger.warning(f"No RADIUS credentials found for customer {customer.full_name}")
-
-                        # Check if the customer profile needs status update
-                        if customer.status == 'SUSPENDED':
+                        # Update customer status if needed
+                        if customer.status in ('SUSPENDED', 'INACTIVE', 'PENDING'):
                             customer.status = 'ACTIVE'
                             customer.save(update_fields=['status'])
 
-                        # F. MIKROTIK KICK - Force immediate reconnection with new expiry
-                        self.trigger_mikrotik_reactivation(service)
-                        
-                        logger.info(f"SUCCESS: Service {bill_ref} reactivated, expiry extended, and MikroTik kicked for {customer.full_name}")
-                    elif service.status == 'SUSPENDED':
+                        if radius_cred:
+                            radius_cred.is_enabled = True
+                            radius_cred.disabled_reason = ''
+                            radius_cred.subscription_activated_at = timezone.now()
+                            if new_expiry:
+                                radius_cred.expiration_date = new_expiry
+                            radius_cred.save()
+
+                            # Sync to RADIUS tables
+                            try:
+                                radius_cred.sync_to_radius()
+                            except Exception as e:
+                                logger.error(f"RADIUS sync failed: {e}")
+
                         logger.info(
-                            f"Payment amount {amount} less than monthly price {monthly_price}. "
-                            f"Service remains suspended for {customer.full_name}"
+                            f"RENEWAL SUCCESS: customer={customer.customer_code} "
+                            f"account={bill_ref} amount={amount} "
+                            f"quantity={quantity} new_expiry={new_expiry}"
                         )
-                    
-                    # G. Send confirmation SMS (optional)
-                    # TODO: Implement SMS notification
-                    # from apps.notifications.services import send_sms
-                    # send_sms(
-                    #     phone=msisdn,
-                    #     message=f"Thank you! Payment of KES {amount} received. "
-                    #             f"Your internet has been reactivated. Receipt: {trans_id}"
-                    # )
-                    
+
+                        # Force MikroTik reconnect
+                        self.trigger_mikrotik_reactivation(service)
+
+                        # Send confirmation SMS
+                        try:
+                            # Build a simple renewal confirmation
+                            _send_renewal_sms(customer, amount, quantity, new_expiry, msisdn)
+                        except Exception as e:
+                            logger.warning(f"Renewal SMS failed: {e}")
+
+                    else:
+                        # Partial payment — recorded but service not activated
+                        logger.info(
+                            f"PARTIAL PAYMENT: customer={customer.customer_code} "
+                            f"account={bill_ref} amount={amount} — "
+                            f"requires {service.plan.base_price if service.plan else 'N/A'} for activation"
+                        )
+
                     logger.info(
-                        f"M-Pesa payment processed successfully: {trans_id} - "
-                        f"Customer: {customer.full_name} - Amount: KES {amount}"
+                        f"C2B payment processed: {trans_id} | "
+                        f"Customer: {customer.customer_code} | Amount: KES {amount} | "
+                        f"Quantity: {quantity} period(s)"
                     )
 
             except Exception as e:
-                logger.error(f"Internal Error in {target_tenant_schema}: {str(e)}", exc_info=True)
+                logger.error(f"Internal Error in {target_tenant_schema}: {e}", exc_info=True)
                 return Response(
                     {"ResultCode": 1, "ResultDesc": "Internal Error"},
                     status=status.HTTP_200_OK
                 )
 
-        # Always return success to Safaricom with ResultCode 0
         return Response(
             {"ResultCode": 0, "ResultDesc": "Success"},
             status=status.HTTP_200_OK
         )
+
+
+def _send_renewal_sms(customer, amount, quantity, new_expiry, phone_override=None):
+    """Send a renewal confirmation SMS to the customer."""
+    try:
+        from apps.messaging.services.notification_sender import _send_once, _fmt_phone
+        
+        phone = phone_override or (
+            customer.user.phone_number if customer.user else None
+        )
+        if not phone:
+            return
+
+        # Format the message
+        period_str = f"{quantity} month{'s' if quantity > 1 else ''}" if quantity > 1 else "1 month"
+        expiry_str = new_expiry.strftime('%d %b %Y') if new_expiry else 'unlimited'
+        name = customer.user.first_name or 'Customer'
+        
+        message = (
+            f"Hi {name}, payment of KES {amount:,.0f} received. "
+            f"Your internet has been renewed for {period_str}. "
+            f"Expires: {expiry_str}. Thank you!"
+        )
+
+        _send_once(
+            f"c2b_renewal:{customer.id}:{int(amount)}",
+            _fmt_phone(phone),
+            message,
+            ttl=3600
+        )
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).warning(f"Renewal SMS failed: {e}")
 
 
 # URL patterns for webhooks (to be added to main urls.py)

@@ -150,7 +150,17 @@ class ServiceConnectionViewSet(viewsets.ModelViewSet):
         - Syncs to FreeRADIUS
         - Assigns IP from plan's pool if applicable
         
+        Optionally records an initial payment.
+        
         POST /customers/{customer_pk}/services/{pk}/activate/
+        Body (optional payment fields):
+        {
+            "record_payment": true,           # optional, default false
+            "payment_amount": 2500.00,        # required if record_payment=true
+            "payment_method_id": 3,           # optional, defaults to CASH
+            "payment_reference": "CASH-001",  # optional
+            "payment_notes": "Initial payment on installation"  # optional
+        }
         """
         from apps.radius.signals_auto_sync import (
             calculate_expiration_from_plan,
@@ -159,6 +169,8 @@ class ServiceConnectionViewSet(viewsets.ModelViewSet):
             _get_or_create_bandwidth_profile,
         )
         from apps.radius.models import CustomerRadiusCredentials
+        from decimal import Decimal
+        from django.db import connection as db_conn
         
         service = self.get_object()
         
@@ -263,6 +275,79 @@ class ServiceConnectionViewSet(viewsets.ModelViewSet):
             customer.status = 'ACTIVE'
             customer.save()
         
+        # ────────────────────────────────────────────────────────────────
+        # OPTIONAL: RECORD INITIAL PAYMENT
+        # ────────────────────────────────────────────────────────────────
+        from apps.billing.models.payment_models import Payment, InvoiceItemPayment
+        
+        record_payment = request.data.get('record_payment', False)
+        payment_obj = None
+        
+        if record_payment:
+            payment_amount = request.data.get('payment_amount')
+            payment_method_id = request.data.get('payment_method_id')
+            payment_reference = request.data.get('payment_reference', '')
+            payment_notes = request.data.get('payment_notes', 'Initial payment on service activation')
+            
+            if not payment_amount:
+                return Response(
+                    {'error': 'payment_amount is required when record_payment=true'},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+            
+            try:
+                payment_amount = Decimal(str(payment_amount))
+                if payment_amount <= 0:
+                    raise ValueError("Amount must be positive")
+            except (ValueError, TypeError):
+                return Response(
+                    {'error': 'Invalid payment_amount'},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+            
+            # Get payment method
+            if payment_method_id:
+                try:
+                    pay_method = InvoiceItemPayment.objects.get(id=payment_method_id)
+                except InvoiceItemPayment.DoesNotExist:
+                    return Response(
+                        {'error': 'Payment method not found'},
+                        status=status.HTTP_400_BAD_REQUEST
+                    )
+            else:
+                # Default to CASH
+                pay_method, _ = InvoiceItemPayment.objects.get_or_create(
+                    method_type='CASH',
+                    schema_name=db_conn.schema_name,
+                    defaults={
+                        'name': 'Cash',
+                        'code': f'CASH_{db_conn.schema_name[:10]}',
+                        'is_active': True,
+                    }
+                )
+            
+            payment_obj = Payment.objects.create(
+                customer=customer,
+                amount=payment_amount,
+                payment_method=pay_method,
+                status='COMPLETED',
+                payment_reference=payment_reference,
+                payment_date=timezone.now(),
+                processed_at=timezone.now(),
+                payer_name=customer.full_name,
+                notes=payment_notes,
+                created_by=request.user,
+                schema_name=db_conn.schema_name,
+            )
+            
+            # Update customer outstanding balance
+            if customer.outstanding_balance is not None:
+                customer.outstanding_balance = max(
+                    Decimal('0'),
+                    customer.outstanding_balance - payment_amount
+                )
+                customer.save(update_fields=['outstanding_balance'])
+        
         # Refresh credentials reference after creation
         creds_for_sms = None
         try:
@@ -302,6 +387,15 @@ class ServiceConnectionViewSet(viewsets.ModelViewSet):
         if assigned_ip:
             response_data['assigned_ip'] = assigned_ip
             response_data['ip_pool'] = service.plan.ip_pool.name if service.plan and service.plan.ip_pool else None
+        
+        # Include payment info in response
+        if payment_obj:
+            response_data['payment'] = {
+                'id': payment_obj.id,
+                'payment_number': payment_obj.payment_number,
+                'amount': float(payment_obj.amount),
+                'status': payment_obj.status,
+            }
         
         return Response(response_data)
     
