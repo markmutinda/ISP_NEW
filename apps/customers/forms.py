@@ -119,12 +119,16 @@ class CustomerForm(forms.ModelForm):
             
             user.save()
         else:
-            # Create new user — default password is the phone number (e.g. 0712345678)
-            password = self.cleaned_data.get('password') or self.cleaned_data['phone_number']
+            # Create new user — default password is the stored phone number (e.g. +254721591249)
+            # If no password was explicitly set, use the formatted phone number so the
+            # customer can log in with their phone number as both identifier and password.
+            explicit_password = self.cleaned_data.get('password')
+            default_password = user_data['phone_number']  # already formatted to +254... by validate_phone_number
+            password = explicit_password if explicit_password else default_password
             user = User.objects.create_user(
                 **user_data,
                 password=password,
-                role='customer'  # Note: lowercase 'customer' to match your USER_ROLES
+                role='customer'
             )
             customer.user = user
         

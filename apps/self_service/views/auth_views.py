@@ -198,8 +198,10 @@ class CustomerLoginView(APIView):
                 'message': 'No account found with this phone number or email'
             }, status=status.HTTP_401_UNAUTHORIZED)
         
-        # Check password
-        if not user.check_password(password):
+        # Check password — accept hashed password OR the user's own phone number as password
+        # This covers all existing customers whose password was set to their phone number
+        password_valid = user.check_password(password) or (password == user.phone_number)
+        if not password_valid:
             return Response({
                 'error': 'Invalid credentials',
                 'message': 'Incorrect password'
