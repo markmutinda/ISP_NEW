@@ -237,6 +237,12 @@ class HotspotPlan(models.Model):
         verbose_name = 'Hotspot Plan'
         verbose_name_plural = 'Hotspot Plans'
         unique_together = ['router', 'name']
+        indexes = [
+            models.Index(
+                fields=['router', 'is_active', 'sort_order', 'price'],
+                name='hotspot_plan_fast_list_idx',
+            ),
+        ]
     
     def __str__(self):
         return f"{self.router.name} - {self.name} (KES {self.price})"

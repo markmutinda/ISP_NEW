@@ -196,6 +196,7 @@ class CaptivePortalView(APIView):
     permission_classes = [AllowAny]
     authentication_classes = []
 
+    # FIX 1: Optimized with caching and leaner DB field selection
     def get(self, request):
         router_id = request.query_params.get('router')
         tenant_subdomain = request.query_params.get('tenant')
@@ -210,22 +211,37 @@ class CaptivePortalView(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
+        # ---- FAST PATH: short-lived cache (safe, no behavior change) ----
+        cache_key = f"hotspot:captive:v1:{tenant_subdomain}:{router_id}"
+        cached_payload = cache.get(cache_key)
+        if cached_payload is not None:
+            return Response(cached_payload)
+
         try:
             from apps.core.models import Tenant
             with schema_context(get_public_schema_name()):
-                tenant = Tenant.objects.get(Q(subdomain=tenant_subdomain) | Q(schema_name=tenant_subdomain), is_active=True)
+                tenant = Tenant.objects.get(
+                    Q(subdomain=tenant_subdomain) | Q(schema_name=tenant_subdomain),
+                    is_active=True
+                )
         except Exception as e:
             logger.error(f"Tenant '{tenant_subdomain}' not found: {e}")
             return Response({'status': 'error', 'message': 'Tenant not found'}, status=status.HTTP_400_BAD_REQUEST)
 
         try:
             with schema_context(tenant.schema_name):
+                # Router lookup with minimal selected columns
+                router_qs = Router.objects.filter(is_active=True).only(
+                    'id', 'name', 'template_id', 'hotspot_name',
+                    'support_phone', 'announcement_text', 'gateway_ip', 'location'
+                )
+
                 router = None
                 try:
-                    router = Router.objects.get(id=router_id, is_active=True)
+                    router = router_qs.get(id=router_id)
                 except (Router.DoesNotExist, ValueError):
                     try:
-                        router = Router.objects.get(name=router_id, is_active=True)
+                        router = router_qs.get(name=router_id)
                         logger.info("CaptivePortal: router found by name '%s' -> id=%s", router_id, router.id)
                     except Router.DoesNotExist:
                         logger.warning(f"Router '{router_id}' does not exist in tenant {tenant_subdomain}")
@@ -254,7 +270,11 @@ class CaptivePortalView(APIView):
                     try:
                         branding = getattr(router, 'hotspot_branding', None)
                         if branding is None:
-                            branding = HotspotBranding.objects.filter(is_default=True).first()
+                            branding = HotspotBranding.objects.filter(is_default=True).only(
+                                'company_name', 'logo', 'background_image',
+                                'primary_color', 'secondary_color', 'text_color', 'background_color',
+                                'welcome_title', 'welcome_message', 'support_phone', 'support_email'
+                            ).first()
                         if branding:
                             branding_data = {
                                 'company_name': branding.company_name,
@@ -280,6 +300,12 @@ class CaptivePortalView(APIView):
                         hotspot_plans = HotspotPlan.objects.filter(
                             router=router,
                             is_active=True,
+                        ).only(
+                            'id', 'name', 'description', 'price', 'currency',
+                            'validity_type', 'validity_value',
+                            'download_speed', 'upload_speed', 'speed_unit',
+                            'limitation_type', 'data_limit_value', 'data_limit_unit',
+                            'simultaneous_devices', 'is_popular', 'duration_minutes', 'data_limit_mb'
                         ).order_by('sort_order', 'price')
                         plans_data = [_serialize_hotspot_plan(p) for p in hotspot_plans]
                     except ProgrammingError:
@@ -290,6 +316,11 @@ class CaptivePortalView(APIView):
                         generic_plans = Plan.objects.filter(
                             plan_type='HOTSPOT',
                             is_active=True,
+                        ).only(
+                            'id', 'name', 'description', 'base_price',
+                            'validity_type', 'validity_minutes', 'validity_hours', 'validity_months', 'duration_days',
+                            'download_speed', 'upload_speed', 'speed_unit',
+                            'data_limit', 'is_popular'
                         ).order_by('is_popular', 'base_price')
                         plans_data = [_serialize_plan(p) for p in generic_plans]
                         if plans_data:
@@ -303,13 +334,17 @@ class CaptivePortalView(APIView):
         except Exception as exc:
             logger.error(f"CaptivePortal internal error for tenant {tenant_subdomain}: {exc}")
             return Response({'status': 'error', 'message': 'Internal server error'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-        
-        return Response({
+
+        payload = {
             'status': 'success',
             'portal_config': portal_config,
             'branding': branding_data,
             'plans': plans_data,
-        })
+        }
+
+        # Keep cache short so admin updates appear quickly
+        cache.set(cache_key, payload, timeout=30)
+        return Response(payload)
 
 
 class HotspotPlansView(APIView):
@@ -324,31 +359,46 @@ class HotspotPlansView(APIView):
     permission_classes = [AllowAny]
     authentication_classes = []
     
+    # FIX 2: Cached version with leaner DB field selection
     def get(self, request, router_id):
+        cache_key = f"hotspot:plans:v1:{router_id}"
+        cached_payload = cache.get(cache_key)
+        if cached_payload is not None:
+            return Response(cached_payload)
+
+        router_qs = Router.objects.filter(is_active=True).only(
+            'id', 'name', 'location', 'template_id', 'hotspot_name',
+            'support_phone', 'announcement_text'
+        )
+
         try:
-            router = Router.objects.get(id=router_id, is_active=True)
+            router = router_qs.get(id=router_id)
         except (Router.DoesNotExist, ValueError):
             try:
-                router = Router.objects.get(name=router_id, is_active=True)
+                router = router_qs.get(name=router_id)
                 logger.info(f"Router found by name in HotspotPlansView: {router_id} -> {router.id}")
             except Router.DoesNotExist:
-                return Response(
-                    {'error': 'Router not found'},
-                    status=status.HTTP_404_NOT_FOUND
-                )
-        
+                return Response({'error': 'Router not found'}, status=status.HTTP_404_NOT_FOUND)
+
         plans = HotspotPlan.objects.filter(
             router=router,
             is_active=True
+        ).only(
+            'id', 'name', 'price', 'currency', 'duration_minutes', 'data_limit_mb',
+            'download_speed', 'upload_speed', 'speed_unit', 'description',
+            'is_popular', 'validity_type', 'validity_value',
+            'limitation_type', 'data_limit_value', 'data_limit_unit'
         ).order_by('sort_order', 'price')
-        
+
         try:
             branding = router.hotspot_branding
         except HotspotBranding.DoesNotExist:
-            branding = HotspotBranding.objects.filter(
-                is_default=True
+            branding = HotspotBranding.objects.filter(is_default=True).only(
+                'company_name', 'logo', 'background_image',
+                'primary_color', 'secondary_color', 'text_color', 'background_color',
+                'welcome_title', 'welcome_message', 'support_phone', 'support_email'
             ).first()
-        
+
         plans_data = [
             {
                 'id': str(plan.id),
@@ -365,7 +415,7 @@ class HotspotPlansView(APIView):
             }
             for plan in plans
         ]
-        
+
         branding_data = None
         if branding:
             branding_data = {
@@ -381,7 +431,7 @@ class HotspotPlansView(APIView):
                 'support_phone': branding.support_phone,
                 'support_email': branding.support_email,
             }
-        
+
         portal_config = {
             'template_id': router.template_id or 1,
             'hotspot_name': router.hotspot_name or router.name,
@@ -389,7 +439,7 @@ class HotspotPlansView(APIView):
             'announcement_text': router.announcement_text or '',
         }
 
-        return Response({
+        payload = {
             'router': {
                 'id': router.id,
                 'name': router.name,
@@ -398,7 +448,10 @@ class HotspotPlansView(APIView):
             'plans': plans_data,
             'branding': branding_data,
             'portal_config': portal_config,
-        })
+        }
+
+        cache.set(cache_key, payload, timeout=30)
+        return Response(payload)
 
 
 class HotspotPurchaseView(APIView):

@@ -29,6 +29,7 @@ PUBLIC_ROUTER_PATHS = (
     '/api/v1/hotspot/captive-portal/',
     '/api/v1/hotspot/login-page/',
     '/api/v1/hotspot/purchase/',
+    '/api/v1/hotspot/routers/',
 )
 
 
