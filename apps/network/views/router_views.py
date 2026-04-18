@@ -2906,6 +2906,12 @@ class RouterPortManagerView(APIView):
             return Response({'error': 'Router not found'}, status=404)
         connection.set_tenant(tenant)
 
+        # Try to sync status first, then check
+        try:
+            router.sync_status(force=True)
+        except Exception:
+            pass
+
         if router.status != 'online':
             return Response({'error': 'Router must be online to scan ports'}, status=400)
 
