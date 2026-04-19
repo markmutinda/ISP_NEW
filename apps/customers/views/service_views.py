@@ -169,6 +169,7 @@ class ServiceConnectionViewSet(viewsets.ModelViewSet):
             _get_or_create_bandwidth_profile,
         )
         from apps.radius.models import CustomerRadiusCredentials
+        from apps.billing.models.payment_models import Payment, InvoiceItemPayment
         from decimal import Decimal
         from django.db import connection as db_conn
         
@@ -210,11 +211,8 @@ class ServiceConnectionViewSet(viewsets.ModelViewSet):
             customer.save()
 
         # ── STEP 2: Record initial payment IMMEDIATELY after activation ─────────
-        # Payment is recorded here so it is ALWAYS captured even if RADIUS setup
-        # fails below.  Previously the payment lived after the RADIUS block, so
-        # any RADIUS exception silently swallowed the payment.
-        from apps.billing.models.payment_models import Payment, InvoiceItemPayment
-
+        # This runs BEFORE RADIUS so a RADIUS error never loses the payment.
+        # The Payment model is the same table queried by /billing/payments/.
         record_payment = request.data.get('record_payment', False)
         payment_obj = None
 
@@ -222,7 +220,9 @@ class ServiceConnectionViewSet(viewsets.ModelViewSet):
             payment_amount = request.data.get('payment_amount')
             payment_method_id = request.data.get('payment_method_id')
             payment_reference = request.data.get('payment_reference', '')
-            payment_notes = request.data.get('payment_notes', 'Initial payment recorded on service activation')
+            payment_notes = request.data.get(
+                'payment_notes', 'Initial payment recorded on service activation'
+            )
 
             if not payment_amount:
                 return Response(
@@ -233,7 +233,7 @@ class ServiceConnectionViewSet(viewsets.ModelViewSet):
             try:
                 payment_amount = Decimal(str(payment_amount))
                 if payment_amount <= 0:
-                    raise ValueError("Amount must be positive")
+                    raise ValueError()
             except (ValueError, TypeError):
                 return Response(
                     {'error': 'Invalid payment_amount'},
@@ -241,6 +241,7 @@ class ServiceConnectionViewSet(viewsets.ModelViewSet):
                 )
 
             # Resolve payment method ──────────────────────────────────────────
+            pay_method = None
             if payment_method_id:
                 try:
                     pay_method = InvoiceItemPayment.objects.get(id=payment_method_id)
@@ -250,51 +251,56 @@ class ServiceConnectionViewSet(viewsets.ModelViewSet):
                         status=status.HTTP_400_BAD_REQUEST
                     )
             else:
-                # Default to CASH – use filter().first() to avoid unique constraint races
+                # Use any active method, preferring the default one
                 pay_method = InvoiceItemPayment.objects.filter(
-                    method_type='CASH',
                     schema_name=db_conn.schema_name,
-                ).first()
+                    is_active=True,
+                ).order_by('-is_default', 'id').first()
+
                 if not pay_method:
-                    import random as _random
-                    import string as _string
-                    _suffix = ''.join(_random.choices(_string.ascii_uppercase + _string.digits, k=8))
+                    # Last resort: create a CASH fallback with a unique code
+                    import random as _r, string as _s
+                    _code = 'CASH_' + ''.join(_r.choices(_s.ascii_uppercase + _s.digits, k=8))
                     pay_method = InvoiceItemPayment.objects.create(
                         method_type='CASH',
                         schema_name=db_conn.schema_name,
                         name='Cash',
-                        code=f'CASH_{_suffix}',
+                        code=_code,
                         is_active=True,
                         minimum_amount=Decimal('1.00'),
                         maximum_amount=Decimal('9999999.00'),
                     )
 
-            # Create the payment record ───────────────────────────────────────
+            # Write the Payment row — this is what appears at /billing/payments/ ──
             payment_obj = Payment.objects.create(
                 customer=customer,
                 amount=payment_amount,
                 payment_method=pay_method,
                 status='COMPLETED',
-                payment_reference=payment_reference or 'MANUAL-ENTRY',
+                payment_reference=payment_reference or f'MANUAL-{service.id}',
                 payment_date=timezone.now(),
                 processed_at=timezone.now(),
                 is_reconciled=True,
                 reconciled_at=timezone.now(),
                 payer_name=customer.full_name,
-                mpesa_name=customer.full_name,
                 payer_phone=customer.user.phone_number if customer.user else '',
-                notes=payment_notes or 'Initial payment recorded on service activation',
+                notes=payment_notes,
                 created_by=request.user,
                 schema_name=db_conn.schema_name,
             )
 
-            # Adjust customer outstanding balance
+            # Reduce outstanding balance
             if customer.outstanding_balance is not None:
                 customer.outstanding_balance = max(
                     Decimal('0'),
                     customer.outstanding_balance - payment_amount
                 )
                 customer.save(update_fields=['outstanding_balance'])
+
+            logger.info(
+                f"Initial payment {payment_obj.payment_number} recorded for "
+                f"{customer.customer_code}: KES {payment_amount}"
+            )
 
         # ── STEP 3: Create/update RADIUS credentials ────────────────────────────
         # Wrapped in try/except so a RADIUS failure never prevents the payment
@@ -391,7 +397,6 @@ class ServiceConnectionViewSet(viewsets.ModelViewSet):
             'status': 'success',
             'message': f'Service activated for {customer.customer_code}',
             'activation_date': service.activation_date.isoformat() if service.activation_date else None,
-            # ↓ Fix for Issue 2 – frontend uses this to show the Paybill account toast
             'billing_account_number': service.billing_account_number,
             'radius_credentials': creds_data,
         }
