@@ -11,6 +11,7 @@ These models live in the PUBLIC schema and handle:
 7. BillingCycle - Tracks 30-day metered cycles for tenants
 8. BillableClientRecord - Ghost records of PPPoE users counted per cycle
 9. BillingSnapshot - Additional ghost record model for PPPoE users
+10. TenantUserLedger - Immutable audit trail of PPPoE/Hotspot user lifecycle events
 """
 
 import secrets
@@ -366,6 +367,7 @@ class CompanySubscription(models.Model):
                     defaults={
                         'end_date': self.current_period_end,
                         'status': 'active',
+                        'is_first_paid_cycle': True,  # Base fee only — metered starts next cycle
                     }
                 )
     
@@ -917,6 +919,12 @@ class BillingCycle(models.Model):
     snapshot_min_clients = models.PositiveIntegerField(default=20, help_text="Minimum billable PPPoE clients (floor)")
     snapshot_hotspot_share_pct = models.DecimalField(max_digits=5, decimal_places=2, default=Decimal('0.00'))
 
+    # First-paid-cycle flag: after trial conversion, this cycle charges base fee only
+    is_first_paid_cycle = models.BooleanField(
+        default=False,
+        help_text="True for the first cycle after trial conversion. Only base license fee is charged."
+    )
+
     # Grace period tracking
     grace_ends_at = models.DateTimeField(
         null=True, blank=True,
@@ -968,6 +976,9 @@ class BillingCycle(models.Model):
         """
         Calculate the strict billing formula: 
         Base Fee + (Active Users * 20 KES) + (Hotspot Revenue * 3%)
+        
+        EXCEPTION: The first paid cycle after trial conversion charges
+        ONLY the base license fee. Metered usage starts on the second cycle.
         """
         plan = self.subscription.plan
         
@@ -976,6 +987,11 @@ class BillingCycle(models.Model):
             return self.subscription.current_price
         
         base_fee = self.snapshot_base_fee
+        
+        # First paid cycle after trial: base fee only — no metered charges
+        if self.is_first_paid_cycle:
+            return base_fee
+        
         pppoe_charge = self.calculate_pppoe_charge()
         
         # Calculate Hotspot Share (e.g., Revenue * 0.03)
@@ -1050,3 +1066,265 @@ class BillingSnapshot(models.Model):
 
     def __str__(self):
         return f"{self.username} in Cycle {self.cycle_id}"
+
+
+class TenantUserLedger(models.Model):
+    """
+    Immutable audit trail for PPPoE and Hotspot user lifecycle events.
+    
+    Lives in PUBLIC schema — tenants CANNOT modify or delete entries.
+    Records every creation and deletion of customers/services so that
+    even if a tenant deletes a user from their dashboard, the billing
+    ledger retains the count for the current cycle.
+    
+    This also feeds into BillableClientRecord automatically: when a
+    PPPoE user is created, a ghost record is inserted into the active
+    billing cycle.
+    """
+    
+    EVENT_CHOICES = [
+        ('customer_created', 'Customer Created'),
+        ('customer_deleted', 'Customer Deleted'),
+        ('service_created', 'Service Created'),
+        ('service_deleted', 'Service Deleted'),
+        ('service_activated', 'Service Activated'),
+        ('service_suspended', 'Service Suspended'),
+        ('service_terminated', 'Service Terminated'),
+    ]
+    
+    USER_TYPE_CHOICES = [
+        ('pppoe', 'PPPoE'),
+        ('hotspot', 'Hotspot'),
+        ('static', 'Static IP'),
+        ('dhcp', 'DHCP'),
+        ('other', 'Other'),
+    ]
+    
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    
+    tenant = models.ForeignKey(
+        'core.Tenant',
+        on_delete=models.CASCADE,
+        related_name='user_ledger_entries',
+    )
+    
+    # Event details
+    event = models.CharField(max_length=30, choices=EVENT_CHOICES, db_index=True)
+    user_type = models.CharField(max_length=20, choices=USER_TYPE_CHOICES, default='pppoe')
+    
+    # Identity snapshot (immutable — even after deletion these stay)
+    customer_code = models.CharField(max_length=100, blank=True)
+    customer_name = models.CharField(max_length=200, blank=True)
+    username = models.CharField(
+        max_length=150, blank=True, db_index=True,
+        help_text="PPPoE/Hotspot username at the time of the event"
+    )
+    phone_number = models.CharField(max_length=20, blank=True)
+    plan_name = models.CharField(max_length=200, blank=True)
+    
+    # Counts at the time of the event
+    pppoe_count_after = models.PositiveIntegerField(
+        default=0,
+        help_text="Total active PPPoE services in tenant after this event"
+    )
+    hotspot_count_after = models.PositiveIntegerField(
+        default=0,
+        help_text="Total active hotspot services in tenant after this event"
+    )
+    
+    # Timestamps
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+    
+    class Meta:
+        ordering = ['-created_at']
+        verbose_name = 'Tenant User Ledger Entry'
+        verbose_name_plural = 'Tenant User Ledger'
+        indexes = [
+            models.Index(fields=['tenant', 'event']),
+            models.Index(fields=['tenant', 'created_at']),
+        ]
+    
+    def __str__(self):
+        return f"[{self.tenant.schema_name}] {self.event} — {self.customer_name or self.username} @ {self.created_at:%Y-%m-%d %H:%M}"
+    
+    @classmethod
+    def record(cls, tenant, event, user_type='pppoe', **kwargs):
+        """
+        Record an immutable ledger entry and, for PPPoE service creation,
+        also insert a BillableClientRecord into the active billing cycle.
+        """
+        from django_tenants.utils import schema_context
+        
+        # Get current PPPoE and hotspot counts from tenant schema
+        pppoe_count = 0
+        hotspot_count = 0
+        try:
+            with schema_context(tenant.schema_name):
+                from apps.customers.models import ServiceConnection
+                pppoe_count = ServiceConnection.objects.filter(
+                    status='ACTIVE', auth_connection_type='PPPOE'
+                ).count()
+                hotspot_count = ServiceConnection.objects.filter(
+                    status='ACTIVE', auth_connection_type='HOTSPOT'
+                ).count()
+        except Exception:
+            pass
+        
+        entry = cls.objects.create(
+            tenant=tenant,
+            event=event,
+            user_type=user_type,
+            pppoe_count_after=pppoe_count,
+            hotspot_count_after=hotspot_count,
+            **kwargs,
+        )
+        
+        # Auto-insert BillableClientRecord for PPPoE user creation
+        username = kwargs.get('username', '')
+        if event == 'service_created' and user_type == 'pppoe' and username:
+            try:
+                active_cycle = BillingCycle.objects.filter(
+                    tenant=tenant,
+                    status='active',
+                ).order_by('-start_date').first()
+                
+                if active_cycle:
+                    BillableClientRecord.objects.get_or_create(
+                        cycle=active_cycle,
+                        username=username,
+                    )
+            except Exception:
+                pass
+        
+        return entry
+
+
+class TenantUserLedger(models.Model):
+    """
+    Immutable audit trail for PPPoE and Hotspot user lifecycle events.
+    
+    Lives in PUBLIC schema — tenants CANNOT modify or delete entries.
+    Records every creation and deletion of customers/services so that
+    even if a tenant deletes a user from their dashboard, the billing
+    ledger retains the count for the current cycle.
+    
+    This also feeds into BillableClientRecord automatically: when a
+    PPPoE user is created, a ghost record is inserted into the active
+    billing cycle.
+    """
+    
+    EVENT_CHOICES = [
+        ('customer_created', 'Customer Created'),
+        ('customer_deleted', 'Customer Deleted'),
+        ('service_created', 'Service Created'),
+        ('service_deleted', 'Service Deleted'),
+        ('service_activated', 'Service Activated'),
+        ('service_suspended', 'Service Suspended'),
+        ('service_terminated', 'Service Terminated'),
+    ]
+    
+    USER_TYPE_CHOICES = [
+        ('pppoe', 'PPPoE'),
+        ('hotspot', 'Hotspot'),
+        ('static', 'Static IP'),
+        ('dhcp', 'DHCP'),
+        ('other', 'Other'),
+    ]
+    
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    
+    tenant = models.ForeignKey(
+        'core.Tenant',
+        on_delete=models.CASCADE,
+        related_name='user_ledger_entries',
+    )
+    
+    # Event details
+    event = models.CharField(max_length=30, choices=EVENT_CHOICES, db_index=True)
+    user_type = models.CharField(max_length=20, choices=USER_TYPE_CHOICES, default='pppoe')
+    
+    # Identity snapshot (immutable — even after deletion these stay)
+    customer_code = models.CharField(max_length=100, blank=True)
+    customer_name = models.CharField(max_length=200, blank=True)
+    username = models.CharField(
+        max_length=150, blank=True, db_index=True,
+        help_text="PPPoE/Hotspot username at the time of the event"
+    )
+    phone_number = models.CharField(max_length=20, blank=True)
+    plan_name = models.CharField(max_length=200, blank=True)
+    
+    # Counts at the time of the event
+    pppoe_count_after = models.PositiveIntegerField(
+        default=0,
+        help_text="Total active PPPoE services in tenant after this event"
+    )
+    hotspot_count_after = models.PositiveIntegerField(
+        default=0,
+        help_text="Total active hotspot services in tenant after this event"
+    )
+    
+    # Timestamps
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+    
+    class Meta:
+        ordering = ['-created_at']
+        verbose_name = 'Tenant User Ledger Entry'
+        verbose_name_plural = 'Tenant User Ledger'
+        indexes = [
+            models.Index(fields=['tenant', 'event']),
+            models.Index(fields=['tenant', 'created_at']),
+        ]
+    
+    def __str__(self):
+        return f"[{self.tenant.schema_name}] {self.event} — {self.customer_name or self.username} @ {self.created_at:%Y-%m-%d %H:%M}"
+    
+    @classmethod
+    def record(cls, tenant, event, user_type='pppoe', **kwargs):
+        """
+        Record an immutable ledger entry and, for PPPoE service creation,
+        also insert a BillableClientRecord into the active billing cycle.
+        """
+        from django_tenants.utils import schema_context
+        
+        # Get current PPPoE and hotspot counts from tenant schema
+        pppoe_count = 0
+        hotspot_count = 0
+        try:
+            with schema_context(tenant.schema_name):
+                from apps.customers.models import ServiceConnection
+                pppoe_count = ServiceConnection.objects.filter(
+                    status='ACTIVE', auth_connection_type='PPPOE'
+                ).count()
+                hotspot_count = ServiceConnection.objects.filter(
+                    status='ACTIVE', auth_connection_type='HOTSPOT'
+                ).count()
+        except Exception:
+            pass
+        
+        entry = cls.objects.create(
+            tenant=tenant,
+            event=event,
+            user_type=user_type,
+            pppoe_count_after=pppoe_count,
+            hotspot_count_after=hotspot_count,
+            **kwargs,
+        )
+        
+        # Auto-insert BillableClientRecord for PPPoE user creation
+        username = kwargs.get('username', '')
+        if event == 'service_created' and user_type == 'pppoe' and username:
+            try:
+                active_cycle = BillingCycle.objects.filter(
+                    tenant=tenant,
+                    status='active',
+                ).order_by('-start_date').first()
+                
+                if active_cycle:
+                    BillableClientRecord.objects.get_or_create(
+                        cycle=active_cycle,
+                        username=username,
+                    )
+            except Exception:
+                pass
+        
+        return entry

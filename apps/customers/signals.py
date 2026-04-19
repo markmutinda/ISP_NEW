@@ -1,20 +1,25 @@
 """
 Customer Signals — RADIUS cleanup, IP release, User cleanup on customer deletion,
-and auto-generation of billing account numbers for PPPoE/Static services.
+auto-generation of billing account numbers for PPPoE/Static services, and
+immutable tenant user ledger recording for billing audit.
 
 When a Customer is deleted (via API or admin):
 1. pre_delete: Remove RADIUS credentials from radcheck/radreply (FreeRADIUS)
 2. pre_delete: Release any assigned IP addresses back to the pool
 3. pre_delete: Stash the User reference for post-delete cleanup
-4. post_delete: Delete the orphaned Django User account
+4. pre_delete: Record 'customer_deleted' in TenantUserLedger (immutable, public schema)
+5. post_delete: Delete the orphaned Django User account
 
 When a ServiceConnection is terminated or deleted:
 - Release any associated IP addresses back to the available pool
+- Record 'service_deleted'/'service_terminated' in TenantUserLedger
 
 When a ServiceConnection is created (PPPoE/Static):
 - Auto-generate a billing_account_number if one hasn't been assigned yet
+- Record 'service_created' in TenantUserLedger + insert BillableClientRecord
 
-This ensures no orphaned RADIUS entries, IP addresses, User accounts, or missing billing numbers.
+This ensures no orphaned RADIUS entries, IP addresses, User accounts, or missing billing numbers,
+and provides an immutable audit trail that tenants cannot tamper with.
 """
 
 import logging
@@ -244,3 +249,152 @@ def log_ip_assignment_changes(sender, instance, created, **kwargs):
     except Exception as e:
         # Don't let logging failures break anything
         pass
+
+
+# ========== TENANT USER LEDGER — IMMUTABLE AUDIT TRAIL ==========
+
+def _get_tenant_for_ledger():
+    """Get the current tenant from the DB connection (set by django-tenants middleware)."""
+    try:
+        from django.db import connection
+        tenant = getattr(connection, 'tenant', None)
+        if tenant and tenant.schema_name != 'public':
+            return tenant
+    except Exception:
+        pass
+    return None
+
+
+def _get_user_type(service):
+    """Map ServiceConnection.auth_connection_type to ledger user_type."""
+    auth_type = (service.auth_connection_type or '').upper()
+    mapping = {
+        'PPPOE': 'pppoe',
+        'HOTSPOT': 'hotspot',
+        'STATIC': 'static',
+        'DYNAMIC': 'dhcp',
+    }
+    return mapping.get(auth_type, 'other')
+
+
+@receiver(post_save, sender=Customer)
+def ledger_record_customer_created(sender, instance, created, **kwargs):
+    """Record customer creation in the immutable tenant ledger."""
+    if not created:
+        return
+    tenant = _get_tenant_for_ledger()
+    if not tenant:
+        return
+    try:
+        from apps.subscriptions.models import TenantUserLedger
+        TenantUserLedger.record(
+            tenant=tenant,
+            event='customer_created',
+            user_type='other',
+            customer_code=instance.customer_code or '',
+            customer_name=instance.full_name or '',
+            phone_number=getattr(instance.user, 'phone_number', '') if instance.user_id else '',
+        )
+    except Exception as e:
+        logger.error(f"Ledger: failed to record customer_created for {instance.customer_code}: {e}")
+
+
+@receiver(pre_delete, sender=Customer)
+def ledger_record_customer_deleted(sender, instance, **kwargs):
+    """Record customer deletion in the immutable tenant ledger BEFORE deletion."""
+    tenant = _get_tenant_for_ledger()
+    if not tenant:
+        return
+    try:
+        from apps.subscriptions.models import TenantUserLedger
+        TenantUserLedger.record(
+            tenant=tenant,
+            event='customer_deleted',
+            user_type='other',
+            customer_code=instance.customer_code or '',
+            customer_name=instance.full_name or '',
+            phone_number=getattr(instance.user, 'phone_number', '') if instance.user_id else '',
+        )
+    except Exception as e:
+        logger.error(f"Ledger: failed to record customer_deleted for {instance.customer_code}: {e}")
+
+
+@receiver(post_save, sender=ServiceConnection)
+def ledger_record_service_lifecycle(sender, instance, created, **kwargs):
+    """
+    Record service creation, activation, suspension, and termination
+    in the immutable tenant ledger.
+    
+    For PPPoE service creation: also inserts a BillableClientRecord
+    into the active billing cycle so the user is counted immediately.
+    """
+    tenant = _get_tenant_for_ledger()
+    if not tenant:
+        return
+
+    try:
+        from apps.subscriptions.models import TenantUserLedger
+
+        user_type = _get_user_type(instance)
+        customer = instance.customer
+        username = ''
+        if hasattr(customer, 'radius_credentials'):
+            try:
+                username = customer.radius_credentials.username or ''
+            except Exception:
+                pass
+        plan_name = instance.plan.name if instance.plan_id else ''
+
+        base_kwargs = dict(
+            user_type=user_type,
+            customer_code=customer.customer_code or '',
+            customer_name=customer.full_name or '',
+            username=username,
+            phone_number=getattr(customer.user, 'phone_number', '') if customer.user_id else '',
+            plan_name=plan_name,
+        )
+
+        if created:
+            TenantUserLedger.record(tenant=tenant, event='service_created', **base_kwargs)
+        else:
+            # Track status transitions
+            status = (instance.status or '').upper()
+            if status == 'ACTIVE':
+                TenantUserLedger.record(tenant=tenant, event='service_activated', **base_kwargs)
+            elif status == 'SUSPENDED':
+                TenantUserLedger.record(tenant=tenant, event='service_suspended', **base_kwargs)
+            elif status == 'TERMINATED':
+                TenantUserLedger.record(tenant=tenant, event='service_terminated', **base_kwargs)
+    except Exception as e:
+        logger.error(f"Ledger: failed to record service lifecycle for service {instance.id}: {e}")
+
+
+@receiver(pre_delete, sender=ServiceConnection)
+def ledger_record_service_deleted(sender, instance, **kwargs):
+    """Record service deletion in the immutable tenant ledger BEFORE deletion."""
+    tenant = _get_tenant_for_ledger()
+    if not tenant:
+        return
+    try:
+        from apps.subscriptions.models import TenantUserLedger
+        user_type = _get_user_type(instance)
+        customer = instance.customer
+        username = ''
+        if hasattr(customer, 'radius_credentials'):
+            try:
+                username = customer.radius_credentials.username or ''
+            except Exception:
+                pass
+
+        TenantUserLedger.record(
+            tenant=tenant,
+            event='service_deleted',
+            user_type=user_type,
+            customer_code=customer.customer_code or '',
+            customer_name=customer.full_name or '',
+            username=username,
+            phone_number=getattr(customer.user, 'phone_number', '') if customer.user_id else '',
+            plan_name=instance.plan.name if instance.plan_id else '',
+        )
+    except Exception as e:
+        logger.error(f"Ledger: failed to record service_deleted for service {instance.id}: {e}")
