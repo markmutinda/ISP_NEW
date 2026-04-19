@@ -2034,6 +2034,76 @@ class BillingCycleListView(APIView):
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  TENANT USER LEDGER (IMMUTABLE AUDIT TRAIL)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+
+class TenantUserLedgerListView(APIView):
+    """
+    List immutable tenant user ledger entries across all tenants.
+    Supports filtering by tenant, event type, user type, and date range.
+
+    GET /api/v1/superadmin/user-ledger/
+    Query params:
+      - tenant_id: UUID filter
+      - event: customer_created, service_created, etc.
+      - user_type: pppoe, hotspot, static, etc.
+      - search: free-text search on customer_name, username, customer_code
+      - date_from, date_to: ISO date range filters
+      - page, page_size: pagination
+    """
+    permission_classes = SUPERADMIN_PERMS
+
+    def get(self, request):
+        _ensure_public()
+        from apps.subscriptions.models import TenantUserLedger
+        from apps.superadmin.serializers import TenantUserLedgerSerializer
+
+        tenant_id = request.query_params.get("tenant_id")
+        event_filter = request.query_params.get("event")
+        user_type_filter = request.query_params.get("user_type")
+        search = request.query_params.get("search", "")
+        date_from = request.query_params.get("date_from")
+        date_to = request.query_params.get("date_to")
+        page = int(request.query_params.get("page", 1))
+        page_size = int(request.query_params.get("page_size", PAGE_SIZE))
+
+        qs = TenantUserLedger.objects.select_related(
+            "tenant", "tenant__company",
+        ).order_by("-created_at")
+
+        if tenant_id:
+            qs = qs.filter(tenant_id=tenant_id)
+        if event_filter:
+            qs = qs.filter(event=event_filter)
+        if user_type_filter:
+            qs = qs.filter(user_type=user_type_filter)
+        if date_from:
+            qs = qs.filter(created_at__date__gte=date_from)
+        if date_to:
+            qs = qs.filter(created_at__date__lte=date_to)
+        if search:
+            qs = qs.filter(
+                Q(customer_name__icontains=search)
+                | Q(username__icontains=search)
+                | Q(customer_code__icontains=search)
+                | Q(phone_number__icontains=search)
+                | Q(tenant__company__name__icontains=search)
+            )
+
+        total = qs.count()
+        start = (page - 1) * page_size
+        entries = qs[start:start + page_size]
+
+        return Response({
+            "count": total,
+            "page": page,
+            "page_size": page_size,
+            "results": TenantUserLedgerSerializer(entries, many=True).data,
+        })
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 #  TUMA SUBSCRIPTION PAYMENTS (ISPs paying Netily)
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 

@@ -11,7 +11,28 @@ from django.utils.text import slugify
 from decimal import Decimal
 
 from apps.core.models import Tenant, Company, Domain, User
-from apps.subscriptions.models import BillingCycle, CompanySubscription  # Import BillingCycle
+from apps.subscriptions.models import BillingCycle, CompanySubscription, TenantUserLedger
+
+
+# ──────────────────────────────────────────
+# TENANT USER LEDGER (IMMUTABLE AUDIT TRAIL)
+# ──────────────────────────────────────────
+
+class TenantUserLedgerSerializer(serializers.ModelSerializer):
+    tenant_name = serializers.CharField(source='tenant.company.name', read_only=True)
+    tenant_subdomain = serializers.CharField(source='tenant.schema_name', read_only=True)
+
+    class Meta:
+        model = TenantUserLedger
+        fields = [
+            'id', 'tenant', 'tenant_name', 'tenant_subdomain',
+            'event', 'user_type',
+            'customer_code', 'customer_name', 'username',
+            'phone_number', 'plan_name',
+            'pppoe_count_after', 'hotspot_count_after',
+            'created_at',
+        ]
+        read_only_fields = fields
 
 
 # ──────────────────────────────────────────

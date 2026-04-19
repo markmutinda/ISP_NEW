@@ -418,6 +418,7 @@ class InitiateSubscriptionPaymentView(APIView):
         billing_period = serializer.validated_data['billing_period']
         phone_number = serializer.validated_data.get('phone_number')
         amount_override = serializer.validated_data.get('amount')
+        defer_billing = serializer.validated_data.get('defer_billing_to_trial_end', False)
         
         # ─────────────────────────────────────────────────────────────
         # Amount priority:
@@ -461,6 +462,7 @@ class InitiateSubscriptionPaymentView(APIView):
             payment_method=payment_method,
             phone_number=phone_number,
             status='pending',
+            defer_billing_to_trial_end=defer_billing,
             period_start=subscription.current_period_end or timezone.now(),
             period_end=(subscription.current_period_end or timezone.now()) + timedelta(
                 days=365 if billing_period == 'yearly' else 30
@@ -653,8 +655,11 @@ class SubscriptionPaymentViewSet(viewsets.ReadOnlyModelViewSet):
 
                             subscription = locked_payment.subscription
                             if subscription.is_trial:
-                                subscription.convert_from_trial(billing_period=subscription.billing_period)
-                                logger.info(f"Trial converted to paid via Polling: {subscription.company.name}")
+                                subscription.convert_from_trial(
+                                    billing_period=subscription.billing_period,
+                                    defer_to_trial_end=locked_payment.defer_billing_to_trial_end,
+                                )
+                                logger.info(f"Trial converted to paid via Polling: {subscription.company.name} (deferred={locked_payment.defer_billing_to_trial_end})")
                             else:
                                 subscription.extend_subscription()
                                 logger.info(f"Subscription extended via Polling: {subscription.company.name}")

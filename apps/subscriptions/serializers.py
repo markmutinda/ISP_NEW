@@ -159,6 +159,10 @@ class InitiateSubscriptionPaymentSerializer(serializers.Serializer):
         max_digits=10, decimal_places=2, required=False, default=None,
         help_text="Override amount (e.g. when paying an outstanding invoice)"
     )
+    defer_billing_to_trial_end = serializers.BooleanField(
+        required=False, default=False,
+        help_text="If true, billing cycle starts when trial ends instead of immediately"
+    )
     
     def validate(self, data):
         """Validate payment initiation data"""

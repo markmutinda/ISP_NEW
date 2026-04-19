@@ -75,6 +75,9 @@ urlpatterns = [
     # Billing Cycles
     path("billing-cycles/", views.BillingCycleListView.as_view(), name="billing-cycle-list"),
 
+    # Tenant User Ledger (Immutable Audit Trail)
+    path("user-ledger/", views.TenantUserLedgerListView.as_view(), name="user-ledger-list"),
+
     # Subscription Payments (Tuma STK Push)
     path("subscriptions/pay/", views.SubscriptionStkPushView.as_view(), name="subscription-stk-push"),
 

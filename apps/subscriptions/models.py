@@ -323,7 +323,7 @@ class CompanySubscription(models.Model):
         
         self.save()
     
-    def convert_from_trial(self, billing_period: str = 'monthly'):
+    def convert_from_trial(self, billing_period: str = 'monthly', defer_to_trial_end: bool = False):
         """
         Convert trial subscription to paid subscription.
         Called after successful payment.
@@ -333,23 +333,48 @@ class CompanySubscription(models.Model):
         - Creates the first billing cycle (ghost container)
         - Snapshot pricing at moment of conversion
         - All wrapped in a transaction for data consistency
+        
+        Args:
+            billing_period: 'monthly' or 'yearly'
+            defer_to_trial_end: If True, keep trial active until trial_ends_at,
+                then start the paid billing cycle from that date.
         """
         from django.db import transaction
         
         with transaction.atomic():
             now = timezone.now()
             
-            self.is_trial = False
-            self.status = 'active'
             self.billing_period = billing_period
             self.converted_from_trial_at = now
-            self.current_period_start = now
             
-            # Set period end based on billing cycle
-            if billing_period == 'yearly':
-                self.current_period_end = now + timedelta(days=365)
+            if defer_to_trial_end and self.trial_ends_at and self.trial_ends_at > now:
+                # DEFERRED: Payment accepted but billing starts when trial expires
+                # Keep trial active, set billing cycle to start at trial end
+                cycle_start = self.trial_ends_at
+                self.is_trial = False
+                self.status = 'active'
+                
+                if billing_period == 'yearly':
+                    cycle_end = cycle_start + timedelta(days=365)
+                else:
+                    cycle_end = cycle_start + timedelta(days=30)
+                
+                # Period starts at trial end
+                self.current_period_start = cycle_start
+                self.current_period_end = cycle_end
             else:
-                self.current_period_end = now + timedelta(days=30)
+                # IMMEDIATE: Billing starts now, trial ends immediately
+                self.is_trial = False
+                self.status = 'active'
+                self.current_period_start = now
+                
+                if billing_period == 'yearly':
+                    self.current_period_end = now + timedelta(days=365)
+                else:
+                    self.current_period_end = now + timedelta(days=30)
+                
+                cycle_start = now
+                cycle_end = self.current_period_end
             
             self.save()
             
@@ -363,9 +388,9 @@ class CompanySubscription(models.Model):
                 BillingCycle.objects.get_or_create(
                     subscription=self,
                     tenant=tenant,
-                    start_date=now,
+                    start_date=cycle_start,
                     defaults={
-                        'end_date': self.current_period_end,
+                        'end_date': cycle_end,
                         'status': 'active',
                         'is_first_paid_cycle': True,  # Base fee only — metered starts next cycle
                     }
@@ -491,6 +516,12 @@ class SubscriptionPayment(models.Model):
     # Billing period this payment covers
     period_start = models.DateTimeField(null=True, blank=True)
     period_end = models.DateTimeField(null=True, blank=True)
+
+    # Trial payment options
+    defer_billing_to_trial_end = models.BooleanField(
+        default=False,
+        help_text="If True, billing cycle starts when trial ends instead of now"
+    )
     
     class Meta:
         ordering = ['-created_at']

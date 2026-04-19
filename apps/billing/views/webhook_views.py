@@ -148,7 +148,10 @@ class PayHeroSubscriptionWebhookView(PayHeroWebhookMixin, APIView):
                 subscription = payment.subscription
                 if subscription.is_trial:
                     # Convert from trial to paid subscription
-                    subscription.convert_from_trial(billing_period=subscription.billing_period)
+                    subscription.convert_from_trial(
+                        billing_period=subscription.billing_period,
+                        defer_to_trial_end=payment.defer_billing_to_trial_end,
+                    )
                     logger.info(
                         f"Trial converted to paid: {subscription.company.name} "
                         f"- Plan: {subscription.plan.name}"
