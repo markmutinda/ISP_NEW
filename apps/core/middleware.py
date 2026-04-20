@@ -290,6 +290,7 @@ class SubscriptionEnforcementMiddleware(MiddlewareMixin):
             '/api/v1/subscriptions/payments/', # Poll payment status
             '/api/v1/subscriptions/plans/',    # View available plans (to select & pay)
             '/api/v1/auth/',                   # Login/Logout/Refresh
+            '/api/v1/core/users/me/',          # Identity check (needed after login for auth context)
         ]
         
         # Check if the request path starts with any allowed path
