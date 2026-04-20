@@ -72,23 +72,54 @@ class CustomerDashboardView(APIView):
                 if not expiry_date and active_service.activation_date:
                     # Calculate from activation_date + plan validity
                     try:
-                        expiry_date = plan.calculate_expiration(start_time=active_service.activation_date)
+                        if hasattr(plan, 'calculate_expiration'):
+                            expiry_date = plan.calculate_expiration(start_time=active_service.activation_date)
                     except Exception:
                         pass
                 
+                # --- NEW FALLBACK: Calculate using the Customer's billing_cycle ---
+                if not expiry_date:
+                    import calendar
+                    from datetime import date
+                    
+                    today = timezone.now().date()
+                    billing_day = getattr(customer, 'billing_cycle', 1) or 1
+                    
+                    # If we've passed the billing day this month, the expiry is next month
+                    if today.day >= billing_day:
+                        next_month = (today.month % 12) + 1
+                        next_year = today.year + (1 if today.month == 12 else 0)
+                    else:
+                        next_month = today.month
+                        next_year = today.year
+                        
+                    # Handle month-end edge cases (e.g., Feb 30th -> Feb 28th)
+                    last_day_of_month = calendar.monthrange(next_year, next_month)[1]
+                    safe_day = min(billing_day, last_day_of_month)
+                    
+                    expiry_date = date(next_year, next_month, safe_day)
+
                 days_remaining = None
                 if expiry_date:
+                    # 1. Parse string to datetime if necessary
                     if isinstance(expiry_date, str):
                         expiry_date = datetime.fromisoformat(expiry_date.replace('Z', '+00:00'))
-                    days_remaining = max(0, (expiry_date.date() - timezone.now().date()).days)
-                
+                        
+                    # 2. Safely get the `.date()` to prevent AttributeError if it's already a date object
+                    exp_date = expiry_date.date() if hasattr(expiry_date, 'date') else expiry_date
+                    days_remaining = max(0, (exp_date - timezone.now().date()).days)
+                    
+                    # 3. Format as ISO string for the JSON response
+                    if not isinstance(expiry_date, str):
+                        expiry_date = expiry_date.isoformat()
+
                 current_plan = {
                     'id': plan.id,
                     'name': plan.name,
                     'price': str(plan.price),
                     'speed_down': str(getattr(plan, 'download_speed', '') or getattr(plan, 'speed_down', '') or ''),
                     'speed_up': str(getattr(plan, 'upload_speed', '') or getattr(plan, 'speed_up', '') or ''),
-                    'expiry_date': expiry_date.isoformat() if expiry_date else None,
+                    'expiry_date': expiry_date, # Already ISO formatted string above
                     'days_remaining': days_remaining,
                 }
             elif customer.plan:
@@ -101,11 +132,39 @@ class CustomerDashboardView(APIView):
                 if activation:
                     try:
                         act_dt = timezone.make_aware(datetime.combine(activation, datetime.min.time())) if not hasattr(activation, 'hour') else activation
-                        expiry_date = plan.calculate_expiration(start_time=act_dt)
+                        if hasattr(plan, 'calculate_expiration'):
+                            expiry_date = plan.calculate_expiration(start_time=act_dt)
                         if expiry_date:
                             days_remaining = max(0, (expiry_date.date() - timezone.now().date()).days)
                     except Exception:
                         pass
+                
+                # --- NEW FALLBACK: Calculate using the Customer's billing_cycle ---
+                if not expiry_date:
+                    import calendar
+                    from datetime import date
+                    
+                    today = timezone.now().date()
+                    billing_day = getattr(customer, 'billing_cycle', 1) or 1
+                    
+                    # If we've passed the billing day this month, the expiry is next month
+                    if today.day >= billing_day:
+                        next_month = (today.month % 12) + 1
+                        next_year = today.year + (1 if today.month == 12 else 0)
+                    else:
+                        next_month = today.month
+                        next_year = today.year
+                        
+                    # Handle month-end edge cases (e.g., Feb 30th -> Feb 28th)
+                    last_day_of_month = calendar.monthrange(next_year, next_month)[1]
+                    safe_day = min(billing_day, last_day_of_month)
+                    
+                    expiry_date = date(next_year, next_month, safe_day)
+                    
+                    # Format as ISO string for JSON response
+                    exp_date = expiry_date
+                    days_remaining = max(0, (exp_date - timezone.now().date()).days)
+                    expiry_date = expiry_date.isoformat()
                 
                 current_plan = {
                     'id': plan.id,
@@ -113,7 +172,7 @@ class CustomerDashboardView(APIView):
                     'price': str(plan.price),
                     'speed_down': str(getattr(plan, 'download_speed', '') or getattr(plan, 'speed_down', '') or ''),
                     'speed_up': str(getattr(plan, 'upload_speed', '') or getattr(plan, 'speed_up', '') or ''),
-                    'expiry_date': expiry_date.isoformat() if expiry_date else None,
+                    'expiry_date': expiry_date if expiry_date else None,
                     'days_remaining': days_remaining,
                 }
         except Exception:
