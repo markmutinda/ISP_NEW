@@ -338,6 +338,10 @@ networks:
 
 volumes:
   postgres_data:
+    external: false
+    labels:
+      com.netily.critical: "true"
+      com.netily.description: "PostgreSQL database - DO NOT DELETE"
   redis_data:
   static_volume:
   media_volume:
