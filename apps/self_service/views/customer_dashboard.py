@@ -66,18 +66,27 @@ class CustomerDashboardView(APIView):
             if active_service and active_service.plan:
                 plan = active_service.plan
                 
-                # Calculate expiry: first try stored fields, then compute from activation + plan validity
+                # 1. Try to get it from standard service fields
                 expiry_date = getattr(active_service, 'expiry_date', None) or getattr(active_service, 'expires_at', None)
                 
+                # 2. THE FIX: Fetch exact expiration from Radius Credentials (Source of Truth for ISP)
+                if not expiry_date:
+                    try:
+                        if hasattr(customer, 'radius_credentials') and customer.radius_credentials and hasattr(customer.radius_credentials, 'expiration_date'):
+                            if customer.radius_credentials.expiration_date:
+                                expiry_date = customer.radius_credentials.expiration_date
+                    except Exception:
+                        pass
+                
+                # 3. If still empty, try plan duration
                 if not expiry_date and active_service.activation_date:
-                    # Calculate from activation_date + plan validity
                     try:
                         if hasattr(plan, 'calculate_expiration'):
                             expiry_date = plan.calculate_expiration(start_time=active_service.activation_date)
                     except Exception:
                         pass
                 
-                # --- NEW FALLBACK: Calculate using the Customer's billing_cycle ---
+                # 4. Final Fallback: Calculate using the Customer's billing cycle day
                 if not expiry_date:
                     import calendar
                     from datetime import date
@@ -85,7 +94,6 @@ class CustomerDashboardView(APIView):
                     today = timezone.now().date()
                     billing_day = getattr(customer, 'billing_cycle', 1) or 1
                     
-                    # If we've passed the billing day this month, the expiry is next month
                     if today.day >= billing_day:
                         next_month = (today.month % 12) + 1
                         next_year = today.year + (1 if today.month == 12 else 0)
@@ -93,7 +101,6 @@ class CustomerDashboardView(APIView):
                         next_month = today.month
                         next_year = today.year
                         
-                    # Handle month-end edge cases (e.g., Feb 30th -> Feb 28th)
                     last_day_of_month = calendar.monthrange(next_year, next_month)[1]
                     safe_day = min(billing_day, last_day_of_month)
                     
@@ -125,21 +132,28 @@ class CustomerDashboardView(APIView):
             elif customer.plan:
                 # Fallback to customer.plan if no active service
                 plan = customer.plan
-                # Try to compute expiry from customer activation + plan validity
-                expiry_date = None
-                days_remaining = None
-                activation = getattr(customer, 'activation_date', None)
-                if activation:
-                    try:
-                        act_dt = timezone.make_aware(datetime.combine(activation, datetime.min.time())) if not hasattr(activation, 'hour') else activation
-                        if hasattr(plan, 'calculate_expiration'):
-                            expiry_date = plan.calculate_expiration(start_time=act_dt)
-                        if expiry_date:
-                            days_remaining = max(0, (expiry_date.date() - timezone.now().date()).days)
-                    except Exception:
-                        pass
                 
-                # --- NEW FALLBACK: Calculate using the Customer's billing_cycle ---
+                # 1. Try to get expiry from Radius Credentials first (Source of Truth)
+                expiry_date = None
+                try:
+                    if hasattr(customer, 'radius_credentials') and customer.radius_credentials and hasattr(customer.radius_credentials, 'expiration_date'):
+                        if customer.radius_credentials.expiration_date:
+                            expiry_date = customer.radius_credentials.expiration_date
+                except Exception:
+                    pass
+                
+                # 2. Try to compute expiry from customer activation + plan validity
+                if not expiry_date:
+                    activation = getattr(customer, 'activation_date', None)
+                    if activation:
+                        try:
+                            act_dt = timezone.make_aware(datetime.combine(activation, datetime.min.time())) if not hasattr(activation, 'hour') else activation
+                            if hasattr(plan, 'calculate_expiration'):
+                                expiry_date = plan.calculate_expiration(start_time=act_dt)
+                        except Exception:
+                            pass
+                
+                # 3. Final Fallback: Calculate using the Customer's billing cycle day
                 if not expiry_date:
                     import calendar
                     from datetime import date
@@ -147,7 +161,6 @@ class CustomerDashboardView(APIView):
                     today = timezone.now().date()
                     billing_day = getattr(customer, 'billing_cycle', 1) or 1
                     
-                    # If we've passed the billing day this month, the expiry is next month
                     if today.day >= billing_day:
                         next_month = (today.month % 12) + 1
                         next_year = today.year + (1 if today.month == 12 else 0)
@@ -155,16 +168,22 @@ class CustomerDashboardView(APIView):
                         next_month = today.month
                         next_year = today.year
                         
-                    # Handle month-end edge cases (e.g., Feb 30th -> Feb 28th)
                     last_day_of_month = calendar.monthrange(next_year, next_month)[1]
                     safe_day = min(billing_day, last_day_of_month)
                     
                     expiry_date = date(next_year, next_month, safe_day)
+
+                days_remaining = None
+                if expiry_date:
+                    # Parse and format
+                    if isinstance(expiry_date, str):
+                        expiry_date = datetime.fromisoformat(expiry_date.replace('Z', '+00:00'))
                     
-                    # Format as ISO string for JSON response
-                    exp_date = expiry_date
+                    exp_date = expiry_date.date() if hasattr(expiry_date, 'date') else expiry_date
                     days_remaining = max(0, (exp_date - timezone.now().date()).days)
-                    expiry_date = expiry_date.isoformat()
+                    
+                    if not isinstance(expiry_date, str):
+                        expiry_date = expiry_date.isoformat()
                 
                 current_plan = {
                     'id': plan.id,
