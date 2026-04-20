@@ -12,7 +12,7 @@ from datetime import timedelta
 from decimal import Decimal
 
 from django.conf import settings
-from django.db import connection
+from django.db import connection, transaction
 from django.db.models import Sum, Count, Q, F
 from django.http import HttpResponse
 from django.utils import timezone
@@ -2216,16 +2216,23 @@ class SubscriptionStkCallbackView(APIView):
 
             if is_success:
                 receipt = data.get("mpesa_receipt_number", "")
-                payment.mark_completed(mpesa_receipt=receipt)
 
-                sub = payment.subscription
-                # If this is the first payment after a trial (or expired trial), convert properly
-                if sub.is_trial and sub.status in ('trialing', 'expired'):
-                    sub.convert_from_trial(billing_period=sub.billing_period or 'monthly')
-                else:
-                    sub.extend_subscription()
+                # ── Atomic block: mark payment + activate subscription together ──
+                # If either step fails, both are rolled back so we never have a
+                # "paid but still expired" tenant.
+                with transaction.atomic():
+                    payment.mark_completed(mpesa_receipt=receipt)
+
+                    sub = payment.subscription
+                    # Convert trial → paid if the subscription was in any trial/pending state.
+                    # Handles: trialing, expired (missed the window), pending (first-ever payment)
+                    if sub.is_trial or sub.status in ('trialing', 'expired', 'pending'):
+                        sub.convert_from_trial(billing_period=sub.billing_period or 'monthly')
+                    else:
+                        sub.extend_subscription()
 
                 # ── Mark NET-BILL invoices as paid in tenant schema ──
+                # (outside atomic to avoid cross-schema transaction issues)
                 try:
                     company = sub.company
                     tenant = getattr(company, 'tenant', None)

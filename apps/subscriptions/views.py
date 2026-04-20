@@ -401,7 +401,6 @@ class InitiateSubscriptionPaymentView(APIView):
     
     permission_classes = [IsAuthenticated]
     
-    @transaction.atomic
     def post(self, request):
         logger.debug(f"Subscription payment request data: {request.data}")
         
@@ -450,37 +449,45 @@ class InitiateSubscriptionPaymentView(APIView):
         
         logger.info(f"Calculated payment amount: KES {amount} for plan {plan.name} (is_metered={plan.is_metered}, billing_period={billing_period})")
         
-        # Get or create subscription
-        subscription, created = CompanySubscription.objects.get_or_create(
-            company=company,
-            defaults={
-                'plan': plan,
-                'billing_period': billing_period,
-                'current_period_start': timezone.now(),
-                'current_period_end': timezone.now(),  # Will be updated on payment
-                'status': 'pending',
-            }
-        )
-        
-        # NOTE: Do NOT update subscription.plan here.
-        # The plan switch is deferred to payment success (webhook/polling)
-        # to prevent phantom plan changes from unpaid STK pushes.
-        
-        # Create payment record with intended plan
-        payment = SubscriptionPayment.objects.create(
-            subscription=subscription,
-            intended_plan=plan,
-            intended_billing_period=billing_period,
-            amount=amount,
-            payment_method=payment_method,
-            phone_number=phone_number,
-            status='pending',
-            defer_billing_to_trial_end=defer_billing,
-            period_start=subscription.current_period_end or timezone.now(),
-            period_end=(subscription.current_period_end or timezone.now()) + timedelta(
-                days=365 if billing_period == 'yearly' else 30
-            ),
-        )
+        # ── DB operations ONLY inside the atomic block ──────────────
+        # IMPORTANT: The external API call (STK push) must happen OUTSIDE
+        # any atomic block. Mixing DB transactions with network calls causes
+        # TransactionManagementError when the network call fails and the
+        # except handler tries to save the failure status.
+        with transaction.atomic():
+            # Get or create subscription
+            subscription, created = CompanySubscription.objects.get_or_create(
+                company=company,
+                defaults={
+                    'plan': plan,
+                    'billing_period': billing_period,
+                    'current_period_start': timezone.now(),
+                    'current_period_end': timezone.now(),  # Will be updated on payment
+                    'status': 'pending',
+                }
+            )
+            
+            # NOTE: Do NOT update subscription.plan here.
+            # The plan switch is deferred to payment success (webhook/polling)
+            # to prevent phantom plan changes from unpaid STK pushes.
+            
+            # Create payment record with intended plan
+            payment = SubscriptionPayment.objects.create(
+                subscription=subscription,
+                intended_plan=plan,
+                intended_billing_period=billing_period,
+                amount=amount,
+                payment_method=payment_method,
+                phone_number=phone_number,
+                status='pending',
+                defer_billing_to_trial_end=defer_billing,
+                period_start=subscription.current_period_end or timezone.now(),
+                period_end=(subscription.current_period_end or timezone.now()) + timedelta(
+                    days=365 if billing_period == 'yearly' else 30
+                ),
+            )
+        # ── End atomic block — payment record is now committed ───────
+        # External API calls happen below, outside any DB transaction.
         
         # Handle different payment methods
         if payment_method == 'mpesa_stk':
@@ -498,7 +505,26 @@ class InitiateSubscriptionPaymentView(APIView):
         )
     
     def _handle_stk_push(self, payment, phone_number, amount, plan):
-        """Initiate M-Pesa STK Push via Tuma parent/master account"""
+        """Initiate M-Pesa STK Push via Tuma parent/master account.
+
+        This runs OUTSIDE any DB transaction so that:
+        - External API failures do not taint the DB transaction
+        - payment.save() calls in the except handler always succeed
+        """
+        # ── Pre-flight: verify Tuma credentials are configured ───────
+        master_email = getattr(settings, 'TUMA_MASTER_EMAIL', '').strip()
+        master_key = getattr(settings, 'TUMA_MASTER_API_KEY', '').strip()
+        if not master_email or not master_key:
+            err_msg = "Payment gateway not configured. Contact support."
+            logger.error("STK push aborted: TUMA_MASTER_EMAIL or TUMA_MASTER_API_KEY not set in environment.")
+            payment.status = 'failed'
+            payment.failure_reason = 'Missing Tuma credentials'
+            payment.save()
+            return Response({
+                'status': 'error',
+                'message': err_msg,
+            }, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+
         try:
             client = TumaClient()
             token = client.get_master_token()
@@ -536,21 +562,36 @@ class InitiateSubscriptionPaymentView(APIView):
                     'message': 'STK Push sent. Check your phone and enter your M-Pesa PIN.',
                 })
             else:
+                # Tuma returned 200 but with no IDs — extract any error detail
+                error_msg = resp_data.get('message') or resp_data.get('error') or 'STK Push failed.'
+                logger.error(f"Tuma STK Push returned no IDs. Full response: {response}")
                 payment.status = 'failed'
-                payment.failure_reason = str(response)
+                payment.failure_reason = error_msg
                 payment.save()
 
                 return Response({
                     'status': 'error',
-                    'message': 'STK Push failed. Please try again.',
-                }, status=status.HTTP_400_BAD_REQUEST)
+                    'message': f'STK Push failed: {error_msg}',
+                }, status=status.HTTP_502_BAD_GATEWAY)
 
-        except (TumaError, Exception) as e:
-            logger.error(f"Tuma STK push failed: {e}")
+        except TumaError as e:
+            # Known Tuma error (auth failure, API rejection, etc.)
+            logger.error(f"TumaError during STK push: {e}", exc_info=True)
+            failure = str(e)
+            payment.status = 'failed'
+            payment.failure_reason = failure
+            payment.save()
+            return Response({
+                'status': 'error',
+                'message': f'Payment gateway error: {failure}',
+            }, status=status.HTTP_502_BAD_GATEWAY)
+
+        except Exception as e:
+            # Unexpected error (network timeout, etc.)
+            logger.exception(f"Unexpected error during STK push: {e}")
             payment.status = 'failed'
             payment.failure_reason = str(e)
             payment.save()
-
             return Response({
                 'status': 'error',
                 'message': 'Failed to initiate payment. Please try again.',
