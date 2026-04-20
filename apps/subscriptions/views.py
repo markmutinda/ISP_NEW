@@ -402,6 +402,18 @@ class InitiateSubscriptionPaymentView(APIView):
     permission_classes = [IsAuthenticated]
     
     def post(self, request):
+        try:
+            return self._do_post(request)
+        except Exception as e:
+            # Top-level safety net: NEVER return a silent 500.
+            # Log the full traceback and return the real error to the caller.
+            logger.exception("InitiateSubscriptionPaymentView unhandled error")
+            return Response({
+                'status': 'error',
+                'message': f'Payment service error: {type(e).__name__}: {e}',
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+    def _do_post(self, request):
         logger.debug(f"Subscription payment request data: {request.data}")
         
         serializer = InitiateSubscriptionPaymentSerializer(data=request.data)
