@@ -156,7 +156,13 @@ class CurrentSubscriptionView(APIView):
                 
                 # Build response with trial warnings
                 data = CompanySubscriptionSerializer(subscription).data
-                
+
+                # Normalize status: if trial has expired, always return "expired" so
+                # the frontend payment wall triggers regardless of what status is in DB
+                # (e.g. status may still be "active" or "trial" while trial_expired=True)
+                if subscription.trial_expired and data.get('status') not in ('expired', 'past_due', 'cancelled'):
+                    data['status'] = 'expired'
+
                 # Add trial-specific messaging
                 if subscription.is_on_trial:
                     days = subscription.trial_days_remaining
