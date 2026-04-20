@@ -454,38 +454,42 @@ class InitiateSubscriptionPaymentView(APIView):
         # any atomic block. Mixing DB transactions with network calls causes
         # TransactionManagementError when the network call fails and the
         # except handler tries to save the failure status.
-        with transaction.atomic():
-            # Get or create subscription
-            subscription, created = CompanySubscription.objects.get_or_create(
-                company=company,
-                defaults={
-                    'plan': plan,
-                    'billing_period': billing_period,
-                    'current_period_start': timezone.now(),
-                    'current_period_end': timezone.now(),  # Will be updated on payment
-                    'status': 'pending',
-                }
-            )
-            
-            # NOTE: Do NOT update subscription.plan here.
-            # The plan switch is deferred to payment success (webhook/polling)
-            # to prevent phantom plan changes from unpaid STK pushes.
-            
-            # Create payment record with intended plan
-            payment = SubscriptionPayment.objects.create(
-                subscription=subscription,
-                intended_plan=plan,
-                intended_billing_period=billing_period,
-                amount=amount,
-                payment_method=payment_method,
-                phone_number=phone_number,
-                status='pending',
-                defer_billing_to_trial_end=defer_billing,
-                period_start=subscription.current_period_end or timezone.now(),
-                period_end=(subscription.current_period_end or timezone.now()) + timedelta(
-                    days=365 if billing_period == 'yearly' else 30
-                ),
-            )
+        #
+        # All subscription models live in the PUBLIC schema only, so we
+        # must switch context before any ORM operations.
+        with schema_context('public'):
+            with transaction.atomic():
+                # Get or create subscription
+                subscription, created = CompanySubscription.objects.get_or_create(
+                    company=company,
+                    defaults={
+                        'plan': plan,
+                        'billing_period': billing_period,
+                        'current_period_start': timezone.now(),
+                        'current_period_end': timezone.now(),  # Will be updated on payment
+                        'status': 'pending',
+                    }
+                )
+                
+                # NOTE: Do NOT update subscription.plan here.
+                # The plan switch is deferred to payment success (webhook/polling)
+                # to prevent phantom plan changes from unpaid STK pushes.
+                
+                # Create payment record with intended plan
+                payment = SubscriptionPayment.objects.create(
+                    subscription=subscription,
+                    intended_plan=plan,
+                    intended_billing_period=billing_period,
+                    amount=amount,
+                    payment_method=payment_method,
+                    phone_number=phone_number,
+                    status='pending',
+                    defer_billing_to_trial_end=defer_billing,
+                    period_start=subscription.current_period_end or timezone.now(),
+                    period_end=(subscription.current_period_end or timezone.now()) + timedelta(
+                        days=365 if billing_period == 'yearly' else 30
+                    ),
+                )
         # ── End atomic block — payment record is now committed ───────
         # External API calls happen below, outside any DB transaction.
         
@@ -510,6 +514,9 @@ class InitiateSubscriptionPaymentView(APIView):
         This runs OUTSIDE any DB transaction so that:
         - External API failures do not taint the DB transaction
         - payment.save() calls in the except handler always succeed
+
+        All payment.save() calls run inside schema_context('public') because
+        SubscriptionPayment lives in the public schema only.
         """
         # ── Pre-flight: verify Tuma credentials are configured ───────
         master_email = getattr(settings, 'TUMA_MASTER_EMAIL', '').strip()
@@ -517,9 +524,10 @@ class InitiateSubscriptionPaymentView(APIView):
         if not master_email or not master_key:
             err_msg = "Payment gateway not configured. Contact support."
             logger.error("STK push aborted: TUMA_MASTER_EMAIL or TUMA_MASTER_API_KEY not set in environment.")
-            payment.status = 'failed'
-            payment.failure_reason = 'Missing Tuma credentials'
-            payment.save()
+            with schema_context('public'):
+                payment.status = 'failed'
+                payment.failure_reason = 'Missing Tuma credentials'
+                payment.save()
             return Response({
                 'status': 'error',
                 'message': err_msg,
@@ -548,11 +556,11 @@ class InitiateSubscriptionPaymentView(APIView):
             checkout_request_id = resp_data.get('checkout_request_id', '')
 
             if merchant_request_id or checkout_request_id:
-                # Store Tuma IDs in existing fields (repurposed from PayHero)
-                payment.payhero_checkout_id = checkout_request_id or merchant_request_id
-                payment.payhero_reference = reference
-                payment.status = 'processing'
-                payment.save()
+                with schema_context('public'):
+                    payment.payhero_checkout_id = checkout_request_id or merchant_request_id
+                    payment.payhero_reference = reference
+                    payment.status = 'processing'
+                    payment.save()
 
                 return Response({
                     'status': 'pending',
@@ -562,12 +570,12 @@ class InitiateSubscriptionPaymentView(APIView):
                     'message': 'STK Push sent. Check your phone and enter your M-Pesa PIN.',
                 })
             else:
-                # Tuma returned 200 but with no IDs — extract any error detail
                 error_msg = resp_data.get('message') or resp_data.get('error') or 'STK Push failed.'
                 logger.error(f"Tuma STK Push returned no IDs. Full response: {response}")
-                payment.status = 'failed'
-                payment.failure_reason = error_msg
-                payment.save()
+                with schema_context('public'):
+                    payment.status = 'failed'
+                    payment.failure_reason = error_msg
+                    payment.save()
 
                 return Response({
                     'status': 'error',
@@ -575,23 +583,23 @@ class InitiateSubscriptionPaymentView(APIView):
                 }, status=status.HTTP_502_BAD_GATEWAY)
 
         except TumaError as e:
-            # Known Tuma error (auth failure, API rejection, etc.)
             logger.error(f"TumaError during STK push: {e}", exc_info=True)
             failure = str(e)
-            payment.status = 'failed'
-            payment.failure_reason = failure
-            payment.save()
+            with schema_context('public'):
+                payment.status = 'failed'
+                payment.failure_reason = failure
+                payment.save()
             return Response({
                 'status': 'error',
                 'message': f'Payment gateway error: {failure}',
             }, status=status.HTTP_502_BAD_GATEWAY)
 
         except Exception as e:
-            # Unexpected error (network timeout, etc.)
             logger.exception(f"Unexpected error during STK push: {e}")
-            payment.status = 'failed'
-            payment.failure_reason = str(e)
-            payment.save()
+            with schema_context('public'):
+                payment.status = 'failed'
+                payment.failure_reason = str(e)
+                payment.save()
             return Response({
                 'status': 'error',
                 'message': 'Failed to initiate payment. Please try again.',
@@ -602,9 +610,10 @@ class InitiateSubscriptionPaymentView(APIView):
         # Generate unique account number
         account_number = f"NETILY-{company.slug.upper()[:10]}-{payment.id.hex[:6].upper()}"
         
-        payment.payhero_reference = account_number
-        payment.status = 'pending'
-        payment.save()
+        with schema_context('public'):
+            payment.payhero_reference = account_number
+            payment.status = 'pending'
+            payment.save()
         
         return Response({
             'status': 'awaiting_payment',
@@ -619,9 +628,10 @@ class InitiateSubscriptionPaymentView(APIView):
         """Return bank details for manual payment"""
         reference = f"NETILY-{company.slug.upper()[:10]}-{payment.id.hex[:6].upper()}"
         
-        payment.bank_reference = reference
-        payment.status = 'pending'
-        payment.save()
+        with schema_context('public'):
+            payment.bank_reference = reference
+            payment.status = 'pending'
+            payment.save()
         
         return Response({
             'status': 'awaiting_payment',
@@ -654,9 +664,11 @@ class SubscriptionPaymentViewSet(viewsets.ReadOnlyModelViewSet):
         if not user.company:
             return SubscriptionPayment.objects.none()
         
-        return SubscriptionPayment.objects.filter(
-            subscription__company=user.company
-        ).select_related('subscription__plan').order_by('-created_at')
+        # SubscriptionPayment lives in the public schema
+        with schema_context('public'):
+            return SubscriptionPayment.objects.filter(
+                subscription__company=user.company
+            ).select_related('subscription__plan').order_by('-created_at')
     
     @action(detail=True, methods=['get'])
     def status(self, request, pk=None):
@@ -667,94 +679,98 @@ class SubscriptionPaymentViewSet(viewsets.ReadOnlyModelViewSet):
         FIXED: Now uses the unified lifecycle engine to prevent split-brain.
         This ensures that whether the webhook processes first or the user polls,
         the subscription is only extended ONCE with proper transaction locking.
+
+        All ORM calls run inside schema_context('public') because
+        subscription models are shared-schema only.
         """
-        payment = self.get_object()
-        
-        # If already completed or failed, return current status
-        if payment.status in ['completed', 'failed', 'cancelled']:
+        with schema_context('public'):
+            payment = self.get_object()
+            
+            # If already completed or failed, return current status
+            if payment.status in ['completed', 'failed', 'cancelled']:
+                return Response({
+                    'payment_id': str(payment.id),
+                    'status': payment.status,
+                    'message': self._get_status_message(payment),
+                    'mpesa_receipt': payment.mpesa_receipt,
+                    'completed_at': payment.completed_at,
+                })
+            
+            # If pending with Tuma, check status via Tuma query API
+            if payment.payhero_checkout_id:
+                try:
+                    client = TumaClient()
+                    token = client.get_master_token()
+                    status_response = client.query_payment_status(
+                        token=token,
+                        checkout_request_id=payment.payhero_checkout_id,
+                    )
+
+                    resp_data = status_response.get('data', status_response)
+                    result_code = str(resp_data.get('result_code', ''))
+                    is_success = result_code == '0'
+                    is_failed = result_code != '' and result_code != '0'
+
+                    if is_success:
+                        receipt = resp_data.get('mpesa_receipt_number', '')
+                        # ─── UNIFIED LIFECYCLE ENGINE ───
+                        with transaction.atomic():
+                            locked_payment = SubscriptionPayment.objects.select_for_update().get(id=payment.id)
+
+                            if locked_payment.status in ['pending', 'processing']:
+                                locked_payment.mark_completed(mpesa_receipt=receipt)
+
+                                # Apply intended plan (only on successful payment)
+                                locked_payment.apply_intended_plan()
+
+                                subscription = locked_payment.subscription
+                                if subscription.is_trial or subscription.status in ('trialing', 'expired', 'pending'):
+                                    subscription.convert_from_trial(
+                                        billing_period=subscription.billing_period,
+                                        defer_to_trial_end=locked_payment.defer_billing_to_trial_end,
+                                    )
+                                    logger.info(f"Trial converted to paid via Polling: {subscription.company.name} (deferred={locked_payment.defer_billing_to_trial_end})")
+                                else:
+                                    subscription.extend_subscription()
+                                    logger.info(f"Subscription extended via Polling: {subscription.company.name}")
+
+                                from .tasks import send_cycle_activated_email
+                                send_cycle_activated_email.delay(subscription.company_id)
+
+                                payment = locked_payment
+
+                        return Response({
+                            'payment_id': str(payment.id),
+                            'status': 'completed',
+                            'message': 'Payment successful! Your subscription is now active.',
+                            'mpesa_receipt': payment.mpesa_receipt,
+                            'completed_at': payment.completed_at,
+                        })
+
+                    elif is_failed:
+                        reason = resp_data.get('result_desc', '') or 'Payment failed'
+                        payment.mark_failed(reason)
+                        return Response({
+                            'payment_id': str(payment.id),
+                            'status': 'failed',
+                            'message': reason,
+                            'mpesa_receipt': None,
+                            'completed_at': None,
+                        })
+
+                except TumaError as e:
+                    logger.error(f"Error checking Tuma payment status: {e}")
+                except Exception as e:
+                    logger.error(f"Error checking payment status: {e}")
+            
+            # Still pending
             return Response({
                 'payment_id': str(payment.id),
-                'status': payment.status,
-                'message': self._get_status_message(payment),
-                'mpesa_receipt': payment.mpesa_receipt,
-                'completed_at': payment.completed_at,
+                'status': 'pending',
+                'message': 'Waiting for payment confirmation...',
+                'mpesa_receipt': None,
+                'completed_at': None,
             })
-        
-        # If pending with Tuma, check status via Tuma query API
-        if payment.payhero_checkout_id:
-            try:
-                client = TumaClient()
-                token = client.get_master_token()
-                status_response = client.query_payment_status(
-                    token=token,
-                    checkout_request_id=payment.payhero_checkout_id,
-                )
-
-                resp_data = status_response.get('data', status_response)
-                result_code = str(resp_data.get('result_code', ''))
-                is_success = result_code == '0'
-                is_failed = result_code != '' and result_code != '0'
-
-                if is_success:
-                    receipt = resp_data.get('mpesa_receipt_number', '')
-                    # ─── UNIFIED LIFECYCLE ENGINE ───
-                    with transaction.atomic():
-                        locked_payment = SubscriptionPayment.objects.select_for_update().get(id=payment.id)
-
-                        if locked_payment.status in ['pending', 'processing']:
-                            locked_payment.mark_completed(mpesa_receipt=receipt)
-
-                            # Apply intended plan (only on successful payment)
-                            locked_payment.apply_intended_plan()
-
-                            subscription = locked_payment.subscription
-                            if subscription.is_trial:
-                                subscription.convert_from_trial(
-                                    billing_period=subscription.billing_period,
-                                    defer_to_trial_end=locked_payment.defer_billing_to_trial_end,
-                                )
-                                logger.info(f"Trial converted to paid via Polling: {subscription.company.name} (deferred={locked_payment.defer_billing_to_trial_end})")
-                            else:
-                                subscription.extend_subscription()
-                                logger.info(f"Subscription extended via Polling: {subscription.company.name}")
-
-                            from .tasks import send_cycle_activated_email
-                            send_cycle_activated_email.delay(subscription.company_id)
-
-                            payment = locked_payment
-
-                    return Response({
-                        'payment_id': str(payment.id),
-                        'status': 'completed',
-                        'message': 'Payment successful! Your subscription is now active.',
-                        'mpesa_receipt': payment.mpesa_receipt,
-                        'completed_at': payment.completed_at,
-                    })
-
-                elif is_failed:
-                    reason = resp_data.get('result_desc', '') or 'Payment failed'
-                    payment.mark_failed(reason)
-                    return Response({
-                        'payment_id': str(payment.id),
-                        'status': 'failed',
-                        'message': reason,
-                        'mpesa_receipt': None,
-                        'completed_at': None,
-                    })
-
-            except TumaError as e:
-                logger.error(f"Error checking Tuma payment status: {e}")
-            except Exception as e:
-                logger.error(f"Error checking payment status: {e}")
-        
-        # Still pending
-        return Response({
-            'payment_id': str(payment.id),
-            'status': 'pending',
-            'message': 'Waiting for payment confirmation...',
-            'mpesa_receipt': None,
-            'completed_at': None,
-        })
     
     def _get_status_message(self, payment):
         messages = {
@@ -788,16 +804,17 @@ class CancelSubscriptionView(APIView):
                 status=status.HTTP_400_BAD_REQUEST
             )
         
-        try:
-            subscription = CompanySubscription.objects.get(company=user.company)
-        except CompanySubscription.DoesNotExist:
-            return Response(
-                {'error': 'No active subscription to cancel'},
-                status=status.HTTP_404_NOT_FOUND
-            )
-        
-        immediate = request.data.get('immediate', False)
-        subscription.cancel(immediate=immediate)
+        with schema_context('public'):
+            try:
+                subscription = CompanySubscription.objects.get(company=user.company)
+            except CompanySubscription.DoesNotExist:
+                return Response(
+                    {'error': 'No active subscription to cancel'},
+                    status=status.HTTP_404_NOT_FOUND
+                )
+            
+            immediate = request.data.get('immediate', False)
+            subscription.cancel(immediate=immediate)
         
         if immediate:
             message = 'Subscription cancelled immediately.'

@@ -5,6 +5,7 @@ Serializers for Netily Platform Subscriptions
 from decimal import Decimal
 from rest_framework import serializers
 from django.utils import timezone
+from django_tenants.utils import schema_context, get_public_schema_name
 
 from .models import (
     NetilyPlan,
@@ -171,9 +172,10 @@ class InitiateSubscriptionPaymentSerializer(serializers.Serializer):
                 'phone_number': 'Phone number is required for M-Pesa STK push'
             })
         
-        # Validate plan exists
+        # Validate plan exists — NetilyPlan lives in the public schema only
         try:
-            plan = NetilyPlan.objects.get(code=data['plan_id'], is_active=True)
+            with schema_context(get_public_schema_name()):
+                plan = NetilyPlan.objects.get(code=data['plan_id'], is_active=True)
             data['plan'] = plan
         except NetilyPlan.DoesNotExist:
             raise serializers.ValidationError({
