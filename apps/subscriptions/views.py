@@ -62,12 +62,19 @@ class NetilyPlanViewSet(viewsets.ReadOnlyModelViewSet):
     GET /api/v1/subscriptions/plans/{id}/
     """
     
-    queryset = NetilyPlan.objects.filter(is_active=True)
     serializer_class = NetilyPlanSerializer
     permission_classes = [IsAuthenticated]
     
     def get_queryset(self):
-        return NetilyPlan.objects.filter(is_active=True).order_by('sort_order', 'price_monthly')
+        # Plans live in public schema (SHARED_APPS) — must query explicitly
+        from django_tenants.utils import schema_context
+        with schema_context('public'):
+            return list(NetilyPlan.objects.filter(is_active=True).order_by('sort_order', 'price_monthly'))
+    
+    def list(self, request, *args, **kwargs):
+        from django_tenants.utils import schema_context
+        with schema_context('public'):
+            return super().list(request, *args, **kwargs)
 
 
 class CurrentSubscriptionView(APIView):
