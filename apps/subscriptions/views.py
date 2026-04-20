@@ -159,7 +159,7 @@ class CurrentSubscriptionView(APIView):
 
                 # Normalize status: if trial has expired, always return "expired" so
                 # the frontend payment wall triggers regardless of what status is in DB
-                # (e.g. status may still be "active" or "trial" while trial_expired=True)
+                # (e.g. status may still be "active", "trial", or "trialing" while trial_expired=True)
                 if subscription.trial_expired and data.get('status') not in ('expired', 'past_due', 'cancelled'):
                     data['status'] = 'expired'
 
