@@ -2149,10 +2149,19 @@ class SubscriptionStkPushView(APIView):
         try:
             client = TumaClient()
             token = client.get_master_token()
-            callback_url = getattr(settings, "TUMA_CALLBACK_URL", "").replace(
-                "/callback/", "/subscription-callback/"
-            )
+            # Use the dedicated subscription callback URL (not derived from TUMA_CALLBACK_URL)
+            callback_url = getattr(settings, "TUMA_SUBSCRIPTION_CALLBACK", "")
+            if not callback_url:
+                # Fallback: derive from TUMA_CALLBACK_URL
+                callback_url = getattr(settings, "TUMA_CALLBACK_URL", "").replace(
+                    "/callback/", "/subscription-callback/"
+                )
             description = f"Netily-{subscription.company.name[:20]}"
+
+            logger.info(
+                "Superadmin STK Push: phone=%s, amount=%s, callback=%s",
+                phone, amount, callback_url,
+            )
 
             result = client.stk_push(token, amount, phone, callback_url, description)
             data = result.get("data", result)

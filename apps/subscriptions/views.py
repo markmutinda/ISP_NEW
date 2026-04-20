@@ -23,6 +23,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from apps.billing.services.tuma_service import TumaClient, TumaError
+from requests.exceptions import RequestException
 from apps.core.models import Company
 
 from .models import (
@@ -551,13 +552,20 @@ class InitiateSubscriptionPaymentView(APIView):
 
             reference = f"NETILY-{plan.code.upper()}-{payment.id.hex[:8].upper()}"
 
-            logger.info(f"Initiating Tuma STK Push: phone={phone_number}, amount={amount}, ref={reference}")
+            callback_url = getattr(settings, 'TUMA_SUBSCRIPTION_CALLBACK', '')
+            logger.info(
+                "Initiating Tuma STK Push: phone=%s, amount=%s, ref=%s, callback=%s",
+                phone_number, amount, reference, callback_url,
+            )
+
+            if not callback_url or 'your-actual-domain' in callback_url or 'your-production-domain' in callback_url:
+                logger.error("TUMA_SUBSCRIPTION_CALLBACK is not configured or still has a placeholder URL: %s", callback_url)
 
             response = client.stk_push(
                 token=token,
                 amount=int(amount),
                 phone=phone_number,
-                callback_url=settings.TUMA_SUBSCRIPTION_CALLBACK,
+                callback_url=callback_url,
                 description=f"Netily {plan.name} Subscription",
             )
 
@@ -606,6 +614,19 @@ class InitiateSubscriptionPaymentView(APIView):
                 'message': f'Payment gateway error: {failure}',
             }, status=status.HTTP_502_BAD_GATEWAY)
 
+        except RequestException as e:
+            # Network / HTTP errors from the requests library
+            logger.error(f"RequestException during STK push: {e}", exc_info=True)
+            failure = f"Network error contacting payment gateway: {e}"
+            with schema_context('public'):
+                payment.status = 'failed'
+                payment.failure_reason = failure
+                payment.save()
+            return Response({
+                'status': 'error',
+                'message': 'Failed to reach payment gateway. Please try again.',
+            }, status=status.HTTP_502_BAD_GATEWAY)
+
         except Exception as e:
             logger.exception(f"Unexpected error during STK push: {e}")
             with schema_context('public'):
@@ -614,7 +635,7 @@ class InitiateSubscriptionPaymentView(APIView):
                 payment.save()
             return Response({
                 'status': 'error',
-                'message': 'Failed to initiate payment. Please try again.',
+                'message': f'Payment initiation failed: {type(e).__name__}: {e}',
             }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
     
     def _handle_paybill(self, payment, amount, company):

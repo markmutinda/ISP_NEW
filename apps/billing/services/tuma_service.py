@@ -289,13 +289,27 @@ class TumaClient:
             timeout=20,
         )
 
-        # 6. Log non-200 responses for debugging
+        # 6. Handle non-200 responses — raise TumaError (not HTTPError) so
+        #    callers that catch TumaError get a descriptive gateway error
+        #    instead of a raw 500.
         if response.status_code != 200:
-            logging.error("TUMA API ERROR (%s): %s", response.status_code, response.text)
+            body = response.text[:500]
+            logger.error("TUMA STK-PUSH ERROR (%s): %s", response.status_code, body)
+            # Try to parse a human-readable message from the response
+            try:
+                err_data = response.json()
+                err_msg = err_data.get("message") or err_data.get("error") or body
+            except Exception:
+                err_msg = body
+            raise TumaError(
+                f"Tuma STK push failed (HTTP {response.status_code}): {err_msg}"
+            )
 
-        # 7. Raise for status (will raise after retries exhausted)
-        response.raise_for_status()
-        return response.json()
+        # 7. Parse successful response
+        try:
+            return response.json()
+        except Exception as e:
+            raise TumaError(f"Invalid JSON in Tuma response: {e}")
 
     def query_payment_status(self, token, merchant_request_id=None, checkout_request_id=None):
         """
@@ -325,7 +339,10 @@ class TumaClient:
             json=payload,
             timeout=20
         )
-        response.raise_for_status()
+        if response.status_code != 200:
+            body = response.text[:500]
+            logger.error("Tuma payment query error (%s): %s", response.status_code, body)
+            raise TumaError(f"Tuma payment query failed (HTTP {response.status_code}): {body}")
         return response.json()
 
 
