@@ -289,7 +289,7 @@ class SubscriptionEnforcementMiddleware(MiddlewareMixin):
             '/api/v1/subscriptions/pay/',      # Initiate M-Pesa payment
             '/api/v1/subscriptions/payments/', # Poll payment status
             '/api/v1/subscriptions/plans/',    # View available plans (to select & pay)
-            '/api/v1/auth/',                   # Login/Logout/Refresh
+            '/api/v1/core/auth/',              # Login/Logout/OTP/Token refresh
             '/api/v1/core/users/me/',          # Identity check (needed after login for auth context)
         ]
         
