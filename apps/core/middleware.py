@@ -315,19 +315,16 @@ class SubscriptionEnforcementMiddleware(MiddlewareMixin):
                 try:
                     sub = CompanySubscription.objects.select_related('plan').get(company=request.company)
                     
-                    # Check if subscription is locked (past_due or trial expired)
+                    # Check if subscription is locked (past_due or overdue billing only)
+                    # NOTE: trial_expired is NOT enforced here — the frontend TrialGuard
+                    # dialog handles expired trials/periods with an uncloseable payment wall,
+                    # allowing dashboard data to load behind it for a better UX.
                     is_locked = False
                     lock_reason = None
                     
                     if sub.status == 'past_due':
                         is_locked = True
                         lock_reason = 'Your subscription payment is past due. Please settle your invoice to restore access.'
-                    elif sub.status == 'expired':
-                        is_locked = True
-                        lock_reason = 'Your subscription has expired. Please select a plan and pay to restore access.'
-                    elif sub.trial_expired:
-                        is_locked = True
-                        lock_reason = 'Your free trial has expired. Please subscribe to continue using Netily.'
                     elif sub.status == 'active':
                         # ── Fallback: catch overdue billing cycles the beat task missed ──
                         from django.utils import timezone as tz
