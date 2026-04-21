@@ -84,7 +84,8 @@ class TenantListSerializer(serializers.ModelSerializer):
     company_phone = serializers.CharField(source="company.phone_number", read_only=True)
     company_type = serializers.CharField(source="company.company_type", read_only=True)
     company_logo = serializers.ImageField(source="company.logo", read_only=True)
-    subscription_plan = serializers.CharField(source="company.subscription_plan", read_only=True)
+    subscription_plan = serializers.SerializerMethodField()
+    subscription_status = serializers.SerializerMethodField()
     days_left = serializers.SerializerMethodField()
     domains = DomainSerializer(many=True, read_only=True)
     
@@ -103,7 +104,7 @@ class TenantListSerializer(serializers.ModelSerializer):
             "max_users", "max_customers", "features",
             "billing_cycle", "monthly_rate", "next_billing_date",
             "company_name", "company_email", "company_phone",
-            "company_type", "company_logo", "subscription_plan",
+            "company_type", "company_logo", "subscription_plan", "subscription_status",
             "days_left", "domains",
             "is_active", "created_at", "updated_at",
             # NEW FIELDS
@@ -116,6 +117,26 @@ class TenantListSerializer(serializers.ModelSerializer):
             return None
         delta = obj.subscription_expiry - timezone.now().date()
         return max(delta.days, 0)
+
+    def get_subscription_plan(self, obj):
+        """Read plan name from CompanySubscription (authoritative source)."""
+        try:
+            sub = CompanySubscription.objects.select_related('plan').filter(company=obj.company).first()
+            if sub and sub.plan:
+                return sub.plan.name
+        except Exception:
+            pass
+        return getattr(obj.company, 'subscription_plan', None)
+
+    def get_subscription_status(self, obj):
+        """Return actual subscription status from CompanySubscription."""
+        try:
+            sub = CompanySubscription.objects.filter(company=obj.company).first()
+            if sub:
+                return sub.status
+        except Exception:
+            pass
+        return obj.status
     
     def get_active_cycle(self, obj):
         """Helper to get the active billing cycle for a tenant."""

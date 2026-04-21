@@ -2283,6 +2283,72 @@ class SubscriptionStkCallbackView(APIView):
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  SUBSCRIPTION PAYMENTS (PLATFORM BILLING)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+
+class SubscriptionPaymentListView(APIView):
+    """List all ISP-to-Netily subscription payments from the public schema."""
+    permission_classes = SUPERADMIN_PERMS
+
+    def get(self, request):
+        _ensure_public()
+        from apps.subscriptions.models import SubscriptionPayment
+
+        page = int(request.query_params.get("page", 1))
+        page_size = int(request.query_params.get("page_size", PAGE_SIZE))
+        search = request.query_params.get("search", "").strip()
+        status_filter = request.query_params.get("status", "").strip()
+        tenant_id = request.query_params.get("tenant", "").strip()
+
+        with schema_context(get_public_schema_name()):
+            qs = SubscriptionPayment.objects.select_related(
+                "subscription__company", "intended_plan"
+            ).order_by("-created_at")
+
+            if search:
+                qs = qs.filter(
+                    Q(subscription__company__name__icontains=search)
+                    | Q(mpesa_receipt__icontains=search)
+                    | Q(phone_number__icontains=search)
+                )
+            if status_filter:
+                qs = qs.filter(status=status_filter)
+            if tenant_id:
+                qs = qs.filter(subscription__company__tenant__id=tenant_id)
+
+            total = qs.count()
+            start = (page - 1) * page_size
+            payments = qs[start: start + page_size]
+
+            results = []
+            for p in payments:
+                results.append({
+                    "id": str(p.id),
+                    "company_name": p.subscription.company.name if p.subscription and p.subscription.company else "—",
+                    "plan_name": p.intended_plan.name if p.intended_plan else (
+                        p.subscription.plan.name if p.subscription and p.subscription.plan else "—"
+                    ),
+                    "amount": str(p.amount),
+                    "currency": p.currency,
+                    "payment_method": p.payment_method,
+                    "status": p.status,
+                    "mpesa_receipt": p.mpesa_receipt or "",
+                    "phone_number": p.phone_number or "",
+                    "created_at": p.created_at.isoformat() if p.created_at else None,
+                    "completed_at": p.completed_at.isoformat() if p.completed_at else None,
+                })
+
+        return Response({
+            "count": total,
+            "page": page,
+            "page_size": page_size,
+            "total_pages": (total + page_size - 1) // page_size,
+            "results": results,
+        })
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 #  LEADS
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
