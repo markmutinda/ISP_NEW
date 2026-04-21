@@ -26,6 +26,11 @@ from .views import (
     CustomerAlertsView,
     MarkAlertReadView,
     MarkAllAlertsReadView,
+    
+    # Support Tickets
+    CustomerTicketListView,
+    CustomerTicketDetailView,
+    CustomerTicketReplyView,
 )
 
 urlpatterns = [
@@ -69,4 +74,9 @@ urlpatterns = [
     path('alerts/', CustomerAlertsView.as_view(), name='customer-alerts'),
     path('alerts/<int:pk>/read/', MarkAlertReadView.as_view(), name='mark-alert-read'),
     path('alerts/mark-all-read/', MarkAllAlertsReadView.as_view(), name='mark-all-alerts-read'),
+    
+    # Support Tickets
+    path('tickets/', CustomerTicketListView.as_view(), name='customer-tickets-list'),
+    path('tickets/<int:pk>/', CustomerTicketDetailView.as_view(), name='customer-ticket-detail'),
+    path('tickets/<int:pk>/reply/', CustomerTicketReplyView.as_view(), name='customer-ticket-reply'),
 ]

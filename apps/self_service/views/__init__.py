@@ -40,6 +40,13 @@ from .profile_view import CustomerProfileView
 # Usage View
 from .usage_view import UsageView
 
+# Ticket Views
+from .ticket_views import (
+    CustomerTicketListView,
+    CustomerTicketDetailView,
+    CustomerTicketReplyView,
+)
+
 __all__ = [
     # Dashboard
     'CustomerDashboardView',
@@ -68,4 +75,8 @@ __all__ = [
     'MarkAllAlertsReadView',
     # Usage
     'UsageView',
+    # Tickets
+    'CustomerTicketListView',
+    'CustomerTicketDetailView',
+    'CustomerTicketReplyView',
 ]
