@@ -38,11 +38,12 @@ class SupportTicketListSerializer(serializers.ModelSerializer):
     Lightweight serializer used for list views (/tickets/ and /my/)
     → avoids loading full message history → much better performance
     """
-    customer_name = serializers.CharField(source='customer_name', read_only=True)
-    customer_email = serializers.CharField(source='customer_email', read_only=True)
-    customer_phone = serializers.CharField(source='customer_phone', read_only=True)
+    # REMOVED source= arguments - field name already matches the @property
+    customer_name = serializers.CharField(read_only=True)
+    customer_email = serializers.CharField(read_only=True)
+    customer_phone = serializers.CharField(read_only=True)
     customer_plan = serializers.SerializerMethodField()
-    assigned_to_name = serializers.CharField(source='assigned_to_name', read_only=True, allow_null=True)
+    assigned_to_name = serializers.CharField(read_only=True, allow_null=True)
 
     class Meta:
         model = SupportTicket
@@ -74,7 +75,7 @@ class SupportTicketListSerializer(serializers.ModelSerializer):
     def get_customer_plan(self, obj):
         try:
             active_service = obj.customer.services.filter(status='ACTIVE').first()
-            return active_service.service_plan.name if active_service and active_service.service_plan else None
+            return active_service.plan.name if active_service and active_service.plan else None
         except (AttributeError, Exception):
             return None
 
@@ -83,11 +84,12 @@ class SupportTicketDetailSerializer(serializers.ModelSerializer):
     """
     Full serializer used for retrieve (/tickets/<id>/) and when messages are needed
     """
-    customer_name = serializers.CharField(source='customer_name', read_only=True)
-    customer_email = serializers.CharField(source='customer_email', read_only=True)
-    customer_phone = serializers.CharField(source='customer_phone', read_only=True)
+    # REMOVED source= arguments - field name already matches the @property
+    customer_name = serializers.CharField(read_only=True)
+    customer_email = serializers.CharField(read_only=True)
+    customer_phone = serializers.CharField(read_only=True)
     customer_plan = serializers.SerializerMethodField()
-    assigned_to_name = serializers.CharField(source='assigned_to_name', read_only=True, allow_null=True)
+    assigned_to_name = serializers.CharField(read_only=True, allow_null=True)
     messages = SupportTicketMessageSerializer(many=True, read_only=True)
 
     class Meta:
@@ -129,7 +131,7 @@ class SupportTicketDetailSerializer(serializers.ModelSerializer):
     def get_customer_plan(self, obj):
         try:
             active_service = obj.customer.services.filter(status='ACTIVE').first()
-            return active_service.service_plan.name if active_service and active_service.service_plan else None
+            return active_service.plan.name if active_service and active_service.plan else None
         except (AttributeError, Exception):
             return None
 
