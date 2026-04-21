@@ -21,7 +21,7 @@ logger = logging.getLogger(__name__)
 
 class PaymentView(APIView):
     """
-    Customer payment operations - delegates to PayHero for M-Pesa.
+    Customer payment operations - dynamically routes to Daraja or Tuma based on tenant config.
     
     POST /api/v1/self-service/payments/initiate/
     {
@@ -31,20 +31,6 @@ class PaymentView(APIView):
     }
     """
     permission_classes = [IsAuthenticated, CustomerOnlyPermission]
-    
-    def _get_or_create_mpesa_payment_method(self):
-        """Get or create M-Pesa STK payment method"""
-        method, created = InvoiceItemPayment.objects.get_or_create(
-            code='MPESA_STK',
-            defaults={
-                'name': 'M-Pesa STK Push',
-                'method_type': 'MPESA_STK',
-                'is_payhero_enabled': True,
-                'is_active': True,
-                'channel_id': getattr(settings, 'PAYHERO_CHANNEL_ID', 1180),
-            }
-        )
-        return method
     
     def get(self, request):
         """Get customer invoices and payments"""
@@ -84,7 +70,8 @@ class PaymentView(APIView):
         })
     
     def post(self, request):
-        """Initiate M-Pesa STK Push payment via PayHero"""
+        """Initiate M-Pesa STK Push payment dynamically via Daraja or Tuma"""
+        from django.db import connection
         user = request.user
         customer = user.customer_profile
         
@@ -92,56 +79,52 @@ class PaymentView(APIView):
         phone_number = request.data.get('phone_number')
         invoice_id = request.data.get('invoice_id')
         
-        # Validate amount
+        # 1. Validate Amount
         if not amount:
-            return Response(
-                {'error': 'Amount is required'},
-                status=status.HTTP_400_BAD_REQUEST
-            )
+            return Response({'error': 'Amount is required. Please ensure the frontend is sending the amount.'}, status=status.HTTP_400_BAD_REQUEST)
         
         try:
             amount = Decimal(str(amount))
+            if amount <= 0:
+                raise ValueError
         except (ValueError, TypeError):
-            return Response(
-                {'error': 'Invalid amount'},
-                status=status.HTTP_400_BAD_REQUEST
-            )
+            return Response({'error': 'Invalid amount'}, status=status.HTTP_400_BAD_REQUEST)
         
-        if amount <= 0:
-            return Response(
-                {'error': 'Amount must be greater than 0'},
-                status=status.HTTP_400_BAD_REQUEST
-            )
-        
-        # Validate phone number
+        # 2. Validate Phone
         if not phone_number:
             phone_number = getattr(customer, 'phone_number', None) or getattr(user, 'phone_number', None)
-        
+            
         if not phone_number:
-            return Response(
-                {'error': 'Phone number is required'},
-                status=status.HTTP_400_BAD_REQUEST
-            )
-        
-        # Get invoice if specified
+            return Response({'error': 'Phone number is required'}, status=status.HTTP_400_BAD_REQUEST)
+            
+        # 3. Get Invoice if specified
         invoice = None
         if invoice_id:
             try:
                 invoice = Invoice.objects.get(id=invoice_id, customer=customer)
             except Invoice.DoesNotExist:
-                return Response(
-                    {'error': 'Invoice not found'},
-                    status=status.HTTP_404_NOT_FOUND
-                )
-        
-        # Get or create M-Pesa payment method
-        payment_method = self._get_or_create_mpesa_payment_method()
-        
-        # Generate reference
+                return Response({'error': 'Invoice not found'}, status=status.HTTP_404_NOT_FOUND)
+
+        # 4. Get Active Payment Method for this Tenant (No PayHero!)
+        payment_method = InvoiceItemPayment.objects.filter(
+            schema_name=connection.schema_name, 
+            is_active=True
+        ).first()
+
+        if not payment_method:
+            return Response({
+                'error': 'No active payment method configured. The ISP must set up M-Pesa or Tuma in the admin dashboard.'
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        # 5. Generate Reference & Create Payment
         reference = f"PAY-{customer.customer_code}-{int(time.time())}"
+        full_name = getattr(customer, 'full_name', None) or f"{user.first_name} {user.last_name}".strip()
+        description = f"Account Recharge - {full_name}"
+        if invoice:
+            description = f"Invoice #{invoice.invoice_number}"
         
-        # Create payment record
         payment = Payment.objects.create(
+            schema_name=connection.schema_name,
             customer=customer,
             invoice=invoice,
             amount=amount,
@@ -150,64 +133,92 @@ class PaymentView(APIView):
             mpesa_phone=phone_number,
             payment_reference=reference,
             status='PENDING',
-            notes=f"Customer initiated payment via dashboard",
+            notes="Customer initiated payment via dashboard",
         )
-        
-        # Initiate PayHero STK Push
-        try:
-            from apps.billing.services.payhero import PayHeroClient, PayHeroError
-            
-            client = PayHeroClient()
-            
-            full_name = getattr(customer, 'full_name', None) or f"{user.first_name} {user.last_name}".strip()
-            description = f"Account Recharge - {full_name}"
-            if invoice:
-                description = f"Invoice #{invoice.invoice_number}"
-            
-            response = client.stk_push(
-                phone_number=phone_number,
-                amount=int(amount),
-                reference=reference,
-                description=description,
-                callback_url=settings.PAYHERO_BILLING_CALLBACK,
-                channel_id=payment_method.channel_id,
-            )
-            
-            if response.success:
-                payment.transaction_id = response.checkout_request_id or ''
-                payment.payhero_external_reference = reference
+
+        # ==========================================
+        # ROUTE 1: DIRECT DARAJA (M-PESA CONFIG)
+        # ==========================================
+        if payment_method.mpesa_configuration and payment_method.mpesa_configuration.is_active:
+            try:
+                from apps.billing.integrations.mpesa_integration import MpesaSTKPush
+                mpesa_service = MpesaSTKPush(config=payment_method.mpesa_configuration)
+                
+                result = mpesa_service.initiate_stk_push(
+                    phone_number=phone_number,
+                    amount=amount,
+                    account_reference=reference,
+                    transaction_desc=description,
+                    payment=payment
+                )
+                
+                if result['success']:
+                    return Response({
+                        'status': 'pending',
+                        'payment_id': payment.id,
+                        'checkout_request_id': result['data']['checkout_request_id'],
+                        'message': 'Please check your phone and enter your PIN to complete payment'
+                    })
+                else:
+                    payment.status = 'FAILED'
+                    payment.failure_reason = result.get('message', 'Failed to initiate M-Pesa')
+                    payment.save()
+                    return Response({'error': payment.failure_reason}, status=status.HTTP_400_BAD_REQUEST)
+            except Exception as e:
+                logger.error(f"Daraja initiation error: {e}")
+                payment.status = 'FAILED'
+                payment.failure_reason = str(e)
+                payment.save()
+                return Response({'error': 'Payment service unavailable. Please try again.'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+        # ==========================================
+        # ROUTE 2: TUMA GATEWAY
+        # ==========================================
+        elif payment_method.tuma_configuration and payment_method.tuma_configuration.is_active:
+            try:
+                from apps.billing.services.tuma_service import TumaClient, TumaError
+                client = TumaClient()
+                tuma_cfg = payment_method.tuma_configuration
+                
+                # Authenticate as the Child Business
+                child_token = client.get_token(tuma_cfg.tuma_business_email, tuma_cfg.tuma_business_api_key)
+                
+                # Build the dynamic Webhook URL for this tenant
+                sub_domain = connection.schema_name.replace('tenant_', '')
+                callback_url = f"https://{sub_domain}.netily.co.ke/api/v1/billing/tuma/callback/"
+                
+                # Push to Tuma
+                tuma_response = client.stk_push(
+                    token=child_token,
+                    amount=int(amount),
+                    phone=phone_number,
+                    callback_url=callback_url,
+                    description=reference
+                )
+                
+                checkout_id = tuma_response.get("data", {}).get("checkout_request_id", "")
+                payment.tuma_merchant_request_id = tuma_response.get("data", {}).get("merchant_request_id", "")
+                payment.tuma_checkout_request_id = checkout_id
+                payment.transaction_id = checkout_id
                 payment.status = 'PROCESSING'
                 payment.save()
                 
                 return Response({
                     'status': 'pending',
                     'payment_id': payment.id,
-                    'payhero_response': {
-                        'status': 'pending',
-                        'checkout_request_id': response.checkout_request_id,
-                        'message': 'STK Push sent to your phone',
-                    }
+                    'checkout_request_id': checkout_id,
+                    'message': 'Please check your phone and enter your PIN to complete payment'
                 })
-            else:
-                payment.status = 'FAILED'
-                payment.failure_reason = response.message
-                payment.save()
                 
-                return Response({
-                    'status': 'error',
-                    'message': response.message or 'Failed to initiate payment',
-                }, status=status.HTTP_400_BAD_REQUEST)
-        
-        except Exception as e:
-            logger.error(f"Payment initiation error: {e}")
-            payment.status = 'FAILED'
-            payment.failure_reason = str(e)
-            payment.save()
-            
-            return Response({
-                'status': 'error',
-                'message': 'Payment service unavailable. Please try again.',
-            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+            except Exception as e:
+                logger.error(f"Tuma initiation error: {e}")
+                payment.status = 'FAILED'
+                payment.failure_reason = str(e)
+                payment.save()
+                return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
+                
+        else:
+            return Response({'error': 'Payment method configuration is incomplete.'}, status=status.HTTP_400_BAD_REQUEST)
     
     def _get_payment_methods(self):
         """Get available payment methods"""
