@@ -7,8 +7,9 @@ from .views import (
     ResendOTPView,
     AvailablePlansView,
     
-    # Customer Dashboard (Authenticated)
+    # Customer Dashboard & Profile (Authenticated)
     CustomerDashboardView,
+    CustomerProfileView,
     PaymentView,
     PaymentStatusView,
     PaymentRefreshStatusView,
@@ -44,8 +45,9 @@ urlpatterns = [
     # AUTHENTICATED ENDPOINTS (Customer Login Required)
     # ==========================================================================
     
-    # Dashboard
+    # Dashboard & Profile
     path('dashboard/', CustomerDashboardView.as_view(), name='customer-dashboard'),
+    path('profile/', CustomerProfileView.as_view(), name='customer-profile'),
     
     # Invoices
     path('invoices/', CustomerInvoicesView.as_view(), name='customer-invoices'),
