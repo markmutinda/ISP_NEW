@@ -2249,7 +2249,21 @@ class SubscriptionStkCallbackView(APIView):
                         tenant = company.tenant_set.first()
                     if tenant:
                         with schema_context(tenant.schema_name):
-                            from apps.billing.models import Invoice
+                            from apps.billing.models import Invoice, InvoiceItem
+                            from django.contrib.auth import get_user_model
+
+                            _User = get_user_model()
+                            billing_user, _ = _User.objects.get_or_create(
+                                email='billing@netily.io',
+                                defaults={'first_name': 'Netily', 'last_name': 'Platform'}
+                            )
+
+                            from apps.customers.models import Customer as _Customer
+                            sys_customer, _ = _Customer.objects.get_or_create(
+                                customer_code='NET-001',
+                                defaults={'user': billing_user, 'status': 'active'}
+                            )
+
                             unpaid = Invoice.objects.filter(
                                 invoice_number__startswith='NET-BILL',
                                 status__in=['ISSUED', 'issued', 'pending', 'overdue'],
@@ -2263,8 +2277,36 @@ class SubscriptionStkCallbackView(APIView):
                                     "Marked %d NET-BILL invoice(s) as paid for %s (receipt: %s)",
                                     updated, company.name, receipt
                                 )
+
+                            # If no prior NET-BILL invoice existed (e.g. trial→paid first payment),
+                            # create a subscription activation invoice so it appears in the invoices tab.
+                            if updated == 0:
+                                plan_name = sub.plan.name if sub.plan else "Netily Platform"
+                                now_ts = timezone.now()
+                                new_inv = Invoice.objects.create(
+                                    invoice_number=f'NET-BILL-{now_ts.strftime("%y%m%d%H%M%S")}',
+                                    customer=sys_customer,
+                                    total_amount=payment.amount,
+                                    status='paid',
+                                    paid_date=now_ts.date(),
+                                    due_date=now_ts.date(),
+                                    billing_date=now_ts.date(),
+                                )
+                                InvoiceItem.objects.create(
+                                    invoice=new_inv,
+                                    description=f'Netily Platform Subscription – {plan_name}',
+                                    quantity=1,
+                                    unit_price=payment.amount,
+                                    tax_rate=0,
+                                    tax_amount=0,
+                                    total=payment.amount,
+                                )
+                                logger.info(
+                                    "Created subscription invoice %s for %s (receipt: %s, amount: %s)",
+                                    new_inv.invoice_number, company.name, receipt, payment.amount
+                                )
                 except Exception as inv_err:
-                    logger.warning("Failed to mark invoices paid for %s: %s", sub.company_id, inv_err)
+                    logger.warning("Failed to mark/create invoices for %s: %s", sub.company_id, inv_err)
 
                 # Fire confirmation email in background
                 try:
