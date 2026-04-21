@@ -117,6 +117,7 @@ class SupportTicketViewSet(viewsets.ModelViewSet):
     def create(self, request, *args, **kwargs):
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
+
         user = request.user
 
         if user.role == 'customer':
@@ -129,14 +130,22 @@ class SupportTicketViewSet(viewsets.ModelViewSet):
                 )
             ticket = serializer.save(customer=customer)
         else:
-            # Admin/staff: customer must be passed in payload
-            customer = serializer.validated_data.get('customer')
-            if not customer:
+            # Admin/staff: read customer_id from request body
+            customer_id = request.data.get('customer_id') or request.data.get('customer')
+            if not customer_id:
                 return Response(
-                    {"detail": "customer field is required for admin ticket creation."},
+                    {"detail": "customer_id is required when creating a ticket as admin."},
                     status=status.HTTP_400_BAD_REQUEST,
                 )
-            ticket = serializer.save()
+            from apps.customers.models import Customer
+            try:
+                customer = Customer.objects.get(pk=customer_id)
+            except Customer.DoesNotExist:
+                return Response(
+                    {"detail": f"Customer with id {customer_id} not found."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            ticket = serializer.save(customer=customer)
 
         SupportTicketMessage.objects.create(
             ticket=ticket,
@@ -145,6 +154,7 @@ class SupportTicketViewSet(viewsets.ModelViewSet):
             message=ticket.description,
             is_internal=False,
         )
+
         return Response(
             SupportTicketDetailSerializer(ticket, context={'request': request}).data,
             status=status.HTTP_201_CREATED,
