@@ -11,7 +11,6 @@ from ..permissions import CustomerOnlyPermission
 from apps.bandwidth.models import DataUsage
 from apps.customers.models import Customer
 
-
 class UsageView(APIView):
     """
     Customer usage data and analytics
@@ -55,10 +54,10 @@ class UsageView(APIView):
         
         usage_data = DataUsage.objects.filter(
             customer=customer,
-            timestamp__gte=start_date,
-            timestamp__lte=end_date
+            created_at__gte=start_date,
+            created_at__lte=end_date
         ).extra({
-            'date': "DATE(timestamp)"
+            'date': "DATE(created_at)"
         }).values('date').annotate(
             upload=Sum('upload_bytes'),
             download=Sum('download_bytes')
@@ -82,11 +81,11 @@ class UsageView(APIView):
         
         usage_data = DataUsage.objects.filter(
             customer=customer,
-            timestamp__gte=start_date,
-            timestamp__lte=end_date
+            created_at__gte=start_date,
+            created_at__lte=end_date
         ).extra({
-            'week': "EXTRACT(WEEK FROM timestamp)",
-            'year': "EXTRACT(YEAR FROM timestamp)"
+            'week': "EXTRACT(WEEK FROM created_at)",
+            'year': "EXTRACT(YEAR FROM created_at)"
         }).values('year', 'week').annotate(
             upload=Sum('upload_bytes'),
             download=Sum('download_bytes')
@@ -110,11 +109,11 @@ class UsageView(APIView):
         
         usage_data = DataUsage.objects.filter(
             customer=customer,
-            timestamp__gte=start_date,
-            timestamp__lte=end_date
+            created_at__gte=start_date,
+            created_at__lte=end_date
         ).extra({
-            'month': "EXTRACT(MONTH FROM timestamp)",
-            'year': "EXTRACT(YEAR FROM timestamp)"
+            'month': "EXTRACT(MONTH FROM created_at)",
+            'year': "EXTRACT(YEAR FROM created_at)"
         }).values('year', 'month').annotate(
             upload=Sum('upload_bytes'),
             download=Sum('download_bytes')
@@ -136,7 +135,7 @@ class UsageView(APIView):
         usage_data = DataUsage.objects.filter(
             customer=customer
         ).extra({
-            'year': "EXTRACT(YEAR FROM timestamp)"
+            'year': "EXTRACT(YEAR FROM created_at)"
         }).values('year').annotate(
             upload=Sum('upload_bytes'),
             download=Sum('download_bytes')
@@ -168,13 +167,13 @@ class UsageView(APIView):
         
         usage_data = DataUsage.objects.filter(
             customer=customer,
-            timestamp__gte=start_date,
-            timestamp__lte=end_date
+            created_at__gte=start_date,
+            created_at__lte=end_date
         ).aggregate(
             total_upload=Sum('upload_bytes'),
             total_download=Sum('download_bytes'),
-            avg_speed=Avg('current_speed'),
-            peak_speed=Avg('peak_speed')
+            avg_speed=Avg('peak_download_speed'),
+            peak_speed=Avg('peak_download_speed')
         )
         
         total_upload_gb = (usage_data['total_upload'] or 0) / (1024**3)
