@@ -208,10 +208,66 @@ class TumaWebhookView(APIView):
                             )
                     
                     # ================================================================
-                    # TODO: Add your logic here for other session types
-                    # (e.g., PPPoE sessions, prepaid plans, etc.)
-                    # For non-hotspot payments, you may want immediate activation here
+                    # PPPoE / STANDARD PLAN ACTIVATION LOGIC
                     # ================================================================
+                    if payment.customer and not hotspot_session:
+                        try:
+                            # 1. Get the customer's primary service connection
+                            service = payment.customer.services.filter(
+                                status__in=['ACTIVE', 'SUSPENDED']
+                            ).first()
+                            
+                            if service and hasattr(payment.customer, 'radius_credentials'):
+                                creds = payment.customer.radius_credentials
+                                plan = service.plan
+                                
+                                # 2. Calculate new expiration date
+                                from datetime import timedelta
+                                
+                                now = timezone.now()
+                                # Safely get the plan's validity period (defaulting to 30 days)
+                                validity_days = getattr(plan, 'validity_days', 30) 
+                                
+                                # If they still have active days, add to them. If expired, start from today.
+                                current_expiry = creds.expiration_date
+                                if current_expiry and current_expiry > now:
+                                    new_expiry = current_expiry + timedelta(days=validity_days)
+                                else:
+                                    new_expiry = now + timedelta(days=validity_days)
+                                
+                                # 3. Update Radius Credentials in the database
+                                creds.expiration_date = new_expiry
+                                creds.is_enabled = True
+                                creds.subscription_activated_at = now
+                                creds.save(update_fields=[
+                                    'expiration_date', 
+                                    'is_enabled', 
+                                    'subscription_activated_at'
+                                ])
+                                
+                                # 4. Sync updates to the FreeRADIUS SQL tables
+                                creds.sync_to_radius()
+                                
+                                # 5. Ensure the service object is marked active
+                                if service.status == 'SUSPENDED':
+                                    service.status = 'ACTIVE'
+                                    service.save(update_fields=['status'])
+                                    
+                                logger.info(f"Successfully activated PPPoE service for {payment.customer}. New expiry: {new_expiry}")
+                                
+                                # 6. (Optional but recommended) Kick the suspended session off the router
+                                # so it immediately reconnects and picks up the new active profile.
+                                try:
+                                    from apps.radius.services.coa_service import CoAService
+                                    coa = CoAService()
+                                    coa.disconnect_user(creds.username)
+                                except ImportError:
+                                    pass # CoAService might not be implemented yet
+                                except Exception as e:
+                                    logger.warning(f"Failed to send CoA disconnect for {creds.username}: {e}")
+                                    
+                        except Exception as e:
+                            logger.error(f"Error activating PPPoE service for payment {payment.payment_number}: {e}")
 
                     # ================================================================
                     # HOTSPOT REVENUE ACCUMULATION

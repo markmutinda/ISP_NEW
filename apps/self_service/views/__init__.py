@@ -34,9 +34,14 @@ from .alerts_view import (
     MarkAllAlertsReadView,
 )
 
+# Profile View
+from .profile_view import CustomerProfileView
+
 __all__ = [
     # Dashboard
     'CustomerDashboardView',
+    # Profile
+    'CustomerProfileView',
     # Payments
     'PaymentView',
     'PaymentStatusView',
