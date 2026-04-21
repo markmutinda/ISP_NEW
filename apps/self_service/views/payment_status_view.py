@@ -183,23 +183,37 @@ class CustomerPaymentsListView(APIView):
                 'error': 'Customer profile not found'
             }, status=status.HTTP_404_NOT_FOUND)
         
-        # Get payments
-        payments = Payment.objects.filter(customer=customer).order_by('-created_at')[:20]
+        # Get payments (using select_related to prevent N+1 database query issues)
+        payments = Payment.objects.filter(customer=customer).select_related(
+            'invoice', 'payment_method'
+        ).order_by('-created_at')[:50]
         
-        payments_data = [
-            {
-                'id': str(payment.id),
-                'amount': float(payment.amount),
-                'status': payment.status,
-                'payment_method': payment.payment_method,
-                'transaction_reference': payment.transaction_reference,
+        payments_data = []
+        for payment in payments:
+            # Safely extract the method name
+            method_name = 'M-Pesa STK'
+            if payment.payment_method:
+                method_name = getattr(payment.payment_method, 'name', 'M-Pesa')
+
+            payments_data.append({
+                'id': payment.id,
+                'amount': str(payment.amount),
+                
+                # Frontend expects lowercase statuses (e.g., 'completed', 'pending')
+                'status': payment.status.lower() if payment.status else 'pending',
+                
+                'payment_method': method_name,
+                
+                # Use safe getattr for modern fields
+                'mpesa_receipt': getattr(payment, 'mpesa_receipt', ''),
+                'transaction_id': getattr(payment, 'transaction_id', ''),
                 'created_at': payment.created_at.isoformat(),
+                
                 'invoice_number': payment.invoice.invoice_number if payment.invoice else None,
-            }
-            for payment in payments
-        ]
+            })
         
+        # The frontend explicitly checks for 'results', not 'payments'
         return Response({
-            'payments': payments_data,
+            'results': payments_data,
             'count': len(payments_data),
         })
