@@ -10,6 +10,7 @@ from .views import (
     # Customer Dashboard & Profile (Authenticated)
     CustomerDashboardView,
     CustomerProfileView,
+    UsageView,                  # <--- ADDED THIS LINE
     PaymentView,
     PaymentStatusView,
     PaymentRefreshStatusView,
@@ -45,9 +46,10 @@ urlpatterns = [
     # AUTHENTICATED ENDPOINTS (Customer Login Required)
     # ==========================================================================
     
-    # Dashboard & Profile
+    # Dashboard & Profile & Usage
     path('dashboard/', CustomerDashboardView.as_view(), name='customer-dashboard'),
     path('profile/', CustomerProfileView.as_view(), name='customer-profile'),
+    path('usage/', UsageView.as_view(), name='customer-usage'),  # <--- ADDED THIS
     
     # Invoices
     path('invoices/', CustomerInvoicesView.as_view(), name='customer-invoices'),

@@ -21,24 +21,31 @@ class UsageView(APIView):
     def get(self, request):
         customer = request.user.customer_profile
         
-        period = request.GET.get('period', 'monthly')  # daily, weekly, monthly, yearly
-        chart_type = request.GET.get('chart', 'line')  # line, bar, area
+        # Get the summary for the last 30 days
+        summary = self._get_usage_summary(customer, 'monthly')
         
-        if period == 'daily':
-            data = self._get_daily_usage(customer)
-        elif period == 'weekly':
-            data = self._get_weekly_usage(customer)
-        elif period == 'yearly':
-            data = self._get_yearly_usage(customer)
-        else:  # monthly
-            data = self._get_monthly_usage(customer)
+        # Determine if they have a data limit from their active plan
+        active_service = customer.services.filter(status__in=['ACTIVE', 'SUSPENDED']).first()
+        data_limit_gb = None
+        if active_service and active_service.plan:
+            # Assuming data_limit is stored in GB on the plan model
+            data_limit_gb = getattr(active_service.plan, 'data_limit', None)
+
+        used_gb = summary.get('total_usage_gb', 0)
         
+        # Calculate percentage
+        percentage = 0
+        if data_limit_gb and data_limit_gb > 0:
+            percentage = min(100, (used_gb / data_limit_gb) * 100)
+
+        # Return the exact flat structure the React frontend expects
         return Response({
-            'customer': customer.name,
-            'period': period,
-            'chart_type': chart_type,
-            'data': data,
-            'summary': self._get_usage_summary(customer, period),
+            'data_used': f"{used_gb} GB",
+            'data_limit': f"{data_limit_gb} GB" if data_limit_gb else None,
+            'percentage': percentage,
+            'download_total': f"{summary.get('total_download_gb', 0)} GB",
+            'upload_total': f"{summary.get('total_upload_gb', 0)} GB",
+            'sessions': [] # Optional: You can populate this with recent sessions from RadAcct later
         })
     
     def _get_daily_usage(self, customer):

@@ -37,6 +37,9 @@ from .alerts_view import (
 # Profile View
 from .profile_view import CustomerProfileView
 
+# Usage View
+from .usage_view import UsageView
+
 __all__ = [
     # Dashboard
     'CustomerDashboardView',
@@ -63,4 +66,6 @@ __all__ = [
     'CustomerAlertsView',
     'MarkAlertReadView',
     'MarkAllAlertsReadView',
+    # Usage
+    'UsageView',
 ]
