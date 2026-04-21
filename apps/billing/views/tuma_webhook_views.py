@@ -221,19 +221,28 @@ class TumaWebhookView(APIView):
                                 creds = payment.customer.radius_credentials
                                 plan = service.plan
                                 
-                                # 2. Calculate new expiration date
-                                from datetime import timedelta
-                                
+                                # 2. Calculate new expiration date using the Plan's exact settings
                                 now = timezone.now()
-                                # Safely get the plan's validity period (defaulting to 30 days)
-                                validity_days = getattr(plan, 'validity_days', 30) 
                                 
-                                # If they still have active days, add to them. If expired, start from today.
-                                current_expiry = creds.expiration_date
-                                if current_expiry and current_expiry > now:
-                                    new_expiry = current_expiry + timedelta(days=validity_days)
+                                # Fetch exact timedelta (minutes, hours, days, months)
+                                validity_delta = None
+                                if hasattr(plan, 'get_validity_timedelta'):
+                                    validity_delta = plan.get_validity_timedelta()
                                 else:
-                                    new_expiry = now + timedelta(days=validity_days)
+                                    from datetime import timedelta
+                                    validity_delta = timedelta(days=getattr(plan, 'validity_days', 30))
+                                
+                                current_expiry = creds.expiration_date
+                                
+                                if validity_delta is None:
+                                    # Unlimited Plan
+                                    new_expiry = None
+                                else:
+                                    # If they still have active time, add to it. If expired, start from right now.
+                                    if current_expiry and current_expiry > now:
+                                        new_expiry = current_expiry + validity_delta
+                                    else:
+                                        new_expiry = now + validity_delta
                                 
                                 # 3. Update Radius Credentials in the database
                                 creds.expiration_date = new_expiry
