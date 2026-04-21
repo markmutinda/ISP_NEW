@@ -117,12 +117,11 @@ class SupportTicketViewSet(viewsets.ModelViewSet):
     def create(self, request, *args, **kwargs):
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
-
         user = request.user
 
         if user.role == 'customer':
             try:
-                customer = user.customer  # assuming reverse accessor
+                customer = user.customer
             except AttributeError:
                 return Response(
                     {"detail": "Customer profile not found"},
@@ -130,10 +129,15 @@ class SupportTicketViewSet(viewsets.ModelViewSet):
                 )
             ticket = serializer.save(customer=customer)
         else:
-            # Admin/staff must provide customer
+            # Admin/staff: customer must be passed in payload
+            customer = serializer.validated_data.get('customer')
+            if not customer:
+                return Response(
+                    {"detail": "customer field is required for admin ticket creation."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
             ticket = serializer.save()
 
-        # Create the initial message from description
         SupportTicketMessage.objects.create(
             ticket=ticket,
             sender_type='customer' if user.role == 'customer' else 'agent',
@@ -141,8 +145,6 @@ class SupportTicketViewSet(viewsets.ModelViewSet):
             message=ticket.description,
             is_internal=False,
         )
-
-        # Return full detail representation after creation
         return Response(
             SupportTicketDetailSerializer(ticket, context={'request': request}).data,
             status=status.HTTP_201_CREATED,
@@ -251,10 +253,9 @@ class SupportTicketViewSet(viewsets.ModelViewSet):
             ticket.first_response_at = timezone.now()
             ticket.save(update_fields=['first_response_at'])
 
-        # Bump updated_at
-        ticket.touch()  # if you have a method, or:
-        # ticket.updated_at = timezone.now()
-        # ticket.save(update_fields=['updated_at'])
+        # Bump updated_at - replaced ticket.touch() with explicit save
+        ticket.updated_at = timezone.now()
+        ticket.save(update_fields=['updated_at', 'first_response_at'])
 
         return Response(
             SupportTicketMessageSerializer(message).data,

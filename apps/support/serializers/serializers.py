@@ -136,16 +136,23 @@ class SupportTicketDetailSerializer(serializers.ModelSerializer):
 
 class TicketCreateSerializer(serializers.ModelSerializer):
     """
-    Used only when customers or admins create new tickets
+    Used when customers or admins create new tickets.
+    `customer` is optional — required only when admin creates on behalf of a customer.
     """
+    customer = serializers.PrimaryKeyRelatedField(
+        queryset=None,   # populated lazily in __init__
+        required=False,
+        allow_null=True,
+    )
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        from apps.customers.models import Customer
+        self.fields['customer'].queryset = Customer.objects.all()
+
     class Meta:
         model = SupportTicket
-        fields = [
-            'subject',
-            'description',
-            'category',
-            'priority',
-        ]
+        fields = ['subject', 'description', 'category', 'priority', 'customer']
 
 
 class TicketUpdateSerializer(serializers.ModelSerializer):
