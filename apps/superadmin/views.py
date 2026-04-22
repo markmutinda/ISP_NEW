@@ -416,18 +416,68 @@ class TenantActivateView(APIView):
 
         tenant.status = "active"
         extend_days = request.data.get("extend_days")
-        if extend_days:
-            today = timezone.now().date()
+        set_expiry_date = request.data.get("set_expiry_date")  # ISO date string YYYY-MM-DD
+
+        today = timezone.now().date()
+
+        if set_expiry_date:
+            # Superadmin is directly overriding the expiry date (e.g. to fix double-payment)
+            from datetime import date as date_type
+            import datetime as _dt
+            try:
+                parsed_date = _dt.date.fromisoformat(str(set_expiry_date))
+                tenant.subscription_expiry = parsed_date
+            except (ValueError, TypeError):
+                return Response({"detail": "Invalid set_expiry_date format. Use YYYY-MM-DD."}, status=400)
+        elif extend_days:
             base = tenant.subscription_expiry if tenant.subscription_expiry and tenant.subscription_expiry > today else today
             tenant.subscription_expiry = base + timedelta(days=int(extend_days))
 
         tenant.save(update_fields=["status", "subscription_expiry", "updated_at"])
 
+        # ── SYNC CompanySubscription so the trial-guard on the ISP dashboard unlocks ──
+        try:
+            from apps.subscriptions.models import CompanySubscription
+            from django.utils import timezone as tz
+            company = getattr(tenant, 'company', None) or \
+                      getattr(tenant, 'company_set', None) and tenant.company_set.first()
+
+            if company:
+                subscription = CompanySubscription.objects.filter(company=company).first()
+                if subscription:
+                    subscription.status = 'active'
+                    sub_update_fields = ['status', 'updated_at']
+
+                    # Derive new period_end from whichever expiry we just set
+                    new_expiry = tenant.subscription_expiry
+                    if new_expiry:
+                        new_period_end = tz.datetime.combine(
+                            new_expiry,
+                            tz.datetime.min.time(),
+                            tzinfo=tz.get_current_timezone(),
+                        )
+                        subscription.current_period_end = new_period_end
+                        sub_update_fields.append('current_period_end')
+
+                    # Ensure period_start is set if missing
+                    if not subscription.current_period_start:
+                        subscription.current_period_start = tz.now()
+                        sub_update_fields.append('current_period_start')
+
+                    subscription.save(update_fields=sub_update_fields)
+        except Exception as sync_err:
+            # Log but don't fail the request — tenant status is already saved
+            logger.warning(f"TenantActivate: failed to sync CompanySubscription for {tenant.subdomain}: {sync_err}")
+
         _log_action(
             request.user, "update", "Tenant",
             object_repr=tenant.subdomain,
             object_id=tenant.id,
-            changes={"action": "activate", "extend_days": extend_days},
+            changes={
+                "action": "activate",
+                "extend_days": extend_days,
+                "set_expiry_date": str(set_expiry_date) if set_expiry_date else None,
+            },
             request=request,
         )
         return Response(TenantListSerializer(tenant).data)
