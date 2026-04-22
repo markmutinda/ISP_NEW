@@ -71,10 +71,12 @@ class HotspotAd(models.Model):
 
     def get_media_url(self, request=None) -> str:
         if self.media_file:
-            if request:
-                return request.build_absolute_uri(self.media_file.url)
-            return self.media_file.url
-        return self.media_url
+            # Use the streaming endpoint for uploaded files (supports range requests + caching)
+            base = request.build_absolute_uri('/').rstrip('/') if request else ''
+            # Include tenant so the media view can find the ad
+            schema = getattr(self, 'schema_name', 'public')
+            return f"{base}/api/v1/hotspot/ads/media/{self.pk}/?tenant={schema}"
+        return self.media_url  # External URLs served as-is
 
 
 class HotspotAdGrant(models.Model):

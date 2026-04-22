@@ -59,6 +59,7 @@ from .views.tuma_webhook_views import TumaWebhookView
 from .views.hotspot_ad_views import (
     HotspotAdServeView,
     HotspotAdGrantView,
+    HotspotAdMediaView,      # ADDED: Media serving with range support
     HotspotAdAdminViewSet,
 )
 
@@ -205,6 +206,7 @@ hotspot_urlpatterns = [
     # ── Ad-Sponsored Free Access Endpoints ──
     path('ads/serve/', HotspotAdServeView.as_view(), name='hotspot-ad-serve'),
     path('ads/grant-access/', HotspotAdGrantView.as_view(), name='hotspot-ad-grant'),
+    path('ads/media/<int:pk>/', HotspotAdMediaView.as_view(), name='hotspot-ad-media'),  # ADDED: Media serving with range support
 ]
 
 # ==========================

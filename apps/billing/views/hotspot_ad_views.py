@@ -1,16 +1,18 @@
-# apps/billing/views/hotspot_ad_views.py
 """
 Hotspot Ad Views
 
 PUBLIC endpoints (captive portal):
   GET  /api/v1/hotspot/ads/serve/         — return best ad for this router
   POST /api/v1/hotspot/ads/grant-access/  — grant RADIUS access after ad completion
+  GET  /api/v1/hotspot/ads/media/<pk>/    — serve ad media with range support
 
 ADMIN endpoints (authenticated):
   GET/POST   /api/v1/hotspot/admin/ads/
   GET/PATCH/DELETE /api/v1/hotspot/admin/ads/<pk>/
   GET        /api/v1/hotspot/admin/ads/storage/
 """
+import mimetypes
+import os
 import secrets
 import string
 from datetime import timedelta
@@ -18,6 +20,7 @@ from decimal import Decimal
 
 from django.db import connection
 from django.db.models import F, Q
+from django.http import StreamingHttpResponse, HttpResponse
 from django.utils import timezone
 
 from rest_framework import status, viewsets, filters
@@ -217,6 +220,91 @@ class HotspotAdGrantView(APIView):
                 'expires_at': expires_at.isoformat(),
                 'reward_minutes': ad.reward_minutes,
             })
+
+
+# ─── Public: Serve Ad Media with Range Support ────────────────────────────────
+
+class HotspotAdMediaView(APIView):
+    """
+    Serves ad media files with proper range-request support.
+    This ensures browsers can seek and buffer efficiently.
+    Public — no auth needed for playback.
+    """
+    permission_classes = [AllowAny]
+    authentication_classes = []
+
+    def get(self, request, pk):
+        tenant_subdomain = request.query_params.get('tenant')
+
+        tenant = _resolve_tenant(tenant_subdomain)
+        if not tenant:
+            return HttpResponse(status=404)
+
+        with schema_context(tenant.schema_name):
+            try:
+                ad = HotspotAd.objects.get(pk=pk, is_active=True, schema_name=tenant.schema_name)
+            except HotspotAd.DoesNotExist:
+                return HttpResponse(status=404)
+
+        if not ad.media_file:
+            return HttpResponse(status=404)
+
+        file_path = ad.media_file.path
+        if not os.path.exists(file_path):
+            return HttpResponse(status=404)
+
+        file_size = os.path.getsize(file_path)
+        content_type, _ = mimetypes.guess_type(file_path)
+        content_type = content_type or 'application/octet-stream'
+
+        range_header = request.META.get('HTTP_RANGE')
+
+        if range_header:
+            # Parse "bytes=start-end"
+            byte_range = range_header.strip().replace('bytes=', '')
+            parts = byte_range.split('-')
+            start = int(parts[0]) if parts[0] else 0
+            end = int(parts[1]) if parts[1] else file_size - 1
+            end = min(end, file_size - 1)
+            length = end - start + 1
+
+            def file_iterator(path, offset, chunk_size=65536):
+                with open(path, 'rb') as f:
+                    f.seek(offset)
+                    remaining = length
+                    while remaining > 0:
+                        data = f.read(min(chunk_size, remaining))
+                        if not data:
+                            break
+                        remaining -= len(data)
+                        yield data
+
+            response = StreamingHttpResponse(
+                file_iterator(file_path, start),
+                status=206,
+                content_type=content_type,
+            )
+            response['Content-Range'] = f'bytes {start}-{end}/{file_size}'
+            response['Content-Length'] = str(length)
+        else:
+            def full_file_iterator(path, chunk_size=65536):
+                with open(path, 'rb') as f:
+                    while True:
+                        data = f.read(chunk_size)
+                        if not data:
+                            break
+                        yield data
+
+            response = StreamingHttpResponse(
+                full_file_iterator(file_path),
+                content_type=content_type,
+            )
+            response['Content-Length'] = str(file_size)
+
+        response['Accept-Ranges'] = 'bytes'
+        response['Cache-Control'] = 'public, max-age=86400'  # Cache 24h on device
+        response['Access-Control-Allow-Origin'] = '*'
+        return response
 
 
 # ─── Admin: Ad Management (Authenticated) ────────────────────────────────────
