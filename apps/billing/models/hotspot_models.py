@@ -661,6 +661,14 @@ class HotspotSession(models.Model):
         help_text="WiFi access code (e.g., WIFI-1234)"
     )
     
+    # NEW: Store the actual RADIUS username used for this session
+    radius_username = models.CharField(
+        max_length=25,
+        blank=True,
+        null=True,
+        help_text="RADIUS credential used (may differ from access_code for multi-device clients)"
+    )
+    
     # Status & Timing
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='pending')
     activated_at = models.DateTimeField(null=True, blank=True)
@@ -700,6 +708,7 @@ class HotspotSession(models.Model):
             models.Index(fields=['status']),
             models.Index(fields=['tuma_merchant_request_id']),
             models.Index(fields=['tuma_checkout_request_id']),
+            models.Index(fields=['radius_username']),  # Index for RADIUS username lookups
         ]
     
     def __str__(self):
@@ -780,6 +789,7 @@ class HotspotSession(models.Model):
 
         locked.status = 'active'
         locked.access_code = access_code or locked.access_code or self.generate_access_code()
+        locked.radius_username = access_code or locked.access_code or self.generate_access_code()
         locked.activated_at = timezone.now()
         locked.expires_at = timezone.now() + timedelta(minutes=locked.plan.duration_minutes)
         locked.save()
@@ -787,6 +797,7 @@ class HotspotSession(models.Model):
         # Copy updated fields back to self so callers see the new state
         self.status = locked.status
         self.access_code = locked.access_code
+        self.radius_username = locked.radius_username
         self.activated_at = locked.activated_at
         self.expires_at = locked.expires_at
 

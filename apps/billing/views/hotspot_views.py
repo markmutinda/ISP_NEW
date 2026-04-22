@@ -622,10 +622,7 @@ class HotspotPurchaseView(APIView):
                 )
 
             # ══════════════════════════════════════════════════════════════
-            # DETERMINE ACCESS CODE
-            # Use the client's PERMANENT canonical_username as the RADIUS
-            # access code.  This means the same person always logs in with
-            # the same credentials — enabling analytics, reconnection, etc.
+            # DETERMINE ACCESS CODE - FIXED FOR MULTIPLE DEVICES
             # ══════════════════════════════════════════════════════════════
             if tv_code and reserved_access_code:
                 # TV pairing: the TV code itself was pre-reserved as the access_code
@@ -635,29 +632,67 @@ class HotspotPurchaseView(APIView):
                 logger.info(f"📺 TV PURCHASE: Using reserved access code {friendly_username}")
 
             elif hotspot_client and hotspot_client.canonical_username:
-                # Returning or new client: always use their permanent username
-                friendly_username = hotspot_client.canonical_username
+                base_username = hotspot_client.canonical_username
+                
+                # Check if this exact MAC already has an active session with the canonical name
+                existing_for_this_mac = HotspotSession.objects.filter(
+                    hotspot_client=hotspot_client,
+                    access_code=base_username,
+                    mac_address=mac_address,
+                    status__in=('active', 'paid'),
+                    expires_at__gt=timezone.now()
+                ).exists()
+                
+                if existing_for_this_mac:
+                    # Same device reconnecting — reuse canonical name (auto-login case)
+                    friendly_username = base_username
+                    is_roaming = False
+                    roamed_from_name = None
+                    logger.info(f"🔄 RE-CONNECT: Same device {mac_address} using {friendly_username}")
+                else:
+                    # Different device for same client — assign a device-specific slot
+                    active_count = HotspotSession.objects.filter(
+                        hotspot_client=hotspot_client,
+                        status__in=('active', 'paid'),
+                        expires_at__gt=timezone.now()
+                    ).exclude(mac_address=mac_address).count()
+                    
+                    if active_count == 0:
+                        # No other active sessions — use canonical name
+                        friendly_username = base_username
+                        is_roaming = False
+                        roamed_from_name = None
+                        logger.info(f"🏠 FIRST DEVICE: {friendly_username} at {router.name}")
+                    else:
+                        # Other devices already using this client's slots
+                        # Issue a numbered device credential: MXA-BKCS-2, MXA-BKCS-3, etc.
+                        device_slot = active_count + 1
+                        friendly_username = f"{base_username}-{device_slot}"
+                        # Ensure uniqueness (collision guard)
+                        while HotspotSession.objects.filter(
+                            access_code=friendly_username,
+                            status__in=('active', 'paid'),
+                            expires_at__gt=timezone.now()
+                        ).exists():
+                            device_slot += 1
+                            friendly_username = f"{base_username}-{device_slot}"
+                        
+                        is_roaming = False
+                        roamed_from_name = None
+                        logger.info(f"📱 ADDITIONAL DEVICE: {friendly_username} (slot {device_slot}) at {router.name}")
 
                 # Roaming detection: did they connect here from a different router?
                 prev_session = (
                     HotspotSession.objects
-                    .filter(hotspot_client=hotspot_client)
+                    .filter(hotspot_client=hotspot_client, access_code=friendly_username)
                     .exclude(router=router)
                     .order_by("-created_at")
                     .first()
                 )
-                is_roaming = prev_session is not None
-                roamed_from_name = prev_session.router.name if is_roaming else None
-
-                if is_roaming:
-                    logger.info(
-                        f"📍 ROAMING: {friendly_username} moved from "
-                        f"{roamed_from_name} → {router.name}"
-                    )
-                else:
-                    logger.info(
-                        f"🏠 RETURNING: {friendly_username} at {router.name}"
-                    )
+                if prev_session:
+                    is_roaming = True
+                    roamed_from_name = prev_session.router.name if prev_session.router else None
+                    logger.info(f"📍 ROAMING: {friendly_username} moved from {roamed_from_name} → {router.name}")
 
             else:
                 # Fallback: generate a one-off code (should rarely happen given
