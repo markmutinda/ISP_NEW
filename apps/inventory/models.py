@@ -192,8 +192,11 @@ class Assignment(models.Model):
     expected_return_date = models.DateField(null=True, blank=True)
     actual_return_date = models.DateField(null=True, blank=True)
 
-    condition_at_assignment = models.CharField(max_length=20, choices=EquipmentItem.CONDITION_CHOICES)
-    condition_at_return = models.CharField(
+    # Fixed: Keep original column names with defaults
+    condition_on_assignment = models.CharField(
+        max_length=20, choices=EquipmentItem.CONDITION_CHOICES, default='good'
+    )
+    condition_on_return = models.CharField(
         max_length=20, choices=EquipmentItem.CONDITION_CHOICES, null=True, blank=True
     )
 
@@ -237,7 +240,7 @@ class Assignment(models.Model):
 
     def mark_returned(self, condition, return_date=None):
         self.actual_return_date = return_date or timezone.now().date()
-        self.condition_at_return = condition
+        self.condition_on_return = condition
         self.save()
         self.equipment.status = 'in_stock'
         self.equipment.assigned_to = None
