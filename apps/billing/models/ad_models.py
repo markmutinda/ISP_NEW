@@ -7,7 +7,7 @@ from django.utils import timezone
 
 class HotspotAd(models.Model):
     MEDIA_TYPE_CHOICES = [('VIDEO', 'Video'), ('IMAGE', 'Image')]
-    STORAGE_LIMIT_MB = Decimal('100')
+    STORAGE_LIMIT_MB = Decimal('10')
 
     schema_name = models.SlugField(max_length=63, editable=False, default="default_schema")
     name = models.CharField(max_length=200)
