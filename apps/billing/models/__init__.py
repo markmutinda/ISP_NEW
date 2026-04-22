@@ -24,6 +24,11 @@ from .hotspot_models import (
     HotspotBranding,
 )
 
+from .ad_models import (
+    HotspotAd,
+    HotspotAdGrant,
+)
+
 __all__ = [
     # Billing
     'Plan',
@@ -41,4 +46,7 @@ __all__ = [
     'HotspotPlan',
     'HotspotSession',
     'HotspotBranding',
+    # Ad Models
+    'HotspotAd',
+    'HotspotAdGrant',
 ]

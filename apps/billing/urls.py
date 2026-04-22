@@ -53,6 +53,15 @@ from .views.tuma_views import (
 )
 from .views.tuma_webhook_views import TumaWebhookView
 
+# ==========================
+# Hotspot Ad-Sponsored URLs
+# ==========================
+from .views.hotspot_ad_views import (
+    HotspotAdServeView,
+    HotspotAdGrantView,
+    HotspotAdAdminViewSet,
+)
+
 router = DefaultRouter()
 
 # Invoice URLs
@@ -192,6 +201,10 @@ hotspot_urlpatterns = [
     path('tv/generate-code/', GenerateTVCodeView.as_view(), name='hotspot-tv-generate-code'),
     # User verifies the code on their phone
     path('tv/verify-code/', VerifyTVCodeView.as_view(), name='hotspot-tv-verify-code'),
+    
+    # ── Ad-Sponsored Free Access Endpoints ──
+    path('ads/serve/', HotspotAdServeView.as_view(), name='hotspot-ad-serve'),
+    path('ads/grant-access/', HotspotAdGrantView.as_view(), name='hotspot-ad-grant'),
 ]
 
 # ==========================
@@ -267,6 +280,22 @@ hotspot_admin_urlpatterns = [
     path('admin/vouchers/', 
          HotspotVoucherListView.as_view(), 
          name='hotspot-admin-voucher-list'),
+    
+    # ============================================================
+    # AD MANAGEMENT (ADDED)
+    # ============================================================
+    path('admin/ads/',
+         HotspotAdAdminViewSet.as_view({'get': 'list', 'post': 'create'}),
+         name='hotspot-admin-ads'),
+    path('admin/ads/storage/',
+         HotspotAdAdminViewSet.as_view({'get': 'storage'}),
+         name='hotspot-admin-ads-storage'),
+    path('admin/ads/<int:pk>/',
+         HotspotAdAdminViewSet.as_view({'get': 'retrieve', 'patch': 'partial_update', 'delete': 'destroy'}),
+         name='hotspot-admin-ad-detail'),
+    path('admin/ads/<int:pk>/toggle-active/',
+         HotspotAdAdminViewSet.as_view({'post': 'toggle_active'}),
+         name='hotspot-admin-ad-toggle'),
 ]
 
 # ==========================
