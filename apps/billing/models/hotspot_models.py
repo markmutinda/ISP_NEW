@@ -18,35 +18,33 @@ from django.utils import timezone
 
 
 # ═══════════════════════════════════════════════════════════════════
-# HELPER: Canonical Username Generator (Collision-free)
+# HELPER: Canonical Username Generator (Tenant-aware & Collision-free)
 # ═══════════════════════════════════════════════════════════════════
 
-def _generate_canonical_username() -> str:
+def _generate_canonical_username(schema_name="default"):
     """
-    Generate a collision-free 9-char hotspot username: XXXX-XXXX
-    Example: 'MXA-BKCS', 'F3T-R7NZ'
+    Generates a unique 9-char username based on the tenant name.
+    Example: tenant_meraki -> MERA-72UY
     """
-    import secrets
-    import string as _string
-
-    safe = ''.join(c for c in (_string.ascii_uppercase + _string.digits)
-                   if c not in "O0I1S5")
-
-    for _ in range(50):
-        part1 = ''.join(secrets.choice(safe) for _ in range(4))
-        part2 = ''.join(secrets.choice(safe) for _ in range(4))
-        candidate = f"{part1}-{part2}"
-
-        # Avoid clashing with any existing client username or session access_code
-        from apps.billing.models.hotspot_models import HotspotClient, HotspotSession
-        taken = (
-            HotspotClient.objects.filter(canonical_username=candidate).exists()
-            or HotspotSession.objects.filter(access_code=candidate).exists()
-        )
-        if not taken:
-            return candidate
-
-    raise RuntimeError("Failed to generate unique hotspot username in 50 attempts")
+    import random
+    import string
+    
+    # 1. Extract prefix from schema name (remove 'tenant_')
+    raw_name = schema_name.replace('tenant_', '').replace('_', '')
+    
+    # 2. Get first 4 letters, uppercase, pad with 'X' if too short
+    prefix = ''.join(e for e in raw_name if e.isalnum()).upper()
+    prefix = (prefix + "XXXX")[:4] 
+    
+    # 3. Generate unique suffix
+    while True:
+        suffix = ''.join(random.choices(string.ascii_uppercase + string.digits, k=4))
+        username = f"{prefix}-{suffix}"
+        
+        # Ensure it is globally unique
+        from apps.billing.models.hotspot_models import HotspotClient
+        if not HotspotClient.objects.filter(canonical_username=username).exists():
+            return username
 
 
 class HotspotPlan(models.Model):
@@ -436,8 +434,7 @@ class HotspotClient(models.Model):
 
         # Generate username if missing (new client OR migrated existing without one)
         if not client.canonical_username:
-            from apps.billing.models.hotspot_models import _generate_canonical_username
-            client.canonical_username = _generate_canonical_username()
+            client.canonical_username = _generate_canonical_username(schema_name)
             client.save(update_fields=["canonical_username"])
 
         if not created:
@@ -473,8 +470,7 @@ class HotspotClient(models.Model):
             client = device.client
             # Backfill username if this client predates the feature
             if not client.canonical_username:
-                from apps.billing.models.hotspot_models import _generate_canonical_username
-                client.canonical_username = _generate_canonical_username()
+                client.canonical_username = _generate_canonical_username(schema_name)
                 client.save(update_fields=["canonical_username"])
             return client
 
