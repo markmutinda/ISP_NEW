@@ -86,7 +86,7 @@ def calculate_expiration_from_plan(plan, start_time=None):
 
 
 # ────────────────────────────────────────────────────────────────
-# CUSTOMER RADIUS CREDENTIALS SIGNALS (The Fix is Here)
+# CUSTOMER RADIUS CREDENTIALS SIGNALS
 # ────────────────────────────────────────────────────────────────
 
 @receiver(post_save, sender='radius.CustomerRadiusCredentials')
@@ -275,8 +275,14 @@ def auto_create_radius_for_service(sender, instance, created, **kwargs):
             return
         
         # Generate credentials
-        # Username: simplified to phone number (last 9 digits)
-        username = generate_pppoe_username(customer)
+        # Username: Check for explicit username stashed by the serializer, else fallback to phone
+        explicit_username = getattr(instance, '_radius_username', None)
+        if explicit_username:
+            username = explicit_username
+            logger.info(f"Using explicit RADIUS username: {username}")
+        else:
+            username = generate_pppoe_username(customer)
+            logger.info(f"Auto-generated RADIUS username from phone: {username}")
         
         # Password: Try to use the radius_password passed via instance, 
         # or fallback to generating one
@@ -284,6 +290,9 @@ def auto_create_radius_for_service(sender, instance, created, **kwargs):
         password = getattr(instance, '_radius_password', None)
         if not password:
             password = generate_password(8)  # 8 char for easier testing
+            logger.info(f"Auto-generated RADIUS password for: {username}")
+        else:
+            logger.info(f"Using explicit RADIUS password for: {username}")
         
         conn_type = 'PPPOE' if auth_type == 'PPPOE' else 'HOTSPOT'
         profile = _get_or_create_bandwidth_profile(instance) if instance.plan else None
@@ -294,8 +303,8 @@ def auto_create_radius_for_service(sender, instance, created, **kwargs):
         if expiration_date:
             logger.info(
                 f"Setting RADIUS expiration for {username}: "
-                f"Plan={instance.plan.name}, "
-                f"ValidityType={instance.plan.validity_type}, "
+                f"Plan={instance.plan.name if instance.plan else 'No Plan'}, "
+                f"ValidityType={instance.plan.validity_type if instance.plan else 'N/A'}, "
                 f"Expires={expiration_date.strftime('%b %d %Y %H:%M:%S')}"
             )
         else:
@@ -324,11 +333,13 @@ def auto_create_radius_for_service(sender, instance, created, **kwargs):
             from apps.network.models.router_models import Router
             try:
                 create_kwargs['router'] = Router.objects.get(pk=radius_router_id)
+                logger.info(f"Assigned router ID {radius_router_id} to {username}")
             except Router.DoesNotExist:
                 logger.warning(f"Router {radius_router_id} not found for RADIUS cred creation")
         
         if radius_ip_pool:
             create_kwargs['ip_pool'] = radius_ip_pool
+            logger.info(f"Assigned IP pool '{radius_ip_pool}' to {username}")
         
         # 🎯 Cloud-Led IPAM: Assign specific IP
         assigned_ip_obj = None
@@ -338,6 +349,7 @@ def auto_create_radius_for_service(sender, instance, created, **kwargs):
                 assigned_ip_obj = IPAddress.objects.get(pk=radius_assigned_ip_id)
                 create_kwargs['assigned_ip_address'] = assigned_ip_obj
                 create_kwargs['static_ip'] = assigned_ip_obj.ip_address  # Sync legacy field
+                logger.info(f"Assigned static IP {assigned_ip_obj.ip_address} to {username}")
             except IPAddress.DoesNotExist:
                 logger.warning(f"IPAddress {radius_assigned_ip_id} not found for RADIUS cred creation")
         
@@ -355,7 +367,7 @@ def auto_create_radius_for_service(sender, instance, created, **kwargs):
         logger.info(f"Auto-created RADIUS credentials: username={username}"
                      f"{f', router_id={radius_router_id}' if radius_router_id else ''}"
                      f"{f', ip_pool={radius_ip_pool}' if radius_ip_pool else ''}"
-                     f"{f', assigned_ip={assigned_ip_obj.ip_address}' if assigned_ip_obj else ''}")
+                     f"{f', assigned_ip={assigned_ip_obj.ip_address if assigned_ip_obj else ''}' if assigned_ip_obj else ''}")
         
         # NOTE: Welcome SMS (pppoe_welcome) is sent from service_views.activate,
         # NOT from this signal, to avoid duplicate SMS.

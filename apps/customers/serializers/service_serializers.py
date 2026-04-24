@@ -47,7 +47,6 @@ class ServiceConnectionSerializer(serializers.ModelSerializer):
             'monthly_price', 'setup_fee', 'prorated_billing',
             'auto_renew', 'contract_period',
             'activation_date', 'suspension_date', 'termination_date',
-            # ↓ These three lines are the fix for Issue 2
             'billing_account_number',
             'mpesa_account_number',
             'paybill_account_number',
@@ -56,9 +55,9 @@ class ServiceConnectionSerializer(serializers.ModelSerializer):
         read_only_fields = [
             'activation_date', 'suspension_date', 'termination_date',
             'installed_by', 'created_at', 'updated_at',
-            'billing_account_number',   # auto-generated, never set by callers
-            'mpesa_account_number',      # auto-generated, never set by callers
-            'paybill_account_number',    # auto-generated, never set by callers
+            'billing_account_number',
+            'mpesa_account_number',
+            'paybill_account_number',
         ]
 
 
@@ -86,6 +85,14 @@ class ServiceCreateSerializer(serializers.ModelSerializer):
         required=False,
         allow_blank=True,
         help_text="Password for RADIUS authentication (PPPoE/Hotspot login)"
+    )
+    
+    # NEW: RADIUS username - explicit PPPoE username
+    radius_username = serializers.CharField(
+        write_only=True,
+        required=False,
+        allow_blank=True,
+        help_text="Explicit RADIUS/PPPoE username (auto-generated from phone if blank)"
     )
     
     # Router (NAS) assignment — passed through to CustomerRadiusCredentials
@@ -146,7 +153,8 @@ class ServiceCreateSerializer(serializers.ModelSerializer):
             'installation_address', 'installation_notes',
             'monthly_price', 'setup_fee', 'prorated_billing',
             'auto_renew', 'contract_period', 'status',
-            'radius_password', 'router', 'ip_pool', 'assigned_ip', 'activate_now',
+            'radius_password', 'radius_username',  # ← ADDED radius_username here
+            'router', 'ip_pool', 'assigned_ip', 'activate_now',
             'activation_delay_minutes',
         ]
     
@@ -169,6 +177,7 @@ class ServiceCreateSerializer(serializers.ModelSerializer):
         and trigger a save so the post_save signal creates RADIUS credentials.
         """
         radius_password = validated_data.pop('radius_password', None)
+        radius_username = validated_data.pop('radius_username', None)  # ← ADD THIS
         activate_now = validated_data.pop('activate_now', True)
         activation_delay_minutes = validated_data.pop('activation_delay_minutes', 0)
         radius_router_id = validated_data.pop('router', None)
@@ -186,11 +195,6 @@ class ServiceCreateSerializer(serializers.ModelSerializer):
         
         instance = super().create(validated_data)
         
-        # The first save (from super().create) triggers post_save with created=True,
-        # but _radius_password isn't set yet. The signal will try to auto-generate
-        # a password. However, if we want the user-provided password, we need
-        # to update the credentials after creation OR trigger a second save.
-        
         # Stash router, ip_pool, and assigned_ip for the RADIUS signal to pick up
         if radius_router_id is not None:
             instance._radius_router_id = radius_router_id
@@ -199,11 +203,12 @@ class ServiceCreateSerializer(serializers.ModelSerializer):
         if assigned_ip_id is not None:
             instance._radius_assigned_ip_id = assigned_ip_id
         
-        if activate_now and radius_password:
-            # Attach password and trigger save so the signal can pick it up.
-            # The signal handles both created=True (first save) and the case
-            # where credentials need to be created for an existing service.
-            instance._radius_password = radius_password
+        if activate_now and (radius_password or radius_username):
+            # Attach password/username and trigger save so the signal can pick it up
+            if radius_password:
+                instance._radius_password = radius_password
+            if radius_username:
+                instance._radius_username = radius_username  # ← stash for signal
             instance._force_radius_creation = True  # Signal flag to force creation
             instance.save()
         elif radius_router_id is not None or radius_ip_pool or assigned_ip_id is not None:
