@@ -70,8 +70,15 @@ class CustomerCreateSerializer(serializers.ModelSerializer):
     
     def create(self, validated_data):
         # Extract user data
+        email = validated_data.pop('email', '')
+        
+        # 🔧 FIX: Prevent PostgreSQL duplicate empty string crash!
+        # Force empty emails to become None (NULL) so they pass the unique constraint
+        if not email or email.strip() == '':
+            email = None  # Force to NULL instead of empty string
+        
         user_data = {
-            'email': validated_data.pop('email'),
+            'email': email,
             'first_name': validated_data.pop('first_name'),
             'last_name': validated_data.pop('last_name'),
             'phone_number': validated_data.pop('phone_number'),
@@ -80,7 +87,7 @@ class CustomerCreateSerializer(serializers.ModelSerializer):
         
         # Create user
         user = User.objects.create_user(
-            email=user_data['email'],
+            email=user_data['email'],  # Now safely passes None instead of ""
             first_name=user_data['first_name'],
             last_name=user_data['last_name'],
             phone_number=user_data['phone_number'],
