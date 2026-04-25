@@ -527,10 +527,9 @@ class TenantTumaConfig(models.Model):
         }
 
 
-# ==================== Rest of the file remains unchanged ====================
+# ==================== InvoiceItemPayment Model ====================
 
 class InvoiceItemPayment(models.Model):
-    # ... (unchanged - kept exactly as you had it)
     METHOD_TYPES = [
         ('MPESA_STK', 'M-Pesa STK Push'),
         ('MPESA_TILL', 'M-Pesa Till'),
@@ -645,6 +644,8 @@ class InvoiceItemPayment(models.Model):
         return None
 
 
+# ==================== Payment Model ====================
+
 class Payment(models.Model):
     PAYMENT_STATUS = [
         ('PENDING', 'Pending'),
@@ -675,7 +676,15 @@ class Payment(models.Model):
     net_amount = models.DecimalField(max_digits=12, decimal_places=2, default=0)
     currency = models.CharField(max_length=3, default='KES')
 
-    payment_method = models.ForeignKey('billing.InvoiceItemPayment', on_delete=models.PROTECT, related_name='payments')
+    # 🔧 FIX: Changed from PROTECT to SET_NULL to allow payment method deletion while preserving payment history
+    payment_method = models.ForeignKey(
+        'billing.InvoiceItemPayment', 
+        on_delete=models.SET_NULL, 
+        null=True, 
+        blank=True, 
+        related_name='payments',
+        help_text="Set to null if the payment method is deleted to preserve history"
+    )
     payment_reference = models.CharField(max_length=100, blank=True)
     transaction_id = models.CharField(max_length=100, blank=True)
 
@@ -937,7 +946,7 @@ class Receipt(models.Model):
             self.amount = self.payment.amount
         
         if not self.payment_method and self.payment:
-            self.payment_method = self.payment.payment_method.name
+            self.payment_method = self.payment.payment_method.name if self.payment.payment_method else "Unknown"
         
         if not self.payment_reference and self.payment:
             self.payment_reference = self.payment.payment_reference
