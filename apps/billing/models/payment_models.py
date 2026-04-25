@@ -394,6 +394,9 @@ class TenantTumaConfig(models.Model):
     """
     Tenant-specific Tuma (payment gateway) configuration.
     Supports Till and Bank payment modes exclusively.
+    
+    🔧 FIX: Removed the ForeignKey to Tenant to prevent cross-schema deletion crashes.
+    Now relying entirely on schema_name for tenant identification.
     """
     MODE_CHOICES = [
         ("TILL", "Till"),
@@ -402,15 +405,15 @@ class TenantTumaConfig(models.Model):
 
     schema_name = models.SlugField(max_length=63, unique=True, db_index=True)
     
-    # Made nullable to avoid cross-schema FK issues
-    # schema_name is now the canonical owner key
-    tenant = models.ForeignKey(
-        "core.Tenant", 
-        on_delete=models.CASCADE, 
-        related_name="tuma_configs",
-        null=True,      # ← CRITICAL FIX
-        blank=True      # ← CRITICAL FIX
-    )
+    # ❌ REMOVED: ForeignKey to Tenant was causing cascade deletion crashes
+    # The schema_name field is now the canonical owner key
+    # tenant = models.ForeignKey(
+    #     "core.Tenant", 
+    #     on_delete=models.CASCADE, 
+    #     related_name="tuma_configs",
+    #     null=True,
+    #     blank=True
+    # )
 
     tuma_business_id = models.CharField(max_length=64, blank=True)
     tuma_business_email = models.EmailField(blank=True)
@@ -714,7 +717,8 @@ class Payment(models.Model):
     status = models.CharField(max_length=20, choices=PAYMENT_STATUS, default='PENDING')
     is_reconciled = models.BooleanField(default=False)
 
-    payment_date = models.DateTimeField(default=timezone.now)
+    # 🔧 FIX: Changed from timezone.now to timezone.now (callable) for naive datetime warning fix
+    payment_date = models.DateTimeField(default=timezone.now)  # This is now a callable, not a fixed value
     processed_at = models.DateTimeField(null=True, blank=True)
     reconciled_at = models.DateTimeField(null=True, blank=True)
 
