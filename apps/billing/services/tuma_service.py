@@ -789,7 +789,8 @@ def delete_tuma_business(schema_name):
     Delete the Tuma business entirely when the last payment method is removed.
     Clears the local TenantTumaConfig credentials.
 
-    Returns True if deleted, False if nothing to delete.
+    Returns True if deleted, False if nothing to delete or if deletion fails
+    (but always clears local config so user isn't stuck).
     """
     from apps.billing.models.payment_models import TenantTumaConfig
 
@@ -802,14 +803,49 @@ def delete_tuma_business(schema_name):
         return False
 
     client = TumaClient()
-    master_token = client.get_master_token()
-
-    res = client.delete_business(master_token, cfg.tuma_business_id)
-    # delete_business handles 404 gracefully (already_gone)
-    if not res.get("success"):
-        raise TumaError(res.get("message", "Failed to delete Tuma business"))
-
+    
+    # Always clear local config first (or at least try to)
+    # This ensures the user isn't stuck even if Tuma is down
     old_id = cfg.tuma_business_id
+    
+    try:
+        master_token = client.get_master_token()
+        res = client.delete_business(master_token, cfg.tuma_business_id)
+        # delete_business handles 404 gracefully (already_gone)
+        if not res.get("success"):
+            logger.warning(
+                f"Tuma delete_business returned success=false for {schema_name}: {res.get('message', 'Unknown error')}. "
+                f"Proceeding with local deletion anyway."
+            )
+    except HTTPError as e:
+        # Catch the 400 Bad Request or any other HTTP error so the server doesn't crash!
+        logger.warning(
+            f"Tuma refused to delete business {old_id} for {schema_name}. "
+            f"HTTPError: {e}. Proceeding with local deletion anyway."
+        )
+    except TumaNotFound:
+        # Business already gone — that's fine
+        logger.info(f"Tuma business {old_id} for {schema_name} already deleted (TumaNotFound)")
+    except ConnectionError as e:
+        # Network issues — don't crash, just log and clear local
+        logger.warning(
+            f"Connection error deleting Tuma business {old_id} for {schema_name}: {e}. "
+            f"Proceeding with local deletion anyway."
+        )
+    except Timeout as e:
+        logger.warning(
+            f"Timeout deleting Tuma business {old_id} for {schema_name}: {e}. "
+            f"Proceeding with local deletion anyway."
+        )
+    except Exception as e:
+        # Any other unexpected error — log and continue with local cleanup
+        logger.warning(
+            f"Unexpected error deleting Tuma business {old_id} for {schema_name}: {e}. "
+            f"Proceeding with local deletion anyway."
+        )
+
+    # Always clear local configuration — this ensures the user isn't stuck
+    # even if the Tuma API call failed
     _clear_tuma_config(cfg)
-    logger.info(f"Tuma business deleted for {schema_name}: was id={old_id}")
+    logger.info(f"Tuma business local config cleared for {schema_name}: was id={old_id}")
     return True
