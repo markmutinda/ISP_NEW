@@ -34,17 +34,26 @@ class CustomerCreateSerializer(serializers.ModelSerializer):
         ]
     
     def validate(self, data):
+        # Extract and clean email FIRST
+        email_raw = data.get('email')
+        email = ''
+        if email_raw:
+            email = email_raw.strip()
+        
+        # Normalise empty email to empty string for further processing
+        if not email:
+            email = ''
+            data['email'] = ''
+        else:
+            data['email'] = email
+        
         # Email uniqueness check — only if email is actually provided
-        email = data.get('email', '').strip() if data.get('email') else ''
         if email:
             # Check against customer-role users only (not admin/staff)
             if User.objects.filter(email=email, role='customer').exists():
                 raise serializers.ValidationError(
                     {"email": "A customer with this email already exists."}
                 )
-        else:
-            # Normalise empty email to empty string for User creation
-            data['email'] = ''
         
         # Validate and format phone number first
         try:
@@ -137,10 +146,10 @@ class CustomerCreateSerializer(serializers.ModelSerializer):
 
 class CustomerUpdateSerializer(serializers.ModelSerializer):
     """Serializer for updating customer details"""
-    email = serializers.EmailField(source='user.email', required=False)
-    first_name = serializers.CharField(source='user.first_name', required=False)
-    last_name = serializers.CharField(source='user.last_name', required=False)
-    phone_number = serializers.CharField(source='user.phone_number', required=False)
+    email = serializers.EmailField(source='user.email', required=False, allow_null=True)
+    first_name = serializers.CharField(source='user.first_name', required=False, allow_blank=True)
+    last_name = serializers.CharField(source='user.last_name', required=False, allow_blank=True)
+    phone_number = serializers.CharField(source='user.phone_number', required=False, allow_blank=True)
     
     class Meta:
         model = Customer
@@ -160,9 +169,29 @@ class CustomerUpdateSerializer(serializers.ModelSerializer):
             return validate_phone_number(value)
         return value
     
+    def validate_email(self, value):
+        """Handle empty email values to prevent unique constraint violations."""
+        # If email is provided, clean it
+        if value:
+            email_cleaned = value.strip()
+            if not email_cleaned:
+                return None
+            return email_cleaned
+        return None
+    
     def update(self, instance, validated_data):
         # Update user fields if provided
         user_data = validated_data.pop('user', {})
+        
+        # 🔧 FIX: Handle email updates with the same NULL logic
+        if 'email' in user_data:
+            email = user_data.get('email')
+            if email:
+                email_cleaned = email.strip()
+                user_data['email'] = email_cleaned if email_cleaned else None
+            else:
+                user_data['email'] = None
+        
         if user_data:
             user = instance.user
             for attr, value in user_data.items():
