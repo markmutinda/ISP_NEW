@@ -21,7 +21,8 @@ from apps.customers.permissions import (
     CustomerAccessPermission, CanManageCustomers
 )
 from apps.core.permissions import IsAdminOrStaff
-from utils.pagination import StandardResultsSetPagination
+# FIX: Import LargeResultsSetPagination along with StandardResultsSetPagination
+from utils.pagination import StandardResultsSetPagination, LargeResultsSetPagination
 
 import logging
 logger = logging.getLogger(__name__)
@@ -36,6 +37,9 @@ class CustomerViewSet(viewsets.ModelViewSet):
     ).all()
     
     permission_classes = [IsAuthenticated, CanManageCustomers]
+    # FIX: Add pagination_class to support large page sizes (up to 1000)
+    pagination_class = LargeResultsSetPagination
+    
     filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
     filterset_fields = [
         'status', 'customer_type', 'category', 
