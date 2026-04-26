@@ -339,20 +339,24 @@ class ServiceConnectionViewSet(viewsets.ModelViewSet):
                         maximum_amount=Decimal('9999999.00'),
                     )
             
-            # Create the payment record
+            # Create the payment record - UPDATED with proper reference and notes
             payment_obj = Payment.objects.create(
                 customer=customer,
                 amount=payment_amount,
                 payment_method=pay_method,
                 status='COMPLETED',
-                payment_reference=payment_reference or f'MANUAL-{service.id}-{timezone.now().timestamp()}',
+                # Change: Use 'MANUAL' as default when no reference provided
+                payment_reference=payment_reference if payment_reference else 'MANUAL',
+                # Only set transaction_id if there's a real reference (not 'MANUAL')
+                transaction_id=payment_reference if (payment_reference and payment_reference != 'MANUAL') else '',
                 payment_date=timezone.now(),
                 processed_at=timezone.now(),
                 is_reconciled=True,
                 reconciled_at=timezone.now(),
                 payer_name=customer.full_name,
                 payer_phone=customer.user.phone_number if customer.user else '',
-                notes=payment_notes,
+                # Updated notes to clearly identify this as a PPPoE service payment
+                notes=payment_notes or 'Manual payment - PPPoE service activation',
                 created_by=request.user,
                 schema_name=db_conn.schema_name,
             )
