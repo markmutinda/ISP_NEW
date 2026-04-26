@@ -161,6 +161,21 @@ def auto_create_radius_for_service(sender, instance, created, **kwargs):
             credentials = customer.radius_credentials
             needs_save = False
             
+            # ── NEW: Update username/password if explicitly provided ──
+            explicit_username = getattr(instance, '_radius_username', None)
+            explicit_password = getattr(instance, '_radius_password', None)
+
+            if explicit_username and credentials.username != explicit_username:
+                credentials.username = explicit_username
+                needs_save = True
+                logger.info(f"Updated RADIUS username to explicit value: {explicit_username}")
+            
+            if explicit_password and credentials.password != explicit_password:
+                credentials.password = explicit_password
+                needs_save = True
+                logger.info(f"Updated RADIUS password for user: {credentials.username}")
+            # ─────────────────────────────────────────────────────────
+            
             # 🎯 Handle RENEWAL: When status changes from non-ACTIVE to ACTIVE
             # This is the key moment to reset the expiration date and activation timestamp
             if instance.status == 'ACTIVE' and not credentials.is_enabled:
