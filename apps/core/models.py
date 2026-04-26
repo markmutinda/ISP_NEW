@@ -53,10 +53,12 @@ class UserManager(BaseUserManager):
         don't have email addresses. When email is empty/None, the user is
         identified by phone_number instead.
         """
-        # Normalise: None / whitespace-only → empty string
-        email = (email or '').strip()
-        if email:
-            email = self.normalize_email(email)
+        # FIX: Keep None as None to prevent unique constraint violations on empty strings
+        if email and email.strip():
+            email = self.normalize_email(email.strip())
+        else:
+            email = None
+
         user = self.model(email=email, **extra_fields)
         user.set_password(password)
         user.save(using=self._db)
@@ -97,7 +99,8 @@ class User(AbstractUser, AuditMixin):
     
     # Remove username field, use email instead
     username = None
-    email = models.EmailField('Email Address', unique=True)
+    # FIX: Add null=True, blank=True to allow NULL values in database
+    email = models.EmailField('Email Address', unique=True, null=True, blank=True)
     
     # Additional fields
     phone_regex = RegexValidator(
@@ -177,7 +180,7 @@ class User(AbstractUser, AuditMixin):
         verbose_name_plural = 'Users'
         
     def __str__(self):
-        return f"{self.get_full_name()} ({self.email})"
+        return f"{self.get_full_name()} ({self.email or 'No Email'})"
     
     def get_full_name(self):
         """Return the full name of the user"""
