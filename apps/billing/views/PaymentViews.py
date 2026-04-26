@@ -293,6 +293,113 @@ class MpesaConfigurationViewSet(viewsets.ModelViewSet):
         serializer = MpesaConfigurationDetailSerializer(config)
         return Response(serializer.data)
 
+    # ============================================================
+    # NEW: Daraja Gateway Activation/Deactivation
+    # ============================================================
+    
+    @action(detail=True, methods=['post'])
+    def activate_as_primary(self, request, pk=None):
+        """
+        Activate this Daraja config as the sole payment gateway.
+        - Deactivates all Tuma configs
+        - Links this config to the active InvoiceItemPayment
+        - Enforces single active gateway
+        """
+        from ..models.payment_models import MpesaConfiguration, InvoiceItemPayment
+        
+        config = self.get_object()
+
+        # 1. Deactivate all other MpesaConfigurations
+        MpesaConfiguration.objects.filter(
+            schema_name=connection.schema_name
+        ).exclude(pk=config.pk).update(is_active=False, is_default=False)
+
+        config.is_active = True
+        config.is_default = True
+        config.save(update_fields=['is_active', 'is_default', 'updated_at'])
+
+        # 2. Deactivate Tuma entirely
+        from ..models.payment_models import TenantTumaConfig
+        TenantTumaConfig.objects.filter(
+            schema_name=connection.schema_name
+        ).update(is_active=False)
+
+        # 3. Find or create a Daraja-linked InvoiceItemPayment
+        method_type = 'MPESA_STK' if config.shortcode_type == 'PAYBILL' else 'MPESA_TILL'
+        
+        # Deactivate all existing methods first
+        InvoiceItemPayment.objects.filter(
+            schema_name=connection.schema_name
+        ).update(is_active=False)
+
+        # Get or create the Daraja method
+        method, _ = InvoiceItemPayment.objects.get_or_create(
+            schema_name=connection.schema_name,
+            mpesa_configuration=config,
+            defaults={
+                'name': f'M-Pesa {config.shortcode_type} (Daraja)',
+                'code': f'MPESA_DARAJA_{connection.schema_name[:8]}',
+                'method_type': method_type,
+                'is_active': True,
+                'is_default': True,
+            }
+        )
+        method.mpesa_configuration = config
+        method.is_active = True
+        method.is_default = True
+        method.save(update_fields=['mpesa_configuration', 'is_active', 'is_default', 'updated_at'])
+
+        return Response({
+            'status': 'success',
+            'message': 'Daraja activated. Tuma gateway has been deactivated.',
+            'payment_method_id': method.id,
+            'gateway': 'daraja',
+        })
+
+    @action(detail=True, methods=['post'])
+    def deactivate_daraja(self, request, pk=None):
+        """
+        Deactivate Daraja and restore Tuma as the gateway.
+        """
+        from ..models.payment_models import MpesaConfiguration, InvoiceItemPayment, TenantTumaConfig
+        
+        config = self.get_object()
+
+        # 1. Deactivate this Daraja config
+        config.is_active = False
+        config.is_default = False
+        config.save(update_fields=['is_active', 'is_default', 'updated_at'])
+
+        # 2. Unlink from any InvoiceItemPayment
+        InvoiceItemPayment.objects.filter(
+            schema_name=connection.schema_name,
+            mpesa_configuration=config
+        ).update(is_active=False)
+
+        # 3. Re-activate Tuma if it exists
+        tuma_cfg = TenantTumaConfig.objects.filter(
+            schema_name=connection.schema_name,
+            tuma_business_id__isnull=False
+        ).exclude(tuma_business_id='').first()
+
+        tuma_restored = False
+        if tuma_cfg:
+            tuma_cfg.is_active = True
+            tuma_cfg.save(update_fields=['is_active', 'updated_at'])
+            # Re-activate the Tuma-linked payment method
+            InvoiceItemPayment.objects.filter(
+                schema_name=connection.schema_name,
+                tuma_configuration=tuma_cfg
+            ).update(is_active=True)
+            tuma_restored = True
+
+        return Response({
+            'status': 'success',
+            'message': 'Daraja deactivated.' + (' Tuma gateway restored.' if tuma_restored else ' No Tuma config found — configure Tuma in the Netily tab.'),
+            'tuma_restored': tuma_restored,
+            'gateway': 'tuma' if tuma_restored else 'none',
+        })
+
 
 # ==========================
 # M-Pesa Transaction Views

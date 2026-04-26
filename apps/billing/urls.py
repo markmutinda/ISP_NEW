@@ -133,6 +133,15 @@ urlpatterns = [
     path('mpesa-config/<int:pk>/toggle-active/', 
          MpesaConfigurationViewSet.as_view({'post': 'toggle_active'}), 
          name='mpesa-config-toggle-active'),
+    
+    # NEW: Daraja Gateway Activation/Deactivation endpoints
+    path('mpesa-config/<int:pk>/activate-as-primary/',
+         MpesaConfigurationViewSet.as_view({'post': 'activate_as_primary'}),
+         name='mpesa-config-activate-primary'),
+    path('mpesa-config/<int:pk>/deactivate-daraja/',
+         MpesaConfigurationViewSet.as_view({'post': 'deactivate_daraja'}),
+         name='mpesa-config-deactivate-daraja'),
+    
     path('mpesa-config/active/', 
          MpesaConfigurationViewSet.as_view({'get': 'active'}), 
          name='mpesa-config-active'),
