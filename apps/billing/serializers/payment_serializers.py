@@ -257,34 +257,104 @@ class PaymentMethodSerializer(serializers.ModelSerializer):
 
 
 # ==========================
-# Payment Serializers - FIXED VERSION
+# Payment Serializers - FIXED VERSION WITH CUSTOMER_NAME, SERVICE_TYPE, PAYMENT_METHOD_NAME
 # ==========================
 
 class PaymentSerializer(serializers.ModelSerializer):
     """
-    Serializer for Payment model - Returns strings instead of IDs for frontend compatibility
+    Serializer for Payment model - Returns strings instead of IDs for frontend compatibility.
+    Enhanced to handle Hotspot payments where customer may be null.
     """
-    # OVERRIDE: Return strings instead of IDs to satisfy frontend formatting
-    customer = serializers.CharField(source='customer.full_name', read_only=True)
-    payment_method = serializers.CharField(source='payment_method.name', read_only=True)
-    invoice = serializers.CharField(source='invoice.invoice_number', read_only=True)
+    # Custom fields for better frontend display
+    customer_name = serializers.SerializerMethodField()
+    service_type = serializers.SerializerMethodField()
+    payment_method_name = serializers.SerializerMethodField()
+    
+    # Keep backward compatibility fields
+    customer = serializers.CharField(source='customer.full_name', read_only=True, required=False)
+    payment_method = serializers.CharField(source='payment_method.name', read_only=True, required=False)
+    invoice = serializers.CharField(source='invoice.invoice_number', read_only=True, required=False)
     
     # Keep these for extra detail if needed
-    customer_code = serializers.CharField(source='customer.customer_code', read_only=True)
-    created_by_name = serializers.CharField(source='created_by.get_full_name', read_only=True)
+    customer_code = serializers.CharField(source='customer.customer_code', read_only=True, required=False)
+    created_by_name = serializers.CharField(source='created_by.get_full_name', read_only=True, required=False)
     
     # Add M-Pesa transaction details as strings
-    mpesa_receipt = serializers.CharField(read_only=True)
-    transaction_id = serializers.CharField(read_only=True)
+    mpesa_receipt = serializers.CharField(read_only=True, required=False)
+    transaction_id = serializers.CharField(read_only=True, required=False)
+    
+    # Include reference/payer fields for Hotspot
+    reference = serializers.CharField(source='payment_reference', read_only=True, required=False)
+    payer_name = serializers.CharField(read_only=True, required=False)
+    payer_phone = serializers.CharField(read_only=True, required=False)
 
     class Meta:
         model = Payment
         fields = [
-            'id', 'payment_number', 'customer', 'customer_code',
-            'invoice', 'amount', 'currency', 'payment_method', 
-            'status', 'transaction_id', 'mpesa_receipt', 
-            'payment_date', 'created_by_name', 'created_at'
+            'id', 'payment_number', 'customer', 'customer_name', 'customer_code',
+            'invoice', 'amount', 'currency', 'payment_method', 'payment_method_name',
+            'status', 'transaction_id', 'mpesa_receipt', 'service_type',
+            'payment_date', 'created_by_name', 'created_at', 'reference',
+            'payer_name', 'payer_phone'
         ]
+
+    def get_customer_name(self, obj):
+        """
+        Get the customer name, handling null customers (e.g., Hotspot payments)
+        """
+        # 1. Try the linked PPPoE customer
+        if obj.customer and hasattr(obj.customer, 'full_name') and obj.customer.full_name:
+            return obj.customer.full_name
+        
+        # 2. Try the hotspot payer name (from STK push or direct)
+        if obj.payer_name:
+            return obj.payer_name
+        
+        # 3. Fallback to payer phone number if we have it
+        if obj.payer_phone:
+            return obj.payer_phone
+        
+        # 4. Check if there's a customer via related name
+        if obj.customer and hasattr(obj.customer, 'name') and obj.customer.name:
+            return obj.customer.name
+        
+        # 5. Final fallback
+        return "Hotspot Client"
+
+    def get_service_type(self, obj):
+        """
+        Determine if this payment was for Hotspot, PPPoE, or other service
+        """
+        # Check if linked to hotspot session
+        if hasattr(obj, 'hotspot_session') and obj.hotspot_session:
+            return "Hotspot"
+        
+        # Check if payment method name indicates hotspot
+        if obj.payment_method and obj.payment_method.name and "Hotspot" in obj.payment_method.name:
+            return "Hotspot"
+        
+        # Check if there's a customer (PPPoE usually has customer)
+        if obj.customer:
+            return "PPPoE"
+        
+        # Check if it's an M-Pesa payment without customer (likely hotspot)
+        if obj.payment_method and obj.payment_method.method_type and obj.payment_method.method_type.startswith('MPESA_'):
+            if not obj.customer:
+                return "Hotspot"
+        
+        # Check payer_name presence (hotspot often has payer_name but no customer)
+        if obj.payer_name and not obj.customer:
+            return "Hotspot"
+        
+        return "Other"
+
+    def get_payment_method_name(self, obj):
+        """
+        Get the payment method name safely
+        """
+        if obj.payment_method:
+            return obj.payment_method.name
+        return "Unknown"
 
 
 class PaymentCreateSerializer(serializers.ModelSerializer):
@@ -348,33 +418,65 @@ class PaymentDetailSerializer(PaymentSerializer):
         read_only=True
     )
     
-    # Keep string versions for frontend display
-    customer = serializers.CharField(source='customer.full_name', read_only=True)
-    payment_method = serializers.CharField(source='payment_method.name', read_only=True)
-    invoice = serializers.CharField(source='invoice.invoice_number', read_only=True)
+    # Keep string versions for frontend display (override to return None safely)
+    customer = serializers.SerializerMethodField()
+    payment_method = serializers.SerializerMethodField()
+    invoice = serializers.SerializerMethodField()
 
     class Meta(PaymentSerializer.Meta):
         fields = PaymentSerializer.Meta.fields + [
             'customer_details', 'invoice_details', 'mpesa_transaction_details'
         ]
+    
+    def get_customer(self, obj):
+        return obj.customer.full_name if obj.customer else None
+    
+    def get_payment_method(self, obj):
+        return obj.payment_method.name if obj.payment_method else None
+    
+    def get_invoice(self, obj):
+        return obj.invoice.invoice_number if obj.invoice else None
 
 
 class PaymentListSerializer(serializers.ModelSerializer):
     """
-    Simplified serializer for listing payments with essential fields only
-    All fields return strings for frontend compatibility
+    Simplified serializer for listing payments with essential fields only.
+    All fields return strings for frontend compatibility, including Hotspot support.
     """
-    customer = serializers.CharField(source='customer.full_name', read_only=True)
-    customer_code = serializers.CharField(source='customer.customer_code', read_only=True)
-    payment_method = serializers.CharField(source='payment_method.name', read_only=True)
+    customer_name = serializers.SerializerMethodField()
+    customer_code = serializers.CharField(source='customer.customer_code', read_only=True, required=False)
+    payment_method_name = serializers.CharField(source='payment_method.name', read_only=True, required=False)
+    service_type = serializers.SerializerMethodField()
 
     class Meta:
         model = Payment
         fields = [
-            'id', 'payment_number', 'customer', 'customer_code', 
-            'amount', 'payment_method', 'status', 
-            'transaction_id', 'mpesa_receipt', 'payment_date', 'created_at'
+            'id', 'payment_number', 'customer_name', 'customer_code', 
+            'amount', 'payment_method_name', 'service_type',
+            'status', 'transaction_id', 'mpesa_receipt', 'payment_date', 'created_at'
         ]
+
+    def get_customer_name(self, obj):
+        """Get customer name, handling null customers (Hotspot)"""
+        if obj.customer and hasattr(obj.customer, 'full_name') and obj.customer.full_name:
+            return obj.customer.full_name
+        if obj.payer_name:
+            return obj.payer_name
+        if obj.payer_phone:
+            return obj.payer_phone
+        return "Hotspot Client"
+
+    def get_service_type(self, obj):
+        """Determine service type for the payment"""
+        if hasattr(obj, 'hotspot_session') and obj.hotspot_session:
+            return "Hotspot"
+        if obj.payment_method and obj.payment_method.name and "Hotspot" in obj.payment_method.name:
+            return "Hotspot"
+        if obj.customer:
+            return "PPPoE"
+        if obj.payer_name and not obj.customer:
+            return "Hotspot"
+        return "Other"
 
 
 # ==========================
