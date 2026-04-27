@@ -56,7 +56,7 @@ class ServiceConnectionViewSet(viewsets.ModelViewSet):
     def get_permissions(self):
         if self.action in ['create', 'update', 'partial_update', 'destroy']:
             return [IsAuthenticated(), IsAdminOrStaff()]
-        elif self.action in ['activate', 'suspend', 'terminate', 'extend']:
+        elif self.action in ['activate', 'suspend', 'terminate', 'extend', 'change_ip']:
             return [IsAuthenticated(), IsAdminStaffOrTechnician()]
         return [IsAuthenticated(), CustomerAccessPermission()]
     
@@ -675,4 +675,68 @@ class ServiceConnectionViewSet(viewsets.ModelViewSet):
             'is_enabled': credentials.is_enabled,
             'plan_changed': plan_changed,
             'plan_name': new_plan.name if new_plan else (service.plan.name if service.plan else None),
+        })
+
+    @action(detail=True, methods=['post'])
+    def change_ip(self, request, customer_pk=None, pk=None):
+        """
+        Change the assigned static IP for a PPPoE service connection.
+        Releases the old IP back to the pool and assigns the new one.
+
+        POST /customers/{customer_pk}/services/{pk}/change_ip/
+        Body: { "assigned_ip_id": <IPAddress pk> }
+        """
+        from apps.network.models.ipam_models import IPAddress
+        from apps.radius.models import CustomerRadiusCredentials
+
+        service = self.get_object()
+        customer = service.customer
+        new_ip_id = request.data.get('assigned_ip_id')
+
+        if not new_ip_id:
+            return Response({'error': 'assigned_ip_id is required'}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            new_ip = IPAddress.objects.get(pk=new_ip_id, status='AVAILABLE')
+        except IPAddress.DoesNotExist:
+            return Response({'error': 'IP address not found or not available'}, status=status.HTTP_404_NOT_FOUND)
+
+        old_ip_str = None
+
+        # Release old IP from RADIUS credentials if present
+        try:
+            creds = customer.radius_credentials
+            if creds.assigned_ip_address:
+                old_ip_str = creds.assigned_ip_address.ip_address
+                creds.assigned_ip_address.release()
+        except CustomerRadiusCredentials.DoesNotExist:
+            creds = None
+        except Exception as e:
+            logger.warning(f"Could not release old IP for service {service.id}: {e}")
+            creds = None
+
+        # Assign new IP
+        new_ip.assign_to_customer(customer, service)
+        service.ip_address = new_ip.ip_address
+        service.save(update_fields=['ip_address'])
+
+        # Update RADIUS credentials
+        if creds:
+            try:
+                creds.assigned_ip_address = new_ip
+                creds.static_ip = new_ip.ip_address
+                creds.save()
+            except Exception as e:
+                logger.warning(f"RADIUS credential IP update failed for service {service.id}: {e}")
+
+        logger.info(
+            f"IP changed for customer {customer.customer_code}: "
+            f"{old_ip_str or 'none'} → {new_ip.ip_address} (by {request.user})"
+        )
+
+        return Response({
+            'status': 'success',
+            'old_ip': old_ip_str,
+            'new_ip': new_ip.ip_address,
+            'message': f'IP changed from {old_ip_str or "none"} to {new_ip.ip_address}',
         })
