@@ -227,27 +227,40 @@ class AnalyticsReportsView(APIView, _RangeMixin):
         # Apply week offset
         week_start = week_start + timedelta(weeks=week_offset)
         week_end = week_start + timedelta(days=7)
-        
-        # Query payments in this week range
+
+        # For the current week, cap the end at now so future weekdays always return 0.
+        # Without this, a UTC payment made on "Sunday" at 11 PM EAT (= 8 PM UTC) can
+        # appear inside the Mon–Sun window even though Sunday hasn't arrived locally yet.
+        effective_end = week_end
+        if week_offset == 0:
+            week_end_dt = timezone.make_aware(
+                datetime.combine(week_end, datetime.min.time()),
+                timezone.get_current_timezone(),
+            )
+            effective_end = min(week_end_dt, timezone.now())
+
         payments = Payment.objects.filter(
             status__iexact="completed",
-            payment_date__gte=week_start,
-            payment_date__lt=week_end
+            payment_date__gte=timezone.make_aware(
+                datetime.combine(week_start, datetime.min.time()),
+                timezone.get_current_timezone(),
+            ),
+            payment_date__lt=effective_end,
         )
-        
+
         # Aggregate by weekday
         weekday_map = {i: 0 for i in range(7)}
         for p in payments:
             weekday = p.payment_date.weekday()
             weekday_map[weekday] += _safe_float(p.amount)
-        
+
         # Build result with day labels (Mon-Sun)
         day_labels = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
         return [
             {"day": day_labels[i], "amount": round(weekday_map[i], 2)}
             for i in range(7)
         ]
-    
+
     def _get_monthly_earnings(self, year, include_future=False):
         """
         Get monthly earnings for a given year.
@@ -258,22 +271,22 @@ class AnalyticsReportsView(APIView, _RangeMixin):
         now = timezone.now()
         current_year = now.year
         current_month = now.month
-        
-        month_labels = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", 
+
+        month_labels = ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
                        "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
-        
+
         result = []
         for month in range(1, 13):
             # Skip future months if not allowed
             if not include_future and year == current_year and month > current_month:
                 break
-            
+
             month_start = datetime(year, month, 1, tzinfo=timezone.get_current_timezone())
             if month == 12:
                 month_end = datetime(year + 1, 1, 1, tzinfo=timezone.get_current_timezone())
             else:
                 month_end = datetime(year, month + 1, 1, tzinfo=timezone.get_current_timezone())
-            
+
             # Query payments for this month
             total = _safe_float(
                 Payment.objects.filter(
@@ -282,12 +295,12 @@ class AnalyticsReportsView(APIView, _RangeMixin):
                     payment_date__lt=month_end
                 ).aggregate(v=Sum("amount"))["v"]
             )
-            
+
             result.append({
                 "month": month_labels[month - 1],
                 "amount": round(total, 2)
             })
-        
+
         return result
 
     def get(self, request):
@@ -383,18 +396,18 @@ class AnalyticsReportsView(APIView, _RangeMixin):
         # ============================================================
         today_date = now.date()
         weekly_income = self._get_weekly_income(today_date, week_offset=0)
-        
+
         # ============================================================
         # NEW: Last Week Income Data
         # ============================================================
         last_week_income = self._get_weekly_income(today_date, week_offset=-1)
-        
+
         # ============================================================
         # NEW: Monthly Earnings (Current Year, up to current month)
         # ============================================================
         current_year = now.year
         monthly_earnings = self._get_monthly_earnings(current_year, include_future=False)
-        
+
         # ============================================================
         # NEW: Last Year Earnings (Full calendar year)
         # ============================================================
@@ -656,7 +669,7 @@ class AnalyticsCustomersView(APIView, _RangeMixin):
                 continue
 
             ids = list(acquired_qs.values_list("id", flat=True))
-            
+
             def retained(month_offset):
                 s = cohort_end + relativedelta(months=month_offset - 1)
                 e = s + relativedelta(months=1)
