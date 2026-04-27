@@ -18,6 +18,7 @@ class ServicePlanNestedSerializer(serializers.ModelSerializer):
         fields = [
             'id', 'name', 'description', 'price', 'code', 'plan_type',
             'speed_down', 'speed_up', 'data_limit', 'validity_days',
+            'ip_pool',          # ← ADDED
             'is_active', 'is_popular'
         ]
 
