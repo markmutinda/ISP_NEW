@@ -13,6 +13,7 @@ Supported providers:
   6. Advanta SMS
   7. Hubtel
   8. Bytewave
+  9. BlessedTexts
 """
 import logging
 import requests
@@ -175,6 +176,79 @@ class AdvantaBackend:
         return {'balance': float(data.get('credit', 0)), 'currency': 'KES'}
 
 
+class BlessedTextsBackend:
+    """
+    BlessedTexts SMS Backend
+    Docs: https://sms.blessedtexts.com/api/sms/v1
+    Auth: api_key param + sender_id param
+    Success: status_code == "1000"
+    """
+    BASE_URL = 'https://sms.blessedtexts.com/api/sms/v1'
+
+    def __init__(self, api_key: str, sender_id: str = '', **kw):
+        self.api_key = api_key
+        self.sender_id = sender_id
+
+    def send(self, to: str, message: str) -> Tuple[bool, str, Decimal]:
+        # BlessedTexts accepts 254XXXXXXXXX format (no leading +)
+        phone = to.lstrip('+')
+
+        resp = requests.post(
+            f'{self.BASE_URL}/sendsms',
+            json={
+                'api_key': self.api_key,
+                'sender_id': self.sender_id,
+                'message': message,
+                'phone': phone,
+            },
+            headers={'Content-Type': 'application/json', 'Accept': 'application/json'},
+            timeout=20,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+
+        # Response is a list; first item contains the result
+        result = data[0] if isinstance(data, list) else data
+
+        if str(result.get('status_code')) == '1000':
+            msg_id = str(result.get('message_id', ''))
+            cost = Decimal(str(result.get('message_cost', '0')))
+            return True, msg_id, cost
+
+        # Map known error codes to readable messages
+        ERROR_CODES = {
+            '1001': 'Missing API Key',
+            '1002': 'Invalid API Key',
+            '1003': 'Missing Sender ID',
+            '1004': 'Invalid Sender ID',
+            '1005': 'Missing Message',
+            '1006': 'Missing Phone number',
+            '1007': 'Invalid Phone number format',
+            '1008': 'Invalid Phone number',
+            '1009': 'Insufficient SMS credits',
+        }
+        code = str(result.get('status_code', ''))
+        err = ERROR_CODES.get(code, result.get('status_desc', f'Error code {code}'))
+        raise RuntimeError(err)
+
+    def get_balance(self) -> Dict[str, Any]:
+        resp = requests.post(
+            f'{self.BASE_URL}/credit-balance',
+            json={'api_key': self.api_key},
+            headers={'Content-Type': 'application/json', 'Accept': 'application/json'},
+            timeout=15,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+
+        if str(data.get('status_code')) == '1000':
+            return {
+                'balance': float(data.get('balance', 0)),
+                'currency': 'KES',
+            }
+        raise RuntimeError(f"Balance check failed: {data}")
+
+
 class HubtelBackend:
     def __init__(self, api_key: str, api_secret: str, sender_id: str = '', **kw):
         self.client_id = api_key
@@ -266,6 +340,7 @@ BACKENDS = {
     'advanta': AdvantaBackend,
     'hubtel': HubtelBackend,
     'bytewave': BytewaveBackend,
+    'blessedtexts': BlessedTextsBackend,  # ← ADDED
 }
 
 # Human-readable field labels per provider
@@ -278,6 +353,7 @@ PROVIDER_FIELDS = {
     'advanta':        {'api_key': 'API Key', 'sender_id': 'Short Code'},
     'hubtel':         {'api_key': 'Client ID', 'api_secret': 'Client Secret', 'sender_id': 'Sender ID'},
     'bytewave':       {'api_key': 'API Token', 'sender_id': 'Sender ID'},
+    'blessedtexts':   {'api_key': 'API Key', 'sender_id': 'Sender ID'},  # ← ADDED
 }
 
 
