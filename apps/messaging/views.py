@@ -41,14 +41,51 @@ class SMSMessageViewSet(viewsets.ModelViewSet):
     """
     SMS Messages ViewSet
     Handles single send, bulk send, retry, list, retrieve
+    
+    NOTE: The default queryset returns ALL messages (including automated ones)
+    with NO type filter. This ensures the history shows everything.
     """
-    queryset = SMSMessage.objects.select_related('template', 'campaign', 'customer').order_by('-created_at')
-    serializer_class = SMSMessageSerializer
     permission_classes = [IsAuthenticated, IsAdminOrStaff]
     filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
     filterset_fields = ['status', 'type', 'provider', 'campaign__id']
     search_fields = ['recipient', 'message', 'recipient_name', 'error_message']
     ordering_fields = ['created_at', 'sent_at', 'status', 'cost']
+
+    def get_queryset(self):
+        """
+        Return ALL messages with no automatic type filtering.
+        Optional query params can still filter by status, search, etc.
+        """
+        qs = SMSMessage.objects.select_related('template', 'campaign', 'customer').order_by('-created_at', '-sent_at')
+
+        # Optional filters from query params (user can still filter by type if they want)
+        status_filter = self.request.query_params.get('status')
+        if status_filter:
+            qs = qs.filter(status=status_filter)
+
+        type_filter = self.request.query_params.get('type')
+        if type_filter:
+            qs = qs.filter(type=type_filter)
+
+        provider_filter = self.request.query_params.get('provider')
+        if provider_filter:
+            qs = qs.filter(provider=provider_filter)
+
+        campaign_filter = self.request.query_params.get('campaign__id')
+        if campaign_filter:
+            qs = qs.filter(campaign__id=campaign_filter)
+
+        search = self.request.query_params.get('search')
+        if search:
+            qs = qs.filter(
+                Q(recipient__icontains=search) |
+                Q(recipient_name__icontains=search) |
+                Q(message__icontains=search)
+            )
+
+        # DO NOT filter by type by default — history must show everything
+        # The type filter is only applied if explicitly requested via query param
+        return qs
 
     def get_serializer_class(self):
         if self.action == 'create':
@@ -324,7 +361,6 @@ class SMSCampaignViewSet(viewsets.ModelViewSet):
             "status": campaign.status
         }, status=status.HTTP_200_OK)
 
-    # FIX 5: Campaign bulk SMS — send to group
     @action(detail=False, methods=['post'], url_path='send-to-group')
     def send_to_group(self, request):
         """
@@ -1020,3 +1056,130 @@ class CustomerSearchView(APIView):
                 unique.append(r)
 
         return Response({'results': unique[:limit], 'count': len(unique)})
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# NEW ENDPOINTS ADDED BELOW
+# ─────────────────────────────────────────────────────────────────────────────
+
+class CampaignSendToGroupView(APIView):
+    """
+    POST /api/v1/messaging/campaigns/send-to-group/
+    Body: { group: 'pppoe'|'hotspot'|'all', message: str, name?: str }
+    Sends bulk SMS and logs a campaign + each individual message.
+    """
+    permission_classes = [IsAuthenticated, IsAdminOrStaff]
+
+    def post(self, request):
+        group = (request.data.get('group') or 'all').lower()
+        message = (request.data.get('message') or '').strip()
+        campaign_name = (request.data.get('name') or
+                         f"Campaign {timezone.now().strftime('%d %b %Y %H:%M')}")
+
+        if not message:
+            return Response({'error': 'message is required'}, status=400)
+
+        if group not in ('pppoe', 'hotspot', 'all'):
+            return Response({'error': 'group must be pppoe, hotspot, or all'}, status=400)
+
+        phones = []   # list of (phone, name, customer_id_or_None, first_name)
+
+        # ── Collect PPPoE recipients ────────────────────────────────────────
+        if group in ('pppoe', 'all'):
+            from apps.customers.models import Customer
+            for c in Customer.objects.select_related('user').filter(
+                status='ACTIVE',
+                user__phone_number__isnull=False,
+            ).exclude(user__phone_number=''):
+                phones.append((
+                    c.user.phone_number,
+                    c.full_name,
+                    c.id,
+                    c.user.first_name or 'Customer',
+                ))
+
+        # ── Collect Hotspot recipients ──────────────────────────────────────
+        if group in ('hotspot', 'all'):
+            from apps.billing.models.hotspot_models import HotspotClient
+            for hc in HotspotClient.objects.exclude(
+                Q(canonical_phone__isnull=True) | Q(canonical_phone='') |
+                Q(canonical_phone__startswith='MAC-')
+            ):
+                phones.append((
+                    hc.canonical_phone,
+                    hc.canonical_username or hc.canonical_phone,
+                    None,
+                    hc.canonical_username or 'Customer',
+                ))
+
+        if not phones:
+            return Response({'error': 'No recipients found for this group'}, status=400)
+
+        # ── Create campaign record ──────────────────────────────────────────
+        try:
+            campaign = SMSCampaign.objects.create(
+                name=campaign_name,
+                message=message,
+                recipient_count=len(phones),
+                status='running',
+                started_at=timezone.now(),
+            )
+        except Exception:
+            campaign = None
+
+        # ── Send and log each message ───────────────────────────────────────
+        from apps.messaging.services.notification_sender import (
+            _send_once, _render, _log_sms, _fmt_phone
+        )
+
+        sent = 0
+        failed = 0
+        for phone_raw, name, cid, first_name in phones:
+            phone = _fmt_phone(phone_raw)
+            if not phone:
+                continue
+            # Substitute {customer_name} etc. in the message
+            personalised = _render(
+                message,
+                customer_name=first_name,
+                name=first_name,
+            )
+            try:
+                # Use _send_once with a campaign-specific key to avoid
+                # dedup collisions with other automated messages
+                _send_once(
+                    f"campaign:{campaign.id if campaign else 'x'}:{phone}",
+                    phone, personalised, ttl=3600
+                )
+                _log_sms(phone, personalised, status='sent',
+                          msg_type='campaign', recipient_name=name,
+                          customer_id=cid)
+                sent += 1
+            except Exception as exc:
+                logger.error(f"Campaign send failed to {phone}: {exc}")
+                _log_sms(phone, personalised, status='failed',
+                          msg_type='campaign', recipient_name=name,
+                          customer_id=cid)
+                failed += 1
+
+        # ── Update campaign totals ──────────────────────────────────────────
+        if campaign:
+            campaign.sent_count = sent
+            campaign.failed_count = failed
+            campaign.delivered_count = sent   # assume sent = delivered; update via webhook if needed
+            campaign.status = 'completed'
+            campaign.completed_at = timezone.now()
+            campaign.save(update_fields=[
+                'sent_count', 'failed_count', 'delivered_count',
+                'status', 'completed_at'
+            ])
+
+        return Response({
+            'campaign_id': campaign.id if campaign else None,
+            'name': campaign_name,
+            'group': group,
+            'recipient_count': len(phones),
+            'sent': sent,
+            'failed': failed,
+            'message': message,
+        })
