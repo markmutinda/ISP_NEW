@@ -9,6 +9,7 @@ import sys
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent.parent
+RUNNING_TESTS = 'test' in sys.argv
 
 # Add apps directory to Python path
 sys.path.insert(0, os.path.join(BASE_DIR, 'apps'))
@@ -113,7 +114,7 @@ INSTALLED_APPS = list(SHARED_APPS) + [app for app in BASE_APPS if app not in SHA
 INSTALLED_APPS = list(dict.fromkeys(INSTALLED_APPS))
 
 # Debug toolbar only in DEBUG mode
-if DEBUG:
+if DEBUG and not RUNNING_TESTS:
     INSTALLED_APPS.append('debug_toolbar')
 
 # ────────────────────────────────────────────────────────────────
@@ -135,7 +136,7 @@ MIDDLEWARE = [
     'apps.core.middleware.SubscriptionEnforcementMiddleware',
     # REMOVED: 'apps.core.middleware.TenantMiddleware',
 ]
-if DEBUG:
+if DEBUG and not RUNNING_TESTS:
     MIDDLEWARE.insert(3, 'debug_toolbar.middleware.DebugToolbarMiddleware')  # After CORS middlewares
     INTERNAL_IPS = ['127.0.0.1', 'localhost', 'camden-convocative-oversorrowfully.ngrok-free.dev']
     DEBUG_TOOLBAR_CONFIG = {'SHOW_TOOLBAR_CALLBACK': lambda request: DEBUG}

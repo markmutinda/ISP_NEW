@@ -14,6 +14,7 @@ from django.conf import settings
 from rest_framework_simplejwt.views import TokenRefreshView
 from rest_framework.views import APIView
 from rest_framework import generics
+from rest_framework.parsers import MultiPartParser, FormParser, JSONParser
 from datetime import timedelta
 from django_tenants.utils import schema_context, get_public_schema_name  # Add this import
 from .models import GlobalSystemSettings  # Add this
@@ -249,11 +250,70 @@ class CompanyViewSet(viewsets.ModelViewSet):
     queryset = Company.objects.all()
     serializer_class = CompanySerializer
     permission_classes = [IsAuthenticated, IsAdminOrStaff]
+    parser_classes = [MultiPartParser, FormParser, JSONParser]
     
     def get_permissions(self):
         if self.action in ['create', 'destroy']:
             permission_classes = [IsAuthenticated, IsAdmin]
+        else:
+            permission_classes = self.permission_classes
         return [permission() for permission in permission_classes]
+
+    def _get_current_company(self):
+        request_company = getattr(self.request, 'company', None)
+        if request_company:
+            return request_company
+
+        user_company = getattr(self.request.user, 'company', None)
+        if user_company:
+            return user_company
+
+        tenant = getattr(self.request, 'tenant', None)
+        if tenant:
+            return getattr(tenant, 'company', None)
+
+        return None
+
+    def get_queryset(self):
+        queryset = super().get_queryset()
+
+        if self.request.user.is_superuser:
+            return queryset
+
+        company = self._get_current_company()
+        if company:
+            return queryset.filter(id=company.id)
+
+        return queryset.none()
+
+    def perform_create(self, serializer):
+        serializer.save(created_by=self.request.user, updated_by=self.request.user)
+
+    def perform_update(self, serializer):
+        serializer.save(updated_by=self.request.user)
+
+    @action(detail=False, methods=['get', 'patch'], url_path='current')
+    def current(self, request):
+        company = self._get_current_company()
+        if not company:
+            return Response(
+                {'error': 'Company not found. Please contact support.'},
+                status=status.HTTP_404_NOT_FOUND
+            )
+
+        if request.method.lower() == 'get':
+            serializer = self.get_serializer(company)
+            return Response(serializer.data)
+
+        serializer = self.get_serializer(
+            company,
+            data=request.data,
+            partial=True,
+            context={'request': request}
+        )
+        serializer.is_valid(raise_exception=True)
+        serializer.save(updated_by=request.user)
+        return Response(serializer.data)
 
 
 class TenantViewSet(viewsets.ModelViewSet):

@@ -18,9 +18,27 @@ from apps.customers.serializers import (
 from apps.customers.permissions import CustomerAccessPermission
 from apps.core.permissions import IsAdminOrStaff, IsTechnician
 from apps.network.models import IPAddress, IPPool
+from apps.billing.models import Plan
 from utils.pagination import StandardResultsSetPagination
 
 logger = logging.getLogger(__name__)
+
+
+def sync_service_plan_fields(service, plan):
+    """Keep service configuration aligned with the chosen plan."""
+    auth_mapping = {
+        'HOTSPOT': 'HOTSPOT',
+        'PPPOE': 'PPPOE',
+        'STATIC': 'STATIC',
+        'INTERNET': 'PPPOE',
+    }
+    service.plan = plan
+    service.monthly_price = plan.base_price
+    service.download_speed = plan.download_speed or 0
+    service.upload_speed = plan.upload_speed or 0
+    service.data_cap = plan.data_limit
+    service.auth_connection_type = auth_mapping.get(plan.plan_type, service.auth_connection_type or 'OTHER')
+    return service
 
 
 class IsAdminStaffOrTechnician(BasePermission):
@@ -54,7 +72,7 @@ class ServiceConnectionViewSet(viewsets.ModelViewSet):
         return ServiceConnectionSerializer
     
     def get_permissions(self):
-        if self.action in ['create', 'update', 'partial_update', 'destroy']:
+        if self.action in ['create', 'update', 'partial_update', 'destroy', 'change_plan']:
             return [IsAuthenticated(), IsAdminOrStaff()]
         elif self.action in ['activate', 'suspend', 'terminate', 'extend', 'change_ip']:
             return [IsAuthenticated(), IsAdminStaffOrTechnician()]
@@ -95,6 +113,13 @@ class ServiceConnectionViewSet(viewsets.ModelViewSet):
             serializer.save(customer=customer)
         else:
             serializer.save()
+
+    def perform_update(self, serializer):
+        service = serializer.save(updated_by=self.request.user)
+        if 'plan' in serializer.validated_data and service.plan:
+            sync_service_plan_fields(service, service.plan)
+            service.updated_by = self.request.user
+            service.save()
     
     def _assign_ip_from_pool(self, service, customer):
         """
@@ -129,6 +154,32 @@ class ServiceConnectionViewSet(viewsets.ModelViewSet):
                 f"Pool stats: total={pool.total_ips}, used={pool.used_ips}"
             )
             return None
+
+    @action(detail=True, methods=['post'])
+    def change_plan(self, request, customer_pk=None, pk=None):
+        service = self.get_object()
+        plan_id = request.data.get('plan_id')
+
+        if not plan_id:
+            return Response(
+                {'error': 'plan_id is required'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        plan = get_object_or_404(Plan.objects.filter(is_active=True), id=plan_id)
+        previous_plan_name = service.plan.name if service.plan else None
+
+        sync_service_plan_fields(service, plan)
+        service.updated_by = request.user
+        service.save()
+
+        return Response({
+            'status': 'success',
+            'message': f'Plan changed from {previous_plan_name or "No Plan"} to {plan.name}.',
+            'service_id': service.id,
+            'plan_id': service.plan_id,
+            'plan_name': service.plan.name if service.plan else None,
+        })
 
     @action(detail=True, methods=['post'])
     def activate(self, request, customer_pk=None, pk=None):

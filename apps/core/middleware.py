@@ -144,20 +144,18 @@ class CompanyContextMiddleware(MiddlewareMixin):
     def process_request(self, request):
         # If tenant is already set by TenantMainMiddleware, use it
         if hasattr(request, 'tenant') and request.tenant:
-            # Company is already set by TenantMainMiddleware
-            # For superadmin users visiting a tenant subdomain,
-            # patch user.company so queryset filters work correctly
-            if (
-                hasattr(request, 'user')
-                and request.user.is_authenticated
-                and request.user.is_superuser
-                and not getattr(request.user, 'company', None)
-            ):
+            # Company is already set by TenantMainMiddleware.
+            # Patch authenticated tenant users with the resolved company context
+            # when their FK fields are intentionally left null inside tenant schemas.
+            if hasattr(request, 'user') and request.user.is_authenticated:
                 tenant_company = getattr(request.tenant, 'company', None)
                 if tenant_company:
-                    request.user._original_company = None
-                    request.user.company = tenant_company
-                    request.user.tenant = request.tenant
+                    if not getattr(request.user, 'company', None):
+                        request.user._original_company = None
+                        request.user.company = tenant_company
+                    if not getattr(request.user, 'tenant', None):
+                        request.user._original_tenant = None
+                        request.user.tenant = request.tenant
             return None
         
         # For authenticated users, get their company/tenant

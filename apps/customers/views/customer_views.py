@@ -5,6 +5,8 @@ from rest_framework.permissions import IsAuthenticated
 from django_filters.rest_framework import DjangoFilterBackend
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
+from django.db.models import Q
+from apps.billing.models import Plan
 
 from apps.customers.models import (
     Customer, CustomerAddress, CustomerDocument, 
@@ -28,6 +30,23 @@ import logging
 logger = logging.getLogger(__name__)
 
 
+def _sync_service_to_plan(service, plan):
+    """Apply the selected plan's billable and network defaults to a service."""
+    auth_mapping = {
+        'HOTSPOT': 'HOTSPOT',
+        'PPPOE': 'PPPOE',
+        'STATIC': 'STATIC',
+        'INTERNET': 'PPPOE',
+    }
+    service.plan = plan
+    service.monthly_price = plan.base_price
+    service.download_speed = plan.download_speed or 0
+    service.upload_speed = plan.upload_speed or 0
+    service.data_cap = plan.data_limit
+    service.auth_connection_type = auth_mapping.get(plan.plan_type, service.auth_connection_type or 'OTHER')
+    return service
+
+
 class CustomerViewSet(viewsets.ModelViewSet):
     """ViewSet for managing customers"""
     queryset = Customer.objects.select_related(
@@ -47,7 +66,11 @@ class CustomerViewSet(viewsets.ModelViewSet):
     ]
     search_fields = [
         'customer_code', 'user__first_name', 'user__last_name',
-        'user__email', 'user__phone_number', 'id_number'
+        'user__email', 'user__phone_number', 'id_number',
+        'alternative_phone', 'services__plan__name', 'services__plan__code',
+        'services__billing_account_number', 'services__mpesa_account_number',
+        'services__paybill_account_number', 'services__ip_address',
+        'services__mac_address', 'radius_credentials__username'
     ]
     ordering_fields = ['created_at', 'customer_code', 'user__last_name']
     ordering = ['-created_at']
@@ -65,7 +88,8 @@ class CustomerViewSet(viewsets.ModelViewSet):
     
     def get_permissions(self):
         if self.action in ['create', 'update', 'partial_update', 'destroy',
-                           'toggle_radius', 'change_status']:
+                           'toggle_radius', 'change_status', 'available_plans',
+                           'change_plan']:
             permission_classes = [IsAuthenticated, IsAdminOrStaff]
         else:
             permission_classes = [IsAuthenticated, CustomerAccessPermission]
@@ -82,10 +106,43 @@ class CustomerViewSet(viewsets.ModelViewSet):
         
         # CUSTOMERS: can only see themselves
         if hasattr(user, 'customer_profile'):
-            return queryset.filter(id=user.customer_profile.id)
-        
-        # No access
-        return queryset.none()
+            queryset = queryset.filter(id=user.customer_profile.id)
+        else:
+            # No access
+            if not (user.is_superuser or user.is_staff):
+                return queryset.none()
+
+        search_term = (self.request.query_params.get('search') or '').strip()
+        if search_term:
+            queryset = queryset.filter(
+                Q(customer_code__icontains=search_term)
+                | Q(user__first_name__icontains=search_term)
+                | Q(user__last_name__icontains=search_term)
+                | Q(user__email__icontains=search_term)
+                | Q(user__phone_number__icontains=search_term)
+                | Q(id_number__icontains=search_term)
+                | Q(alternative_phone__icontains=search_term)
+                | Q(services__plan__name__icontains=search_term)
+                | Q(services__plan__code__icontains=search_term)
+                | Q(services__billing_account_number__icontains=search_term)
+                | Q(services__mpesa_account_number__icontains=search_term)
+                | Q(services__paybill_account_number__icontains=search_term)
+                | Q(services__ip_address__icontains=search_term)
+                | Q(services__mac_address__icontains=search_term)
+                | Q(radius_credentials__username__icontains=search_term)
+            )
+
+        return queryset.distinct()
+
+    def _get_target_service(self, customer, service_id=None):
+        services = customer.services.select_related('plan').order_by('-activation_date', '-created_at')
+        if service_id:
+            return get_object_or_404(services, id=service_id)
+        return (
+            services.filter(status='ACTIVE').first()
+            or services.exclude(status='TERMINATED').first()
+            or services.first()
+        )
     
     def perform_create(self, serializer):
         """Create customer - tenant scoping handled by django-tenants"""
@@ -179,6 +236,98 @@ class CustomerViewSet(viewsets.ModelViewSet):
             },
             status=status.HTTP_200_OK
         )
+
+    @action(detail=True, methods=['get'])
+    def available_plans(self, request, pk=None):
+        customer = self.get_object()
+        service_id = request.query_params.get('service_id')
+        service = self._get_target_service(customer, service_id=service_id)
+
+        plans = Plan.objects.filter(is_active=True).order_by('name')
+        if service and service.auth_connection_type:
+            auth_type = service.auth_connection_type.upper()
+            compatible_plan_types = {
+                'HOTSPOT': ['HOTSPOT'],
+                'PPPOE': ['PPPOE', 'INTERNET'],
+                'STATIC': ['STATIC', 'PPPOE', 'INTERNET'],
+                'DYNAMIC': ['INTERNET', 'PPPOE'],
+            }.get(auth_type)
+            if compatible_plan_types:
+                plans = plans.filter(plan_type__in=compatible_plan_types)
+
+        payload = []
+        for plan in plans:
+            payload.append({
+                'id': plan.id,
+                'name': plan.name,
+                'code': plan.code,
+                'plan_type': plan.plan_type,
+                'price': str(plan.base_price),
+                'download_speed': plan.download_speed,
+                'upload_speed': plan.upload_speed,
+                'data_limit': plan.data_limit,
+                'is_public': plan.is_public,
+                'is_popular': plan.is_popular,
+            })
+
+        return Response({
+            'customer_id': customer.id,
+            'service_id': service.id if service else None,
+            'current_plan_id': service.plan_id if service else None,
+            'current_plan_name': service.plan.name if service and service.plan else None,
+            'plans': payload,
+        })
+
+    @action(detail=True, methods=['post'])
+    def change_plan(self, request, pk=None):
+        customer = self.get_object()
+        plan_id = request.data.get('plan_id')
+        service_id = request.data.get('service_id')
+
+        if not plan_id:
+            return Response(
+                {'error': 'plan_id is required'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        service = self._get_target_service(customer, service_id=service_id)
+        if not service:
+            return Response(
+                {'error': 'No service found for this customer'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        plan = get_object_or_404(Plan.objects.filter(is_active=True), id=plan_id)
+        previous_plan_name = service.plan.name if service.plan else None
+
+        _sync_service_to_plan(service, plan)
+        service.updated_by = request.user
+        service.save()
+
+        CustomerNotes.objects.create(
+            customer=customer,
+            note=(
+                f"Service plan changed from {previous_plan_name or 'No Plan'} "
+                f"to {plan.name}."
+            ),
+            note_type='SERVICE_ISSUE',
+            created_by=request.user
+        )
+
+        return Response({
+            'status': 'success',
+            'message': f'Plan changed to {plan.name} successfully.',
+            'service': {
+                'id': service.id,
+                'plan_id': service.plan_id,
+                'plan_name': service.plan.name if service.plan else None,
+                'monthly_price': str(service.monthly_price),
+                'download_speed': service.download_speed,
+                'upload_speed': service.upload_speed,
+                'data_cap': service.data_cap,
+                'auth_connection_type': service.auth_connection_type,
+            }
+        })
 
     @action(detail=True, methods=['post'])
     def toggle_radius(self, request, pk=None):

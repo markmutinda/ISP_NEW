@@ -327,13 +327,14 @@ class CompanySerializer(serializers.ModelSerializer):
     
     total_customers = serializers.IntegerField(read_only=True)
     active_customers = serializers.IntegerField(read_only=True)
+    logo_url = serializers.SerializerMethodField()
     
     class Meta:
         model = Company
         fields = [
             'id', 'name', 'slug', 'company_type', 'email', 'phone_number',
             'address', 'city', 'county', 'postal_code', 'registration_number',
-            'tax_pin', 'website', 'logo', 'is_active', 'subscription_plan',
+            'tax_pin', 'website', 'logo', 'logo_url', 'is_active', 'subscription_plan',
             'subscription_expiry', 'total_customers', 'active_customers',
             'created_at', 'updated_at', 'created_by'
         ]
@@ -363,6 +364,14 @@ class CompanySerializer(serializers.ModelSerializer):
                 validated_data['created_by'] = request.user
         
         return super().create(validated_data)
+
+    def get_logo_url(self, obj):
+        if not obj.logo:
+            return None
+        request = self.context.get('request')
+        if request:
+            return request.build_absolute_uri(obj.logo.url)
+        return obj.logo.url
 
 
 class TenantSerializer(serializers.ModelSerializer):
