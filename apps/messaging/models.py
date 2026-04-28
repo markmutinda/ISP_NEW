@@ -342,6 +342,18 @@ class SMSNotificationSettings(models.Model):
         help_text="Phone number to receive system alerts (e.g. +2547...)"
     )
 
+    # ── Router Offline Alerts ──────────────────────────────────────────────
+    router_offline_enabled = models.BooleanField(
+        default=False,
+        help_text="Send SMS when any MikroTik router goes offline"
+    )
+    router_offline_numbers = models.JSONField(
+        default=list,
+        blank=True,
+        help_text="List of phone numbers to alert on router offline (e.g. ['0712345678'])"
+    )
+    # ───────────────────────────────────────────────────────────────────────
+
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:

@@ -281,56 +281,139 @@ def send_loyalty_notification_sms(self, customer_id, message_type='points_earned
         raise self.retry(exc=e)
 
 
-@shared_task(bind=True, max_retries=2, default_retry_delay=30)
-def send_router_offline_alert(self, router_name):
+@shared_task(
+    bind=True,
+    queue='notifications',
+    max_retries=3,
+    default_retry_delay=30,
+    ignore_result=True,
+)
+def send_router_offline_alert(self, router_name: str, schema_name: str = None):
     """
-    Triggered when a router drops from 'online' to 'offline'.
-    Sends an SMS alert to the configured system alert phone number.
+    Send SMS to configured alert numbers when a MikroTik router goes offline.
+
+    Called from Router.sync_status() on the online → offline transition.
+    Runs inside the correct tenant schema so it reads the right settings.
+    
+    Supports multiple recipient numbers via the new router_offline_numbers JSONField.
     """
     try:
-        from .models import SMSNotificationSettings, SMSGatewayConfig, SMSMessage
-        from .services.gateway_dispatcher import GatewayDispatcher
-        from decimal import Decimal
-
-        settings = SMSNotificationSettings.get_settings()
-        
-        # Guard: Check if the feature is enabled and a phone number is provided
-        if not settings.system_router_offline or not settings.system_alert_phone:
-            logger.debug(f"Router offline alert disabled or no alert phone configured. router={router_name}")
-            return
-
-        config = SMSGatewayConfig.objects.filter(is_active=True).first()
-        if not config:
-            logger.warning("No active SMS gateway for offline alert.")
-            return
-
-        phone = settings.system_alert_phone
-        msg = f"SYSTEM ALERT: Your router '{router_name}' is currently OFFLINE. Please check the network."
-
-        dispatcher = GatewayDispatcher()
-        result = dispatcher.send_sms(to=phone, message=msg)
-
-        # Log the system message in the general SMS history
-        SMSMessage.objects.create(
-            recipient=phone,
-            recipient_name="System Admin",
-            message=msg,
-            status=result.get('status', 'failed'),
-            type='automated',
-            provider=config.provider,
-            provider_message_id=result.get('provider_id', ''),
-            cost=result.get('cost', Decimal('0.00')),
-            error_message=result.get('error', ''),
-        )
-        
-        if result.get('success'):
-            logger.info(f"Router offline alert sent for '{router_name}' to {phone}")
+        if schema_name:
+            from django_tenants.utils import schema_context
+            with schema_context(schema_name):
+                _dispatch_router_offline_sms(router_name)
         else:
-            logger.warning(f"Router offline alert failed for '{router_name}': {result.get('error')}")
-            
+            _dispatch_router_offline_sms(router_name)
+
+    except Exception as exc:
+        logger.error(
+            f"[ROUTER ALERT] Failed for router '{router_name}' "
+            f"(schema={schema_name}): {exc}",
+            exc_info=True,
+        )
+        try:
+            raise self.retry(exc=exc)
+        except self.MaxRetriesExceededError:
+            logger.error(f"[ROUTER ALERT] Max retries exceeded for '{router_name}'. Giving up.")
+
+
+def _dispatch_router_offline_sms(router_name: str):
+    """
+    Inner function that runs inside the correct tenant schema context.
+    Reads notification settings, validates recipients, and sends SMS.
+    Supports both legacy single-number and new multi-number configurations.
+    """
+    from .models import SMSNotificationSettings, SMSGatewayConfig, SMSMessage
+    from .services.gateway_dispatcher import GatewayDispatcher
+    from decimal import Decimal
+
+    try:
+        settings_obj = SMSNotificationSettings.objects.first()
     except Exception as e:
-        logger.error(f"send_router_offline_alert error for router '{router_name}': {e}")
-        raise self.retry(exc=e)
+        logger.warning(f"[ROUTER ALERT] Could not read SMSNotificationSettings: {e}")
+        return
+
+    if not settings_obj:
+        logger.debug("[ROUTER ALERT] No SMSNotificationSettings record found — skipping")
+        return
+
+    # NEW: Check the new router_offline_enabled field
+    if not settings_obj.router_offline_enabled:
+        logger.debug(f"[ROUTER ALERT] Router offline alerts disabled — skipping for '{router_name}'")
+        return
+
+    # NEW: Get the list of numbers from router_offline_numbers JSONField
+    numbers = list(settings_obj.router_offline_numbers or [])
+    
+    # FALLBACK: If no numbers in new field, check legacy fields for backward compatibility
+    if not numbers:
+        legacy_phone = getattr(settings_obj, 'system_alert_phone', '')
+        if legacy_phone:
+            numbers = [legacy_phone]
+            logger.info(f"[ROUTER ALERT] Using legacy system_alert_phone: {legacy_phone}")
+        else:
+            logger.info(
+                f"[ROUTER ALERT] Router '{router_name}' offline but no recipients configured"
+            )
+            return
+
+    # Build the alert message
+    message = (
+        f"\u26a0\ufe0f ALERT: Router '{router_name}' has gone OFFLINE. "
+        f"Please check your network immediately."
+    )
+
+    # Get the active gateway
+    config = SMSGatewayConfig.objects.filter(is_active=True).first()
+    if not config and not getattr(settings_obj, 'use_inbuilt_system', False):
+        logger.warning("[ROUTER ALERT] No active SMS gateway for offline alert.")
+        return
+
+    sent_count = 0
+    failed_phones = []
+
+    for phone in numbers:
+        if not phone or not phone.strip():
+            continue
+            
+        phone = phone.strip()
+        try:
+            dispatcher = GatewayDispatcher()
+            result = dispatcher.send_sms(to=phone, message=message)
+
+            # Log the system message in the general SMS history
+            SMSMessage.objects.create(
+                recipient=phone,
+                recipient_name="System Admin",
+                message=message,
+                status=result.get('status', 'failed'),
+                type='automated',
+                provider=config.provider if config else 'inbuilt',
+                provider_message_id=result.get('provider_id', ''),
+                cost=result.get('cost', Decimal('0.00')),
+                error_message=result.get('error', ''),
+            )
+            
+            if result.get('success'):
+                sent_count += 1
+                logger.info(f"[ROUTER ALERT] Sent to {phone} for router '{router_name}'")
+            else:
+                failed_phones.append(phone)
+                logger.warning(f"[ROUTER ALERT] Failed to send to {phone}: {result.get('error')}")
+                
+        except Exception as e:
+            failed_phones.append(phone)
+            logger.error(f"[ROUTER ALERT] Exception sending to {phone}: {e}")
+
+    logger.info(
+        f"[ROUTER ALERT] Completed — router='{router_name}' "
+        f"sent={sent_count}/{len(numbers)}"
+    )
+    
+    if failed_phones:
+        logger.warning(
+            f"[ROUTER ALERT] Failed recipients for '{router_name}': {failed_phones}"
+        )
 
 
 # FIX 5: Campaign bulk SMS — Celery task with tenant context

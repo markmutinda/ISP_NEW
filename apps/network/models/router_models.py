@@ -352,9 +352,10 @@ class Router(AuditMixin):
         
         # ── TRIGGER ALERT IF ROUTER GOES OFFLINE ──
         # Detect transition from online to offline
+        # Pass schema_name so the task runs in the right tenant context
         if old_status == 'online' and new_status == 'offline':
             from apps.messaging.tasks import send_router_offline_alert
-            send_router_offline_alert.delay(self.name)
+            send_router_offline_alert.delay(self.name, schema_name=self.schema_name)
         
         # Update status and timestamp
         if new_status == 'online':
