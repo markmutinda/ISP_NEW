@@ -47,9 +47,34 @@ def _send_auto_sms(phone: str, message: str, trigger_flag: str, msg_type='automa
         return False
 
 
+def _get_rendered_message(event_type: str, default_msg: str, **context) -> str:
+    """
+    Fetches the active custom template for a given event from the database.
+    Replaces {variable} placeholders with actual values.
+    Falls back to the hardcoded default_msg if no template exists.
+    """
+    from apps.messaging.models import SMSTemplate
+    
+    # Query the database for the user's saved template for this specific event
+    template = SMSTemplate.objects.filter(event_type=event_type, is_active=True).first()
+    
+    if not template or not template.content.strip():
+        return default_msg
+        
+    msg = template.content
+    # Dynamically inject the context variables (e.g., {name}, {amount}) into the text
+    for key, value in context.items():
+        msg = msg.replace(f"{{{key}}}", str(value))
+        
+    return msg
+
+
 @shared_task(bind=True, max_retries=2, default_retry_delay=30)
 def send_payment_confirmation_sms(self, customer_id, amount, reference=''):
-    """Triggered after a payment is marked COMPLETED."""
+    """
+    Triggered after a payment is marked COMPLETED.
+    Uses dynamic template from DB with event_type='pppoe_payment'
+    """
     try:
         from apps.customers.models import Customer
         customer = Customer.objects.select_related('user').get(id=customer_id)
@@ -58,10 +83,17 @@ def send_payment_confirmation_sms(self, customer_id, amount, reference=''):
             return
 
         name = customer.user.first_name or 'Customer'
-        msg = (
-            f"Hi {name}, your payment of KES {amount:,.2f} has been received. "
-            f"Ref: {reference}. Thank you!"
+        default_msg = f"Hi {name}, your payment of KES {amount:,.2f} has been received. Ref: {reference}. Thank you!"
+        
+        # Pull from DB: event_type must match the value saved from the frontend React Select component
+        msg = _get_rendered_message(
+            event_type='pppoe_payment',
+            default_msg=default_msg,
+            name=name,
+            amount=f"{amount:,.2f}",
+            reference=reference
         )
+        
         _send_auto_sms(phone, msg, 'auto_payment_confirmation')
     except Exception as e:
         logger.error(f"payment_confirmation_sms error: {e}")
@@ -70,7 +102,10 @@ def send_payment_confirmation_sms(self, customer_id, amount, reference=''):
 
 @shared_task(bind=True, max_retries=2, default_retry_delay=30)
 def send_welcome_sms(self, customer_id):
-    """Triggered when a new customer is created."""
+    """
+    Triggered when a new customer is created.
+    Uses dynamic template from DB with event_type='pppoe_welcome'
+    """
     try:
         from apps.customers.models import Customer
         customer = Customer.objects.select_related('user').get(id=customer_id)
@@ -79,10 +114,14 @@ def send_welcome_sms(self, customer_id):
             return
 
         name = customer.user.first_name or 'Customer'
-        msg = (
-            f"Welcome {name}! Your account has been set up. "
-            f"Contact support if you need any help. Enjoy your service!"
+        default_msg = f"Welcome {name}! Your account has been set up. Contact support if you need any help. Enjoy your service!"
+        
+        msg = _get_rendered_message(
+            event_type='pppoe_welcome',
+            default_msg=default_msg,
+            name=name
         )
+        
         _send_auto_sms(phone, msg, 'auto_welcome_message')
     except Exception as e:
         logger.error(f"welcome_sms error: {e}")
@@ -91,7 +130,10 @@ def send_welcome_sms(self, customer_id):
 
 @shared_task(bind=True, max_retries=2, default_retry_delay=30)
 def send_expiry_reminder_sms(self, customer_id, days_left=2):
-    """Triggered before a subscription/plan expires."""
+    """
+    Triggered before a subscription/plan expires.
+    Uses dynamic template from DB with event_type='pppoe_expiry'
+    """
     try:
         from apps.customers.models import Customer
         customer = Customer.objects.select_related('user').get(id=customer_id)
@@ -100,10 +142,15 @@ def send_expiry_reminder_sms(self, customer_id, days_left=2):
             return
 
         name = customer.user.first_name or 'Customer'
-        msg = (
-            f"Hi {name}, your internet plan expires in {days_left} day(s). "
-            f"Please renew to avoid service interruption."
+        default_msg = f"Hi {name}, your internet plan expires in {days_left} day(s). Please renew to avoid service interruption."
+        
+        msg = _get_rendered_message(
+            event_type='pppoe_expiry',
+            default_msg=default_msg,
+            name=name,
+            days_left=days_left
         )
+        
         _send_auto_sms(phone, msg, 'auto_expiry_reminder')
     except Exception as e:
         logger.error(f"expiry_reminder_sms error: {e}")
@@ -112,7 +159,10 @@ def send_expiry_reminder_sms(self, customer_id, days_left=2):
 
 @shared_task(bind=True, max_retries=2, default_retry_delay=30)
 def send_service_suspension_sms(self, customer_id, reason=''):
-    """Triggered when a customer's service is suspended."""
+    """
+    Triggered when a customer's service is suspended.
+    Uses dynamic template from DB with event_type='pppoe_suspended'
+    """
     try:
         from apps.customers.models import Customer
         customer = Customer.objects.select_related('user').get(id=customer_id)
@@ -121,11 +171,15 @@ def send_service_suspension_sms(self, customer_id, reason=''):
             return
 
         name = customer.user.first_name or 'Customer'
-        reason_text = f" Reason: {reason}" if reason else ""
-        msg = (
-            f"Hi {name}, your internet service has been suspended.{reason_text} "
-            f"Please contact support or make a payment to restore service."
+        default_msg = f"Hi {name}, your internet service has been suspended. Reason: {reason} Please contact support or make a payment to restore service." if reason else f"Hi {name}, your internet service has been suspended. Please contact support or make a payment to restore service."
+        
+        msg = _get_rendered_message(
+            event_type='pppoe_suspended',
+            default_msg=default_msg,
+            name=name,
+            reason=reason
         )
+        
         _send_auto_sms(phone, msg, 'auto_service_suspension')
     except Exception as e:
         logger.error(f"service_suspension_sms error: {e}")
@@ -137,6 +191,7 @@ def send_loyalty_notification_sms(self, customer_id, message_type='points_earned
     """
     Loyalty program SMS notifications.
     message_type: points_earned | redemption | tier_upgrade | expiry_warning
+    Uses dynamic template from DB with event_type='loyalty_{message_type}'
     """
     try:
         from apps.customers.models import Customer
@@ -148,26 +203,57 @@ def send_loyalty_notification_sms(self, customer_id, message_type='points_earned
             return
 
         name = customer.user.first_name or 'Customer'
-
+        
+        # Build default messages and context based on message_type
         if message_type == 'points_earned':
             points = kwargs.get('points', 0)
             reason = kwargs.get('reason', '')
-            msg = f"Hi {name}, you earned {points} loyalty points! {reason}. Keep it up!"
+            default_msg = f"Hi {name}, you earned {points} loyalty points! {reason}. Keep it up!"
+            context = {
+                'name': name,
+                'points': points,
+                'reason': reason
+            }
+            event_type = 'loyalty_points_earned'
         elif message_type == 'redemption':
             reward_name = kwargs.get('reward_name', 'a reward')
             voucher_code = kwargs.get('voucher_code', '')
-            msg = f"Hi {name}, you redeemed {reward_name}."
+            default_msg = f"Hi {name}, you redeemed {reward_name}."
             if voucher_code:
-                msg += f" Voucher code: {voucher_code}"
+                default_msg += f" Voucher code: {voucher_code}"
+            context = {
+                'name': name,
+                'reward_name': reward_name,
+                'voucher_code': voucher_code
+            }
+            event_type = 'loyalty_redemption'
         elif message_type == 'tier_upgrade':
             new_tier = kwargs.get('new_tier', '')
-            msg = f"Congratulations {name}! You've been upgraded to {new_tier} tier! Enjoy your new benefits."
+            default_msg = f"Congratulations {name}! You've been upgraded to {new_tier} tier! Enjoy your new benefits."
+            context = {
+                'name': name,
+                'new_tier': new_tier
+            }
+            event_type = 'loyalty_tier_upgrade'
         elif message_type == 'expiry_warning':
             points = kwargs.get('points', 0)
             days = kwargs.get('days', 30)
-            msg = f"Hi {name}, {points} loyalty points will expire in {days} days. Redeem them now!"
+            default_msg = f"Hi {name}, {points} loyalty points will expire in {days} days. Redeem them now!"
+            context = {
+                'name': name,
+                'points': points,
+                'days': days
+            }
+            event_type = 'loyalty_expiry_warning'
         else:
             return
+
+        # Try to get custom template from DB, fall back to default
+        msg = _get_rendered_message(
+            event_type=event_type,
+            default_msg=default_msg,
+            **context
+        )
 
         # Use the generic auto-sms helper (always send loyalty SMS if gateway active)
         from .models import SMSGatewayConfig, SMSMessage
