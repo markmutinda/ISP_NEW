@@ -14,6 +14,7 @@ from .views import (
     SMSTopupInitiateView,
     SMSTopupCallbackView,
     CustomerSearchView,
+    CampaignSendToGroupView,  # ← ADDED
 )
 
 router = DefaultRouter()
@@ -33,6 +34,9 @@ urlpatterns = [
     path('campaigns/<int:pk>/start/', SMSCampaignViewSet.as_view({'post': 'start'}), name='campaign-start'),
     path('campaigns/<int:pk>/cancel/', SMSCampaignViewSet.as_view({'post': 'cancel'}), name='campaign-cancel'),
 
+    # NEW: send to group (pppoe / hotspot / all)
+    path('campaigns/send-to-group/', CampaignSendToGroupView.as_view(), name='campaign-send-to-group'),  # ← ADDED
+
     # Stats & balance (live provider balance)
     path('sms/stats/', SMSStatsView.as_view(), name='sms-stats'),
     path('sms/balance/', SMSBalanceView.as_view(), name='sms-balance'),
@@ -41,7 +45,7 @@ urlpatterns = [
     path('gateway/<int:pk>/activate/', SMSGatewayConfigViewSet.as_view({'post': 'activate'}), name='gateway-activate'),
     path('gateway/<int:pk>/test/', SMSGatewayConfigViewSet.as_view({'post': 'test_connection'}), name='gateway-test'),
     path('gateway/providers/', SMSGatewayConfigViewSet.as_view({'get': 'list_providers'}), name='gateway-providers'),
-    path('gateway/save/', SMSGatewayConfigViewSet.as_view({'post': 'save_config', 'patch': 'save_config'}), name='gateway-save'),  # ← ADDED
+    path('gateway/save/', SMSGatewayConfigViewSet.as_view({'post': 'save_config', 'patch': 'save_config'}), name='gateway-save'),
 
     # Notification settings (hotspot + pppoe toggles)
     path('notification-settings/', SMSNotificationSettingsView.as_view(), name='sms-notification-settings'),

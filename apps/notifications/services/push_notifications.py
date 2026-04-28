@@ -3,7 +3,7 @@ import json
 import requests
 from django.conf import settings
 from django.utils import timezone
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Union
 from firebase_admin import messaging, initialize_app
 from apps.core.models import AuditLog
 
