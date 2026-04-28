@@ -281,6 +281,58 @@ def send_loyalty_notification_sms(self, customer_id, message_type='points_earned
         raise self.retry(exc=e)
 
 
+@shared_task(bind=True, max_retries=2, default_retry_delay=30)
+def send_router_offline_alert(self, router_name):
+    """
+    Triggered when a router drops from 'online' to 'offline'.
+    Sends an SMS alert to the configured system alert phone number.
+    """
+    try:
+        from .models import SMSNotificationSettings, SMSGatewayConfig, SMSMessage
+        from .services.gateway_dispatcher import GatewayDispatcher
+        from decimal import Decimal
+
+        settings = SMSNotificationSettings.get_settings()
+        
+        # Guard: Check if the feature is enabled and a phone number is provided
+        if not settings.system_router_offline or not settings.system_alert_phone:
+            logger.debug(f"Router offline alert disabled or no alert phone configured. router={router_name}")
+            return
+
+        config = SMSGatewayConfig.objects.filter(is_active=True).first()
+        if not config:
+            logger.warning("No active SMS gateway for offline alert.")
+            return
+
+        phone = settings.system_alert_phone
+        msg = f"SYSTEM ALERT: Your router '{router_name}' is currently OFFLINE. Please check the network."
+
+        dispatcher = GatewayDispatcher()
+        result = dispatcher.send_sms(to=phone, message=msg)
+
+        # Log the system message in the general SMS history
+        SMSMessage.objects.create(
+            recipient=phone,
+            recipient_name="System Admin",
+            message=msg,
+            status=result.get('status', 'failed'),
+            type='automated',
+            provider=config.provider,
+            provider_message_id=result.get('provider_id', ''),
+            cost=result.get('cost', Decimal('0.00')),
+            error_message=result.get('error', ''),
+        )
+        
+        if result.get('success'):
+            logger.info(f"Router offline alert sent for '{router_name}' to {phone}")
+        else:
+            logger.warning(f"Router offline alert failed for '{router_name}': {result.get('error')}")
+            
+    except Exception as e:
+        logger.error(f"send_router_offline_alert error for router '{router_name}': {e}")
+        raise self.retry(exc=e)
+
+
 # FIX 5: Campaign bulk SMS — Celery task with tenant context
 @shared_task(bind=True, max_retries=2)
 def process_campaign_sms(self, campaign_id: int, phones: list, message: str):

@@ -265,6 +265,9 @@ class SMSNotificationSettingsSerializer(serializers.ModelSerializer):
             'pppoe_service_suspended', 'pppoe_service_resumed',
             'pppoe_plan_changed', 'pppoe_renewal_confirmation',
             'pppoe_new_subscription',
+            # system notifications
+            'system_router_offline', 
+            'system_alert_phone',
             'updated_at',
         ]
         read_only_fields = ['updated_at']

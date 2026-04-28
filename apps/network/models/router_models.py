@@ -335,21 +335,32 @@ class Router(AuditMixin):
             self.save(update_fields=['status', 'updated_at'])
             return self.status
 
+        # Store the old status before checking
+        old_status = self.status
+
         # 3. FAST SOCKET PING: Just check if port 8728 is open (bypasses heavy auth)
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         sock.settimeout(1.5)  # Max 1.5 seconds wait time per router!
         
         try:
             result = sock.connect_ex((target_ip, self.api_port or 8728))
-            if result == 0:
-                self.status = 'online'
-                self.last_seen = timezone.now()
-            else:
-                self.status = 'offline'
+            new_status = 'online' if result == 0 else 'offline'
         except Exception:
-            self.status = 'offline'
+            new_status = 'offline'
         finally:
             sock.close()
+        
+        # ── TRIGGER ALERT IF ROUTER GOES OFFLINE ──
+        # Detect transition from online to offline
+        if old_status == 'online' and new_status == 'offline':
+            from apps.messaging.tasks import send_router_offline_alert
+            send_router_offline_alert.delay(self.name)
+        
+        # Update status and timestamp
+        if new_status == 'online':
+            self.last_seen = timezone.now()
+        
+        self.status = new_status
         
         # 4. UPDATE DB silently
         self.save(update_fields=['status', 'last_seen', 'updated_at'])

@@ -332,6 +332,16 @@ class SMSNotificationSettings(models.Model):
     pppoe_new_subscription = models.BooleanField(default=True,
         help_text="SMS when admin creates a new PPPoE subscription for a customer")
 
+    # ── SYSTEM NOTIFICATIONS ───────────────────────────────────────────────
+    system_router_offline = models.BooleanField(
+        default=False,
+        help_text="Send an SMS alert when a router goes offline"
+    )
+    system_alert_phone = models.CharField(
+        max_length=20, blank=True, default='',
+        help_text="Phone number to receive system alerts (e.g. +2547...)"
+    )
+
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
