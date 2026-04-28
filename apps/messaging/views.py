@@ -459,8 +459,11 @@ class SMSGatewayConfigViewSet(viewsets.ModelViewSet):
     /api/v1/messaging/gateway/
     CRUD for per-tenant SMS gateway configuration.
     """
-    queryset = SMSGatewayConfig.objects.order_by('-is_active', '-updated_at')
     permission_classes = [IsAuthenticated, IsAdminOrStaff]
+
+    def get_queryset(self):
+        # Explicitly scope to current tenant schema to avoid cross-tenant leaks
+        return SMSGatewayConfig.objects.order_by('-is_active', '-updated_at')
 
     def get_serializer_class(self):
         if self.action in ('create', 'update', 'partial_update'):
@@ -506,6 +509,34 @@ class SMSGatewayConfigViewSet(viewsets.ModelViewSet):
     def list_providers(self, request):
         """List available providers and their required fields."""
         return Response(PROVIDER_FIELDS)
+
+    @action(detail=False, methods=['post', 'patch'], url_path='save')
+    def save_config(self, request):
+        """
+        Upsert the active gateway config — avoids 404 when frontend
+        has a stale ID. POST body same as create/update.
+        """
+        serializer = SMSGatewayConfigWriteSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
+
+        # Deactivate all others, then get_or_create based on provider
+        SMSGatewayConfig.objects.exclude(
+            provider=data.get('provider', '')
+        ).update(is_active=False)
+
+        config, created = SMSGatewayConfig.objects.get_or_create(
+            provider=data.get('provider', 'africastalking'),
+            defaults=data
+        )
+        # Update existing fields (skip blanks for masked keys)
+        for field, value in data.items():
+            if value not in (None, '', b''):
+                setattr(config, field, value)
+        config.is_active = True
+        config.save()
+
+        return Response(SMSGatewayConfigSerializer(config).data)
 
 
 # ============================================================

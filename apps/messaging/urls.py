@@ -37,10 +37,11 @@ urlpatterns = [
     path('sms/stats/', SMSStatsView.as_view(), name='sms-stats'),
     path('sms/balance/', SMSBalanceView.as_view(), name='sms-balance'),
 
-    # Gateway CRUD + test
+    # Gateway CRUD + test + upsert
     path('gateway/<int:pk>/activate/', SMSGatewayConfigViewSet.as_view({'post': 'activate'}), name='gateway-activate'),
     path('gateway/<int:pk>/test/', SMSGatewayConfigViewSet.as_view({'post': 'test_connection'}), name='gateway-test'),
     path('gateway/providers/', SMSGatewayConfigViewSet.as_view({'get': 'list_providers'}), name='gateway-providers'),
+    path('gateway/save/', SMSGatewayConfigViewSet.as_view({'post': 'save_config', 'patch': 'save_config'}), name='gateway-save'),  # ← ADDED
 
     # Notification settings (hotspot + pppoe toggles)
     path('notification-settings/', SMSNotificationSettingsView.as_view(), name='sms-notification-settings'),
