@@ -146,7 +146,7 @@ class CustomerCreateSerializer(serializers.ModelSerializer):
 
 class CustomerUpdateSerializer(serializers.ModelSerializer):
     """Serializer for updating customer details"""
-    email = serializers.EmailField(source='user.email', required=False, allow_null=True)
+    email = serializers.EmailField(source='user.email', required=False, allow_null=True, allow_blank=True)
     first_name = serializers.CharField(source='user.first_name', required=False, allow_blank=True)
     last_name = serializers.CharField(source='user.last_name', required=False, allow_blank=True)
     phone_number = serializers.CharField(source='user.phone_number', required=False, allow_blank=True)

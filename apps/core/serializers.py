@@ -294,7 +294,7 @@ class ProfileSerializer(serializers.ModelSerializer):
             'phone_number', 'id_number', 'gender', 'date_of_birth',
             'profile_picture', 'role', 'role_display', 'is_verified',
             'last_login', 'created_at', 'updated_at',
-            'company_name', 'tenant_subdomain'  # Add these
+            'company_name', 'tenant_subdomain', 'company', 'company_id'
         ]
         read_only_fields = ['id', 'email', 'role', 'is_verified', 'last_login', 'created_at', 'updated_at']
     
