@@ -350,8 +350,9 @@ def _dispatch_router_offline_sms(router_name: str):
         logger.info(f"[ROUTER ALERT] No SMSNotificationSettings record found for this tenant — skipping '{router_name}'")
         return
 
-    # SAFE CHECK: Look for either 'router_offline_enabled' or 'system_router_offline'
-    is_enabled = getattr(settings_obj, 'router_offline_enabled', getattr(settings_obj, 'system_router_offline', False))
+    # FIXED: Use 'or' operator to check both possible field names
+    # If either router_offline_enabled OR system_router_offline is True, alerts are enabled
+    is_enabled = getattr(settings_obj, 'router_offline_enabled', False) or getattr(settings_obj, 'system_router_offline', False)
     print(f"-> Toggle Status in Database: {is_enabled}")
     print(f"   - router_offline_enabled: {getattr(settings_obj, 'router_offline_enabled', 'NOT FOUND')}")
     print(f"   - system_router_offline: {getattr(settings_obj, 'system_router_offline', 'NOT FOUND')}")
