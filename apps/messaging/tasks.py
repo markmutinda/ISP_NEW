@@ -297,6 +297,12 @@ def send_router_offline_alert(self, router_name: str, schema_name: str = None):
     
     Supports multiple recipient numbers via the new router_offline_numbers JSONField.
     """
+    print(f"\n\n==================================================")
+    print(f"🚨 ROUTER OFFLINE TASK TRIGGERED")
+    print(f"Router: {router_name}")
+    print(f"Schema (Tenant): {schema_name}")
+    print(f"==================================================")
+    
     try:
         if schema_name:
             from django_tenants.utils import schema_context
@@ -306,6 +312,7 @@ def send_router_offline_alert(self, router_name: str, schema_name: str = None):
             _dispatch_router_offline_sms(router_name)
 
     except Exception as exc:
+        print(f"❌ CRITICAL ERROR IN TASK: {exc}")
         logger.error(
             f"[ROUTER ALERT] Failed for router '{router_name}' "
             f"(schema={schema_name}): {exc}",
@@ -314,6 +321,7 @@ def send_router_offline_alert(self, router_name: str, schema_name: str = None):
         try:
             raise self.retry(exc=exc)
         except self.MaxRetriesExceededError:
+            print(f"❌ Max retries exceeded for '{router_name}'. Giving up.")
             logger.error(f"[ROUTER ALERT] Max retries exceeded for '{router_name}'. Giving up.")
 
 
@@ -327,59 +335,86 @@ def _dispatch_router_offline_sms(router_name: str):
     from .services.gateway_dispatcher import GatewayDispatcher
     from decimal import Decimal
 
+    print(f"\n->_dispatch_router_offline_sms() called for router: {router_name}")
+    print(f"-> Querying Notification Settings...")
+
     try:
         settings_obj = SMSNotificationSettings.objects.first()
     except Exception as e:
+        print(f"-> ❌ EXCEPTION reading SMSNotificationSettings: {e}")
         logger.warning(f"[ROUTER ALERT] Could not read SMSNotificationSettings: {e}")
         return
 
     if not settings_obj:
+        print(f"-> 🛑 EXIT: No SMSNotificationSettings record found for this tenant!")
         logger.info(f"[ROUTER ALERT] No SMSNotificationSettings record found for this tenant — skipping '{router_name}'")
         return
 
     # SAFE CHECK: Look for either 'router_offline_enabled' or 'system_router_offline'
     is_enabled = getattr(settings_obj, 'router_offline_enabled', getattr(settings_obj, 'system_router_offline', False))
+    print(f"-> Toggle Status in Database: {is_enabled}")
+    print(f"   - router_offline_enabled: {getattr(settings_obj, 'router_offline_enabled', 'NOT FOUND')}")
+    print(f"   - system_router_offline: {getattr(settings_obj, 'system_router_offline', 'NOT FOUND')}")
 
     if not is_enabled:
+        print(f"-> 🛑 EXIT: Alerts are toggled OFF in the database. (Did the frontend actually save it?)")
         logger.info(f"[ROUTER ALERT] Alerts are currently toggled OFF in settings — skipping for '{router_name}'")
         return
 
     # SAFE CHECK: Get the list of numbers from JSON or fallback to the single string field
     numbers = list(getattr(settings_obj, 'router_offline_numbers', []) or [])
+    print(f"-> router_offline_numbers (JSON array): {numbers}")
     
     # FALLBACK: Check legacy single phone field
     if not numbers:
         legacy_phone = getattr(settings_obj, 'system_alert_phone', '')
+        print(f"-> system_alert_phone (legacy field): '{legacy_phone}'")
         if legacy_phone:
             numbers = [legacy_phone]
+            print(f"-> Using legacy system_alert_phone: {legacy_phone}")
             logger.info(f"[ROUTER ALERT] Using legacy system_alert_phone: {legacy_phone}")
         else:
+            print(f"-> 🛑 EXIT: No phone numbers configured in the database!")
             logger.info(f"[ROUTER ALERT] Router '{router_name}' offline but NO PHONE NUMBERS are configured")
             return
+            
+    print(f"-> Sending to {len(numbers)} number(s): {numbers}")
 
     # Build the alert message
     message = (
         f"⚠️ ALERT: Router '{router_name}' has gone OFFLINE. "
         f"Please check your network immediately."
     )
+    print(f"-> Message: {message}")
 
     # Get the active gateway
     config = SMSGatewayConfig.objects.filter(is_active=True).first()
-    if not config and not getattr(settings_obj, 'use_inbuilt_system', False):
+    use_inbuilt = getattr(settings_obj, 'use_inbuilt_system', False)
+    print(f"-> Active gateway: {config.provider if config else 'None'}")
+    print(f"-> use_inbuilt_system setting: {use_inbuilt}")
+
+    if not config and not use_inbuilt:
+        print(f"-> 🛑 EXIT: No active SMS gateway found and Inbuilt System is OFF.")
         logger.warning(f"[ROUTER ALERT] No active SMS gateway found to send alert for '{router_name}'")
         return
+
+    print(f"-> Gateway OK. Dispatching SMS...")
+    print(f"-> {'-'*40}")
 
     sent_count = 0
     failed_phones = []
 
     for phone in numbers:
         if not phone or not phone.strip():
+            print(f"-> ⚠️ Skipping empty phone number")
             continue
             
         phone = phone.strip()
+        print(f"-> Sending to: {phone}")
         try:
             dispatcher = GatewayDispatcher()
             result = dispatcher.send_sms(to=phone, message=message)
+            print(f"   Gateway result: success={result.get('success')}, error={result.get('error')}")
 
             # Log the system message in the general SMS history
             SMSMessage.objects.create(
@@ -396,24 +431,33 @@ def _dispatch_router_offline_sms(router_name: str):
             
             if result.get('success'):
                 sent_count += 1
+                print(f"   ✅ SUCCESS! SMS sent to {phone}")
                 logger.info(f"[ROUTER ALERT] ✅ Sent to {phone} for router '{router_name}'")
             else:
                 failed_phones.append(phone)
+                print(f"   ❌ FAILED to send to {phone}: {result.get('error')}")
                 logger.warning(f"[ROUTER ALERT] ❌ Failed to send to {phone}: {result.get('error')}")
                 
         except Exception as e:
             failed_phones.append(phone)
+            print(f"   ❌ EXCEPTION sending to {phone}: {e}")
             logger.error(f"[ROUTER ALERT] Exception sending to {phone}: {e}")
 
+        print(f"   {'-'*40}")
+
+    print(f"\n-> [ROUTER ALERT] Completed — router='{router_name}' sent={sent_count}/{len(numbers)}")
     logger.info(
         f"[ROUTER ALERT] Completed — router='{router_name}' "
         f"sent={sent_count}/{len(numbers)}"
     )
     
     if failed_phones:
+        print(f"-> ⚠️ Failed recipients for '{router_name}': {failed_phones}")
         logger.warning(
             f"[ROUTER ALERT] Failed recipients for '{router_name}': {failed_phones}"
         )
+    
+    print(f"\n==================================================\n")
 
 
 # FIX 5: Campaign bulk SMS — Celery task with tenant context
