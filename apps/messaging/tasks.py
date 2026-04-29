@@ -334,39 +334,39 @@ def _dispatch_router_offline_sms(router_name: str):
         return
 
     if not settings_obj:
-        logger.debug("[ROUTER ALERT] No SMSNotificationSettings record found — skipping")
+        logger.info(f"[ROUTER ALERT] No SMSNotificationSettings record found for this tenant — skipping '{router_name}'")
         return
 
-    # NEW: Check the new router_offline_enabled field
-    if not settings_obj.router_offline_enabled:
-        logger.debug(f"[ROUTER ALERT] Router offline alerts disabled — skipping for '{router_name}'")
+    # SAFE CHECK: Look for either 'router_offline_enabled' or 'system_router_offline'
+    is_enabled = getattr(settings_obj, 'router_offline_enabled', getattr(settings_obj, 'system_router_offline', False))
+
+    if not is_enabled:
+        logger.info(f"[ROUTER ALERT] Alerts are currently toggled OFF in settings — skipping for '{router_name}'")
         return
 
-    # NEW: Get the list of numbers from router_offline_numbers JSONField
-    numbers = list(settings_obj.router_offline_numbers or [])
+    # SAFE CHECK: Get the list of numbers from JSON or fallback to the single string field
+    numbers = list(getattr(settings_obj, 'router_offline_numbers', []) or [])
     
-    # FALLBACK: If no numbers in new field, check legacy fields for backward compatibility
+    # FALLBACK: Check legacy single phone field
     if not numbers:
         legacy_phone = getattr(settings_obj, 'system_alert_phone', '')
         if legacy_phone:
             numbers = [legacy_phone]
             logger.info(f"[ROUTER ALERT] Using legacy system_alert_phone: {legacy_phone}")
         else:
-            logger.info(
-                f"[ROUTER ALERT] Router '{router_name}' offline but no recipients configured"
-            )
+            logger.info(f"[ROUTER ALERT] Router '{router_name}' offline but NO PHONE NUMBERS are configured")
             return
 
     # Build the alert message
     message = (
-        f"\u26a0\ufe0f ALERT: Router '{router_name}' has gone OFFLINE. "
+        f"⚠️ ALERT: Router '{router_name}' has gone OFFLINE. "
         f"Please check your network immediately."
     )
 
     # Get the active gateway
     config = SMSGatewayConfig.objects.filter(is_active=True).first()
     if not config and not getattr(settings_obj, 'use_inbuilt_system', False):
-        logger.warning("[ROUTER ALERT] No active SMS gateway for offline alert.")
+        logger.warning(f"[ROUTER ALERT] No active SMS gateway found to send alert for '{router_name}'")
         return
 
     sent_count = 0
@@ -396,10 +396,10 @@ def _dispatch_router_offline_sms(router_name: str):
             
             if result.get('success'):
                 sent_count += 1
-                logger.info(f"[ROUTER ALERT] Sent to {phone} for router '{router_name}'")
+                logger.info(f"[ROUTER ALERT] ✅ Sent to {phone} for router '{router_name}'")
             else:
                 failed_phones.append(phone)
-                logger.warning(f"[ROUTER ALERT] Failed to send to {phone}: {result.get('error')}")
+                logger.warning(f"[ROUTER ALERT] ❌ Failed to send to {phone}: {result.get('error')}")
                 
         except Exception as e:
             failed_phones.append(phone)
