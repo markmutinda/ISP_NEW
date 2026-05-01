@@ -318,7 +318,11 @@ class Router(AuditMixin):
             str: The updated status ('online' or 'offline')
         """
         import socket
+        import logging
         from django.utils import timezone
+        from django.db import connection as _conn
+        
+        logger = logging.getLogger(__name__)
         
         # 1. COOLDOWN: Don't check if we just checked less than 30 seconds ago
         if not force and self.last_seen:
@@ -355,7 +359,15 @@ class Router(AuditMixin):
         # Pass schema_name so the task runs in the right tenant context
         if old_status == 'online' and new_status == 'offline':
             from apps.messaging.tasks import send_router_offline_alert
-            send_router_offline_alert.delay(self.name, schema_name=self.schema_name)
+            
+            # FIX: Fallback to live DB connection schema if model field is None
+            effective_schema = self.schema_name or _conn.schema_name
+            
+            if effective_schema and effective_schema != 'public':
+                send_router_offline_alert.delay(self.name, schema_name=effective_schema)
+                logger.info(f"[OFFLINE ALERT] Queued SMS for {self.name} (schema={effective_schema})")
+            else:
+                logger.warning(f"[OFFLINE ALERT] Could not queue SMS — no valid schema for {self.name}")
         
         # Update status and timestamp
         if new_status == 'online':

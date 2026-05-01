@@ -527,7 +527,7 @@ class TenantTumaConfig(models.Model):
         }
 
 
-# ==================== InvoiceItemPayment Model ====================
+# ==================== InvoiceItemPayment Model (UPDATED - PayHero Removed) ====================
 
 class InvoiceItemPayment(models.Model):
     METHOD_TYPES = [
@@ -556,8 +556,9 @@ class InvoiceItemPayment(models.Model):
     method_type = models.CharField(max_length=20, choices=METHOD_TYPES)
     description = models.TextField(blank=True)
 
-    channel_id = models.IntegerField(null=True, blank=True)
-    is_payhero_enabled = models.BooleanField(default=False)
+    # REMOVED: channel_id = models.IntegerField(null=True, blank=True)
+    # REMOVED: is_payhero_enabled = models.BooleanField(default=False)
+    
     till_number = models.CharField(max_length=20, null=True, blank=True)
     paybill_number = models.CharField(max_length=20, null=True, blank=True)
     account_number = models.CharField(max_length=50, null=True, blank=True)
@@ -614,16 +615,16 @@ class InvoiceItemPayment(models.Model):
             models.Index(fields=['code']),
             models.Index(fields=['method_type']),
             models.Index(fields=['is_active']),
-            models.Index(fields=['channel_id']),
+            # REMOVED: models.Index(fields=['channel_id']),
             models.Index(fields=['is_default']),
             models.Index(fields=['schema_name', 'method_type']),
         ]
 
     def __str__(self):
-        payhero_status = " (PayHero)" if self.is_payhero_enabled else ""
+        # REMOVED: payhero_status = " (PayHero)" if self.is_payhero_enabled else ""
         mpesa_status = " (M-Pesa)" if self.mpesa_configuration else ""
         tuma_status = " (Tuma)" if self.tuma_configuration else ""
-        return f"{self.name}{payhero_status}{mpesa_status}{tuma_status}"
+        return f"{self.name}{mpesa_status}{tuma_status}"
 
     def calculate_fee(self, amount):
         if self.fee_type == 'PERCENTAGE':
@@ -644,7 +645,7 @@ class InvoiceItemPayment(models.Model):
         return None
 
 
-# ==================== Payment Model ====================
+# ==================== Payment Model (UPDATED - PayHero Removed) ====================
 
 class Payment(models.Model):
     PAYMENT_STATUS = [
@@ -699,8 +700,8 @@ class Payment(models.Model):
         help_text="Explicit link to the hotspot session that initiated this payment (for STK Push)"
     )
 
-    payhero_external_reference = models.CharField(max_length=255, blank=True, null=True, unique=True)
-    raw_callback = models.JSONField(null=True, blank=True)
+    # REMOVED: payhero_external_reference = models.CharField(max_length=255, blank=True, null=True, unique=True)
+    # REMOVED: raw_callback = models.JSONField(null=True, blank=True)
     
     mpesa_transaction = models.OneToOneField(
         'billing.MpesaTransaction',
@@ -762,7 +763,7 @@ class Payment(models.Model):
             models.Index(fields=['payment_date']),
             models.Index(fields=['transaction_id']),
             models.Index(fields=['mpesa_receipt']),
-            models.Index(fields=['payhero_external_reference']),
+            # REMOVED: models.Index(fields=['payhero_external_reference']),
             models.Index(fields=['tuma_merchant_request_id']),
             models.Index(fields=['tuma_checkout_request_id']),
             models.Index(fields=['hotspot_session']),  # Added index for the new field

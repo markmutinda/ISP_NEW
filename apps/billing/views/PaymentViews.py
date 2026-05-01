@@ -21,7 +21,6 @@ from ..models.payment_models import Payment
 from apps.core.permissions import IsCompanyAdmin, IsCompanyStaff
 from apps.customers.models import Customer
 from ..models.billing_models import Invoice
-# from ..models.payment_models import Payment, PaymentMethod, Receipt   # ← COMMENTED OUT to prevent circular/early import error
 from ..serializers import (
     PaymentSerializer, PaymentMethodSerializer, ReceiptSerializer,
     PaymentCreateSerializer, PaymentDetailSerializer, MpesaSTKPushSerializer,
@@ -477,17 +476,17 @@ class MpesaTransactionViewSet(viewsets.ReadOnlyModelViewSet):
 
 
 # ==========================
-# Payment Method Views (Updated)
+# Payment Method Views (Updated - PayHero Removed)
 # ==========================
 
 class PaymentMethodViewSet(viewsets.ModelViewSet):
     """
-    ViewSet for managing payment methods (including PayHero channels and M-Pesa)
+    ViewSet for managing payment methods (M-Pesa and Bank Transfers only)
     """
     permission_classes = [IsAuthenticated, IsCompanyAdmin]
     filter_backends = [DjangoFilterBackend, filters.SearchFilter]
-    filterset_fields = ['method_type', 'is_active', 'status', 'is_payhero_enabled']
-    search_fields = ['name', 'code', 'description', 'channel_id']
+    filterset_fields = ['method_type', 'is_active', 'status']  # REMOVED: 'is_payhero_enabled'
+    search_fields = ['name', 'code', 'description']  # REMOVED: 'channel_id'
 
     def get_queryset(self):
         from ..models.payment_models import InvoiceItemPayment
@@ -641,10 +640,11 @@ class PaymentMethodViewSet(viewsets.ModelViewSet):
 
     @action(detail=True, methods=['post'])
     def test_connection(self, request, pk=None):
+        """Test connection for M-Pesa payment methods only (PayHero removed)"""
         method = self.get_object()
 
         # Test M-Pesa connection if it's an M-Pesa method
-        if method.method_type.startswith('MPESA') and not method.is_payhero_enabled:
+        if method.method_type.startswith('MPESA'):
             if not method.mpesa_configuration:
                 return Response({
                     'status': 'error',
@@ -668,42 +668,6 @@ class PaymentMethodViewSet(viewsets.ModelViewSet):
                     'message': f'M-Pesa connection test failed: {str(e)}'
                 }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
-        # Test PayHero connection
-        elif method.is_payhero_enabled:
-            try:
-                auth_str = f"{settings.PAYHERO_API_USERNAME}:{settings.PAYHERO_API_PASSWORD}"
-                headers = {
-                    'Authorization': f'Basic {base64.b64encode(auth_str.encode()).decode()}',
-                    'Content-Type': 'application/json'
-                }
-                
-                response = requests.get(
-                    'https://api.payhero.co.ke/v1.1/channels',
-                    headers=headers,
-                    timeout=10
-                )
-                
-                if response.status_code == 200:
-                    channels = response.json()
-                    channel_exists = any(str(ch.get('id')) == str(method.channel_id) for ch in channels)
-                    
-                    return Response({
-                        'status': 'success' if channel_exists else 'warning',
-                        'message': 'PayHero connected' if channel_exists else 'Channel ID not found',
-                        'channel_found': channel_exists
-                    })
-                else:
-                    return Response({
-                        'status': 'error',
-                        'message': f'PayHero API error: {response.status_code}'
-                    }, status=status.HTTP_502_BAD_GATEWAY)
-                    
-            except Exception as e:
-                return Response({
-                    'status': 'error',
-                    'message': f'PayHero connection failed: {str(e)}'
-                }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-
         return Response({
             'status': 'info',
             'message': f'No test available for {method.method_type}'
@@ -711,19 +675,19 @@ class PaymentMethodViewSet(viewsets.ModelViewSet):
 
 
 # ==========================
-# Payment Views (Updated)
+# Payment Views (Updated - PayHero Removed)
 # ==========================
 
 class PaymentViewSet(viewsets.ModelViewSet):
     """
-    ViewSet for managing payments with unified PayHero + M-Pesa support
+    ViewSet for managing payments with M-Pesa support (PayHero removed)
     """
     permission_classes = [IsAuthenticated, IsCompanyStaff]
     filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
     filterset_fields = ['status', 'payment_method', 'customer', 'is_reconciled']
     search_fields = [
         'payment_number', 'customer__customer_code', 'transaction_id',
-        'mpesa_receipt', 'payhero_external_reference'
+        'mpesa_receipt'  # REMOVED: 'payhero_external_reference'
     ]
     ordering_fields = ['payment_date', 'amount', 'created_at']
 
@@ -1005,137 +969,6 @@ class PaymentViewSet(viewsets.ModelViewSet):
             'ResultCode': 0,
             'ResultDesc': 'Accepted'
         })
-
-    # === PayHero Unified Initiation ===
-    @action(detail=False, methods=['post'])
-    def initiate(self, request):
-        amount = Decimal(request.data.get('amount', 0))
-        external_reference = request.data.get('external_reference')
-        channel_id = request.data.get('channel_id')
-
-        if amount <= 0 or not external_reference:
-            return Response({'error': 'Invalid amount or external_reference'}, status=status.HTTP_400_BAD_REQUEST)
-
-        try:
-            from ..models.payment_models import InvoiceItemPayment
-            if channel_id:
-                method = InvoiceItemPayment.objects.get(
-                    schema_name=connection.schema_name,
-                    channel_id=channel_id,
-                    is_active=True
-                )
-            else:
-                method = InvoiceItemPayment.objects.get(
-                    schema_name=connection.schema_name,
-                    is_default=True,
-                    is_active=True
-                )
-        except InvoiceItemPayment.DoesNotExist:
-            return Response({'error': 'No valid payment method found'}, status=status.HTTP_400_BAD_REQUEST)
-        except Exception as e:
-            logger.error(f"Payment method lookup error: {str(e)}")
-            return Response({'error': 'Error finding payment method'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-
-        customer = getattr(request.user, 'customer_profile', None)
-        
-        from ..models.payment_models import Payment
-        payment = Payment.objects.create(
-            schema_name=connection.schema_name,
-            customer=customer,
-            amount=amount,
-            payment_method=method,
-            status='PENDING',
-            payment_reference=external_reference,
-            payhero_external_reference=external_reference if method.is_payhero_enabled else None,
-            created_by=request.user
-        )
-
-        if method.is_payhero_enabled and method.channel_id:
-            try:
-                payload = {
-                    "amount": int(amount),
-                    "channel_id": method.channel_id,
-                    "provider": "m-pesa" if "MPESA" in method.method_type else "bank",
-                    "external_reference": external_reference,
-                    "callback_url": settings.PAYHERO_CALLBACK_URL,
-                }
-                auth_str = f"{settings.PAYHERO_API_USERNAME}:{settings.PAYHERO_API_PASSWORD}"
-                headers = {
-                    'Authorization': f'Basic {base64.b64encode(auth_str.encode()).decode()}',
-                    'Content-Type': 'application/json'
-                }
-
-                response = requests.post(
-                    'https://api.payhero.co.ke/v1.1/payments/initiate',
-                    json=payload,
-                    headers=headers,
-                    timeout=30
-                )
-
-                if response.status_code == 200:
-                    resp_data = response.json()
-                    return Response({
-                        'status': 'success',
-                        'message': 'Payment initiated via PayHero',
-                        'payhero_response': resp_data,
-                        'payment_id': payment.id
-                    })
-                else:
-                    payment.status = 'FAILED'
-                    payment.failure_reason = response.text[:500]
-                    payment.save()
-                    return Response({
-                        'error': 'PayHero initiation failed',
-                        'detail': response.text
-                    }, status=status.HTTP_502_BAD_GATEWAY)
-
-            except Exception as e:
-                logger.error(f"PayHero initiation error: {str(e)}")
-                payment.status = 'FAILED'
-                payment.failure_reason = str(e)[:500]
-                payment.save()
-                return Response({'error': 'Gateway error'}, status=status.HTTP_502_BAD_GATEWAY)
-
-        return Response({
-            'status': 'info',
-            'message': 'Direct payment initiation not implemented in unified endpoint'
-        })
-
-    # === PayHero Callback ===
-    @csrf_exempt
-    @action(detail=False, methods=['post'], url_path='payhero/callback')
-    def payhero_callback(self, request):
-        data = request.data
-        logger.info(f"PayHero callback received: {json.dumps(data, default=str)}")
-
-        external_ref = data.get('external_reference')
-        if not external_ref:
-            return Response({'error': 'Missing external_reference'}, status=status.HTTP_400_BAD_REQUEST)
-
-        try:
-            with transaction.atomic():
-                from ..models.payment_models import Payment
-                payment = Payment.objects.select_for_update().get(
-                    payhero_external_reference=external_ref
-                )
-
-                new_status = 'COMPLETED' if str(data.get('status', '')).lower() in ['success', 'completed'] else 'FAILED'
-                payment.status = new_status
-                payment.raw_callback = data
-                payment.failure_reason = data.get('message', '') if new_status == 'FAILED' else ''
-                payment.save()
-
-                if new_status == 'COMPLETED':
-                    payment.mark_as_completed()
-
-            return Response({'status': 'ok'})
-
-        except Payment.DoesNotExist:
-            logger.warning(f"PayHero callback for unknown reference: {external_ref}")
-            return Response({'error': 'Payment not found'}, status=status.HTTP_404_NOT_FOUND)
-        except Exception as e:
-            logger.error(f"PayHero callback processing error: {str(e)}")
-            return Response({'error': 'Processing failed'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
     # === Bank Transfer ===
     @action(detail=False, methods=['post'])

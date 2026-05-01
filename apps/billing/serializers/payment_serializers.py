@@ -224,7 +224,7 @@ class MpesaCallbackSerializer(serializers.Serializer):
 
 
 # ==========================
-# Payment Method Serializers
+# Payment Method Serializers (UPDATED - PayHero Removed)
 # ==========================
 
 class PaymentMethodSerializer(serializers.ModelSerializer):
@@ -240,7 +240,8 @@ class PaymentMethodSerializer(serializers.ModelSerializer):
         model = InvoiceItemPayment
         fields = [
             'id', 'name', 'code', 'method_type', 'description',
-            'channel_id', 'is_payhero_enabled', 'mpesa_configuration', 'mpesa_configuration_details',
+            # REMOVED: 'channel_id', 'is_payhero_enabled',
+            'mpesa_configuration', 'mpesa_configuration_details',
             'till_number', 'paybill_number', 'account_number', 'bank_name', 'custom_link', 'is_default',
             'is_active', 'requires_confirmation', 'confirmation_timeout',
             'transaction_fee', 'fee_type', 'minimum_amount', 'maximum_amount',
@@ -249,11 +250,7 @@ class PaymentMethodSerializer(serializers.ModelSerializer):
         ]
         read_only_fields = ['created_at', 'updated_at', 'last_used']
 
-    def validate(self, data):
-        if data.get('is_payhero_enabled') and not data.get('channel_id'):
-            raise serializers.ValidationError({"channel_id": "This field is required when PayHero is enabled."})
-        
-        return data
+    # REMOVED: validate method that checked is_payhero_enabled and channel_id
 
 
 # ==========================
