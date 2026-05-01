@@ -36,10 +36,10 @@ from .views.customer_payment_views import (
     PaymentMethodToggleActiveView,
 )
 from .views.webhook_views import (
-    PayHeroSubscriptionWebhookView,
-    PayHeroHotspotWebhookView,
-    PayHeroBillingWebhookView,
-    MpesaC2BWebhookView,  # ADDED: Import the new M-Pesa C2B webhook view
+    # REMOVED: PayHeroSubscriptionWebhookView,
+    # REMOVED: PayHeroHotspotWebhookView,
+    # REMOVED: PayHeroBillingWebhookView,
+    MpesaC2BWebhookView,  # KEPT: M-Pesa C2B webhook view
 )
 
 # ==========================
@@ -155,11 +155,8 @@ urlpatterns = [
          name='mpesa-transaction-status'),
 
     # ==========================
-    # PayHero Endpoints (DEPRECATED - being phased out)
+    # REMOVED: PayHero Endpoints (DEPRECATED - fully removed)
     # ==========================
-    # NOTE: PayHero is being phased out in favor of Tuma
-    # These endpoints will be removed in a future release
-    path('payments/payhero/callback/', PaymentViewSet.as_view({'post': 'payhero_callback'}), name='payhero-callback'),
 
     # ==========================
     # Dashboard Endpoints
@@ -310,15 +307,9 @@ hotspot_admin_urlpatterns = [
 ]
 
 # ==========================
-# PayHero Webhook URLs (DEPRECATED - being phased out)
-# These receive callbacks from PayHero
-# NOTE: These will be removed once Tuma migration is complete
+# REMOVED: PayHero Webhook URLs (DEPRECATED - fully removed)
 # ==========================
-webhook_urlpatterns = [
-    path('subscription/', PayHeroSubscriptionWebhookView.as_view(), name='payhero-subscription-webhook'),
-    path('hotspot/', PayHeroHotspotWebhookView.as_view(), name='payhero-hotspot-webhook'),
-    path('billing/', PayHeroBillingWebhookView.as_view(), name='payhero-billing-webhook'),
-]
+# webhook_urlpatterns = [ ... ]  # DELETED
 
 # ==========================
 # M-Pesa Webhook URLs (PUBLIC - no auth)
@@ -339,7 +330,7 @@ tuma_webhook_urlpatterns = [
 # Combine all URL patterns for easy inclusion in main urls.py
 hotspot_all_urlpatterns = hotspot_urlpatterns + hotspot_admin_urlpatterns
 
-# Combine all webhook URL patterns (including Tuma)
-webhook_all_urlpatterns = webhook_urlpatterns + mpesa_webhook_urlpatterns + tuma_webhook_urlpatterns
+# Combine all webhook URL patterns (PayHero removed)
+webhook_all_urlpatterns = mpesa_webhook_urlpatterns + tuma_webhook_urlpatterns
 
 app_name = 'billing'
