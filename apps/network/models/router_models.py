@@ -354,20 +354,29 @@ class Router(AuditMixin):
         finally:
             sock.close()
         
-        # ── TRIGGER ALERT IF ROUTER GOES OFFLINE ──
-        # Detect transition from online to offline
-        # Pass schema_name so the task runs in the right tenant context
+        # ── TRIGGER ALERT ON STATUS TRANSITION ──
+        # Get effective schema for tenant context
+        effective_schema = self.schema_name or _conn.schema_name
+
+        # Handle OFFLINE transition
         if old_status == 'online' and new_status == 'offline':
             from apps.messaging.tasks import send_router_offline_alert
-            
-            # FIX: Fallback to live DB connection schema if model field is None
-            effective_schema = self.schema_name or _conn.schema_name
             
             if effective_schema and effective_schema != 'public':
                 send_router_offline_alert.delay(self.name, schema_name=effective_schema)
                 logger.info(f"[OFFLINE ALERT] Queued SMS for {self.name} (schema={effective_schema})")
             else:
                 logger.warning(f"[OFFLINE ALERT] Could not queue SMS — no valid schema for {self.name}")
+
+        # Handle ONLINE transition (new addition)
+        elif old_status == 'offline' and new_status == 'online':
+            from apps.messaging.tasks import send_router_online_alert
+            
+            if effective_schema and effective_schema != 'public':
+                send_router_online_alert.delay(self.name, schema_name=effective_schema)
+                logger.info(f"[ONLINE ALERT] Queued SMS for {self.name} (schema={effective_schema})")
+            else:
+                logger.warning(f"[ONLINE ALERT] Could not queue SMS — no valid schema for {self.name}")
         
         # Update status and timestamp
         if new_status == 'online':
