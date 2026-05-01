@@ -266,8 +266,11 @@ class SMSNotificationSettingsSerializer(serializers.ModelSerializer):
             'pppoe_plan_changed', 'pppoe_renewal_confirmation',
             'pppoe_new_subscription',
             # system notifications
-            'system_router_offline', 
+            'system_router_offline',
             'system_alert_phone',
+            # router offline/online alert configuration (JSON array & toggle)
+            'router_offline_numbers',
+            'router_offline_enabled',
             'updated_at',
         ]
         read_only_fields = ['updated_at']
