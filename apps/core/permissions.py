@@ -92,9 +92,19 @@ class IsCompanyAdmin(permissions.BasePermission):
         if request.user.is_superuser:
             return True
         
-        # User must have a company and be an admin role
-        if hasattr(request.user, 'company') and request.user.company:
-            return request.user.role == 'admin'
+        if request.user.role != 'admin':
+            return False
+
+        # Public-schema users have a real FK; tenant-schema users often carry
+        # tenant/company context through middleware plus denormalized fields.
+        if getattr(request.user, 'company', None):
+            return True
+
+        if getattr(request, 'company', None) or getattr(request, 'tenant', None):
+            return True
+
+        if getattr(request.user, 'company_name', None) or getattr(request.user, 'tenant_subdomain', None):
+            return True
         
         return False
 
@@ -113,10 +123,18 @@ class IsCompanyStaff(permissions.BasePermission):
         if request.user.is_superuser:
             return True
         
-        # User must have a company and be a staff role
-        if hasattr(request.user, 'company') and request.user.company:
-            allowed_roles = ['admin', 'staff', 'technician', 'accountant', 'support']
-            return request.user.role in allowed_roles
+        allowed_roles = ['admin', 'staff', 'technician', 'accountant', 'support']
+        if request.user.role not in allowed_roles:
+            return False
+
+        if getattr(request.user, 'company', None):
+            return True
+
+        if getattr(request, 'company', None) or getattr(request, 'tenant', None):
+            return True
+
+        if getattr(request.user, 'company_name', None) or getattr(request.user, 'tenant_subdomain', None):
+            return True
         
         return False
 

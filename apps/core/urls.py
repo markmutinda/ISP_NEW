@@ -22,6 +22,7 @@ urlpatterns = [
     path('auth/token/refresh/', views.CustomTokenRefreshView.as_view(), name='token_refresh'),
     path('auth/change-password/', views.PasswordChangeView.as_view(), name='change-password'),
     path('settings/', views.GlobalSystemSettingsView.as_view(), name='system-settings'),
+    path('branding/', views.TenantBrandingView.as_view(), name='tenant-branding'),
     path('companies/register/', views.CompanyRegisterView.as_view(), name='company-register'),
 
     # Email verification

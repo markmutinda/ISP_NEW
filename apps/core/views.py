@@ -36,11 +36,51 @@ from .serializers import (
     ProfileSerializer, PasswordChangeSerializer,
     CompanySerializer, TenantSerializer, SystemSettingsSerializer, AuditLogSerializer,
     CustomTokenObtainPairSerializer, DashboardStatsSerializer, ChangelogSerializer,
-    FeatureRequestSerializer  # Add FeatureRequestSerializer here
+    FeatureRequestSerializer, CompanyBrandingSerializer  # Add FeatureRequestSerializer here
 )
 from .permissions import IsAdmin, IsAdminOrStaff, IsCustomer, IsTechnician
 
 logger = logging.getLogger(__name__)
+
+
+def get_current_public_company_and_tenant(request):
+    """
+    Resolve the current tenant's public Company/Tenant records.
+
+    Tenant-schema users deliberately keep company/tenant FKs null because those
+    FKs cannot safely point across schemas. Middleware attaches request.tenant
+    and request.company from the public schema, and this helper re-queries those
+    records in the public schema before reads or writes.
+    """
+    user = getattr(request, 'user', None)
+    request_tenant = getattr(request, 'tenant', None)
+    request_company = getattr(request, 'company', None)
+
+    tenant_id = getattr(request_tenant, 'id', None)
+    tenant_subdomain = (
+        getattr(request_tenant, 'subdomain', None)
+        or getattr(user, 'tenant_subdomain', None)
+    )
+    company_id = getattr(request_company, 'id', None) or getattr(getattr(user, 'company', None), 'id', None)
+    company_name = getattr(request_company, 'name', None) or getattr(user, 'company_name', None)
+
+    with schema_context(get_public_schema_name()):
+        tenant = None
+        company = None
+
+        if tenant_id:
+            tenant = Tenant.objects.select_related('company').filter(id=tenant_id).first()
+        if not tenant and tenant_subdomain:
+            tenant = Tenant.objects.select_related('company').filter(subdomain=tenant_subdomain).first()
+
+        if tenant:
+            company = tenant.company
+        elif company_id:
+            company = Company.objects.filter(id=company_id).first()
+        elif company_name:
+            company = Company.objects.filter(name=company_name).first()
+
+        return company, tenant
 
 
 class DebugAuthView(APIView):
@@ -260,19 +300,8 @@ class CompanyViewSet(viewsets.ModelViewSet):
         return [permission() for permission in permission_classes]
 
     def _get_current_company(self):
-        request_company = getattr(self.request, 'company', None)
-        if request_company:
-            return request_company
-
-        user_company = getattr(self.request.user, 'company', None)
-        if user_company:
-            return user_company
-
-        tenant = getattr(self.request, 'tenant', None)
-        if tenant:
-            return getattr(tenant, 'company', None)
-
-        return None
+        company, _tenant = get_current_public_company_and_tenant(self.request)
+        return company
 
     def get_queryset(self):
         queryset = super().get_queryset()
@@ -294,7 +323,7 @@ class CompanyViewSet(viewsets.ModelViewSet):
 
     @action(detail=False, methods=['get', 'patch'], url_path='current')
     def current(self, request):
-        company = self._get_current_company()
+        company, tenant = get_current_public_company_and_tenant(request)
         if not company:
             return Response(
                 {'error': 'Company not found. Please contact support.'},
@@ -302,18 +331,86 @@ class CompanyViewSet(viewsets.ModelViewSet):
             )
 
         if request.method.lower() == 'get':
-            serializer = self.get_serializer(company)
+            serializer = self.get_serializer(company, context={'request': request})
             return Response(serializer.data)
 
-        serializer = self.get_serializer(
-            company,
-            data=request.data,
-            partial=True,
-            context={'request': request}
-        )
-        serializer.is_valid(raise_exception=True)
-        serializer.save(updated_by=request.user)
-        return Response(serializer.data)
+        old_name = company.name
+        with schema_context(get_public_schema_name()):
+            company = Company.objects.get(id=company.id)
+            serializer = self.get_serializer(
+                company,
+                data=request.data,
+                partial=True,
+                context={'request': request}
+            )
+            serializer.is_valid(raise_exception=True)
+            company = serializer.save(updated_by=request.user)
+
+        if tenant and old_name != company.name:
+            with schema_context(tenant.schema_name):
+                User.objects.filter(company_name=old_name).update(company_name=company.name)
+
+        return Response(self.get_serializer(company, context={'request': request}).data)
+
+
+class TenantBrandingView(APIView):
+    """
+    Current tenant/company branding for dashboard headers.
+
+    GET is available to any authenticated dashboard user. PATCH is restricted to
+    tenant admins and updates the public Company record created at registration.
+    """
+    parser_classes = [MultiPartParser, FormParser, JSONParser]
+
+    def get_permissions(self):
+        if self.request.method.lower() in ['patch', 'put']:
+            return [IsAuthenticated(), IsAdmin()]
+        return [IsAuthenticated()]
+
+    def _response_data(self, company, tenant, request):
+        serializer = CompanyBrandingSerializer(company, context={'request': request})
+        data = serializer.data
+        data['tenant_subdomain'] = getattr(tenant, 'subdomain', None)
+        data['tenant_domain'] = getattr(tenant, 'domain', None)
+        return data
+
+    def get(self, request):
+        company, tenant = get_current_public_company_and_tenant(request)
+        if not company:
+            return Response(
+                {'error': 'Company branding is not available for this account.'},
+                status=status.HTTP_404_NOT_FOUND
+            )
+        return Response(self._response_data(company, tenant, request))
+
+    def patch(self, request):
+        company, tenant = get_current_public_company_and_tenant(request)
+        if not company:
+            return Response(
+                {'error': 'Company branding is not available for this account.'},
+                status=status.HTTP_404_NOT_FOUND
+            )
+
+        old_name = company.name
+        with schema_context(get_public_schema_name()):
+            company = Company.objects.get(id=company.id)
+            serializer = CompanyBrandingSerializer(
+                company,
+                data=request.data,
+                partial=True,
+                context={'request': request}
+            )
+            serializer.is_valid(raise_exception=True)
+            company = serializer.save()
+
+        if tenant and old_name != company.name:
+            with schema_context(tenant.schema_name):
+                User.objects.filter(company_name=old_name).update(company_name=company.name)
+
+        return Response(self._response_data(company, tenant, request))
+
+    def put(self, request):
+        return self.patch(request)
 
 
 class TenantViewSet(viewsets.ModelViewSet):

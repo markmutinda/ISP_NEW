@@ -374,6 +374,45 @@ class CompanySerializer(serializers.ModelSerializer):
         return obj.logo.url
 
 
+class CompanyBrandingSerializer(serializers.ModelSerializer):
+    """Focused serializer for tenant dashboard branding."""
+
+    logo_url = serializers.SerializerMethodField()
+    remove_logo = serializers.BooleanField(write_only=True, required=False, default=False)
+
+    class Meta:
+        model = Company
+        fields = ['id', 'name', 'logo', 'logo_url', 'remove_logo', 'updated_at']
+        read_only_fields = ['id', 'logo_url', 'updated_at']
+
+    def validate_name(self, value):
+        value = value.strip()
+        if not value:
+            raise serializers.ValidationError("Company name is required.")
+
+        queryset = Company.objects.filter(name__iexact=value)
+        if self.instance:
+            queryset = queryset.exclude(id=self.instance.id)
+        if queryset.exists():
+            raise serializers.ValidationError("A company with this name already exists.")
+        return value
+
+    def update(self, instance, validated_data):
+        remove_logo = validated_data.pop('remove_logo', False)
+        if remove_logo and instance.logo:
+            instance.logo.delete(save=False)
+            instance.logo = None
+        return super().update(instance, validated_data)
+
+    def get_logo_url(self, obj):
+        if not obj.logo:
+            return None
+        request = self.context.get('request')
+        if request:
+            return request.build_absolute_uri(obj.logo.url)
+        return obj.logo.url
+
+
 class TenantSerializer(serializers.ModelSerializer):
     """Serializer for Tenant model"""
     
