@@ -503,6 +503,7 @@ class HotspotPurchaseView(APIView):
             return method
         
         # Fallback: any active method that has a tuma_configuration OR mpesa_configuration
+        # REMOVED: is_payhero_enabled filter
         method = (
             InvoiceItemPayment.objects
             .filter(
@@ -511,8 +512,7 @@ class HotspotPurchaseView(APIView):
             )
             .filter(
                 Q(tuma_configuration__isnull=False) |
-                Q(mpesa_configuration__isnull=False) |
-                Q(is_payhero_enabled=True)
+                Q(mpesa_configuration__isnull=False)
             )
             .select_related('mpesa_configuration', 'tuma_configuration')
             .order_by('-is_default', '-updated_at')
