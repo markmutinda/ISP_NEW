@@ -805,3 +805,34 @@ class Lead(models.Model):
 
     def __str__(self):
         return f"{self.name} ({self.email})"
+
+
+class EmailOTP(models.Model):
+    PURPOSE_LOGIN = "login"
+    PURPOSE_PAYMENT_METHOD_CHANGE = "payment_method_change"
+    PURPOSE_CHOICES = (
+        (PURPOSE_LOGIN, "Tenant Login"),
+        (PURPOSE_PAYMENT_METHOD_CHANGE, "Payment Method Verification"),
+    )
+
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="email_otps")
+    purpose = models.CharField(max_length=40, choices=PURPOSE_CHOICES, default=PURPOSE_LOGIN, db_index=True)
+    code = models.CharField(max_length=6)
+    failed_attempts = models.PositiveSmallIntegerField(default=0)
+    is_used = models.BooleanField(default=False)
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    expires_at = models.DateTimeField(db_index=True)
+    verified_at = models.DateTimeField(null=True, blank=True)
+    ip_address = models.GenericIPAddressField(null=True, blank=True)
+
+    class Meta:
+        app_label = "core"
+        ordering = ["-created_at"]
+        indexes = [
+            models.Index(fields=["user", "purpose", "created_at"]),
+            models.Index(fields=["expires_at", "is_used"]),
+        ]
+
+    def __str__(self):
+        return f"OTP<{self.user_id}:{self.purpose}:{self.created_at}>"

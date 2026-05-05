@@ -1,13 +1,27 @@
 <!DOCTYPE html>
 <html>
-<body>
-    <p>Dear {{ user.first_name }},</p>
-    <p>Welcome to {{ company.name }}!</p>
-    <p>Your admin account is ready. Access your ISP dashboard at:</p>
-    <p><a href="{{ subdomain_url }}">{{ subdomain_url }}</a></p>
-    <p>Username: {{ username }}</p>
-    <p>Password: {{ password }} (Change it immediately after login!)</p>
-    <p>Your trial expires on {{ expiry }}. Enjoy!</p>
-    <p>Best,<br>{{ company.name }} Team</p>
+<head>
+    <meta charset="utf-8" />
+    <title>Welcome to {{ company.name }} on Netily</title>
+</head>
+<body style="font-family: Arial, sans-serif; color: #1f2937; line-height: 1.6;">
+    <p>Hi {{ user.first_name }},</p>
+
+    <p>Welcome to <strong>{{ company.name }}</strong>. Your tenant workspace is ready.</p>
+
+    <p><strong>Login URL:</strong><br />
+    <a href="{{ subdomain_url }}">{{ subdomain_url }}</a></p>
+
+    <p><strong>Username:</strong> {{ username }}<br />
+    <strong>Temporary Password:</strong> {{ password }}</p>
+
+    <p>For security, please sign in and change your password immediately after first login.</p>
+
+    <p>Your trial access is active until <strong>{{ expiry }}</strong>.</p>
+
+    <p>If you did not request this account, reply to this email and our team will help.</p>
+
+    <p>Regards,<br />
+    Netily Team</p>
 </body>
 </html>

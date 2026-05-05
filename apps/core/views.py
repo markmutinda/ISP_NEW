@@ -27,8 +27,7 @@ from django.utils.html import strip_tags  # For plain text email
 from .models import Domain   # ← This is your custom Domain in core/models.
 import logging
 from django.shortcuts import get_object_or_404  # Add this import
-from django.core.cache import cache  # For OTP storage
-import secrets  # For secure OTP generation
+from .otp_service import OTPService, OTPError, OTPRateLimitedError
 
 from .models import User, Company, SystemSettings, AuditLog, Tenant, Changelog, FeatureRequest, FeatureUpvote  # Add FeatureRequest and FeatureUpvote here
 from .serializers import (
@@ -115,8 +114,75 @@ class CustomTokenObtainPairView(TokenObtainPairView):
     serializer_class = CustomTokenObtainPairSerializer
 
     def post(self, request, *args, **kwargs):
-        # Removed sensitive debug prints
-        return super().post(request, *args, **kwargs)
+        email = (request.data.get("email") or "").strip().lower()
+        password = request.data.get("password") or ""
+        otp_code = (request.data.get("otp_code") or "").strip()
+        otp_id = request.data.get("otp_id")
+
+        if not email or not password:
+            return Response({"detail": "Email and password are required."}, status=status.HTTP_400_BAD_REQUEST)
+
+        user = authenticate(request=request, username=email, password=password)
+        if not user:
+            return Response({"detail": "Invalid email or password."}, status=status.HTTP_401_UNAUTHORIZED)
+        if not user.is_active:
+            return Response({"detail": "Account is disabled."}, status=status.HTTP_403_FORBIDDEN)
+
+        # Tenant subdomain login requires OTP
+        tenant_schema = getattr(getattr(request, "tenant", None), "schema_name", None)
+        requires_otp = bool(tenant_schema and tenant_schema != "public")
+
+        if requires_otp and not (otp_id and otp_code):
+            if not user.email:
+                return Response({"detail": "This account has no email for OTP delivery."}, status=status.HTTP_400_BAD_REQUEST)
+            try:
+                otp = OTPService.issue_otp(
+                    user=user,
+                    purpose=OTPService.LOGIN_PURPOSE,
+                    ip_address=request.META.get("REMOTE_ADDR", ""),
+                )
+            except OTPRateLimitedError as exc:
+                return Response({"detail": str(exc)}, status=status.HTTP_429_TOO_MANY_REQUESTS)
+            except Exception:
+                logger.exception("Failed to issue login OTP for user_id=%s", user.id)
+                return Response({"detail": "Failed to send OTP email. Please try again."}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+            email_parts = user.email.split("@")
+            masked_email = f"{email_parts[0][:2]}***@{email_parts[1]}" if len(email_parts) == 2 else "***"
+            return Response({
+                "requires_otp": True,
+                "otp_id": otp.id,
+                "email": masked_email,
+                "message": "OTP sent to your registered email.",
+            }, status=status.HTTP_202_ACCEPTED)
+
+        if requires_otp:
+            try:
+                OTPService.verify_and_consume(
+                    user=user,
+                    otp_id=otp_id,
+                    code=otp_code,
+                    purpose=OTPService.LOGIN_PURPOSE,
+                )
+            except OTPError as exc:
+                return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+
+        refresh = RefreshToken.for_user(user)
+        user.last_login = timezone.now()
+        user.save(update_fields=["last_login"])
+        return Response({
+            "refresh": str(refresh),
+            "access": str(refresh.access_token),
+            "user": {
+                "id": user.id,
+                "email": user.email,
+                "first_name": user.first_name,
+                "last_name": user.last_name,
+                "role": user.role,
+                "is_verified": user.is_verified,
+                "is_superuser": user.is_superuser,
+            },
+        })
 
 # In RegisterView class, update the create method:
 
@@ -964,6 +1030,16 @@ class CompanyRegisterView(generics.CreateAPIView):
         )
         user.set_password(data['admin_password'])
         user.save()
+
+        try:
+            self.send_welcome_email(
+                user=user,
+                tenant=tenant,
+                domain_name=domain_name,
+                password=data['admin_password'],
+            )
+        except Exception:
+            logger.exception("Welcome email failed for tenant registration: %s", tenant.subdomain)
     
         # Removed sensitive debug print line
         
@@ -1000,11 +1076,11 @@ class CompanyRegisterView(generics.CreateAPIView):
 
     def send_welcome_email(self, user, tenant, domain_name, password):
         """Send welcome email with subdomain and credentials"""
-        subject = f"Welcome to {tenant.company.name} - Your Account Details"
+        subject = f"Welcome to {tenant.company.name} on Netily - Your Login Details"
         context = {
             'user': user,
             'company': tenant.company,
-            'subdomain_url': f"http://{domain_name}/", 
+            'subdomain_url': f"https://{domain_name}/admin/login/",
             'username': user.email,
             'password': password,  # Note: Sending plain password is insecure - consider reset link instead
             'expiry': tenant.subscription_expiry,
@@ -1101,7 +1177,7 @@ class ToggleUpvoteView(APIView):
 class SendOTPView(APIView):
     """
     Send a 6-digit OTP to the authenticated user's email.
-    OTP is stored in Django cache with a 5-minute TTL.
+    Default purpose is payment-method verification.
     """
     permission_classes = [IsAuthenticated]
 
@@ -1111,41 +1187,30 @@ class SendOTPView(APIView):
         if not email:
             return Response({"error": "No email associated with this account."}, status=status.HTTP_400_BAD_REQUEST)
 
-        # Rate limit: one OTP per 60 seconds per user
-        rate_key = f"otp_rate_{user.id}"
-        if cache.get(rate_key):
-            return Response({"error": "Please wait 60 seconds before requesting a new OTP."}, status=status.HTTP_429_TOO_MANY_REQUESTS)
+        purpose = request.data.get("purpose") or OTPService.PAYMENT_PURPOSE
+        if purpose not in (OTPService.LOGIN_PURPOSE, OTPService.PAYMENT_PURPOSE):
+            return Response({"error": "Invalid OTP purpose."}, status=status.HTTP_400_BAD_REQUEST)
 
-        # Generate a secure 6-digit code
-        otp_code = f"{secrets.randbelow(900000) + 100000}"
-
-        # Store in cache with 5-minute TTL
-        cache_key = f"otp_{user.id}"
-        cache.set(cache_key, otp_code, timeout=300)
-
-        # Set rate limit (60 seconds)
-        cache.set(rate_key, True, timeout=60)
-
-        # Send via email
         try:
-            send_mail(
-                subject="Your Netily Verification Code",
-                message=f"Your verification code is: {otp_code}\n\nThis code expires in 5 minutes. Do not share it with anyone.",
-                from_email=settings.DEFAULT_FROM_EMAIL,
-                recipient_list=[email],
-                fail_silently=False,
+            otp = OTPService.issue_otp(
+                user=user,
+                purpose=purpose,
+                ip_address=request.META.get("REMOTE_ADDR", ""),
             )
-        except Exception as e:
-            logger.error(f"Failed to send OTP email to {email}: {e}")
+        except OTPRateLimitedError as exc:
+            return Response({"error": str(exc)}, status=status.HTTP_429_TOO_MANY_REQUESTS)
+        except Exception as exc:
+            logger.error("Failed to send OTP email to %s: %s", email, exc)
             return Response({"error": "Failed to send OTP. Please try again."}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
-        # Mask the email for the response
         parts = email.split("@")
         masked = parts[0][:2] + "***@" + parts[1] if len(parts) == 2 else "***"
 
         return Response({
             "message": "OTP sent successfully.",
             "email": masked,
+            "otp_id": otp.id,
+            "purpose": purpose,
         })
 
 
@@ -1157,26 +1222,26 @@ class VerifyOTPView(APIView):
 
     def post(self, request):
         otp_code = request.data.get("otp", "").strip()
-        if not otp_code or len(otp_code) != 6:
+        otp_id = request.data.get("otp_id")
+        purpose = request.data.get("purpose") or OTPService.PAYMENT_PURPOSE
+
+        if not otp_code or len(otp_code) != 6 or not otp_id:
             return Response({"error": "Please provide a valid 6-digit OTP."}, status=status.HTTP_400_BAD_REQUEST)
 
-        cache_key = f"otp_{request.user.id}"
-        stored_otp = cache.get(cache_key)
-
-        if not stored_otp:
-            return Response({"error": "OTP has expired. Please request a new one."}, status=status.HTTP_400_BAD_REQUEST)
-
-        if stored_otp != otp_code:
-            return Response({"error": "Invalid OTP. Please try again."}, status=status.HTTP_400_BAD_REQUEST)
-
-        # OTP is valid — delete it so it can't be reused
-        cache.delete(cache_key)
+        try:
+            OTPService.verify_and_consume(
+                user=request.user,
+                otp_id=otp_id,
+                code=otp_code,
+                purpose=purpose,
+            )
+        except OTPError as exc:
+            return Response({"error": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
 
         return Response({
             "message": "OTP verified successfully.",
             "verified": True,
         })
-
 
 class SubmitLeadView(APIView):
     """
@@ -1224,3 +1289,4 @@ class SubmitLeadView(APIView):
         return Response({
             "message": "Thank you! We'll be in touch shortly.",
         }, status=status.HTTP_201_CREATED)
+

@@ -27,8 +27,30 @@ from apps.billing.models.payment_models import (
 )
 from apps.billing.models.billing_models import Invoice
 from apps.billing.services.tuma_service import TumaClient, TumaError
+from apps.core.otp_service import OTPService, OTPError
 
 logger = logging.getLogger(__name__)
+
+
+def require_payment_method_otp(request):
+    otp_id = request.data.get("otp_id") or request.headers.get("X-OTP-ID")
+    otp_code = request.data.get("otp_code") or request.data.get("otp") or request.headers.get("X-OTP-CODE")
+    if not otp_id or not otp_code:
+        return Response(
+            {"detail": "OTP is required for payment method changes. Include otp_id and otp_code."},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    try:
+        OTPService.verify_and_consume(
+            user=request.user,
+            otp_id=otp_id,
+            code=otp_code,
+            purpose=OTPService.PAYMENT_PURPOSE,
+        )
+    except OTPError as exc:
+        return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+    return None
 
 
 class InitiateCustomerPaymentView(APIView):
@@ -389,6 +411,10 @@ class CustomerPaymentMethodsView(APIView):
 
     def post(self, request):
         """Create a new payment method (admin only). Max 3 per tenant."""
+        otp_error = require_payment_method_otp(request)
+        if otp_error:
+            return otp_error
+
         from apps.billing.models.payment_models import InvoiceItemPayment
         from apps.billing.serializers.payment_serializers import PaymentMethodSerializer
 
@@ -455,6 +481,10 @@ class PaymentMethodDetailView(APIView):
         return Response(PaymentMethodSerializer(method).data)
 
     def patch(self, request, pk):
+        otp_error = require_payment_method_otp(request)
+        if otp_error:
+            return otp_error
+
         from apps.billing.serializers.payment_serializers import PaymentMethodSerializer
         try:
             method = self._get_method(pk)
@@ -479,6 +509,10 @@ class PaymentMethodDetailView(APIView):
         return Response(data)
 
     def delete(self, request, pk):
+        otp_error = require_payment_method_otp(request)
+        if otp_error:
+            return otp_error
+
         try:
             method = self._get_method(pk)
         except InvoiceItemPayment.DoesNotExist:
@@ -540,6 +574,10 @@ class PaymentMethodToggleActiveView(APIView):
     permission_classes = [IsAuthenticated]
 
     def post(self, request, pk):
+        otp_error = require_payment_method_otp(request)
+        if otp_error:
+            return otp_error
+
         from apps.billing.models.payment_models import InvoiceItemPayment
         from apps.billing.services.tuma_service import (
             sync_active_method_to_tuma, deactivate_tuma_collections, TumaError,
