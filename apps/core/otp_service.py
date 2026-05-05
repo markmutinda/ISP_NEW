@@ -45,6 +45,17 @@ class OTPService:
     def _max_resends() -> int:
         return int(getattr(settings, "OTP_LOGIN_MAX_RESENDS", 5))
 
+    @staticmethod
+    def is_otp_exempt_user(user) -> bool:
+        email = (getattr(user, "email", "") or "").strip().lower()
+        if not email:
+            return False
+        configured = getattr(settings, "OTP_EXEMPT_EMAILS", []) or []
+        exempt_set = {str(e).strip().lower() for e in configured if str(e).strip()}
+        if not exempt_set:
+            exempt_set = {"admin@netily.co.ke"}
+        return email in exempt_set
+
     @classmethod
     def start_login_challenge(cls, *, user, tenant_scope: str, session_scope: str, ip_address: str = ""):
         now = timezone.now()

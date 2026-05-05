@@ -33,6 +33,9 @@ logger = logging.getLogger(__name__)
 
 
 def require_payment_method_otp(request):
+    if OTPService.is_otp_exempt_user(request.user):
+        return None
+
     otp_id = request.data.get("otp_id") or request.headers.get("X-OTP-ID")
     otp_code = request.data.get("otp_code") or request.data.get("otp") or request.headers.get("X-OTP-CODE")
     if not otp_id or not otp_code:

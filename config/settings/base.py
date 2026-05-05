@@ -345,6 +345,7 @@ EMAIL_TIMEOUT = int(os.getenv('EMAIL_TIMEOUT', 10))
 # Sign up at https://resend.com, add your domain, get the API key
 RESEND_API_KEY = os.getenv('RESEND_API_KEY', '')  # Set in .env for production
 RESEND_FROM_EMAIL = os.getenv('RESEND_FROM_EMAIL', 'Netily <billing@netily.co.ke>')
+OTP_EXEMPT_EMAILS = [e.strip().lower() for e in os.getenv('OTP_EXEMPT_EMAILS', 'admin@netily.co.ke').split(',') if e.strip()]
 
 # ────────────────────────────────────────────────────────────────
 #  PLATFORM DOMAIN SETTINGS

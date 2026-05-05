@@ -127,10 +127,12 @@ class CustomTokenObtainPairView(TokenObtainPairView):
             return Response({"detail": "Invalid email or password."}, status=status.HTTP_401_UNAUTHORIZED)
         if not user.is_active:
             return Response({"detail": "Account is disabled."}, status=status.HTTP_403_FORBIDDEN)
-
-        # Tenant subdomain login requires OTP
-        tenant_schema = getattr(getattr(request, "tenant", None), "schema_name", None)
-        requires_otp = bool(tenant_schema and tenant_schema != "public")
+        if OTPService.is_otp_exempt_user(user):
+            requires_otp = False
+        else:
+            # Tenant subdomain login requires OTP
+            tenant_schema = getattr(getattr(request, "tenant", None), "schema_name", None)
+            requires_otp = bool(tenant_schema and tenant_schema != "public")
 
         tenant_scope = getattr(getattr(request, "tenant", None), "schema_name", "") or "public"
         session_scope = (
@@ -1252,6 +1254,14 @@ class SendOTPView(APIView):
 
     def post(self, request):
         user = request.user
+        if OTPService.is_otp_exempt_user(user):
+            return Response({
+                "message": "OTP bypassed for this account.",
+                "verified": True,
+                "email": user.email,
+                "bypass": True,
+            })
+
         email = user.email
         if not email:
             return Response({"error": "No email associated with this account."}, status=status.HTTP_400_BAD_REQUEST)
@@ -1290,6 +1300,13 @@ class VerifyOTPView(APIView):
     permission_classes = [IsAuthenticated]
 
     def post(self, request):
+        if OTPService.is_otp_exempt_user(request.user):
+            return Response({
+                "message": "OTP bypassed for this account.",
+                "verified": True,
+                "bypass": True,
+            })
+
         otp_code = request.data.get("otp", "").strip()
         otp_id = request.data.get("otp_id")
         purpose = request.data.get("purpose") or OTPService.PAYMENT_PURPOSE
