@@ -816,6 +816,13 @@ class EmailOTP(models.Model):
     )
 
     user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="email_otps")
+    login_challenge = models.ForeignKey(
+        "core.LoginOTPChallenge",
+        on_delete=models.CASCADE,
+        null=True,
+        blank=True,
+        related_name="otps",
+    )
     purpose = models.CharField(max_length=40, choices=PURPOSE_CHOICES, default=PURPOSE_LOGIN, db_index=True)
     code = models.CharField(max_length=6)
     failed_attempts = models.PositiveSmallIntegerField(default=0)
@@ -836,3 +843,30 @@ class EmailOTP(models.Model):
 
     def __str__(self):
         return f"OTP<{self.user_id}:{self.purpose}:{self.created_at}>"
+
+
+class LoginOTPChallenge(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="login_otp_challenges")
+    tenant_scope = models.CharField(max_length=120, blank=True, default="")
+    session_scope = models.CharField(max_length=255, blank=True, default="")
+    failed_attempts = models.PositiveSmallIntegerField(default=0)
+    resend_count = models.PositiveSmallIntegerField(default=0)
+    is_completed = models.BooleanField(default=False)
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    expires_at = models.DateTimeField(db_index=True)
+    last_sent_at = models.DateTimeField(auto_now_add=True)
+    ip_address = models.GenericIPAddressField(null=True, blank=True)
+
+    class Meta:
+        app_label = "core"
+        ordering = ["-created_at"]
+        indexes = [
+            models.Index(fields=["user", "created_at"]),
+            models.Index(fields=["tenant_scope", "session_scope"]),
+            models.Index(fields=["expires_at", "is_completed"]),
+        ]
+
+    def __str__(self):
+        return f"LoginChallenge<{self.user_id}:{self.id}>"

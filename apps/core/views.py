@@ -117,7 +117,7 @@ class CustomTokenObtainPairView(TokenObtainPairView):
         email = (request.data.get("email") or "").strip().lower()
         password = request.data.get("password") or ""
         otp_code = (request.data.get("otp_code") or "").strip()
-        otp_id = request.data.get("otp_id")
+        challenge_id = request.data.get("challenge_id") or request.data.get("otp_id")
 
         if not email or not password:
             return Response({"detail": "Email and password are required."}, status=status.HTTP_400_BAD_REQUEST)
@@ -132,13 +132,22 @@ class CustomTokenObtainPairView(TokenObtainPairView):
         tenant_schema = getattr(getattr(request, "tenant", None), "schema_name", None)
         requires_otp = bool(tenant_schema and tenant_schema != "public")
 
-        if requires_otp and not (otp_id and otp_code):
+        tenant_scope = getattr(getattr(request, "tenant", None), "schema_name", "") or "public"
+        session_scope = (
+            request.headers.get("X-Session-ID")
+            or request.COOKIES.get("sessionid")
+            or request.session.session_key
+            or f"{request.META.get('REMOTE_ADDR', '')}:{request.META.get('HTTP_USER_AGENT', '')[:40]}"
+        )
+
+        if requires_otp and not (challenge_id and otp_code):
             if not user.email:
                 return Response({"detail": "This account has no email for OTP delivery."}, status=status.HTTP_400_BAD_REQUEST)
             try:
-                otp = OTPService.issue_otp(
+                challenge = OTPService.start_login_challenge(
                     user=user,
-                    purpose=OTPService.LOGIN_PURPOSE,
+                    tenant_scope=tenant_scope,
+                    session_scope=session_scope,
                     ip_address=request.META.get("REMOTE_ADDR", ""),
                 )
             except OTPRateLimitedError as exc:
@@ -151,18 +160,22 @@ class CustomTokenObtainPairView(TokenObtainPairView):
             masked_email = f"{email_parts[0][:2]}***@{email_parts[1]}" if len(email_parts) == 2 else "***"
             return Response({
                 "requires_otp": True,
-                "otp_id": otp.id,
+                "challenge_id": str(challenge.id),
                 "email": masked_email,
                 "message": "OTP sent to your registered email.",
+                "expires_in": int((challenge.expires_at - timezone.now()).total_seconds()),
+                "resend_available_in": int(getattr(settings, "OTP_RESEND_COOLDOWN_SECONDS", 60)),
+                "max_resends": int(getattr(settings, "OTP_LOGIN_MAX_RESENDS", 5)),
             }, status=status.HTTP_202_ACCEPTED)
 
         if requires_otp:
             try:
-                OTPService.verify_and_consume(
+                OTPService.verify_login_challenge(
                     user=user,
-                    otp_id=otp_id,
+                    challenge_id=challenge_id,
                     code=otp_code,
-                    purpose=OTPService.LOGIN_PURPOSE,
+                    tenant_scope=tenant_scope,
+                    session_scope=session_scope,
                 )
             except OTPError as exc:
                 return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
@@ -183,6 +196,62 @@ class CustomTokenObtainPairView(TokenObtainPairView):
                 "is_superuser": user.is_superuser,
             },
         })
+
+
+class ResendLoginOTPView(APIView):
+    permission_classes = [AllowAny]
+    authentication_classes = []
+
+    def post(self, request):
+        email = (request.data.get("email") or "").strip().lower()
+        password = request.data.get("password") or ""
+        challenge_id = request.data.get("challenge_id")
+
+        if not email or not password or not challenge_id:
+            return Response({"detail": "Email, password and challenge_id are required."}, status=status.HTTP_400_BAD_REQUEST)
+
+        user = authenticate(request=request, username=email, password=password)
+        if not user:
+            return Response({"detail": "Invalid email or password."}, status=status.HTTP_401_UNAUTHORIZED)
+        if not user.is_active:
+            return Response({"detail": "Account is disabled."}, status=status.HTTP_403_FORBIDDEN)
+
+        tenant_scope = getattr(getattr(request, "tenant", None), "schema_name", "") or "public"
+        session_scope = (
+            request.headers.get("X-Session-ID")
+            or request.COOKIES.get("sessionid")
+            or request.session.session_key
+            or f"{request.META.get('REMOTE_ADDR', '')}:{request.META.get('HTTP_USER_AGENT', '')[:40]}"
+        )
+
+        try:
+            challenge = OTPService.resend_login_challenge(
+                user=user,
+                challenge_id=challenge_id,
+                tenant_scope=tenant_scope,
+                session_scope=session_scope,
+                ip_address=request.META.get("REMOTE_ADDR", ""),
+            )
+        except OTPRateLimitedError as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_429_TOO_MANY_REQUESTS)
+        except OTPError as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        except Exception:
+            logger.exception("Failed to resend login OTP for user_id=%s", user.id)
+            return Response({"detail": "Failed to resend OTP. Please try again."}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+        email_parts = user.email.split("@")
+        masked_email = f"{email_parts[0][:2]}***@{email_parts[1]}" if len(email_parts) == 2 else "***"
+        return Response({
+            "requires_otp": True,
+            "challenge_id": str(challenge.id),
+            "email": masked_email,
+            "message": "A new OTP has been sent.",
+            "expires_in": int((challenge.expires_at - timezone.now()).total_seconds()),
+            "resend_available_in": int(getattr(settings, "OTP_RESEND_COOLDOWN_SECONDS", 60)),
+            "resend_count": int(getattr(challenge, "resend_count", 0)),
+            "max_resends": int(getattr(settings, "OTP_LOGIN_MAX_RESENDS", 5)),
+        }, status=status.HTTP_200_OK)
 
 # In RegisterView class, update the create method:
 

@@ -1,4 +1,5 @@
 from django.core import mail
+from django.core.cache import cache
 from django.test import TestCase, override_settings
 from django.utils import timezone
 from datetime import timedelta
@@ -11,6 +12,7 @@ from apps.core.otp_service import OTPService, OTPRateLimitedError, OTPError
 @override_settings(EMAIL_BACKEND="django.core.mail.backends.locmem.EmailBackend")
 class OTPServiceTests(TestCase):
     def setUp(self):
+        cache.clear()
         self.user = User.objects.filter(email__isnull=False).first()
         if not self.user:
             suffix = uuid.uuid4().hex[:8]
@@ -64,3 +66,40 @@ class OTPServiceTests(TestCase):
                 code=otp.code,
                 purpose=OTPService.LOGIN_PURPOSE,
             )
+
+    def test_login_challenge_resend_and_verify(self):
+        challenge = OTPService.start_login_challenge(
+            user=self.user,
+            tenant_scope="tenant_demo",
+            session_scope="browser-a",
+            ip_address="127.0.0.1",
+        )
+        self.assertIsNotNone(challenge.id)
+
+        with self.assertRaises(OTPRateLimitedError):
+            OTPService.resend_login_challenge(
+                user=self.user,
+                challenge_id=str(challenge.id),
+                tenant_scope="tenant_demo",
+                session_scope="browser-a",
+                ip_address="127.0.0.1",
+            )
+
+        # move cooldown back
+        challenge.last_sent_at = timezone.now() - timedelta(seconds=61)
+        challenge.save(update_fields=["last_sent_at"])
+        challenge = OTPService.resend_login_challenge(
+            user=self.user,
+            challenge_id=str(challenge.id),
+            tenant_scope="tenant_demo",
+            session_scope="browser-a",
+            ip_address="127.0.0.1",
+        )
+        latest_otp = challenge.otps.order_by("-created_at").first()
+        OTPService.verify_login_challenge(
+            user=self.user,
+            challenge_id=str(challenge.id),
+            code=latest_otp.code,
+            tenant_scope="tenant_demo",
+            session_scope="browser-a",
+        )
