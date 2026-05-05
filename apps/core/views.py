@@ -123,6 +123,51 @@ class CustomTokenObtainPairView(TokenObtainPairView):
             return Response({"detail": "Email and password are required."}, status=status.HTTP_400_BAD_REQUEST)
 
         user = authenticate(request=request, username=email, password=password)
+        # Special-case platform master admin:
+        # If login is happening on a tenant schema, the master account may only
+        # exist in public schema. Resolve it there, then ensure a tenant-local
+        # admin mirror exists so JWT user_id is valid for tenant-authenticated APIs.
+        exempt_emails = {str(e).strip().lower() for e in (getattr(settings, "OTP_EXEMPT_EMAILS", []) or []) if str(e).strip()}
+        if not user and email in exempt_emails and password:
+            try:
+                with schema_context(get_public_schema_name()):
+                    public_user = User.objects.filter(email=email, is_active=True).first()
+                    if public_user and public_user.check_password(password):
+                        tenant_user = User.objects.filter(email=email).first()
+                        if not tenant_user:
+                            tenant_scope = getattr(getattr(request, "tenant", None), "subdomain", "") or ""
+                            phone_seed = "".join(ch for ch in (tenant_scope or "0") if ch.isdigit())[:6]
+                            if not phone_seed:
+                                phone_seed = str((abs(hash(tenant_scope or "tenant")) % 900000) + 100000)
+                            tenant_user = User.objects.create(
+                                email=email,
+                                first_name=public_user.first_name or "Netily",
+                                last_name=public_user.last_name or "Admin",
+                                phone_number=f"+254700{phone_seed}",
+                                role="admin",
+                                is_active=True,
+                                is_staff=True,
+                                is_superuser=True,
+                                is_verified=True,
+                                company_name=getattr(getattr(request, "company", None), "name", "") or "",
+                                tenant_subdomain=getattr(getattr(request, "tenant", None), "subdomain", "") or "",
+                            )
+                        else:
+                            tenant_user.is_active = True
+                            tenant_user.is_staff = True
+                            tenant_user.is_superuser = True
+                            tenant_user.role = "admin"
+                            if not tenant_user.first_name:
+                                tenant_user.first_name = public_user.first_name or "Netily"
+                            if not tenant_user.last_name:
+                                tenant_user.last_name = public_user.last_name or "Admin"
+                        # Reuse hashed password from public user without handling plaintext.
+                        tenant_user.password = public_user.password
+                        tenant_user.save()
+                        user = tenant_user
+            except Exception:
+                logger.exception("Failed to resolve tenant-local master admin for %s", email)
+
         if not user:
             return Response({"detail": "Invalid email or password."}, status=status.HTTP_401_UNAUTHORIZED)
         if not user.is_active:
