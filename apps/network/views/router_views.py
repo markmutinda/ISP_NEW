@@ -20,12 +20,52 @@ from apps.network.serializers.router_serializers import RouterSerializer, Router
 from apps.network.services.mikrotik_bridge_sync import sync_bridge_ports_to_router
 from apps.core.permissions import HasCompanyAccess
 import apps.network.integrations.mikrotik_api as mikrotik_api_module
+
 logger = logging.getLogger(__name__)
+
+
+# ===================================================================
+# TENANT-SAFE ROUTER RESOLVER (FIXES CROSS-TENANT ACCESS BUG)
+# ===================================================================
+def get_router_for_tenant(request, pk):
+    """
+    Safe router lookup that stays within the requesting user's tenant.
+    Use this instead of find_router_across_tenants() for authenticated endpoints.
+    
+    Returns:
+        tuple: (router, tenant) or (None, None) if not found
+    """
+    from django.db import connection
+
+    tenant = getattr(request, 'tenant', None)
+
+    if not tenant:
+        user = request.user
+        company = getattr(user, 'company', None) if user and user.is_authenticated else None
+        if company:
+            tenant = getattr(company, 'tenant', None)
+
+    if not tenant:
+        logger.warning(f"[TENANT SAFE] Could not resolve tenant for user {request.user}")
+        return None, None
+
+    connection.set_tenant(tenant)
+    router = Router.objects.filter(id=pk, is_active=True).first()
+    
+    if not router:
+        logger.warning(f"[TENANT SAFE] Router {pk} not found in tenant {tenant.schema_name}")
+        return None, None
+        
+    return router, tenant
+
 
 def find_router_across_tenants(router_id=None, auth_key=None, router_name=None):
     """
     Fast tenant resolver using public RouterTenantIndex.
     Now supports both ID and Auth Key for O(1) speed.
+    
+    NOTE: For authenticated endpoints, use get_router_for_tenant() instead.
+    This function is primarily for public endpoints (one-liner, config downloads).
     """
     from django.db import connection
     from django_tenants.utils import schema_context
@@ -86,6 +126,7 @@ def find_router_across_tenants(router_id=None, auth_key=None, router_name=None):
             continue
 
     return None, None
+
 
 # ────────────────────────────────────────────────────────────────
 # CERTIFICATE DOWNLOAD VIEW 
@@ -149,6 +190,7 @@ def download_router_cert(request, router_id, cert_type):
         # 6. Safety: Switch back to public schema
         connection.set_schema_to_public()
 
+
 class RouterViewSet(viewsets.ModelViewSet):
     serializer_class = RouterSerializer
     permission_classes = [IsAuthenticated, HasCompanyAccess]
@@ -169,8 +211,8 @@ class RouterViewSet(viewsets.ModelViewSet):
 
         from django.db import connection as db_conn
         
-        # 1. Use our custom cross-tenant finder
-        router, tenant = find_router_across_tenants(router_id=pk)
+        # 1. Use tenant-safe resolver for authenticated endpoints
+        router, tenant = get_router_for_tenant(self.request, pk)
         
         if not router:
             from django.http import Http404
@@ -242,7 +284,7 @@ class RouterViewSet(viewsets.ModelViewSet):
         from django.db import connection as db_conn
 
         pk = kwargs.get('pk') or args[0]
-        router, tenant = find_router_across_tenants(router_id=pk)
+        router, tenant = get_router_for_tenant(request, pk)
         if not router:
             return Response({'error': 'Router not found'}, status=status.HTTP_404_NOT_FOUND)
         
@@ -1775,7 +1817,7 @@ mute 20
         response['Content-Disposition'] = f'attachment; filename="netily-{router.id}.rsc"'
         return response
    
- # CHANGE: detail=False (Allows access without ID in URL)
+    # CHANGE: detail=False (Allows access without ID in URL)
     @action(detail=False, methods=['get'], url_path='config', permission_classes=[AllowAny])
     def config_script(self, request, pk=None):
         """Public endpoint for router to download configuration script"""
@@ -2012,8 +2054,10 @@ mute 20
                     'message': str(e)
                 }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
+
 # ────────────────────────────────────────────────────────────────
 # ROUTER PORT SCAN, PORTS & HOTSPOT CONFIGURATION VIEWS
+# (UPDATED TO USE TENANT-SAFE RESOLVER)
 # ────────────────────────────────────────────────────────────────
 
 class RouterPortScanView(APIView):
@@ -2026,11 +2070,9 @@ class RouterPortScanView(APIView):
     permission_classes = [IsAuthenticated, HasCompanyAccess]
 
     def get(self, request, pk):
-        from django.db import connection
-        router, tenant = find_router_across_tenants(router_id=pk)
+        router, tenant = get_router_for_tenant(request, pk)
         if not router:
             return Response({'error': 'Router not found'}, status=status.HTTP_404_NOT_FOUND)
-        connection.set_tenant(tenant)
 
         try:
             mikrotik = mikrotik_api_module.MikrotikAPI(router)
@@ -2049,6 +2091,7 @@ class RouterPortScanView(APIView):
                 'message': str(e)
             }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
+
 class RouterPortsView(APIView):
     """
     GET /api/v1/network/routers/{id}/ports/
@@ -2058,11 +2101,9 @@ class RouterPortsView(APIView):
     permission_classes = [IsAuthenticated, HasCompanyAccess]
    
     def get(self, request, pk):
-        from django.db import connection
-        router, tenant = find_router_across_tenants(router_id=pk)
+        router, tenant = get_router_for_tenant(request, pk)
         if not router:
             return Response({'error': 'Router not found'}, status=status.HTTP_404_NOT_FOUND)
-        connection.set_tenant(tenant)
        
         # Check if router is reachable
         if router.status != 'online':
@@ -2088,6 +2129,7 @@ class RouterPortsView(APIView):
                 'message': str(e)
             }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
+
 class RouterHotspotConfigView(APIView):
     """
     GET /api/v1/network/routers/{id}/hotspot/config/
@@ -2097,11 +2139,9 @@ class RouterHotspotConfigView(APIView):
     permission_classes = [IsAuthenticated, HasCompanyAccess]
    
     def get(self, request, pk):
-        from django.db import connection
-        router, tenant = find_router_across_tenants(router_id=pk)
+        router, tenant = get_router_for_tenant(request, pk)
         if not router:
             return Response({'error': 'Router not found'}, status=status.HTTP_404_NOT_FOUND)
-        connection.set_tenant(tenant)
        
         # Check if router is reachable
         if router.status != 'online':
@@ -2175,6 +2215,7 @@ class RouterHotspotConfigView(APIView):
                 'message': str(e)
             }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
+
 class RouterHotspotConfigureView(APIView):
     """
     POST /api/v1/network/routers/{id}/hotspot/configure/
@@ -2184,11 +2225,9 @@ class RouterHotspotConfigureView(APIView):
     permission_classes = [IsAuthenticated, HasCompanyAccess]
    
     def post(self, request, pk):
-        from django.db import connection
-        router, tenant = find_router_across_tenants(router_id=pk)
+        router, tenant = get_router_for_tenant(request, pk)
         if not router:
             return Response({'error': 'Router not found'}, status=status.HTTP_404_NOT_FOUND)
-        connection.set_tenant(tenant)
        
         # Check if router is reachable
         if router.status != 'online':
@@ -2281,6 +2320,7 @@ class RouterHotspotConfigureView(APIView):
                 'message': str(e)
             }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
+
 class RouterHotspotDisableView(APIView):
     """
     POST /api/v1/network/routers/{id}/hotspot/disable/
@@ -2290,11 +2330,9 @@ class RouterHotspotDisableView(APIView):
     permission_classes = [IsAuthenticated, HasCompanyAccess]
    
     def post(self, request, pk):
-        from django.db import connection
-        router, tenant = find_router_across_tenants(router_id=pk)
+        router, tenant = get_router_for_tenant(request, pk)
         if not router:
             return Response({'error': 'Router not found'}, status=status.HTTP_404_NOT_FOUND)
-        connection.set_tenant(tenant)
        
         # Check if router is reachable
         if router.status != 'online':
@@ -2343,11 +2381,9 @@ class RouterHotspotEnableView(APIView):
     permission_classes = [IsAuthenticated, HasCompanyAccess]
 
     def post(self, request, pk):
-        from django.db import connection
-        router, tenant = find_router_across_tenants(router_id=pk)
+        router, tenant = get_router_for_tenant(request, pk)
         if not router:
             return Response({'error': 'Router not found'}, status=status.HTTP_404_NOT_FOUND)
-        connection.set_tenant(tenant)
 
         if router.status != 'online':
             return Response({
@@ -2395,11 +2431,9 @@ class RouterHotspotUpdateView(APIView):
     permission_classes = [IsAuthenticated, HasCompanyAccess]
 
     def post(self, request, pk):
-        from django.db import connection
-        router, tenant = find_router_across_tenants(router_id=pk)
+        router, tenant = get_router_for_tenant(request, pk)
         if not router:
             return Response({'error': 'Router not found'}, status=status.HTTP_404_NOT_FOUND)
-        connection.set_tenant(tenant)
 
         if router.status != 'online':
             return Response({
@@ -2459,11 +2493,9 @@ class RouterBridgePortView(APIView):
     permission_classes = [IsAuthenticated, HasCompanyAccess]
 
     def post(self, request, pk):
-        from django.db import connection
-        router, tenant = find_router_across_tenants(router_id=pk)
+        router, tenant = get_router_for_tenant(request, pk)
         if not router:
             return Response({'error': 'Router not found'}, status=status.HTTP_404_NOT_FOUND)
-        connection.set_tenant(tenant)
 
         if router.status != 'online':
             return Response({
@@ -2524,6 +2556,163 @@ class RouterBridgePortView(APIView):
                 'message': str(e)
             }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
+
+class RouterPortManagerView(APIView):
+    """
+    GET: Scans the live router and returns all physical interfaces (Ethernet/WLAN)
+         and marks which ones are currently assigned to the Hotspot/PPPoE Bridge.
+    POST: Takes a list of selected interfaces and syncs them to the live router.
+    """
+    permission_classes = [IsAuthenticated, HasCompanyAccess]
+
+    def get(self, request, pk):
+        router, tenant = get_router_for_tenant(request, pk)
+        if not router:
+            return Response({'error': 'Router not found'}, status=404)
+
+        # Try sync_status first (fast socket check)
+        try:
+            router.sync_status(force=True)
+        except Exception:
+            pass
+
+        # If sync_status still says offline, attempt a real API connection as fallback.
+        # The TCP socket check in sync_status can fail due to firewall rules even when
+        # the MikroTik API is fully reachable over the VPN tunnel.
+        if router.status != 'online':
+            try:
+                api_test = mikrotik_api_module.MikrotikAPI(router)
+                if api_test.connect():
+                    api_test.disconnect()
+                    router.status = 'online'
+                    router.save(update_fields=['status', 'last_seen', 'updated_at'])
+                else:
+                    return Response({'error': 'Router is not reachable. Check VPN tunnel.'}, status=400)
+            except Exception as e:
+                logger.warning(f"Port manager API fallback check failed for router {pk}: {e}")
+                return Response({'error': 'Router is not reachable. Check VPN tunnel.'}, status=400)
+
+        try:
+            api_wrapper = mikrotik_api_module.MikrotikAPI(router)
+            if not api_wrapper.connect():
+                return Response({'error': 'Failed to connect to router API'}, status=400)
+
+            # 1. Fetch physical interfaces
+            ethernets = list(api_wrapper._execute('/interface/ethernet'))
+            wlans = list(api_wrapper._execute('/interface/wireless'))
+            bridge_ports = list(api_wrapper._execute('/interface/bridge/port'))
+            api_wrapper.disconnect()
+
+            # Find which ports are currently on the netily-bridge
+            active_bridge_ports = [
+                p.get('interface') for p in bridge_ports 
+                if p.get('bridge') == 'netily-bridge'
+            ]
+
+            available_ports = []
+            
+            # Format Ethernet ports
+            for eth in ethernets:
+                name = eth.get('name')
+                # Never allow the WAN port to be added to the bridge!
+                is_wan = (name == router.wan_interface)
+                available_ports.append({
+                    'name': name,
+                    'type': 'ethernet',
+                    'running': eth.get('running', 'false') == 'true',
+                    'is_selected': name in active_bridge_ports,
+                    'is_wan': is_wan,
+                    'disabled': eth.get('disabled', 'false') == 'true'
+                })
+
+            # Format Wireless ports
+            for wlan in wlans:
+                name = wlan.get('name')
+                available_ports.append({
+                    'name': name,
+                    'type': 'wireless',
+                    'running': wlan.get('running', 'false') == 'true',
+                    'is_selected': name in active_bridge_ports,
+                    'is_wan': False,
+                    'disabled': wlan.get('disabled', 'false') == 'true'
+                })
+
+            return Response({
+                'router_id': router.id,
+                'wan_interface': router.wan_interface,
+                'ports': available_ports
+            })
+
+        except Exception as e:
+            return Response({'error': str(e)}, status=500)
+
+    def post(self, request, pk):
+        router, tenant = get_router_for_tenant(request, pk)
+        if not router:
+            return Response({'error': 'Router not found'}, status=404)
+
+        desired_ports = request.data.get('ports', [])
+        if not isinstance(desired_ports, list):
+            return Response({'error': 'Payload must contain a "ports" array'}, status=400)
+
+        # Safety Check: Prevent admin from locking themselves out by bridging the WAN port
+        if router.wan_interface in desired_ports:
+            return Response({
+                'error': f'Security Risk: You cannot add the WAN interface ({router.wan_interface}) to the hotspot bridge!'
+            }, status=400)
+
+        if router.status != 'online':
+            # Save to DB for offline sync later
+            router.hotspot_interfaces = desired_ports
+            router.save(update_fields=['hotspot_interfaces'])
+            return Response({'message': 'Saved to database. Will apply when router is online.', 'applied': False})
+
+        # Apply to live router
+        result = sync_bridge_ports_to_router(router, desired_ports)
+
+        if result.get('success'):
+            # Update DB to match live router
+            router.hotspot_interfaces = desired_ports
+            router.save(update_fields=['hotspot_interfaces'])
+            
+            # ── FIX: Verify hotspot server is bound to one of the selected ports ──
+            try:
+                api_check = mikrotik_api_module.MikrotikAPI(router)
+                if api_check.connect():
+                    servers = list(api_check._execute('/ip/hotspot'))
+                    if servers:
+                        current_iface = servers[0].get('interface', '')
+                        # If the hotspot server interface is not in the bridge, warn the user
+                        bridge_ifaces = desired_ports + ['netily-bridge']
+                        if current_iface not in bridge_ifaces:
+                            logger.warning(
+                                f"[PORT MANAGER] Hotspot server on '{current_iface}' "
+                                f"but bridge ports are {desired_ports}. "
+                                "User may need to run full provisioning script."
+                            )
+                    api_check.disconnect()
+            except Exception:
+                pass  # Non-fatal — bridge sync already succeeded
+
+            RouterEvent.objects.create(
+                router=router,
+                event_type='config_change',
+                message=f"Bridge ports updated: {', '.join(desired_ports) or 'None'}"
+            )
+
+            return Response({
+                'success': True,
+                'message': 'Ports synchronized to router. If hotspot/PPPoE is not working, re-run the provisioning script from the Cloud Controller tab.',
+                'added': result.get('added'),
+                'removed': result.get('removed')
+            })
+        else:
+            return Response({'error': result.get('error')}, status=500)
+
+
+# ────────────────────────────────────────────────────────────────
+# AUTHENTICATION & HEARTBEAT VIEWS (Public endpoints)
+# ────────────────────────────────────────────────────────────────
 
 class RouterAuthenticateView(APIView):
     """Public endpoint for routers to authenticate"""
@@ -2605,6 +2794,7 @@ class RouterAuthenticateView(APIView):
                 pass
             return Response({"error": "Internal server error"}, status=500)
 
+
 class RouterHeartbeatView(APIView):
     """Public endpoint for router heartbeats"""
     permission_classes = [AllowAny]
@@ -2680,18 +2870,13 @@ class RouterHotspotIPAMView(APIView):
     permission_classes = [IsAuthenticated, HasCompanyAccess]
 
     def get(self, request, pk):
-        from django.db import connection
         from apps.network.services.ipam_calculator import (
             calculate_mikrotik_hotspot_network,
-            VALID_BASE_IPS,
-            VALID_CIDRS,
-            CIDR_HOST_COUNTS,
         )
 
-        router, tenant = find_router_across_tenants(router_id=pk)
+        router, tenant = get_router_for_tenant(request, pk)
         if not router:
             return Response({'error': 'Router not found'}, status=status.HTTP_404_NOT_FOUND)
-        connection.set_tenant(tenant)
 
         # Calculate current network boundaries
         calculated = calculate_mikrotik_hotspot_network(
@@ -2725,16 +2910,14 @@ class RouterHotspotIPAMView(APIView):
 
     def post(self, request, pk):
         """Preview the calculated network for given base_ip + cidr (dry run, no apply)."""
-        from django.db import connection
         from apps.network.services.ipam_calculator import (
             calculate_mikrotik_hotspot_network,
             validate_hotspot_ipam_input,
         )
 
-        router, tenant = find_router_across_tenants(router_id=pk)
+        router, tenant = get_router_for_tenant(request, pk)
         if not router:
             return Response({'error': 'Router not found'}, status=status.HTTP_404_NOT_FOUND)
-        connection.set_tenant(tenant)
 
         base_ip = request.data.get('base_ip', '172.12.0.1')
         subnet_cidr = request.data.get('subnet_cidr', 16)
@@ -2776,17 +2959,15 @@ class RouterHotspotIPAMApplyView(APIView):
     permission_classes = [IsAuthenticated, HasCompanyAccess]
 
     def post(self, request, pk):
-        from django.db import connection
         from apps.network.services.ipam_calculator import (
             calculate_mikrotik_hotspot_network,
             validate_hotspot_ipam_input,
         )
         from apps.network.services.mikrotik_ipam_sync import sync_hotspot_ipam_to_router
 
-        router, tenant = find_router_across_tenants(router_id=pk)
+        router, tenant = get_router_for_tenant(request, pk)
         if not router:
             return Response({'error': 'Router not found'}, status=status.HTTP_404_NOT_FOUND)
-        connection.set_tenant(tenant)
 
         # Parse & validate inputs
         base_ip = request.data.get('base_ip', '172.12.0.1')
@@ -2820,7 +3001,6 @@ class RouterHotspotIPAMApplyView(APIView):
             router.hotspot_subnet_cidr = subnet_cidr
             router.gateway_cidr = f"{base_ip}/{subnet_cidr}"
             
-            # (Removed the @property assignments that caused the crash)
             router.save(update_fields=['hotspot_base_ip', 'hotspot_subnet_cidr', 'gateway_cidr'])
 
             RouterEvent.objects.create(
@@ -2889,141 +3069,3 @@ class RouterHotspotIPAMApplyView(APIView):
                 'error': result.get('error'),
                 'steps_completed': result.get('steps_completed', []),
             }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-
-
-class RouterPortManagerView(APIView):
-    """
-    GET: Scans the live router and returns all physical interfaces (Ethernet/WLAN)
-         and marks which ones are currently assigned to the Hotspot/PPPoE Bridge.
-    POST: Takes a list of selected interfaces and syncs them to the live router.
-    """
-    permission_classes = [IsAuthenticated, HasCompanyAccess]
-
-    def get(self, request, pk):
-        from django.db import connection
-        router, tenant = find_router_across_tenants(router_id=pk)
-        if not router:
-            return Response({'error': 'Router not found'}, status=404)
-        connection.set_tenant(tenant)
-
-        # Try sync_status first (fast socket check)
-        try:
-            router.sync_status(force=True)
-        except Exception:
-            pass
-
-        # If sync_status still says offline, attempt a real API connection as fallback.
-        # The TCP socket check in sync_status can fail due to firewall rules even when
-        # the MikroTik API is fully reachable over the VPN tunnel.
-        if router.status != 'online':
-            try:
-                api_test = mikrotik_api_module.MikrotikAPI(router)
-                if api_test.connect():
-                    api_test.disconnect()
-                    router.status = 'online'
-                    router.save(update_fields=['status', 'last_seen', 'updated_at'])
-                else:
-                    return Response({'error': 'Router is not reachable. Check VPN tunnel.'}, status=400)
-            except Exception as e:
-                logger.warning(f"Port manager API fallback check failed for router {pk}: {e}")
-                return Response({'error': 'Router is not reachable. Check VPN tunnel.'}, status=400)
-
-        try:
-            api_wrapper = mikrotik_api_module.MikrotikAPI(router)
-            if not api_wrapper.connect():
-                return Response({'error': 'Failed to connect to router API'}, status=400)
-
-            # 1. Fetch physical interfaces
-            ethernets = list(api_wrapper._execute('/interface/ethernet'))
-            wlans = list(api_wrapper._execute('/interface/wireless'))
-            bridge_ports = list(api_wrapper._execute('/interface/bridge/port'))
-            api_wrapper.disconnect()
-
-            # Find which ports are currently on the netily-bridge
-            active_bridge_ports = [
-                p.get('interface') for p in bridge_ports 
-                if p.get('bridge') == 'netily-bridge'
-            ]
-
-            available_ports = []
-            
-            # Format Ethernet ports
-            for eth in ethernets:
-                name = eth.get('name')
-                # Never allow the WAN port to be added to the bridge!
-                is_wan = (name == router.wan_interface)
-                available_ports.append({
-                    'name': name,
-                    'type': 'ethernet',
-                    'running': eth.get('running', 'false') == 'true',
-                    'is_selected': name in active_bridge_ports,
-                    'is_wan': is_wan,
-                    'disabled': eth.get('disabled', 'false') == 'true'
-                })
-
-            # Format Wireless ports
-            for wlan in wlans:
-                name = wlan.get('name')
-                available_ports.append({
-                    'name': name,
-                    'type': 'wireless',
-                    'running': wlan.get('running', 'false') == 'true',
-                    'is_selected': name in active_bridge_ports,
-                    'is_wan': False,
-                    'disabled': wlan.get('disabled', 'false') == 'true'
-                })
-
-            return Response({
-                'router_id': router.id,
-                'wan_interface': router.wan_interface,
-                'ports': available_ports
-            })
-
-        except Exception as e:
-            return Response({'error': str(e)}, status=500)
-
-    def post(self, request, pk):
-        from django.db import connection
-        router, tenant = find_router_across_tenants(router_id=pk)
-        if not router:
-            return Response({'error': 'Router not found'}, status=404)
-        connection.set_tenant(tenant)
-
-        desired_ports = request.data.get('ports', [])
-        if not isinstance(desired_ports, list):
-            return Response({'error': 'Payload must contain a "ports" array'}, status=400)
-
-        # Safety Check: Prevent admin from locking themselves out by bridging the WAN port
-        if router.wan_interface in desired_ports:
-            return Response({
-                'error': f'Security Risk: You cannot add the WAN interface ({router.wan_interface}) to the hotspot bridge!'
-            }, status=400)
-
-        if router.status != 'online':
-            # Save to DB for offline sync later
-            router.hotspot_interfaces = desired_ports
-            router.save(update_fields=['hotspot_interfaces'])
-            return Response({'message': 'Saved to database. Will apply when router is online.', 'applied': False})
-
-        # Apply to live router
-        result = sync_bridge_ports_to_router(router, desired_ports)
-
-        if result.get('success'):
-            # Update DB to match live router
-            router.hotspot_interfaces = desired_ports
-            router.save(update_fields=['hotspot_interfaces'])
-            
-            RouterEvent.objects.create(
-                router=router,
-                event_type='config_change',
-                message=f"Bridge ports updated: {', '.join(desired_ports) or 'None'}"
-            )
-            
-            return Response({
-                'success': True, 
-                'message': 'Ports synchronized to router successfully!',
-                'added': result.get('added'),
-                'removed': result.get('removed')
-            })
-        else:
-            return Response({'error': result.get('error')}, status=500)
