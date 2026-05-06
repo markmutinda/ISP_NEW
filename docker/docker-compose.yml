@@ -81,6 +81,10 @@ services:
       - BASE_URL=${BASE_URL:-https://api.netily.co.ke}
       - FRONTEND_URL=${FRONTEND_URL:-https://netily.co.ke}
       - VPN_NETWORK_CIDR=${VPN_NETWORK_CIDR:-10.8.0.0/16}
+      - WG_NETWORK_CIDR=${WG_NETWORK_CIDR:-10.9.0.0/16}
+      - WG_SERVER_IP=${WG_SERVER_IP:-10.9.0.1}
+      - WG_SERVER_PUBLIC_KEY=${WG_SERVER_PUBLIC_KEY:-}
+      - WG_SERVER_ENDPOINT=${WG_SERVER_ENDPOINT:-vpn.netily.co.ke:51820}
     cap_add:
       - NET_ADMIN
     depends_on:
@@ -128,6 +132,8 @@ services:
       - OPENVPN_MANAGEMENT_HOST=netily-openvpn
       - VPN_GATEWAY_IP=${VPN_GATEWAY_IP:-10.8.0.1}
       - VPN_NETWORK_CIDR=${VPN_NETWORK_CIDR:-10.8.0.0/16}
+      - WG_NETWORK_CIDR=${WG_NETWORK_CIDR:-10.9.0.0/16}
+      - WG_SERVER_IP=${WG_SERVER_IP:-10.9.0.1}
     cap_add:
       - NET_ADMIN
     depends_on:
@@ -195,6 +201,8 @@ services:
       - DB_PORT=5432
       - DB_SCHEMA=public
       - VPN_NETWORK_CIDR=${VPN_NETWORK_CIDR:-10.8.0.0/16}
+      - WG_NETWORK_CIDR=${WG_NETWORK_CIDR:-10.9.0.0/16}
+      - WG_SERVER_IP=${WG_SERVER_IP:-10.9.0.1}
     volumes:
       - ../radius_config/sites-available/default:/etc/freeradius/sites-enabled/default:ro
       - ../radius_config/mods-config/sql/main/postgresql/queries.conf:/etc/freeradius/mods-config/sql/main/postgresql/queries.conf:ro

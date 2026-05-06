@@ -16,10 +16,16 @@ class MikrotikScriptGenerator:
         self.request = request
 
         # ── VPN Gateway Logic ─────────────────────────────────────────
-        self.vpn_gateway = getattr(settings, 'VPN_GATEWAY_IP', '10.8.0.1')
+        self.vpn_gateway = getattr(settings, 'VPN_SERVER_IP', '10.8.0.1')
         
         # ── VPN Network CIDR (dynamic from settings) ───────────────────
         self.vpn_network_cidr = getattr(settings, 'VPN_NETWORK_CIDR', '10.8.0.0/16')
+
+        # ── WireGuard settings ─────────────────────────────────────────
+        self.wg_server_ip = getattr(settings, 'WG_SERVER_IP', '10.9.0.1')
+        self.wg_network_cidr = getattr(settings, 'WG_NETWORK_CIDR', '10.9.0.0/16')
+        self.wg_server_public_key = getattr(settings, 'WG_SERVER_PUBLIC_KEY', '')
+        self.wg_server_endpoint = getattr(settings, 'WG_SERVER_ENDPOINT', 'vpn.netily.co.ke:51820')
         
         # ── Production URLs Logic ─────────────────────────────────────
         self.base_url = getattr(settings, 'BASE_URL', 'https://api.netily.co.ke').rstrip('/')
@@ -164,13 +170,18 @@ class MikrotikScriptGenerator:
             self._section_header(r, v),
             self._section_identity_cleanup(r),
             self._section_api_user(r),
-            self._section_openvpn(r, ovpn_cipher, ovpn_auth, is_v6),
-            self._section_firewall(r),
+            # KEY CHANGE: WireGuard for v7, OpenVPN for v6
+            self._section_openvpn(r, ovpn_cipher, ovpn_auth, is_v6)
+            if is_v6
+            else self._section_wireguard(r),
+            # Firewall rules use correct VPN network range
+            self._section_firewall(r, is_v6),
             self._section_bridge_ports(r, r_gateway_cidr),
             self._section_dhcp(r, gateway_ip, pool_range, dhcp_network),
-            self._section_radius(r),
+            # RADIUS points to correct server IP based on VPN type
+            self._section_radius(r, is_v6),
             self._section_hotspot(r, gateway_ip),
-            self._section_walled_garden(r, portal_domain),
+            self._section_walled_garden(r, portal_domain, is_v6),
             self._section_ssl_certs(r),
             self._section_hotspot_html(r),
             self._section_pppoe(r, pppoe_local) if r.enable_pppoe else "",
@@ -210,6 +221,7 @@ class MikrotikScriptGenerator:
 :do {{ :foreach i in=[/ip dhcp-server find name="netily-dhcp"] do={{ /ip dhcp-server remove $i }} }} on-error={{}}
 :do {{ :foreach i in=[/ip dhcp-server network find comment="Netily DHCP Network"] do={{ /ip dhcp-server network remove $i }} }} on-error={{}}
 :do {{ :foreach i in=[/interface ovpn-client find name="Netily-VPN"] do={{ /interface ovpn-client remove $i }} }} on-error={{}}
+:do {{ :foreach i in=[/interface wireguard find name="netily-wg"] do={{ /interface wireguard remove $i }} }} on-error={{}}
 :do {{ :foreach i in=[/ppp profile find name="netily-pppoe-profile"] do={{ /ppp profile remove $i }} }} on-error={{}}
 :do {{ :foreach i in=[/interface pppoe-server server find name="netily-pppoe"] do={{ /interface pppoe-server server remove $i }} }} on-error={{}}
 :do {{ :foreach i in=[/interface bridge find name="netily-bridge"] do={{
@@ -289,16 +301,105 @@ class MikrotikScriptGenerator:
 }}
 """
 
-    def _section_firewall(self, r: Router) -> str:
-        # Use dynamic VPN network CIDR instead of hardcoded /24
+    def _section_wireguard(self, r) -> str:
+        """WireGuard tunnel for RouterOS v7 — replaces OpenVPN section"""
+        endpoint_parts = self.wg_server_endpoint.split(':')
+        endpoint_host = endpoint_parts[0]
+        endpoint_port = endpoint_parts[1] if len(endpoint_parts) > 1 else '51820'
+
+        # Safety check — if WireGuard keys not provisioned yet, warn clearly
+        private_key = getattr(r, 'wg_private_key', '') or ''
+        vpn_ip = getattr(r, 'vpn_ip_address', '') or ''
+
+        if not private_key or not vpn_ip:
+            return f"""# ─────────────────────────────────────────────────────────────
+# 3. WIREGUARD VPN TUNNEL — NOT YET PROVISIONED
+# ─────────────────────────────────────────────────────────────
+:put "ERROR: WireGuard not provisioned for this router"
+:put "Please reprovision from the Netily dashboard"
+"""
+
+        return f"""# ─────────────────────────────────────────────────────────────
+# 3. WIREGUARD VPN TUNNEL (RouterOS v7)
+# ─────────────────────────────────────────────────────────────
+:put "Configuring WireGuard VPN tunnel..."
+
+# Clean up any existing WireGuard config
+:do {{ /interface wireguard remove [find name="netily-wg"] }} on-error={{}}
+:do {{ /ip address remove [find comment="Netily-WG-IP"] }} on-error={{}}
+:do {{ /ip route remove [find comment="Netily-WG-Route"] }} on-error={{}}
+:do {{ /interface wireguard peers remove [find comment="Netily-Cloud-Server"] }} on-error={{}}
+
+# Create WireGuard interface with server-generated private key
+/interface wireguard add \\
+    name="netily-wg" \\
+    private-key="{self._escape_ros_string(private_key)}" \\
+    listen-port=13231 \\
+    comment="Netily Cloud Controller WireGuard"
+
+# Assign VPN IP to interface
+/ip address add \\
+    address="{vpn_ip}/32" \\
+    interface="netily-wg" \\
+    comment="Netily-WG-IP"
+
+# Add server as peer
+/interface wireguard peers add \\
+    interface="netily-wg" \\
+    public-key="{self._escape_ros_string(self.wg_server_public_key)}" \\
+    endpoint-address="{endpoint_host}" \\
+    endpoint-port={endpoint_port} \\
+    allowed-address={self.wg_network_cidr} \\
+    persistent-keepalive=25 \\
+    comment="Netily-Cloud-Server"
+
+# Route WireGuard network through tunnel
+/ip route add \\
+    dst-address={self.wg_network_cidr} \\
+    gateway="netily-wg" \\
+    comment="Netily-WG-Route"
+
+# Wait for handshake
+:put "Waiting for WireGuard handshake..."
+:delay 8s
+
+:local wgOk false
+:local wgAttempts 0
+:while ($wgAttempts < 6 && $wgOk = false) do={{
+    :delay 3s
+    :set wgAttempts ($wgAttempts + 1)
+    :do {{
+        :local hs [/interface wireguard peers get \\
+            [find comment="Netily-Cloud-Server"] last-handshake]
+        :if ($hs != "never" && $hs != "") do={{
+            :set wgOk true
+            :put (" + WireGuard handshake established after " . ($wgAttempts * 3) . "s")
+        }}
+    }} on-error={{}}
+}}
+
+:if ($wgOk = false) do={{
+    :put "WARNING: WireGuard handshake pending"
+    :put "Tunnel will keep retrying — this is normal on first boot"
+}}
+"""
+
+    def _section_firewall(self, r: Router, is_v6: bool = False) -> str:
+        """
+        Firewall allows traffic from the correct VPN network range.
+        v6 → 10.8.0.0/16
+        v7 → 10.9.0.0/16
+        """
+        vpn_cidr = self.vpn_network_cidr if is_v6 else self.wg_network_cidr
+
         return f"""# ─────────────────────────────────────────────────────────────
 # 4. FIREWALL (VPN & Management)
 # ─────────────────────────────────────────────────────────────
 :put "Configuring firewall rules..."
 
-/ip firewall filter add chain=input action=accept src-address={self.vpn_network_cidr} comment="Netily-VPN-Input-Allow"
-/ip firewall filter add chain=forward action=accept src-address={self.vpn_network_cidr} comment="Netily-VPN-Forward-Allow"
-/ip firewall filter add chain=forward action=accept dst-address={self.vpn_network_cidr} comment="Netily-VPN-Forward-Return"
+/ip firewall filter add chain=input action=accept src-address={vpn_cidr} comment="Netily-VPN-Input-Allow"
+/ip firewall filter add chain=forward action=accept src-address={vpn_cidr} comment="Netily-VPN-Forward-Allow"
+/ip firewall filter add chain=forward action=accept dst-address={vpn_cidr} comment="Netily-VPN-Forward-Return"
 /ip firewall filter add chain=input action=accept connection-state=established,related comment="Netily-Established"
 """
 
@@ -353,19 +454,27 @@ class MikrotikScriptGenerator:
 /ip dhcp-server network add address="{dhcp_network}" gateway="{gateway_ip}" dns-server=8.8.8.8,1.1.1.1 comment="Netily DHCP Network"
 """
 
-    def _section_radius(self, r: Router) -> str:
-        radius_cmd = (
-            f'/radius add address={self.vpn_gateway} secret="{self._escape_ros_string(r.shared_secret)}" '
-            f'authentication-port=1812 accounting-port=1813 '
-            f'service=hotspot,ppp timeout=3000ms comment="Netily-Cloud-RADIUS"'
-        )
-        
+    def _section_radius(self, r: Router, is_v6: bool = False) -> str:
+        """
+        RADIUS server IP depends on VPN type.
+        v6/OpenVPN → 10.8.0.1
+        v7/WireGuard → 10.9.0.1
+        """
+        radius_ip = self.vpn_gateway if is_v6 else self.wg_server_ip
+
         return f"""# ─────────────────────────────────────────────────────────────
 # 7. RADIUS (Cloud RADIUS via VPN Tunnel)
 # ─────────────────────────────────────────────────────────────
-:put "Configuring Cloud RADIUS with standard ports (1812/1813)..."
+:put "Configuring RADIUS → {radius_ip}..."
 :do {{ /radius remove [find comment~"Netily"] }} on-error={{}}
-{radius_cmd}
+/radius add \\
+    address={radius_ip} \\
+    secret="{self._escape_ros_string(r.shared_secret)}" \\
+    authentication-port=1812 \\
+    accounting-port=1813 \\
+    service=hotspot,ppp \\
+    timeout=3000ms \\
+    comment="Netily-Cloud-RADIUS"
 /radius incoming set accept=yes port=3799
 """
 
@@ -393,10 +502,17 @@ class MikrotikScriptGenerator:
 :put " + RADIUS accounting enabled with 3-minute interim updates"
 """
 
-    def _section_walled_garden(self, r: Router, portal_domain: str) -> str:
+    def _section_walled_garden(self, r: Router, portal_domain: str, is_v6: bool = False) -> str:
+        """
+        Walled garden allows the correct VPN server IP.
+        v6 → 10.8.0.1
+        v7 → 10.9.0.1
+        """
+        from urllib.parse import urlparse
         tenant_domain = urlparse(self.get_tenant_portal_url()).netloc
-        
-        # Use dynamic VPN network CIDR instead of hardcoded /24
+        vpn_ip = self.vpn_gateway if is_v6 else self.wg_server_ip
+        vpn_cidr = self.vpn_network_cidr if is_v6 else self.wg_network_cidr
+
         return f"""# ─────────────────────────────────────────────────────────────
 # 9. WALLED GARDEN (Pre-Auth Access)
 # ─────────────────────────────────────────────────────────────
@@ -415,8 +531,8 @@ class MikrotikScriptGenerator:
 /ip hotspot walled-garden add dst-host="*.payhero.co.ke" comment="Netily-PayHero"
 
 # Allow VPN / API ranges
-/ip hotspot walled-garden ip add dst-address={self.vpn_gateway}/32 action=accept comment="Netily-VPN-API"
-/ip hotspot walled-garden ip add dst-address={self.vpn_network_cidr} action=accept comment="Netily-VPN-Network"
+/ip hotspot walled-garden ip add dst-address={vpn_ip}/32 action=accept comment="Netily-VPN-API"
+/ip hotspot walled-garden ip add dst-address={vpn_cidr} action=accept comment="Netily-VPN-Network"
 """
 
     def _section_ssl_certs(self, r: Router) -> str:
@@ -553,19 +669,24 @@ class MikrotikScriptGenerator:
         return ""
 
     def _section_footer(self, r: Router) -> str:
-        vpn_host = self._get_vpn_host(r)
-        
+        """Updated footer shows VPN type"""
+        is_v6 = getattr(r, 'vpn_type', 'wireguard') == 'openvpn'
+        vpn_type_label = "OpenVPN (v6)" if is_v6 else "WireGuard (v7)"
+        vpn_ip = getattr(r, 'vpn_ip_address', 'pending') or 'pending'
+        radius_ip = self.vpn_gateway if is_v6 else self.wg_server_ip
+
         return f"""# ═══════════════════════════════════════════════════════════════
 # PROVISIONING COMPLETE
 # ═══════════════════════════════════════════════════════════════
 :delay 1s
-:log info "Netily Cloud Controller v4.6 provisioning complete for {self._escape_ros_string(r.name)}"
+:log info "Netily Cloud Controller v4.6 complete for {self._escape_ros_string(r.name)}"
 :put ""
 :put "════════════════════════════════════════════════════════"
 :put " NETILY CLOUD CONTROLLER — SETUP COMPLETE"
 :put " Router:  {self._escape_ros_string(r.name)}"
-:put " VPN:     {self._escape_ros_string(vpn_host)}:{r.openvpn_port}"
-:put " RADIUS:  {self.vpn_gateway}:1812/1813"
+:put " VPN:     {vpn_type_label}"
+:put " VPN IP:  {vpn_ip}"
+:put " RADIUS:  {radius_ip}:1812/1813"
 :put " Portal:  {self.get_tenant_portal_url()}"
 :put "════════════════════════════════════════════════════════"
 """
