@@ -28,4 +28,4 @@ try:
     print('✅ PASS: User and Default NAS created successfully')
 
 except Exception as e:
-    print(f'❌ FAIL: Database Error: {e}')
+    print(f'❌ FAIL: Database has an Error: {e}')
