@@ -5,7 +5,7 @@ services:
     image: postgres:15-alpine
     container_name: netily_db
     volumes:
-      - /var/lib/docker/volumes/6cf8ec734407cd7580a97b02c5ed5019867275b935f36c877e65ac3f9cc1b2c4/_data:/var/lib/postgresql/data
+      - /var/lib/docker/volumes/b4a58f0f53b8b10bd2a01aa90dd196e5619d21fa99008a8c37df8fda014b3e2d/_data:/var/lib/postgresql/data
     env_file: ../.env
     environment:
       - POSTGRES_DB=isp_management
