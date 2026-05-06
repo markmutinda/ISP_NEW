@@ -142,34 +142,6 @@ class Router(AuditMixin):
     openvpn_username = models.CharField(max_length=100, blank=True, null=True)
     openvpn_password = models.CharField(max_length=100, blank=True, null=True)
     
-    # ─────────────────────────────────────────────────────────────
-    # DUAL VPN SETTINGS (OpenVPN v6 & WireGuard v7)
-    # ─────────────────────────────────────────────────────────────
-    VPN_TYPE_CHOICES = [
-        ('openvpn', 'OpenVPN (RouterOS v6)'),
-        ('wireguard', 'WireGuard (RouterOS v7)'),
-    ]
-
-    vpn_type = models.CharField(
-        max_length=20,
-        choices=VPN_TYPE_CHOICES,
-        default='openvpn',
-        help_text='VPN tunnel type — auto-set based on RouterOS version'
-    )
-    
-    wg_private_key = models.TextField(
-        blank=True,
-        null=True,
-        help_text='WireGuard private key (generated server-side, kept secret)'
-    )
-    
-    wg_public_key = models.CharField(
-        max_length=64,
-        blank=True,
-        null=True,
-        help_text='WireGuard public key (sent to server peer list)'
-    )
-    
     # The actual IP the router gets inside the VPN (e.g., 10.8.0.5)
     ip_address = models.GenericIPAddressField(
         protocol='IPv4', 

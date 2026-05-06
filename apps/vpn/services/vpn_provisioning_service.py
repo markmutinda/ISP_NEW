@@ -1,505 +1,352 @@
 """
-VPN Provisioning Service — Dual Stack (OpenVPN v6 + WireGuard v7)
+VPN Provisioning Service — Cloud Controller Auto-Provisioning
 
-OpenVPN  → 10.8.0.0/16 range → existing clients unaffected
-WireGuard → 10.9.0.0/16 range → new v7 clients
-
-Both tunnel to same VPS, both hit same FreeRADIUS server,
-both managed from same Django dashboard.
-
-Reference architecture: Centipid Technologies dual-VPN approach
+Handles the full lifecycle when a new Router is created:
+1. Assigns next available static VPN IP from the configured CIDR pool (GLOBALLY unique across all tenants)
+2. Generates a client certificate via CertificateService
+3. Writes a CCD file mapping the certificate CN → static IP
+4. Stores PEM content on the Router model for .rsc script injection
 """
 
 import ipaddress
 import logging
-import subprocess
-from typing import Optional
+from typing import Optional, Set, Tuple
 
 from django.conf import settings
 from django.db import transaction
 from django.utils import timezone
 from django_tenants.utils import schema_context, get_public_schema_name
 
+from apps.vpn.models import CertificateAuthority, VPNCertificate, VPNServer
+from apps.vpn.services.certificate_service import CertificateService
+from apps.vpn.services.ccd_manager import CCDManager
+from apps.core.models import GlobalRouterMap  # ADDED: For global IP tracking
+
 logger = logging.getLogger(__name__)
 
 
 class VPNProvisioningError(Exception):
+    """Raised when VPN provisioning fails."""
     pass
 
 
 class VPNProvisioningService:
-
-    # Separate IP ranges — never overlap
-    OPENVPN_NETWORK = getattr(settings, 'OPENVPN_NETWORK_CIDR', '10.8.0.0/16')
-    OPENVPN_SERVER_IP = getattr(settings, 'OPENVPN_SERVER_IP', '10.8.0.1')
-
-    WIREGUARD_NETWORK = getattr(settings, 'WG_NETWORK_CIDR', '10.9.0.0/16')
-    WIREGUARD_SERVER_IP = getattr(settings, 'WG_SERVER_IP', '10.9.0.1')
+    """
+    Orchestrates the complete VPN provisioning flow for a router.
+    Called when a new Router is created or when re-provisioning is requested.
+    """
 
     def __init__(self):
-        # Only import CertificateService if cryptography is available
-        # WireGuard doesn't need it
-        try:
-            from apps.vpn.services.certificate_service import CertificateService
-            self.cert_service = CertificateService()
-        except ImportError:
-            self.cert_service = None
-
-        from apps.vpn.services.ccd_manager import CCDManager
+        self.cert_service = CertificateService()
         self.ccd_manager = CCDManager()
 
     def provision_router(self, router) -> dict:
         """
-        Main entry point — called exactly the same way for all routers.
-        Detects correct VPN type from routeros_version and provisions accordingly.
-
-        Existing OpenVPN routers are NEVER touched by this logic unless
-        they explicitly re-run the script on v7 hardware.
+        Full provisioning pipeline:
+        1. Ensure a CA exists
+        2. Assign a unique VPN IP (GLOBALLY unique across all tenants)
+        3. Generate a client certificate
+        4. Write the CCD file
+        5. Store everything on the Router record
+        6. Register the router in GlobalRouterMap (public schema)
         """
-        ros_version = getattr(router, 'routeros_version', None)
+        from apps.network.models.router_models import Router  # late import to avoid circular
 
-        # If router already has a vpn_type set and is provisioned,
-        # respect it — don't reprovision automatically
-        if router.vpn_provisioned and router.vpn_ip_address:
-            logger.info(
-                f"Router {router.name} already provisioned as "
-                f"{router.vpn_type} with IP {router.vpn_ip_address} — skipping"
-            )
-            return {
-                'vpn_ip': router.vpn_ip_address,
-                'type': router.vpn_type,
-                'status': 'already_provisioned'
-            }
+        logger.info(f"Starting VPN provisioning for router: {router.name} (id={router.id})")
 
-        # Determine VPN type from RouterOS version
-        if ros_version and str(ros_version).startswith('6'):
-            logger.info(
-                f"Router {router.name} is ROS v6 — "
-                f"provisioning OpenVPN (10.8.x.x range)"
-            )
-            return self._provision_openvpn(router)
-        else:
-            logger.info(
-                f"Router {router.name} is ROS v7 (or unknown) — "
-                f"provisioning WireGuard (10.9.x.x range)"
-            )
-            return self._provision_wireguard(router)
-
-    def reprovision_router(self, router) -> dict:
-        """
-        Explicit reprovision — called when admin clicks reprovision
-        or when a v6 client upgrades to v7 and re-runs the script.
-        This WILL change VPN type if the version changed.
-        """
-        logger.info(f"Reprovisioning router {router.name} (current type: {router.vpn_type})")
-        self.deprovision_router(router)
-        # Clear vpn_provisioned so provision_router picks the right type fresh
-        router.vpn_provisioned = False
-        router.vpn_ip_address = None
-        router.save(update_fields=['vpn_provisioned', 'vpn_ip_address'])
-        return self.provision_router(router)
-
-    def deprovision_router(self, router) -> None:
-        """Clean removal — handles both VPN types correctly"""
-        if router.vpn_type == 'wireguard':
-            self._deprovision_wireguard(router)
-        else:
-            self._deprovision_openvpn(router)
-
-        # Clear GlobalRouterMap entry regardless of type
-        self._unregister_router_globally(router)
-
-        # Clear all VPN fields
-        router.vpn_type = 'openvpn'  # reset to default
-        router.vpn_ip_address = None
-        router.vpn_provisioned = False
-        router.vpn_provisioned_at = None
-        router.wg_private_key = None
-        router.wg_public_key = None
-        router.ca_certificate = None
-        router.client_certificate = None
-        router.client_key = None
-        router.save(update_fields=[
-            'vpn_type', 'vpn_ip_address', 'vpn_provisioned',
-            'vpn_provisioned_at', 'wg_private_key', 'wg_public_key',
-            'ca_certificate', 'client_certificate', 'client_key', 'updated_at'
-        ])
-
-    # ─────────────────────────────────────────────────────────────
-    # WIREGUARD (v7)
-    # ─────────────────────────────────────────────────────────────
-
-    def _provision_wireguard(self, router) -> dict:
-        """
-        Provision WireGuard tunnel for RouterOS v7 router.
-        Server-side keypair generation (same approach as Centipid).
-        """
         try:
             with transaction.atomic():
-                # 1. Generate keypair server-side
-                private_key, public_key = self._generate_wg_keypair()
-                logger.info(f"Generated WireGuard keypair for {router.name}")
-
-                # 2. Assign IP from WireGuard range (10.9.x.x)
-                vpn_ip = self._assign_ip(self.WIREGUARD_NETWORK, 'wireguard')
-                logger.info(f"Assigned WireGuard IP {vpn_ip} to {router.name}")
-
-                # 3. Add peer to WireGuard server
-                self._add_wg_peer(public_key, vpn_ip)
-                logger.info(f"Added WireGuard peer {public_key[:8]}... for {router.name}")
-
-                # 4. Save to router model
-                router.vpn_type = 'wireguard'
-                router.wg_private_key = private_key
-                router.wg_public_key = public_key
-                router.vpn_ip_address = vpn_ip
-                router.ip_address = vpn_ip
-                router.vpn_provisioned = True
-                router.vpn_provisioned_at = timezone.now()
-                # Clear OpenVPN cert fields — not needed for WireGuard
-                router.ca_certificate = None
-                router.client_certificate = None
-                router.client_key = None
-                router.save(update_fields=[
-                    'vpn_type', 'wg_private_key', 'wg_public_key',
-                    'vpn_ip_address', 'ip_address', 'vpn_provisioned',
-                    'vpn_provisioned_at', 'ca_certificate',
-                    'client_certificate', 'client_key', 'updated_at'
-                ])
-
-                # 5. Register in GlobalRouterMap (public schema)
-                self._register_router_globally(router, vpn_ip)
-
-                logger.info(
-                    f"WireGuard provisioning complete for {router.name}: "
-                    f"IP={vpn_ip}"
-                )
-                return {
-                    'vpn_ip': vpn_ip,
-                    'type': 'wireguard',
-                    'status': 'provisioned'
-                }
-
-        except Exception as e:
-            logger.error(
-                f"WireGuard provisioning failed for {router.name}: {e}",
-                exc_info=True
-            )
-            raise VPNProvisioningError(
-                f"WireGuard provisioning failed for {router.name}: {e}"
-            )
-
-    def _deprovision_wireguard(self, router) -> None:
-        """Remove WireGuard peer from server"""
-        if not router.wg_public_key:
-            logger.warning(f"Router {router.name} has no WireGuard public key to remove")
-            return
-
-        try:
-            subprocess.run(
-                ['wg', 'set', 'wg0', 'peer', router.wg_public_key, '--remove'],
-                check=True,
-                capture_output=True
-            )
-            subprocess.run(
-                ['wg-quick', 'save', 'wg0'],
-                check=True,
-                capture_output=True
-            )
-            logger.info(f"Removed WireGuard peer for {router.name}")
-        except subprocess.CalledProcessError as e:
-            logger.error(f"Failed to remove WireGuard peer for {router.name}: {e}")
-        except FileNotFoundError:
-            logger.warning(
-                "wg command not found — WireGuard may not be installed on this server. "
-                "Peer not removed from server config."
-            )
-
-    def _generate_wg_keypair(self):
-        """Generate WireGuard keypair using wg command"""
-        try:
-            private_key = subprocess.check_output(
-                ['wg', 'genkey'],
-                text=True,
-                stderr=subprocess.PIPE
-            ).strip()
-
-            public_key = subprocess.check_output(
-                ['wg', 'pubkey'],
-                input=private_key,
-                text=True,
-                stderr=subprocess.PIPE
-            ).strip()
-
-            return private_key, public_key
-
-        except FileNotFoundError:
-            raise VPNProvisioningError(
-                "wg command not found. Install WireGuard on the server: "
-                "apt-get install wireguard-tools"
-            )
-        except subprocess.CalledProcessError as e:
-            raise VPNProvisioningError(f"WireGuard keygen failed: {e}")
-
-    def _add_wg_peer(self, public_key: str, vpn_ip: str) -> None:
-        """Add a peer to the running WireGuard interface on the server"""
-        try:
-            subprocess.run(
-                [
-                    'wg', 'set', 'wg0',
-                    'peer', public_key,
-                    'allowed-ips', f'{vpn_ip}/32'
-                ],
-                check=True,
-                capture_output=True
-            )
-            # Persist so peers survive server reboot
-            subprocess.run(
-                ['wg-quick', 'save', 'wg0'],
-                check=True,
-                capture_output=True
-            )
-        except FileNotFoundError:
-            raise VPNProvisioningError(
-                "wg command not found. WireGuard not installed on server."
-            )
-        except subprocess.CalledProcessError as e:
-            raise VPNProvisioningError(f"Failed to add WireGuard peer: {e}")
-
-    # ─────────────────────────────────────────────────────────────
-    # OPENVPN (v6) — existing logic preserved exactly
-    # ─────────────────────────────────────────────────────────────
-
-    def _provision_openvpn(self, router) -> dict:
-        """
-        Provision OpenVPN for RouterOS v6 router.
-        This is your existing logic — untouched so existing clients
-        are completely unaffected.
-        """
-        try:
-            with transaction.atomic():
-                # 1. Get or create CA
+                # 1. Ensure CA exists
                 ca = self._ensure_ca()
 
-                # 2. Assign IP from OpenVPN range (10.8.x.x)
-                vpn_ip = self._assign_ip(self.OPENVPN_NETWORK, 'openvpn')
-                logger.info(f"Assigned OpenVPN IP {vpn_ip} to {router.name}")
+                # 2. Assign globally unique VPN IP
+                vpn_ip = self._assign_vpn_ip(router)
+                logger.info(f"Assigned globally unique VPN IP {vpn_ip} to router {router.name}")
 
-                # 3. Generate certificate CN from openvpn_username
-                common_name = self._generate_cn(router)
-
-                # 4. Generate client certificate
+                # 3. Generate client certificate
+                common_name = self._generate_cn(router)  # ← returns openvpn_username
                 cert_record = self._generate_client_certificate(ca, router, common_name)
+                logger.info(f"Generated certificate CN={common_name} for router {router.name}")
 
-                # 5. Write CCD file
+                # 4. Write CCD file (filename = common_name = username)
                 self.ccd_manager.create_ccd_file(common_name, vpn_ip)
-                logger.info(f"CCD file written for {common_name} → {vpn_ip}")
+                logger.info(f"Wrote CCD file for CN={common_name} → {vpn_ip}")
 
-                # 6. Save to router
-                router.vpn_type = 'openvpn'
+                # 5. Update Router record
                 router.vpn_ip_address = vpn_ip
-                router.ip_address = vpn_ip
                 router.vpn_certificate = cert_record
                 router.ca_certificate = ca.ca_certificate
                 router.client_certificate = cert_record.certificate
                 router.client_key = cert_record.private_key
                 router.vpn_provisioned = True
+                router.status = 'online'  # <--- SET STATUS TO ONLINE
                 router.vpn_provisioned_at = timezone.now()
+                # Also set the management ip_address for backward compat
+                router.ip_address = vpn_ip
                 router.save(update_fields=[
-                    'vpn_type', 'vpn_ip_address', 'ip_address',
-                    'vpn_certificate', 'ca_certificate',
-                    'client_certificate', 'client_key',
-                    'vpn_provisioned', 'vpn_provisioned_at', 'updated_at'
+                    'vpn_ip_address', 'vpn_certificate', 'ca_certificate',
+                    'client_certificate', 'client_key', 'vpn_provisioned',
+                    'status',           # <--- ADDED STATUS TO UPDATE FIELDS
+                    'vpn_provisioned_at', 'ip_address', 'updated_at',
                 ])
 
-                # 7. Register in GlobalRouterMap
+                # 6. Register router in GlobalRouterMap (public schema)
                 self._register_router_globally(router, vpn_ip)
 
-                logger.info(
-                    f"OpenVPN provisioning complete for {router.name}: "
-                    f"IP={vpn_ip}"
-                )
-                return {
+                result = {
                     'vpn_ip': vpn_ip,
-                    'type': 'openvpn',
-                    'status': 'provisioned'
+                    'common_name': common_name,
+                    'certificate_id': str(cert_record.id),
+                    'status': 'provisioned',
                 }
+                logger.info(f"VPN provisioning complete for router {router.name}: {result}")
+                return result
 
         except Exception as e:
-            logger.error(
-                f"OpenVPN provisioning failed for {router.name}: {e}",
-                exc_info=True
-            )
-            raise VPNProvisioningError(
-                f"OpenVPN provisioning failed for {router.name}: {e}"
-            )
+            logger.error(f"VPN provisioning failed for router {router.name}: {e}", exc_info=True)
+            raise VPNProvisioningError(f"Failed to provision VPN for router {router.name}: {e}")
 
-    def _deprovision_openvpn(self, router) -> None:
-        """Remove OpenVPN CCD file and revoke certificate"""
+    def deprovision_router(self, router) -> None:
+        """
+        Removes VPN provisioning for a router:
+        - Revokes the certificate
+        - Removes the CCD file
+        - Removes from GlobalRouterMap (public schema)
+        - Clears Router VPN fields
+        """
+        logger.info(f"Deprovisioning VPN for router: {router.name}")
+
         # Revoke certificate
         if router.vpn_certificate:
-            try:
-                router.vpn_certificate.revoke(
-                    reason=f"Router {router.name} deprovisioned"
-                )
-            except Exception as e:
-                logger.error(f"Failed to revoke cert for {router.name}: {e}")
+            router.vpn_certificate.revoke(reason=f"Router {router.name} deprovisioned")
 
-        # Remove CCD file
+        # Remove CCD (filename = openvpn_username)
         common_name = self._generate_cn(router)
-        try:
-            self.ccd_manager.remove_ccd_file(common_name)
-        except Exception as e:
-            logger.error(f"Failed to remove CCD for {router.name}: {e}")
+        self.ccd_manager.remove_ccd_file(common_name)
 
-    # ─────────────────────────────────────────────────────────────
-    # SHARED HELPERS
-    # ─────────────────────────────────────────────────────────────
+        # Remove from GlobalRouterMap (public schema)
+        self._unregister_router_globally(router)
 
-    def _assign_ip(self, network_cidr: str, vpn_type: str) -> str:
-        """
-        Assign next available IP from the correct pool.
-        Queries ONLY routers of matching vpn_type.
-        OpenVPN pool (10.8.x.x) and WireGuard pool (10.9.x.x)
-        never interfere with each other.
-        """
-        from apps.network.models.router_models import Router
-        from apps.core.models import GlobalRouterMap
-        from django_tenants.utils import schema_context, get_public_schema_name
+        # Clear fields
+        router.vpn_ip_address = None
+        router.vpn_certificate = None
+        router.ca_certificate = None
+        router.client_certificate = None
+        router.client_key = None
+        router.vpn_provisioned = False
+        router.vpn_provisioned_at = None
+        router.save(update_fields=[
+            'vpn_ip_address', 'vpn_certificate', 'ca_certificate',
+            'client_certificate', 'client_key', 'vpn_provisioned',
+            'vpn_provisioned_at', 'updated_at',
+        ])
+        logger.info(f"VPN deprovisioned for router {router.name}")
 
-        network = ipaddress.ip_network(network_cidr, strict=False)
+    def reprovision_router(self, router) -> dict:
+        """Deprovision then re-provision (cert rotation, IP change, etc.)."""
+        self.deprovision_router(router)
+        return self.provision_router(router)
 
-        # Get all IPs already assigned globally for this VPN type
-        with schema_context(get_public_schema_name()):
-            # Check GlobalRouterMap for the network range
-            all_map_ips = set(
-                GlobalRouterMap.objects.values_list('nas_ip', flat=True)
-            )
+    # ────────────────────────────────────────────────────────────
+    # INTERNAL HELPERS
+    # ────────────────────────────────────────────────────────────
 
-        # Filter to only IPs in this specific network range
-        used_ips = set()
-        for ip_str in all_map_ips:
-            if ip_str:
-                try:
-                    ip = ipaddress.ip_address(ip_str)
-                    if ip in network:
-                        used_ips.add(ip)
-                except ValueError:
-                    pass
-
-        # Reserved: first IP is network gateway (.0.1)
-        reserved = {network.network_address + 1}
-
-        # Find first available
-        for host in network.hosts():
-            if host not in reserved and host not in used_ips:
-                return str(host)
-
-        raise VPNProvisioningError(
-            f"No available IPs in {network_cidr} for {vpn_type}. "
-            f"Used: {len(used_ips)}, Capacity: {network.num_addresses - 2}"
-        )
-
-    def _ensure_ca(self):
-        """Get active CA for OpenVPN — unchanged from your existing code"""
-        from apps.vpn.models import CertificateAuthority
-
+    def _ensure_ca(self) -> CertificateAuthority:
+        """Get the active CA, or create one if none exists."""
         ca = CertificateAuthority.objects.filter(is_active=True).first()
         if ca:
             return ca
 
-        logger.info("No active CA — creating new Certificate Authority")
+        logger.info("No active CA found. Creating a new Certificate Authority...")
+        # The CertificateService handles DB creation and returns the CA object
         ca = self.cert_service.create_ca(
             name="Netily Cloud CA",
             common_name="Netily Cloud Controller CA",
             organization="Netily ISP Platform",
             country="KE",
         )
+        logger.info(f"Created new CA: {ca.name}")
         return ca
 
+    def _assign_vpn_ip(self, router) -> str:
+        """
+        Assign globally unique VPN IP across ALL tenants using CIDR-based allocation.
+        Uses GlobalRouterMap (public schema) as the source of truth.
+        
+        This prevents duplicate IPs across different tenants because:
+        - GlobalRouterMap lives in public/shared space
+        - nas_ip field has unique=True constraint
+        - Every tenant draws from one common VPN pool
+        - Supports any CIDR size (default: /16 = 65,534 usable IPs)
+        """
+        from django_tenants.utils import schema_context, get_public_schema_name
+        from apps.core.models import GlobalRouterMap
+
+        # Reuse existing assignment on router
+        if router.vpn_ip_address:
+            return str(router.vpn_ip_address)
+
+        # Get VPN network from settings (supports any CIDR)
+        vpn_cidr = getattr(settings, 'VPN_NETWORK_CIDR', '10.8.0.0/16')
+        try:
+            vpn_net = ipaddress.ip_network(vpn_cidr, strict=False)
+        except ValueError as e:
+            logger.error(f"Invalid VPN_NETWORK_CIDR: {vpn_cidr}")
+            raise VPNProvisioningError(f"Invalid VPN network configuration: {e}")
+
+        # Parse reserved IPs from settings
+        reserved_ips_str = getattr(settings, 'VPN_RESERVED_IPS', '10.8.0.1,10.8.0.2')
+        reserved_ips: Set[ipaddress.IPv4Address] = set()
+        for ip_str in reserved_ips_str.split(','):
+            ip_str = ip_str.strip()
+            if ip_str:
+                try:
+                    reserved_ips.add(ipaddress.ip_address(ip_str))
+                except ValueError:
+                    logger.warning(f"Invalid reserved IP address: {ip_str}")
+
+        # IMPORTANT: Read globally assigned NAS IPs from PUBLIC schema
+        # This ensures we see ALL routers across ALL tenants
+        with schema_context(get_public_schema_name()):
+            assigned_ips = set()
+            for ip_str in GlobalRouterMap.objects.values_list('nas_ip', flat=True):
+                if ip_str:
+                    try:
+                        assigned_ips.add(ipaddress.ip_address(ip_str))
+                    except ValueError:
+                        logger.warning(f"Invalid IP in GlobalRouterMap: {ip_str}")
+            
+            logger.debug(f"Currently assigned global VPN IPs: {assigned_ips}")
+            logger.debug(f"Reserved IPs: {reserved_ips}")
+            logger.debug(f"VPN network: {vpn_net} (total hosts: {vpn_net.num_addresses - 2})")
+
+        # Iterate through all usable hosts in the network (excluding network and broadcast)
+        for host in vpn_net.hosts():
+            # Skip reserved IPs
+            if host in reserved_ips:
+                logger.debug(f"Skipping reserved IP: {host}")
+                continue
+            
+            # Skip already assigned IPs
+            if host in assigned_ips:
+                logger.debug(f"Skipping already assigned IP: {host}")
+                continue
+            
+            # Found available IP
+            logger.info(f"Found available VPN IP: {host}")
+            return str(host)
+
+        # No available IPs found
+        total_capacity = vpn_net.num_addresses - 2  # Subtract network and broadcast
+        raise VPNProvisioningError(
+            f"No available VPN IPs in {vpn_cidr}. "
+            f"Total capacity: {total_capacity} IPs. "
+            f"Reserved: {len(reserved_ips)} IPs. "
+            f"Assigned: {len(assigned_ips)} IPs globally."
+        )
+
+    def _register_router_globally(self, router, vpn_ip: str) -> None:
+        """
+        Register the router in the GlobalRouterMap (public schema).
+        This makes the IP visible to all tenants for global uniqueness.
+        
+        FIXED: Uses router.shared_secret instead of router.radius_secret,
+        and resolves tenant using router's stored schema_name / tenant_subdomain.
+        """
+        from django_tenants.utils import schema_context, get_public_schema_name
+        from apps.core.models import GlobalRouterMap, Tenant
+
+        logger.info(f"Registering router {router.name} (IP: {vpn_ip}) in GlobalRouterMap")
+
+        # Capture tenant identity BEFORE switching schema
+        tenant_schema = getattr(router, "schema_name", None)
+        tenant_subdomain = getattr(router, "tenant_subdomain", None)
+
+        with schema_context(get_public_schema_name()):
+            tenant = None
+            if tenant_schema:
+                tenant = Tenant.objects.filter(schema_name=tenant_schema).first()
+            if not tenant and tenant_subdomain:
+                tenant = Tenant.objects.filter(subdomain=tenant_subdomain).first()
+
+            if not tenant:
+                logger.error(
+                    "Cannot register router %s: tenant not found (schema=%s, subdomain=%s)",
+                    router.name, tenant_schema, tenant_subdomain
+                )
+                return
+
+            # Create or update GlobalRouterMap entry
+            # FIXED: Use router.shared_secret instead of router.radius_secret
+            GlobalRouterMap.objects.update_or_create(
+                nas_ip=vpn_ip,
+                defaults={
+                    "nas_secret": router.shared_secret or "default_secret",
+                    "tenant": tenant,
+                    "is_active": True,
+                },
+            )
+            
+            logger.info(f"Registered GlobalRouterMap entry: {vpn_ip} -> {tenant.schema_name}")
+
+    def _unregister_router_globally(self, router) -> None:
+        """
+        Remove the router from GlobalRouterMap (public schema).
+        Frees up the VPN IP for future allocation.
+        """
+        from django_tenants.utils import schema_context, get_public_schema_name
+        from apps.core.models import GlobalRouterMap
+
+        if not router.vpn_ip_address:
+            logger.debug(f"Router {router.name} has no VPN IP to unregister")
+            return
+
+        logger.info(f"Unregistering router {router.name} (IP: {router.vpn_ip_address}) from GlobalRouterMap")
+
+        with schema_context(get_public_schema_name()):
+            deleted_count, _ = GlobalRouterMap.objects.filter(
+                nas_ip=router.vpn_ip_address
+            ).delete()
+            
+            if deleted_count > 0:
+                logger.info(f"Removed GlobalRouterMap entry for IP {router.vpn_ip_address}")
+            else:
+                logger.warning(f"No GlobalRouterMap entry found for IP {router.vpn_ip_address}")
+
     def _generate_cn(self, router) -> str:
-        """Generate OpenVPN certificate CN from router username"""
+        """
+        Generate the Common Name for the certificate and CCD file.
+        Because the OpenVPN server uses 'username-as-common-name',
+        we must use the router's OpenVPN username directly.
+        """
+        # Ensure the router has an openvpn_username (it should be auto-generated)
         if not router.openvpn_username:
             raise VPNProvisioningError(
-                f"Router {router.name} has no openvpn_username"
+                f"Router {router.name} has no openvpn_username. "
+                "Make sure Router.save() generates it."
             )
         return router.openvpn_username
 
-    def _generate_client_certificate(self, ca, router, common_name: str):
-        """Generate OpenVPN client cert — unchanged from your existing code"""
-        from apps.vpn.models import VPNCertificate
-
+    def _generate_client_certificate(
+        self, ca: CertificateAuthority, router, common_name: str
+    ) -> VPNCertificate:
+        """Generate a client certificate using the CertificateService."""
+        # Check if there's an existing active cert for this router
         existing = VPNCertificate.objects.filter(
             router=router,
             status='active',
             certificate_type='client',
         ).first()
-
+        
         if existing:
+            # Revoke old cert before generating new one
             existing.revoke(reason="Replaced by new provisioning")
 
-        return self.cert_service.generate_client_certificate(
+        # The CertificateService handles DB creation and returns the Cert object
+        cert_record = self.cert_service.generate_client_certificate(
             ca=ca,
             router=router,
             common_name=common_name,
         )
 
-    def _register_router_globally(self, router, vpn_ip: str) -> None:
-        """
-        Register router in GlobalRouterMap (public schema).
-        Works identically for both VPN types — the IP range
-        tells FreeRADIUS which network the packet came from.
-        """
-        from apps.core.models import GlobalRouterMap, Tenant
-
-        tenant_schema = getattr(router, 'schema_name', None)
-        tenant_subdomain = getattr(router, 'tenant_subdomain', None)
-
-        with schema_context(get_public_schema_name()):
-            tenant = None
-            if tenant_schema:
-                tenant = Tenant.objects.filter(
-                    schema_name=tenant_schema
-                ).first()
-            if not tenant and tenant_subdomain:
-                tenant = Tenant.objects.filter(
-                    subdomain=tenant_subdomain
-                ).first()
-
-            if not tenant:
-                logger.error(
-                    f"Cannot register {router.name} in GlobalRouterMap: "
-                    f"tenant not found (schema={tenant_schema})"
-                )
-                return
-
-            GlobalRouterMap.objects.update_or_create(
-                nas_ip=vpn_ip,
-                defaults={
-                    'nas_secret': router.shared_secret or 'default_secret',
-                    'tenant': tenant,
-                    'is_active': True,
-                }
-            )
-            logger.info(
-                f"GlobalRouterMap: {vpn_ip} → {tenant.schema_name} "
-                f"({router.vpn_type})"
-            )
-
-    def _unregister_router_globally(self, router) -> None:
-        """Remove from GlobalRouterMap when router deleted"""
-        from apps.core.models import GlobalRouterMap
-
-        if not router.vpn_ip_address:
-            return
-
-        with schema_context(get_public_schema_name()):
-            deleted, _ = GlobalRouterMap.objects.filter(
-                nas_ip=router.vpn_ip_address
-            ).delete()
-
-            if deleted:
-                logger.info(
-                    f"Removed GlobalRouterMap entry for "
-                    f"{router.name} ({router.vpn_ip_address})"
-                )
+        return cert_record

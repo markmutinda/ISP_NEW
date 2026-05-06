@@ -8,11 +8,11 @@ services:
       - postgres_data:/var/lib/postgresql/data
     env_file: ../.env
     environment:
-      - POSTGRES_DB=isp_management
-      - POSTGRES_USER=isp_user
-      - POSTGRES_PASSWORD=changeme
+      - POSTGRES_DB=${DB_NAME:-isp_management}
+      - POSTGRES_USER=${DB_USER:-isp_user}
+      - POSTGRES_PASSWORD=${DB_PASSWORD:-changeme}
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U netily -d netily_isp"]
+      test: ["CMD-SHELL", "pg_isready -U isp_user -d isp_management"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -76,18 +76,11 @@ services:
       - REDIS_URL=redis://netily_redis:6379/0
       - DB_HOST=netily_db
       - DB_PORT=5432
-      - DB_NAME=netily_isp
-      - DB_USER=netily
-      - DB_PASS=CreativE@2028y
       - OPENVPN_MANAGEMENT_HOST=netily-openvpn
       - VPN_GATEWAY_IP=${VPN_GATEWAY_IP:-10.8.0.1}
       - BASE_URL=${BASE_URL:-https://api.netily.co.ke}
       - FRONTEND_URL=${FRONTEND_URL:-https://netily.co.ke}
       - VPN_NETWORK_CIDR=${VPN_NETWORK_CIDR:-10.8.0.0/16}
-      - WG_NETWORK_CIDR=${WG_NETWORK_CIDR:-10.9.0.0/16}
-      - WG_SERVER_IP=${WG_SERVER_IP:-10.9.0.1}
-      - WG_SERVER_PUBLIC_KEY=${WG_SERVER_PUBLIC_KEY:-}
-      - WG_SERVER_ENDPOINT=${WG_SERVER_ENDPOINT:-vpn.netily.co.ke:51820}
     cap_add:
       - NET_ADMIN
     depends_on:
@@ -132,14 +125,9 @@ services:
       - REDIS_URL=redis://netily_redis:6379/0
       - DB_HOST=netily_db
       - DB_PORT=5432
-      - DB_NAME=netily_isp
-      - DB_USER=netily
-      - DB_PASS=CreativE@2028y
       - OPENVPN_MANAGEMENT_HOST=netily-openvpn
       - VPN_GATEWAY_IP=${VPN_GATEWAY_IP:-10.8.0.1}
       - VPN_NETWORK_CIDR=${VPN_NETWORK_CIDR:-10.8.0.0/16}
-      - WG_NETWORK_CIDR=${WG_NETWORK_CIDR:-10.9.0.0/16}
-      - WG_SERVER_IP=${WG_SERVER_IP:-10.9.0.1}
     cap_add:
       - NET_ADMIN
     depends_on:
@@ -173,9 +161,6 @@ services:
       - REDIS_URL=redis://netily_redis:6379/0
       - DB_HOST=netily_db
       - DB_PORT=5432
-      - DB_NAME=netily_isp
-      - DB_USER=netily
-      - DB_PASS=CreativE@2028y
     depends_on:
       db:
         condition: service_healthy
@@ -208,13 +193,8 @@ services:
     environment:
       - DB_HOST=netily_db
       - DB_PORT=5432
-      - DB_NAME=netily_isp
-      - DB_USER=netily
-      - DB_PASS=CreativE@2028y
       - DB_SCHEMA=public
       - VPN_NETWORK_CIDR=${VPN_NETWORK_CIDR:-10.8.0.0/16}
-      - WG_NETWORK_CIDR=${WG_NETWORK_CIDR:-10.9.0.0/16}
-      - WG_SERVER_IP=${WG_SERVER_IP:-10.9.0.1}
     volumes:
       - ../radius_config/sites-available/default:/etc/freeradius/sites-enabled/default:ro
       - ../radius_config/mods-config/sql/main/postgresql/queries.conf:/etc/freeradius/mods-config/sql/main/postgresql/queries.conf:ro
