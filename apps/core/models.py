@@ -577,6 +577,10 @@ class GlobalSystemSettings(models.Model):
     admin_email = models.EmailField(blank=True)
     sms_gateway = models.CharField(max_length=50, default='africastalking')
 
+    # Security Settings
+    # Controls whether tenant admin login requires email OTP challenge.
+    admin_email_otp_enabled = models.BooleanField(default=False)
+
     class Meta:
         app_label = 'core'
         verbose_name = 'Global System Settings'

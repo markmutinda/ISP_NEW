@@ -293,10 +293,11 @@ class ProfileSerializer(serializers.ModelSerializer):
             'id', 'email', 'first_name', 'last_name', 'full_name',
             'phone_number', 'id_number', 'gender', 'date_of_birth',
             'profile_picture', 'role', 'role_display', 'is_verified',
+            'is_staff', 'is_superuser',
             'last_login', 'created_at', 'updated_at',
             'company_name', 'tenant_subdomain', 'company', 'company_id'
         ]
-        read_only_fields = ['id', 'email', 'role', 'is_verified', 'last_login', 'created_at', 'updated_at']
+        read_only_fields = ['id', 'email', 'role', 'is_verified', 'is_staff', 'is_superuser', 'last_login', 'created_at', 'updated_at']
     
     def get_full_name(self, obj):
         return obj.get_full_name()
