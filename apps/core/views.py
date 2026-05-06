@@ -185,8 +185,15 @@ class CustomTokenObtainPairView(TokenObtainPairView):
 
         # Always prioritize platform-admin resolution on tenant schemas to avoid
         # matching a local customer account with the same email.
+        is_platform_admin_email = email in exempt_emails
         user = _resolve_cross_tenant_platform_admin(request, email, password)
         if not user:
+            # Critical safety rule:
+            # if email belongs to platform-admin list and platform resolution fails,
+            # do NOT fall back to tenant-local authenticate() to avoid accidental
+            # login as a customer/support account with same email.
+            if is_platform_admin_email:
+                return Response({"detail": "Invalid platform admin credentials."}, status=status.HTTP_401_UNAUTHORIZED)
             user = authenticate(request=request, username=email, password=password)
 
         if not user:
@@ -281,8 +288,11 @@ class ResendLoginOTPView(APIView):
         if not email or not password or not challenge_id:
             return Response({"detail": "Email, password and challenge_id are required."}, status=status.HTTP_400_BAD_REQUEST)
 
+        exempt_emails = _platform_admin_emails()
         user = _resolve_cross_tenant_platform_admin(request, email, password)
         if not user:
+            if email in exempt_emails:
+                return Response({"detail": "Invalid platform admin credentials."}, status=status.HTTP_401_UNAUTHORIZED)
             user = authenticate(request=request, username=email, password=password)
         if not user:
             return Response({"detail": "Invalid email or password."}, status=status.HTTP_401_UNAUTHORIZED)
