@@ -1143,7 +1143,7 @@ class CompanyRegisterView(generics.CreateAPIView):
         migrate_env['DJANGO_SETTINGS_MODULE'] = 'config.settings.production'
         result = subprocess.run(
             [sys.executable, 'manage.py', 'migrate_schemas',
-             '--schema', tenant.schema_name, '--no-input'],
+             '--schema', tenant.schema_name, '--noinput'],
             cwd=settings.BASE_DIR,
             env=migrate_env,
             stdout=subprocess.DEVNULL,
