@@ -199,6 +199,9 @@ services:
     environment:
       - DB_HOST=netily_db
       - DB_PORT=5432
+      - DB_NAME=${POSTGRES_DB:-isp_management}
+      - DB_USER=${POSTGRES_USER:-isp_user}
+      - DB_PASS=${POSTGRES_PASSWORD:-changeme}
       - DB_SCHEMA=public
       - VPN_NETWORK_CIDR=${VPN_NETWORK_CIDR:-10.8.0.0/16}
       - WG_NETWORK_CIDR=${WG_NETWORK_CIDR:-10.9.0.0/16}
