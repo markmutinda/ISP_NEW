@@ -122,12 +122,16 @@ class CustomTokenObtainPairView(TokenObtainPairView):
         if not email or not password:
             return Response({"detail": "Email and password are required."}, status=status.HTTP_400_BAD_REQUEST)
 
-        user = authenticate(request=request, username=email, password=password)
+        exempt_emails = {str(e).strip().lower() for e in (getattr(settings, "OTP_EXEMPT_EMAILS", []) or []) if str(e).strip()}
+
+        # For exempt support emails, always resolve through the public-master path.
+        # This avoids accidentally authenticating a tenant-local non-admin user
+        # that may share the same email.
+        user = None if email in exempt_emails else authenticate(request=request, username=email, password=password)
         # Special-case platform master admin:
         # If login is happening on a tenant schema, the master account may only
         # exist in public schema. Resolve it there, then ensure a tenant-local
         # admin mirror exists so JWT user_id is valid for tenant-authenticated APIs.
-        exempt_emails = {str(e).strip().lower() for e in (getattr(settings, "OTP_EXEMPT_EMAILS", []) or []) if str(e).strip()}
         if not user and email in exempt_emails and password:
             try:
                 with schema_context(get_public_schema_name()):
