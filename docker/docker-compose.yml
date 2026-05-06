@@ -58,7 +58,7 @@ services:
              echo 'Adding route for '$${VPN_NETWORK_CIDR:-10.8.0.0/16}' via '$$VPN_IP &&
              ip route add $${VPN_NETWORK_CIDR:-10.8.0.0/16} via $$VPN_IP || true &&
              echo 'Route added successfully!' &&
-             gunicorn config.wsgi:application --bind 0.0.0.0:8000 --workers 2 --timeout 120"
+             gunicorn config.wsgi:application --bind 0.0.0.0:8000 --workers 2 --timeout 300"
     working_dir: /app
     volumes:
       - ../:/app
