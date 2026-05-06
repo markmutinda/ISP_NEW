@@ -479,26 +479,6 @@ CAPTIVE_PORTAL_URL = os.environ.get('CAPTIVE_PORTAL_URL', 'https://portal.netily
 # VPN API endpoint (how routers reach Django through the tunnel)
 VPN_API_URL = f"http://{VPN_SERVER_IP}:8000"
 
-# ────────────────────────────────────────────────────────────────
-#  DUAL VPN SETTINGS
-# ────────────────────────────────────────────────────────────────
-
-# OpenVPN (RouterOS v6 routers)
-# These stay exactly as they are — existing clients unaffected
-OPENVPN_NETWORK_CIDR = os.environ.get('OPENVPN_NETWORK_CIDR', '10.8.0.0/16')
-OPENVPN_SERVER_IP = os.environ.get('OPENVPN_SERVER_IP', '10.8.0.1')
-
-# WireGuard (RouterOS v7 routers)
-# Separate IP range — zero conflict with OpenVPN range
-WG_SERVER_PUBLIC_KEY = os.environ.get('WG_SERVER_PUBLIC_KEY', '')
-WG_SERVER_ENDPOINT = os.environ.get('WG_SERVER_ENDPOINT', 'vpn.netily.co.ke:51820')
-WG_SERVER_IP = os.environ.get('WG_SERVER_IP', '10.9.0.1')
-WG_NETWORK_CIDR = os.environ.get('WG_NETWORK_CIDR', '10.9.0.0/16')
-
-# FreeRADIUS listens on both VPN server IPs
-RADIUS_OPENVPN_IP = os.environ.get('RADIUS_OPENVPN_IP', '10.8.0.1')
-RADIUS_WIREGUARD_IP = os.environ.get('RADIUS_WIREGUARD_IP', '10.9.0.1')
-
 # config/settings/base.py
 
 # TUMA PAYMENT GATEWAY CONFIG
