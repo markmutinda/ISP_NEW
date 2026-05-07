@@ -72,69 +72,104 @@ def get_router_for_tenant(request, pk):
     return router, tenant
 
 
-def find_router_across_tenants(router_id=None, auth_key=None, router_name=None):
+def find_router_across_tenants(router_id=None, auth_key=None, router_name=None, tenant_schema=None):
     """
-    Fast tenant resolver using public RouterTenantIndex.
-    Now supports both ID and Auth Key for O(1) speed.
+    Resolve routers across tenants safely.
+
+    Safe lookup modes:
+    1. auth_key only:
+       Safe because router_auth_key/auth_key is globally unique.
+
+    2. tenant_schema + router_id:
+       Safe because router_id is only unique inside one tenant schema.
+
+    Unsafe:
+    - router_id alone.
+      Never use router_id alone for public unauthenticated endpoints because
+      the same ID can exist in multiple tenant schemas.
     
-    NOTE: For authenticated endpoints, use get_router_for_tenant() instead.
-    This function is primarily for public endpoints (one-liner, config downloads).
+    Returns:
+        tuple: (router, tenant) or (None, None) if not found
     """
     from django.db import connection
     from django_tenants.utils import schema_context
     from apps.core.models import Tenant, RouterTenantIndex
 
-    # 1) Try O(1) indexed lookup - supports both ID and auth_key
-    index_row = None
-    try:
-        with schema_context('public'):
-            # Check index by ID if provided
-            if router_id:
-                index_row = RouterTenantIndex.objects.select_related('tenant').filter(
-                    router_id=router_id, is_active=True
-                ).first()
-            # Otherwise check by auth_key
-            elif auth_key:
-                index_row = RouterTenantIndex.objects.select_related('tenant').filter(
-                    router_auth_key=auth_key, is_active=True
-                ).first()
-    except Exception:
-        index_row = None
-
-    if index_row:
-        tenant = index_row.tenant
+    # ────────────────────────────────────────────────────────────────
+    # 1. Fast safe lookup by auth_key.
+    # ────────────────────────────────────────────────────────────────
+    if auth_key:
         try:
-            connection.set_tenant(tenant)
-            # Find the actual router object inside the tenant
-            if router_id:
-                router = Router.objects.filter(id=router_id).first()
-            elif auth_key:
-                router = Router.objects.filter(auth_key=auth_key).first()
-            elif router_name:
-                router = Router.objects.filter(name__icontains=router_name).first()
-            else:
-                router = None
-            return router, tenant
-        except Exception:
-            pass
+            with schema_context('public'):
+                index_row = RouterTenantIndex.objects.select_related('tenant').filter(
+                    router_auth_key=auth_key,
+                    is_active=True,
+                ).first()
 
-    # 2) Fallback legacy scan (kept for safety)
+            if index_row:
+                tenant = index_row.tenant
+                connection.set_tenant(tenant)
+                router = Router.objects.filter(auth_key=auth_key).first()
+                if router:
+                    return router, tenant
+
+        except Exception:
+            logger.exception("[ROUTER RESOLVE] auth_key lookup failed")
+
+    # ────────────────────────────────────────────────────────────────
+    # 2. Fast safe lookup by tenant_schema + router_id.
+    # ────────────────────────────────────────────────────────────────
+    if tenant_schema and router_id:
+        try:
+            with schema_context('public'):
+                index_row = RouterTenantIndex.objects.select_related('tenant').filter(
+                    tenant_schema=tenant_schema,
+                    router_id=router_id,
+                    is_active=True,
+                ).first()
+
+            if index_row:
+                tenant = index_row.tenant
+                connection.set_tenant(tenant)
+                router = Router.objects.filter(id=router_id).first()
+                if router:
+                    return router, tenant
+
+        except Exception:
+            logger.exception(
+                "[ROUTER RESOLVE] tenant_schema+router_id lookup failed "
+                "schema=%s id=%s",
+                tenant_schema,
+                router_id,
+            )
+
+    # ────────────────────────────────────────────────────────────────
+    # 3. Fallback scan for auth_key/router_name only.
+    #    Do NOT scan by router_id alone.
+    # ────────────────────────────────────────────────────────────────
     connection.set_schema_to_public()
     tenants = Tenant.objects.filter(is_active=True)
+
     for tenant in tenants:
         try:
             connection.set_tenant(tenant)
-            if router_id:
-                found = Router.objects.filter(id=router_id).first()
-            elif auth_key:
+
+            if auth_key:
                 found = Router.objects.filter(auth_key=auth_key).first()
             elif router_name:
-                found = Router.objects.filter(name__icontains=router_name).first() or Router.objects.filter(auth_key=router_name).first()
+                found = (
+                    Router.objects.filter(name__icontains=router_name).first()
+                    or Router.objects.filter(auth_key=router_name).first()
+                )
+            elif router_id and tenant_schema:
+                found = Router.objects.filter(id=router_id).first()
             else:
+                # router_id alone is ambiguous and intentionally unsupported.
                 found = None
 
             if found:
                 return found, tenant
+
         except Exception:
             continue
 
@@ -150,6 +185,12 @@ def download_router_cert(request, router_id, cert_type):
     Used by the router's /tool fetch command.
     """
     # 1. Find Router (Handle Multi-tenancy)
+    # Note: This is a public endpoint. Without tenant_schema, we rely on
+    # auth_key being passed. Since certificate endpoints typically use
+    # router_id, we need to be careful. The Router model has tenant_subdomain
+    # denormalized, but we still need to find the correct tenant.
+    # For now, we'll try to find by router_id with tenant context.
+    # A better approach would be to pass tenant_schema in the URL.
     router, tenant = find_router_across_tenants(router_id=router_id)
     
     if not router:

@@ -735,20 +735,23 @@ class RouterTenantIndex(models.Model):
     """
     Public-schema index to resolve router -> tenant in O(1).
     Used to avoid cross-tenant loops for auth_key or ID lookups.
+
+    IMPORTANT:
+    - router_auth_key is globally unique and is the preferred lookup key.
+    - router_id is tenant-local and may repeat across schemas.
+    - tenant_schema + router_id is unique.
     """
-    # Added default=uuid.uuid4 and editable=False
-    router_id = models.UUIDField(
-        primary_key=False, 
-        default=uuid.uuid4, 
-        editable=False, 
-        unique=True, 
-        db_index=True
-    )  
+    # router_auth_key: Primary lookup key, globally unique
     router_auth_key = models.CharField(max_length=64, unique=True, db_index=True)
+
+    # Router.id comes from Django's DEFAULT_AUTO_FIELD / BigAutoField.
+    # It is NOT globally unique because each tenant schema has its own sequence.
+    router_id = models.BigIntegerField(db_index=True)
+
     tenant = models.ForeignKey(
         'core.Tenant',
         on_delete=models.CASCADE,
-        related_name='router_tenant_indexes'
+        related_name='router_tenant_indexes',
     )
     tenant_schema = models.CharField(max_length=63, db_index=True)
     router_name = models.CharField(max_length=255, blank=True, default='')
@@ -763,13 +766,18 @@ class RouterTenantIndex(models.Model):
         indexes = [
             models.Index(fields=['tenant_schema']),
             models.Index(fields=['is_active']),
-            # Note: unique=True already creates an index, 
-            # but keeping this doesn't hurt.
-            models.Index(fields=['router_id']),  
+            models.Index(fields=['router_id']),
+            models.Index(fields=['tenant_schema', 'router_id']),
+        ]
+        constraints = [
+            models.UniqueConstraint(
+                fields=['tenant_schema', 'router_id'],
+                name='uniq_routertenantindex_schema_router_id',
+            ),
         ]
 
     def __str__(self):
-        return f"{self.router_auth_key} -> {self.tenant_schema}"
+        return f"{self.router_auth_key} -> {self.tenant_schema}:{self.router_id}"
 
 
 class TumaCallbackMap(models.Model):

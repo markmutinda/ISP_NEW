@@ -282,7 +282,12 @@ def _get_current_tenant_for_index():
 @receiver(post_save, sender=Router)
 def upsert_router_tenant_index(sender, instance, **kwargs):
     """
-    Keep RouterTenantIndex in sync for O(1) auth_key -> tenant lookup.
+    Keep RouterTenantIndex in sync for public O(1) auth_key -> tenant lookup.
+
+    IMPORTANT:
+    - router_auth_key is globally unique and safe for public provisioning lookup.
+    - router_id is tenant-local and can repeat across schemas.
+    - RouterTenantIndex must be written in public schema.
     """
     try:
         from apps.core.models import RouterTenantIndex
@@ -299,22 +304,38 @@ def upsert_router_tenant_index(sender, instance, **kwargs):
             RouterTenantIndex.objects.update_or_create(
                 router_auth_key=instance.auth_key,
                 defaults={
-                    'router_id': instance.id,  # Store the router UUID for ID-based lookups
+                    'router_id': instance.id,
                     'tenant': tenant,
                     'tenant_schema': tenant.schema_name,
                     'router_name': instance.name or '',
                     'is_active': instance.is_active,
-                }
+                },
             )
-            logger.debug(f"[INDEX UPSERT] Updated index for router {instance.name} (ID: {instance.id})")
+
+        logger.debug(
+            "[INDEX UPSERT] Updated router index: name=%s schema=%s id=%s auth_key=%s",
+            instance.name,
+            tenant.schema_name,
+            instance.id,
+            instance.auth_key,
+        )
+
     except Exception as e:
-        logger.error(f"[INDEX UPSERT] Failed for {instance.name}: {e}")
+        logger.error(
+            "[INDEX UPSERT] Failed for router=%s schema=%s id=%s: %s",
+            instance.name,
+            getattr(tenant, 'schema_name', None),
+            instance.id,
+            e,
+        )
 
 
 @receiver(post_delete, sender=Router)
 def cleanup_router_tenant_index(sender, instance, **kwargs):
     """
     Clean up RouterTenantIndex entry when a router is deleted.
+
+    Cleanup by auth_key is safe because auth_key is globally unique.
     """
     try:
         from apps.core.models import RouterTenantIndex
@@ -324,14 +345,26 @@ def cleanup_router_tenant_index(sender, instance, **kwargs):
 
     try:
         with schema_context('public'):
-            # Clean up by both auth_key and router_id to ensure complete cleanup
             deleted_count = RouterTenantIndex.objects.filter(
                 router_auth_key=instance.auth_key
             ).delete()[0]
-            if deleted_count > 0:
-                logger.debug(f"[INDEX CLEANUP] Removed index entry for router {instance.name} (ID: {instance.id})")
+
+        if deleted_count > 0:
+            logger.debug(
+                "[INDEX CLEANUP] Removed index entry for router %s "
+                "(schema=%s, id=%s)",
+                instance.name,
+                instance._state.db if hasattr(instance, '_state') else 'unknown',
+                instance.id,
+            )
+
     except Exception as e:
-        logger.error(f"[INDEX CLEANUP] Failed for {instance.name}: {e}")
+        logger.error(
+            "[INDEX CLEANUP] Failed for router=%s auth_key=%s: %s",
+            instance.name,
+            instance.auth_key,
+            e,
+        )
 
 
 # ────────────────────────────────────────────────────────────────
