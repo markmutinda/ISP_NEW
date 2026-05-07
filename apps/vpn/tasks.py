@@ -203,5 +203,3 @@ def cleanup_orphaned_ccd():
     }
 
 
-# Alias for backward compatibility
-cleanup_orphaned_ccd.__name__ = 'cleanup_orphaned_ccd'
