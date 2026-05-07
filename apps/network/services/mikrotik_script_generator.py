@@ -188,7 +188,19 @@ class MikrotikScriptGenerator:
             self._section_schedulers(r),
             self._section_footer(r),
         ]
-        return "\n".join(s for s in sections if s)
+        
+        full_script = "\n".join(s for s in sections if s)
+        
+        # Strip comment lines to reduce payload size for MikroTik fetch
+        lines = []
+        for line in full_script.splitlines():
+            stripped = line.strip()
+            # Keep blank lines for readability but remove pure comment lines
+            if stripped.startswith('#'):
+                continue
+            lines.append(line)
+            
+        return "\n".join(lines)
 
     def _section_header(self, r: Router, version: str) -> str:
         return f"""# ═══════════════════════════════════════════════════════════════
