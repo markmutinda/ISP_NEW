@@ -83,7 +83,13 @@ class MikrotikScriptGenerator:
             absolute_api_path = self.request.build_absolute_uri(api_path)
         else:
             absolute_api_path = f"{self.base_url}{api_path}"
-        base_api_url = absolute_api_path.split('?')[0]
+        
+        # CRITICAL FIX: Use HTTP instead of HTTPS for the config download
+        # MikroTik RouterOS has SSL certificate issues; HTTP works reliably
+        config_url = absolute_api_path.replace('https://', 'http://')
+        
+        # Remove the router parameter to avoid validation mismatches
+        base_api_url = config_url.split('?')[0]
 
         return f"""# ═══════════════════════════════════════════════════════════════
 # Netily Cloud Controller — Base Script (Stage 1)
@@ -121,11 +127,12 @@ class MikrotikScriptGenerator:
 :put ("RouterOS version detected: v" . $rosVersion)
 
 # ─── Download Version-Specific Configuration ────────────────
-:local configUrl ("{base_api_url}?version=" . $rosVersion . "&router={r.id}&subdomain={subdomain}")
-:put ("Downloading config from: " . $configUrl)
+# Using HTTP to avoid SSL issues (the initial script was HTTPS, but this fetch will be HTTP)
+:local configUrl "{config_url}?version=" . $rosVersion . "&subdomain={subdomain}"
+:put "Downloading config from: $configUrl"
 
 :do {{
-    /tool fetch url=$configUrl dst-path="netily_conf.rsc" http-header-field="ngrok-skip-browser-warning: true"
+    /tool fetch url=$configUrl dst-path="netily_conf.rsc"
     :delay 2s
     :put "Config downloaded. Importing..."
     /import netily_conf.rsc
