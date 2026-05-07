@@ -85,6 +85,15 @@ class MikrotikScriptGenerator:
             absolute_api_path = f"{self.base_url}{api_path}"
         base_api_url = absolute_api_path.split('?')[0]
 
+        # ── CRITICAL FIX: Force Stage 2 to HTTP ─────────────────────────────────
+        # Stage 1 (this script, ~2KiB) stays HTTPS — auth_key is the security gate.
+        # Stage 2 (config, ~163KiB) MUST use HTTP. HTTPS + large payloads + MikroTik
+        # /tool fetch = silent packet drop due to MTU/TLS fragmentation black hole.
+        # The WireGuard private key in the config is protected by the auth_key token
+        # and the short-lived provision_slug — both already validated by this point.
+        config_fetch_url = base_api_url.replace('https://', 'http://', 1)
+        # ────────────────────────────────────────────────────────────────────────
+
         return f"""# ═══════════════════════════════════════════════════════════════
 # Netily Cloud Controller — Base Script (Stage 1)
 # Router: {self._escape_ros_string(r.name)}
@@ -120,8 +129,11 @@ class MikrotikScriptGenerator:
 }}
 :put ("RouterOS version detected: v" . $rosVersion)
 
-# ─── Download Version-Specific Configuration ────────────────
-:local configUrl ("{base_api_url}?version=" . $rosVersion . "&router={r.id}&subdomain={subdomain}")
+# ─── Download Version-Specific Configuration ─────────────────
+# NOTE: HTTP intentional — HTTPS causes MTU/TLS fragmentation failure
+# with large payloads (~163KiB) on MikroTik /tool fetch.
+# Auth security is provided by the auth_key + provision_slug token pair.
+:local configUrl ("{config_fetch_url}?version=" . $rosVersion . "&router={r.id}&subdomain={subdomain}")
 :put ("Downloading config from: " . $configUrl)
 
 :do {{

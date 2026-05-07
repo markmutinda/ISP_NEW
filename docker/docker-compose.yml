@@ -318,8 +318,12 @@ services:
 networks:
   isp_network:
     driver: bridge
+    driver_opts:
+      com.docker.network.driver.mtu: "1450"  # Clamp below cloud provider limit (1500 default causes fragmentation)
   vpn_network:
     driver: bridge
+    driver_opts:
+      com.docker.network.driver.mtu: "1350"  # Extra headroom for WireGuard overhead (WG adds ~60 bytes)
     ipam:
       config:
         - subnet: 10.10.0.0/24
