@@ -42,15 +42,6 @@ class MikrotikScriptGenerator:
         s = s.replace('$', '\\$')
         return s
 
-    def _escape_ros_url(self, url: str) -> str:
-        """Escape special characters in URL for RouterOS fetch command"""
-        if url is None:
-            return ""
-        # RouterOS needs backslashes escaped and quotes handled
-        url = url.replace('\\', '\\\\')
-        url = url.replace('"', '\\"')
-        return url
-
     def _get_vpn_host(self, r: Router) -> str:
         vpn_host = r.openvpn_server
         if not vpn_host or vpn_host == "vpn.yourisp.com":
@@ -76,14 +67,12 @@ class MikrotikScriptGenerator:
         return f"{parsed.scheme}://{r.tenant_subdomain}.{netloc}"
 
     def get_magic_link(self) -> str:
-        """Generate one-liner command for initial provisioning"""
         r = self.router
-        # Use HTTP for the initial fetch to avoid SSL issues
-        http_base = self.provision_base.replace('https://', 'http://')
-        url = f"{http_base}/{r.auth_key}/{r.provision_slug}/script.rsc"
-        # Escape the URL properly for RouterOS
-        escaped_url = self._escape_ros_url(url)
-        return f'/tool fetch url="{escaped_url}" dst-path="netily.rsc" ; :delay 2s ; /import netily.rsc'
+        url = f"{self.provision_base}/{r.auth_key}/{r.provision_slug}/script.rsc"
+        return (
+            f'/tool fetch url="{url}" dst-path="netily.rsc"; '
+            f':delay 2s; /import netily.rsc'
+        )
 
     def generate_base_script(self) -> str:
         r = self.router
@@ -94,15 +83,7 @@ class MikrotikScriptGenerator:
             absolute_api_path = self.request.build_absolute_uri(api_path)
         else:
             absolute_api_path = f"{self.base_url}{api_path}"
-        
-        # Split to remove any existing query params
         base_api_url = absolute_api_path.split('?')[0]
-        
-        # THE FIX: Force HTTP for the Stage 2 URL to bypass MikroTik SSL validation issues
-        base_api_url = base_api_url.replace('https://', 'http://')
-        
-        # Escape the URL for RouterOS
-        escaped_api_url = self._escape_ros_url(base_api_url)
 
         return f"""# ═══════════════════════════════════════════════════════════════
 # Netily Cloud Controller — Base Script (Stage 1)
@@ -140,7 +121,7 @@ class MikrotikScriptGenerator:
 :put ("RouterOS version detected: v" . $rosVersion)
 
 # ─── Download Version-Specific Configuration ────────────────
-:local configUrl "{escaped_api_url}?version=" . $rosVersion . "&router={r.id}&subdomain={subdomain}"
+:local configUrl ("{base_api_url}?version=" . $rosVersion . "&router={r.id}&subdomain={subdomain}")
 :put ("Downloading config from: " . $configUrl)
 
 :do {{
@@ -518,9 +499,8 @@ class MikrotikScriptGenerator:
 # ─────────────────────────────────────────────────────────────
 :put "No SSL certificates configured — hotspot will use HTTP only."
 """
-        # Use HTTP for certificate downloads too
-        ssl_cert_url = f"{self.base_url}/api/v1/network/provision/{r.auth_key}/certs/ssl.crt".replace('https://', 'http://')
-        ssl_key_url = f"{self.base_url}/api/v1/network/provision/{r.auth_key}/certs/ssl.key".replace('https://', 'http://')
+        ssl_cert_url = f"{self.base_url}/api/v1/network/provision/{r.auth_key}/certs/ssl.crt"
+        ssl_key_url = f"{self.base_url}/api/v1/network/provision/{r.auth_key}/certs/ssl.key"
         passphrase = self._escape_ros_string(r.ssl_passphrase or '')
 
         return f"""# ─────────────────────────────────────────────────────────────
@@ -559,9 +539,8 @@ class MikrotikScriptGenerator:
 """
 
     def _section_hotspot_html(self, r: Router) -> str:
-        # Use HTTP for HTML downloads too
-        login_url = f"{self.active_url}/api/v1/network/provision/{r.auth_key}/hotspot/login.html".replace('https://', 'http://')
-        status_url = f"{self.active_url}/api/v1/network/provision/{r.auth_key}/hotspot/status.html".replace('https://', 'http://')
+        login_url = f"{self.active_url}/api/v1/network/provision/{r.auth_key}/hotspot/login.html"
+        status_url = f"{self.active_url}/api/v1/network/provision/{r.auth_key}/hotspot/status.html"
 
         return f"""# ─────────────────────────────────────────────────────────────
 # 11. HOTSPOT HTML PAGES (Cloud Portal Redirectors)
