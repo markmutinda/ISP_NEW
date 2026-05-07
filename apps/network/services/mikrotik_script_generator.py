@@ -77,13 +77,10 @@ class MikrotikScriptGenerator:
     def generate_base_script(self) -> str:
         r = self.router
         subdomain = r.tenant_subdomain or 'public'
-
         api_path = f"/api/v1/network/provision/{r.auth_key}/{r.provision_slug}/config"
-        if getattr(self, 'request', None):
-            absolute_api_path = self.request.build_absolute_uri(api_path)
-        else:
-            absolute_api_path = f"{self.base_url}{api_path}"
         
+        # Force the official API domain as per Senior Dev's standardization
+        absolute_api_path = f"{self.base_url}{api_path}"
         config_fetch_url = absolute_api_path.split('?')[0]
 
         return f"""# ═══════════════════════════════════════════════════════════════
@@ -99,48 +96,18 @@ class MikrotikScriptGenerator:
 :delay 1s
 :put "MSS clamp applied."
 
-# ─── Check Internet Connectivity ────────────────────────────
-:local hasInternet false
-:do {{
-    /tool dns-query name="dns.google" type=A
-    :set hasInternet true
-}} on-error={{}}
-:if ($hasInternet = false) do={{
-    :do {{
-        /ping 8.8.8.8 count=2
-        :set hasInternet true
-    }} on-error={{}}
-}}
-
-:if ($hasInternet = false) do={{
-    :put "ERROR: No internet detected! Connect WAN first."
-    :error "No internet connectivity"
-}}
-:put "Internet: OK"
-
-# ─── Detect RouterOS Version ────────────────────────────────
-:local rosVersion "7"
-:local verStr [/system resource get version]
-:if ([:pick $verStr 0 1] = "6") do={{
-    :set rosVersion "6"
-}}
-:put ("RouterOS version detected: v" . $rosVersion)
-
 # ─── Download Version-Specific Configuration ─────────────────
-:local configUrl ("{config_fetch_url}?version=" . $rosVersion . "&router={r.id}&subdomain={subdomain}")
+:local configUrl ("{config_fetch_url}?version=7&router={r.id}&subdomain={subdomain}")
 :put ("Downloading config from: " . $configUrl)
 
 :do {{
-    /tool fetch url=$configUrl dst-path="netily_conf.rsc" http-header-field="ngrok-skip-browser-warning: true"
+    # Clean production fetch: No headers, enforced certificate check
+    /tool fetch url=$configUrl dst-path="netily_conf.rsc" check-certificate=yes
     :delay 2s
-    :put "Config downloaded. Importing..."
     /import netily_conf.rsc
-    :put ">>> Stage 2 complete. Router configured."
+    :put ">>> Stage 2 complete."
 }} on-error={{
-    :put "ERROR: Configuration download or import failed!"
-    :put "URL: $configUrl"
-    :put "Check that the config file is valid and the router has internet access."
-    :put "To debug, run: /import netily_conf.rsc"
+    :put "ERROR: Configuration download failed!"
     :error "Provisioning failed"
 }}
 """
