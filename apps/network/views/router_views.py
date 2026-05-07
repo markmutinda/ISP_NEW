@@ -50,12 +50,25 @@ def get_router_for_tenant(request, pk):
         return None, None
 
     connection.set_tenant(tenant)
-    router = Router.objects.filter(id=pk, is_active=True).first()
-    
+
+    # ─── CRITICAL FIX ──────────────────────────────────────────────────────
+    # Always scope the query to the tenant's subdomain so that ID collisions
+    # between tenant schemas never return the wrong router.
+    # e.g. tenant_a.router(id=1) must never match tenant_b.router(id=1).
+    # ──────────────────────────────────────────────────────────────────────
+    router = Router.objects.filter(
+        id=pk,
+        is_active=True,
+        tenant_subdomain=tenant.subdomain,   # ← THE FIX
+    ).first()
+
     if not router:
-        logger.warning(f"[TENANT SAFE] Router {pk} not found in tenant {tenant.schema_name}")
+        logger.warning(
+            f"[TENANT SAFE] Router {pk} not found in tenant "
+            f"{tenant.schema_name} (subdomain={tenant.subdomain})"
+        )
         return None, None
-        
+
     return router, tenant
 
 
@@ -2557,11 +2570,88 @@ class RouterBridgePortView(APIView):
             }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
+# ─── HELPER: Rebind services to bridge after port sync ────────────────────────────────
+
+def _rebind_services_to_bridge(api, router):
+    """
+    After physical ports have been added to netily-bridge, make sure:
+      1. The bridge still holds the correct gateway IP.
+      2. The hotspot server is enabled and attached to netily-bridge.
+      3. The PPPoE server is enabled and attached to netily-bridge.
+
+    Called from RouterPortManagerView.post() after a successful bridge sync.
+    All failures are non-fatal — they are logged as warnings.
+    """
+    from apps.network.services.ipam_calculator import calculate_mikrotik_hotspot_network
+
+    math = calculate_mikrotik_hotspot_network(
+        router.hotspot_base_ip, router.hotspot_subnet_cidr
+    )
+    gateway_cidr = math['interface_address']   # e.g. "172.12.0.1/16"
+
+    # ── 1. Bridge IP ───────────────────────────────────────────────────────
+    try:
+        addresses = list(api._execute('/ip/address'))
+        bridge_has_ip = any(
+            a.get('interface') == 'netily-bridge' and a.get('address') == gateway_cidr
+            for a in addresses
+        )
+        if not bridge_has_ip:
+            # Remove stale IPs on the bridge
+            for a in addresses:
+                if a.get('interface') == 'netily-bridge':
+                    api._execute('/ip/address', remove={'.id': a['.id']})
+            api._execute('/ip/address', add={
+                'address': gateway_cidr,
+                'interface': 'netily-bridge',
+                'comment': 'Netily Gateway',
+            })
+            logger.info(f"[REBIND] Restored {gateway_cidr} on netily-bridge")
+    except Exception as e:
+        logger.warning(f"[REBIND] Bridge IP assertion failed: {e}")
+
+    # ── 2. Hotspot server ──────────────────────────────────────────────────
+    try:
+        for srv in list(api._execute('/ip/hotspot')):
+            if srv.get('name') == 'netily-hotspot':
+                updates = {}
+                if srv.get('disabled') in ('true', True):
+                    updates['disabled'] = 'no'
+                if srv.get('interface') != 'netily-bridge':
+                    updates['interface'] = 'netily-bridge'
+                if updates:
+                    updates['.id'] = srv['.id']
+                    api._execute('/ip/hotspot', update=updates)
+                    logger.info(f"[REBIND] Hotspot server updated: {updates}")
+                break
+    except Exception as e:
+        logger.warning(f"[REBIND] Hotspot server rebind failed: {e}")
+
+    # ── 3. PPPoE server ────────────────────────────────────────────────────
+    if router.enable_pppoe:
+        try:
+            for srv in list(api._execute('/interface/pppoe-server/server')):
+                if srv.get('service-name') == 'netily-pppoe':
+                    updates = {}
+                    if srv.get('disabled') in ('true', True):
+                        updates['disabled'] = 'no'
+                    if srv.get('interface') != 'netily-bridge':
+                        updates['interface'] = 'netily-bridge'
+                    if updates:
+                        updates['.id'] = srv['.id']
+                        api._execute('/interface/pppoe-server/server', update=updates)
+                        logger.info(f"[REBIND] PPPoE server updated: {updates}")
+                    break
+        except Exception as e:
+            logger.warning(f"[REBIND] PPPoE server rebind failed: {e}")
+
+
+# ─── PORT MANAGER VIEW (UPDATED WITH REBIND) ─────────────────────────────────────────
+
 class RouterPortManagerView(APIView):
     """
-    GET: Scans the live router and returns all physical interfaces (Ethernet/WLAN)
-         and marks which ones are currently assigned to the Hotspot/PPPoE Bridge.
-    POST: Takes a list of selected interfaces and syncs them to the live router.
+    GET  — scan live router interfaces and return which are on netily-bridge.
+    POST — sync selected interfaces to netily-bridge and rebind services.
     """
     permission_classes = [IsAuthenticated, HasCompanyAccess]
 
@@ -2589,62 +2679,55 @@ class RouterPortManagerView(APIView):
                 else:
                     return Response({'error': 'Router is not reachable. Check VPN tunnel.'}, status=400)
             except Exception as e:
-                logger.warning(f"Port manager API fallback check failed for router {pk}: {e}")
+                logger.warning(f"[PORT MANAGER GET] Fallback check failed for {pk}: {e}")
                 return Response({'error': 'Router is not reachable. Check VPN tunnel.'}, status=400)
 
         try:
-            api_wrapper = mikrotik_api_module.MikrotikAPI(router)
-            if not api_wrapper.connect():
+            api = mikrotik_api_module.MikrotikAPI(router)
+            if not api.connect():
                 return Response({'error': 'Failed to connect to router API'}, status=400)
 
-            # 1. Fetch physical interfaces
-            ethernets = list(api_wrapper._execute('/interface/ethernet'))
-            wlans = list(api_wrapper._execute('/interface/wireless'))
-            bridge_ports = list(api_wrapper._execute('/interface/bridge/port'))
-            api_wrapper.disconnect()
-
-            # Find which ports are currently on the netily-bridge
-            active_bridge_ports = [
-                p.get('interface') for p in bridge_ports 
-                if p.get('bridge') == 'netily-bridge'
-            ]
-
-            available_ports = []
-            
-            # Format Ethernet ports
-            for eth in ethernets:
-                name = eth.get('name')
-                # Never allow the WAN port to be added to the bridge!
-                is_wan = (name == router.wan_interface)
-                available_ports.append({
-                    'name': name,
-                    'type': 'ethernet',
-                    'running': eth.get('running', 'false') == 'true',
-                    'is_selected': name in active_bridge_ports,
-                    'is_wan': is_wan,
-                    'disabled': eth.get('disabled', 'false') == 'true'
-                })
-
-            # Format Wireless ports
-            for wlan in wlans:
-                name = wlan.get('name')
-                available_ports.append({
-                    'name': name,
-                    'type': 'wireless',
-                    'running': wlan.get('running', 'false') == 'true',
-                    'is_selected': name in active_bridge_ports,
-                    'is_wan': False,
-                    'disabled': wlan.get('disabled', 'false') == 'true'
-                })
-
-            return Response({
-                'router_id': router.id,
-                'wan_interface': router.wan_interface,
-                'ports': available_ports
-            })
+            ethernets  = list(api._execute('/interface/ethernet'))
+            wlans      = list(api._execute('/interface/wireless'))
+            bridge_ports = list(api._execute('/interface/bridge/port'))
+            api.disconnect()
 
         except Exception as e:
             return Response({'error': str(e)}, status=500)
+
+        active_bridge_ports = {
+            p.get('interface')
+            for p in bridge_ports
+            if p.get('bridge') == 'netily-bridge'
+        }
+
+        ports = []
+        for eth in ethernets:
+            name = eth.get('name', '')
+            ports.append({
+                'name': name,
+                'type': 'ethernet',
+                'running': eth.get('running', 'false') == 'true',
+                'is_selected': name in active_bridge_ports,
+                'is_wan': name == router.wan_interface,
+                'disabled': eth.get('disabled', 'false') == 'true',
+            })
+        for wlan in wlans:
+            name = wlan.get('name', '')
+            ports.append({
+                'name': name,
+                'type': 'wireless',
+                'running': wlan.get('running', 'false') == 'true',
+                'is_selected': name in active_bridge_ports,
+                'is_wan': False,
+                'disabled': wlan.get('disabled', 'false') == 'true',
+            })
+
+        return Response({
+            'router_id': router.id,
+            'wan_interface': router.wan_interface,
+            'ports': ports,
+        })
 
     def post(self, request, pk):
         router, tenant = get_router_for_tenant(request, pk)
@@ -2658,56 +2741,55 @@ class RouterPortManagerView(APIView):
         # Safety Check: Prevent admin from locking themselves out by bridging the WAN port
         if router.wan_interface in desired_ports:
             return Response({
-                'error': f'Security Risk: You cannot add the WAN interface ({router.wan_interface}) to the hotspot bridge!'
+                'error': f'Security Risk: Cannot add WAN interface ({router.wan_interface}) to the hotspot bridge.'
             }, status=400)
 
+        # ── Offline path — save for later ─────────────────────────────────
         if router.status != 'online':
-            # Save to DB for offline sync later
             router.hotspot_interfaces = desired_ports
             router.save(update_fields=['hotspot_interfaces'])
-            return Response({'message': 'Saved to database. Will apply when router is online.', 'applied': False})
+            return Response({
+                'message': 'Saved to database. Will apply when router is online.',
+                'applied': False,
+            })
 
-        # Apply to live router
+        # ── Live path — sync to router ─────────────────────────────────────
         result = sync_bridge_ports_to_router(router, desired_ports)
 
-        if result.get('success'):
-            # Update DB to match live router
-            router.hotspot_interfaces = desired_ports
-            router.save(update_fields=['hotspot_interfaces'])
-            
-            # ── FIX: Verify hotspot server is bound to one of the selected ports ──
-            try:
-                api_check = mikrotik_api_module.MikrotikAPI(router)
-                if api_check.connect():
-                    servers = list(api_check._execute('/ip/hotspot'))
-                    if servers:
-                        current_iface = servers[0].get('interface', '')
-                        # If the hotspot server interface is not in the bridge, warn the user
-                        bridge_ifaces = desired_ports + ['netily-bridge']
-                        if current_iface not in bridge_ifaces:
-                            logger.warning(
-                                f"[PORT MANAGER] Hotspot server on '{current_iface}' "
-                                f"but bridge ports are {desired_ports}. "
-                                "User may need to run full provisioning script."
-                            )
-                    api_check.disconnect()
-            except Exception:
-                pass  # Non-fatal — bridge sync already succeeded
-
-            RouterEvent.objects.create(
-                router=router,
-                event_type='config_change',
-                message=f"Bridge ports updated: {', '.join(desired_ports) or 'None'}"
-            )
-
-            return Response({
-                'success': True,
-                'message': 'Ports synchronized to router. If hotspot/PPPoE is not working, re-run the provisioning script from the Cloud Controller tab.',
-                'added': result.get('added'),
-                'removed': result.get('removed')
-            })
-        else:
+        if not result.get('success'):
             return Response({'error': result.get('error')}, status=500)
+
+        # Persist to DB
+        router.hotspot_interfaces = desired_ports
+        router.save(update_fields=['hotspot_interfaces'])
+
+        # ── CRITICAL FIX: rebind hotspot/PPPoE to bridge ──────────────────
+        try:
+            api_rebind = mikrotik_api_module.MikrotikAPI(router)
+            if api_rebind.connect():
+                _rebind_services_to_bridge(api_rebind, router)
+                api_rebind.disconnect()
+        except Exception as e:
+            logger.warning(f"[PORT MANAGER POST] Rebind services failed (non-fatal): {e}")
+
+        RouterEvent.objects.create(
+            router=router,
+            event_type='config_change',
+            message=f"Bridge ports updated: {', '.join(desired_ports) or 'None'}",
+            details={
+                'added': result.get('added'),
+                'removed': result.get('removed'),
+                'desired': desired_ports,
+                'updated_by': request.user.email if hasattr(request.user, 'email') else str(request.user),
+            },
+        )
+
+        return Response({
+            'success': True,
+            'message': 'Ports synchronized and services rebound to netily-bridge.',
+            'added': result.get('added'),
+            'removed': result.get('removed'),
+        })
 
 
 # ────────────────────────────────────────────────────────────────

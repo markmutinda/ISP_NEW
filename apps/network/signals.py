@@ -1,4 +1,4 @@
-from django.db.models.signals import post_save, post_delete
+from django.db.models.signals import post_save, post_delete, pre_delete
 from django.dispatch import receiver
 from django.db import transaction
 from django.core.cache import cache
@@ -130,6 +130,88 @@ def cleanup_router_radius_nas(sender, instance, **kwargs):
 
 
 # ────────────────────────────────────────────────────────────────
+# PRE-DELETE VPN CLEANUP (RUNS BEFORE ROW IS DELETED)
+# ────────────────────────────────────────────────────────────────
+
+@receiver(pre_delete, sender=Router)
+def deprovision_vpn_before_delete(sender, instance, **kwargs):
+    """
+    Free all VPN resources BEFORE the router row is deleted so that:
+      - The VPN IP is returned to the pool immediately.
+      - The OpenVPN CCD file is removed (router can no longer connect).
+      - The certificate is revoked.
+
+    We use pre_delete (not post_delete) because post_delete signals
+    receive an instance with no PK, making save() impossible, and
+    the VPN provisioning service needs the instance intact.
+    """
+    if not instance.vpn_provisioned and not instance.vpn_ip_address:
+        return
+
+    logger.info(
+        f"[PRE-DELETE] Cleaning up VPN for router '{instance.name}' "
+        f"(ID: {instance.id}, IP: {instance.vpn_ip_address})"
+    )
+
+    # 1. Revoke certificate
+    try:
+        if instance.vpn_certificate_id:
+            # Check if certificate still exists and hasn't been revoked already
+            cert = instance.vpn_certificate
+            if cert and not cert.is_revoked:
+                cert.revoke(
+                    reason=f"Router '{instance.name}' deleted"
+                )
+                logger.info(f"[PRE-DELETE] Certificate revoked for {instance.name}")
+            elif cert and cert.is_revoked:
+                logger.info(f"[PRE-DELETE] Certificate already revoked for {instance.name}")
+    except Exception as e:
+        logger.warning(f"[PRE-DELETE] Certificate revocation failed: {e}")
+
+    # 2. Remove CCD file (filename = openvpn_username)
+    try:
+        if instance.openvpn_username:
+            from apps.vpn.services.ccd_manager import CCDManager
+            ccd = CCDManager()
+            ccd.remove_ccd_file(instance.openvpn_username)
+            logger.info(f"[PRE-DELETE] CCD file removed for {instance.openvpn_username}")
+    except Exception as e:
+        logger.warning(f"[PRE-DELETE] CCD removal failed: {e}")
+
+    # 3. Free the VPN IP from the global map
+    try:
+        if instance.vpn_ip_address:
+            from apps.core.models import GlobalRouterMap
+            with schema_context('public'):
+                deleted_count, _ = GlobalRouterMap.objects.filter(
+                    nas_ip=instance.vpn_ip_address
+                ).delete()
+                if deleted_count:
+                    logger.info(
+                        f"[PRE-DELETE] Freed VPN IP {instance.vpn_ip_address} "
+                        f"from GlobalRouterMap"
+                    )
+                else:
+                    logger.debug(
+                        f"[PRE-DELETE] No GlobalRouterMap entry found for IP {instance.vpn_ip_address}"
+                    )
+    except Exception as e:
+        logger.warning(f"[PRE-DELETE] GlobalRouterMap cleanup failed: {e}")
+
+    # 4. Optionally: Remove from the IP pool if you maintain one
+    try:
+        from apps.vpn.services.ip_pool_manager import IPPoolManager
+        if instance.vpn_ip_address:
+            pool_manager = IPPoolManager()
+            pool_manager.release_ip(instance.vpn_ip_address)
+            logger.info(f"[PRE-DELETE] Released VPN IP {instance.vpn_ip_address} back to pool")
+    except ImportError:
+        logger.debug("[PRE-DELETE] IPPoolManager not available — skipping pool release")
+    except Exception as e:
+        logger.warning(f"[PRE-DELETE] IP pool release failed: {e}")
+
+
+# ────────────────────────────────────────────────────────────────
 # GLOBAL ROUTER MAP CLEANUP (PUBLIC SCHEMA)
 # ────────────────────────────────────────────────────────────────
 
@@ -143,6 +225,9 @@ def cleanup_global_router_map(sender, instance, **kwargs):
     1. Preventing "ghost" router entries in the global RADIUS client table
     2. Avoiding IP conflicts when re-using VPN IP addresses
     3. Keeping the shared RADIUS server's client list clean
+    
+    NOTE: This runs AFTER pre_delete. If pre_delete already removed the entry,
+    this will just log a debug message.
     """
     # Import here to avoid circular imports
     try:
@@ -163,14 +248,15 @@ def cleanup_global_router_map(sender, instance, **kwargs):
     
     if nas_ip:
         try:
-            deleted_count = GlobalRouterMap.objects.filter(nas_ip=nas_ip).delete()[0]
-            if deleted_count > 0:
-                logger.info(f"[GLOBAL CLEANUP] Removed {instance.name} ({nas_ip}) from GlobalRouterMap.")
-                
-                # Trigger RADIUS client reload after DB commit succeeds
-                transaction.on_commit(reload_radius_clients_now)
-            else:
-                logger.debug(f"[GLOBAL CLEANUP] No GlobalRouterMap entry found for {instance.name} ({nas_ip})")
+            with schema_context('public'):
+                deleted_count = GlobalRouterMap.objects.filter(nas_ip=nas_ip).delete()[0]
+                if deleted_count > 0:
+                    logger.info(f"[GLOBAL CLEANUP] Removed {instance.name} ({nas_ip}) from GlobalRouterMap.")
+                    
+                    # Trigger RADIUS client reload after DB commit succeeds
+                    transaction.on_commit(reload_radius_clients_now)
+                else:
+                    logger.debug(f"[GLOBAL CLEANUP] No GlobalRouterMap entry found for {instance.name} ({nas_ip})")
         except Exception as e:
             logger.error(f"[GLOBAL CLEANUP] Failed to remove GlobalRouterMap entry for {instance.name} ({nas_ip}): {e}")
     else:
