@@ -84,19 +84,20 @@ class MikrotikScriptGenerator:
         else:
             absolute_api_path = f"{self.base_url}{api_path}"
         
-        # ── USE PURE HTTPS: No HTTP bypass anymore ───────────────────────────
-        # The MSS clamping in firewall will prevent fragmentation issues
-        # No need to downgrade to HTTP — HTTPS works with proper MTU handling
-        config_fetch_url = absolute_api_path
-        # ────────────────────────────────────────────────────────────────────────
+        config_fetch_url = absolute_api_path.split('?')[0]
 
         return f"""# ═══════════════════════════════════════════════════════════════
 # Netily Cloud Controller — Base Script (Stage 1)
-# Router: {self._escape_ros_string(r.name)}
-# Generated: {timezone.now().strftime("%Y-%m-%d %H:%M:%S")}
 # ═══════════════════════════════════════════════════════════════
 :put ">>> NETILY CLOUD CONTROLLER v4.6 <<<"
-:put ">>> Stage 1: Detecting RouterOS version..."
+
+# ─── Fix MTU/MSS FIRST before any HTTPS fetch ───────────────
+:put "Applying MSS clamp for HTTPS compatibility..."
+:do {{ /ip firewall mangle remove [find comment="Netily-Bootstrap-MSS"] }} on-error={{}}
+/ip firewall mangle add chain=output protocol=tcp tcp-flags=syn action=change-mss new-mss=1360 comment="Netily-Bootstrap-MSS" place-before=0
+/ip firewall mangle add chain=forward protocol=tcp tcp-flags=syn action=change-mss new-mss=clamp-to-pmtu comment="Netily-Bootstrap-MSS" place-before=0
+:delay 1s
+:put "MSS clamp applied."
 
 # ─── Check Internet Connectivity ────────────────────────────
 :local hasInternet false
@@ -126,7 +127,6 @@ class MikrotikScriptGenerator:
 :put ("RouterOS version detected: v" . $rosVersion)
 
 # ─── Download Version-Specific Configuration ─────────────────
-# Using HTTPS with MSS clamping to prevent fragmentation
 :local configUrl ("{config_fetch_url}?version=" . $rosVersion . "&router={r.id}&subdomain={subdomain}")
 :put ("Downloading config from: " . $configUrl)
 
@@ -616,25 +616,16 @@ class MikrotikScriptGenerator:
 """
 
     def _section_nat(self, r: Router) -> str:
-        """UPDATED: Added MSS clamping to prevent HTTPS fragmentation"""
         return f"""# ─────────────────────────────────────────────────────────────
-# 14. MASQUERADE, NAT & MSS CLAMPING
+# 14. MASQUERADE & NAT
 # ─────────────────────────────────────────────────────────────
-:put "Configuring NAT and MSS clamping..."
+:put "Configuring NAT..."
 
 :do {{
     :if ([:len [/ip firewall nat find comment="Netily-Masquerade"]] = 0) do={{
         /ip firewall nat add chain=srcnat action=masquerade comment="Netily-Masquerade"
     }}
 }} on-error={{}}
-
-# Clamp MSS to prevent fragmentation on HTTPS fetches through the tunnel
-# This fixes large config payloads (~160KiB) failing due to MTU/TLS fragmentation
-:do {{ /ip firewall mangle remove [find comment="Netily-MSS-Clamp"] }} on-error={{}}
-/ip firewall mangle add chain=forward protocol=tcp tcp-flags=syn \\
-    action=change-mss new-mss=clamp-to-pmtu comment="Netily-MSS-Clamp"
-/ip firewall mangle add chain=output protocol=tcp tcp-flags=syn \\
-    action=change-mss new-mss=1360 comment="Netily-MSS-Clamp"
 """
 
     def _section_schedulers(self, r: Router) -> str:
