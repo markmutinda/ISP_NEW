@@ -56,11 +56,12 @@ def _get_router_by_auth_key(auth_key: str) -> Router:
     querying the wrong schema on subsequent iterations.
     """
     from django.db import connection
-    from apps.core.models import Tenant, RouterTenantIndex
+    from apps.core.models import Tenant
     from django_tenants.utils import schema_context
 
-    # Fast path: use the index table (if available)
+    # Fast path: try RouterTenantIndex
     try:
+        from apps.core.models import RouterTenantIndex
         with schema_context('public'):
             index_row = RouterTenantIndex.objects.select_related('tenant').filter(
                 router_auth_key=auth_key,
@@ -68,36 +69,36 @@ def _get_router_by_auth_key(auth_key: str) -> Router:
             ).first()
 
         if index_row:
-            tenant = index_row.tenant
-            connection.set_tenant(tenant)
-            router = Router.objects.filter(auth_key=auth_key, is_active=True).first()
+            with schema_context(index_row.tenant.schema_name):
+                router = Router.objects.filter(auth_key=auth_key, is_active=True).first()
             if router:
-                logger.debug(f"[PROVISION] Router found via index: {router.name} (tenant={tenant.schema_name})")
+                connection.set_tenant(index_row.tenant)
+                logger.debug(f"[PROVISION] Router found via index: {router.name}")
                 return router
     except Exception as e:
         logger.warning(f"[PROVISION] Index lookup failed: {e}")
 
-    # Fallback: scan all tenants (reset schema between each)
-    connection.set_schema_to_public()
-    tenants = Tenant.objects.filter(is_active=True)
-    
+    # Fallback: scan all tenants
+    try:
+        with schema_context('public'):
+            tenants = list(Tenant.objects.filter(is_active=True).exclude(schema_name='public'))
+    except Exception as e:
+        logger.error(f"[PROVISION] Cannot list tenants: {e}")
+        raise Http404("Router not found")
+
     for tenant in tenants:
         try:
-            connection.set_tenant(tenant)
-            router = Router.objects.filter(auth_key=auth_key, is_active=True).first()
-            if router:
-                logger.debug(f"[PROVISION] Router found via fallback scan: {router.name} (tenant={tenant.schema_name})")
-                return router
+            with schema_context(tenant.schema_name):
+                router = Router.objects.filter(auth_key=auth_key, is_active=True).first()
+                if router:
+                    connection.set_tenant(tenant)
+                    logger.debug(f"[PROVISION] Router found via scan: {router.name} (tenant={tenant.schema_name})")
+                    return router
         except Exception as e:
             logger.warning(f"[PROVISION] Error checking tenant {tenant.schema_name}: {e}")
             continue
-        finally:
-            # CRITICAL: Always reset schema to public after each tenant attempt
-            connection.set_schema_to_public()
 
-    # If we check all ISPs and don't find it, ensure we're on public schema
     connection.set_schema_to_public()
-    logger.error(f"[PROVISION] Router not found for auth_key={auth_key}")
     raise Http404("Router not found")
 
 
