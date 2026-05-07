@@ -234,9 +234,23 @@ class ProvisionConfigView(APIView):
                 f"[PROVISION CONFIG] Script generation failed for router '{router.name}': {e}",
                 exc_info=True
             )
-            from rest_framework.response import Response
-            from rest_framework import status as drf_status
-            return Response({'error': str(e)}, status=drf_status.HTTP_500_INTERNAL_SERVER_ERROR)
+            # Return a plain text error script so MikroTik can download and show the error
+            error_script = f"""# Netily Provisioning Error
+# Router: {router.name}
+# Router ID: {router.id}
+# Error: {str(e)}
+# Please check backend logs.
+
+:put "========================================="
+:put "PROVISIONING ERROR"
+:put "========================================="
+:put "Router: {router.name}"
+:put "Error: {str(e)}"
+:put "========================================="
+:put "Please contact support with this error."
+:put "========================================="
+"""
+            return _plain_text_response(error_script, filename='error.rsc')
 
         # Update router provisioning state
         router.routeros_version = version
