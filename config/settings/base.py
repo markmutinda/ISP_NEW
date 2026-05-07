@@ -98,7 +98,7 @@ TENANT_APPS = (
     'apps.inventory',
     'apps.notifications',
     'apps.bandwidth',
-    'apps.vpn',                        # VPN/OpenVPN Management
+    'apps.vpn',                        # VPN/WireGuard Management
     'apps.radius',                     # RADIUS/FreeRADIUS Integration
     'apps.fup',
     'apps.loyalty',                    # Loyalty/Rewards Program
@@ -488,3 +488,12 @@ TUMA_MASTER_API_KEY = os.getenv("TUMA_MASTER_API_KEY", "")   # Your main Tuma AP
 TUMA_CALLBACK_URL = os.getenv("TUMA_CALLBACK_URL", "https://your-production-domain.com/api/v1/webhooks/tuma/callback/")
 TUMA_SUBSCRIPTION_CALLBACK = os.getenv("TUMA_SUBSCRIPTION_CALLBACK", "https://api.netily.co.ke/api/v1/webhooks/tuma/subscription-callback/")
 TUMA_DEFAULT_LOGO_URL = os.getenv("TUMA_DEFAULT_LOGO_URL", "https://your-saas.com/default-logo.png")
+
+# ────────────────────────────────────────────────────────────────
+#  WIREGUARD SETTINGS (replaces OpenVPN)
+# ────────────────────────────────────────────────────────────────
+WG_SERVER_HOST       = os.environ.get('WG_SERVER_HOST', 'vpn.netily.co.ke')
+WG_SERVER_PORT       = int(os.environ.get('WG_SERVER_PORT', '51820'))
+WG_SERVER_PUBLIC_KEY = os.environ.get('WG_SERVER_PUBLIC_KEY', '')
+WG_INTERFACE         = os.environ.get('WG_INTERFACE', 'wg0')
+WG_PEERS_DIR         = os.environ.get('WG_PEERS_DIR', '/etc/wireguard/peers')

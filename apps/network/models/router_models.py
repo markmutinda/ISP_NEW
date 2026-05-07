@@ -151,47 +151,32 @@ class Router(AuditMixin):
     )
 
     # ────────────────────────────────────────────────────────────────
-    # CERTIFICATE-BASED VPN (Cloud Controller)
+    # WIREGUARD VPN (replaces OpenVPN certificate-based setup)
     # ────────────────────────────────────────────────────────────────
-    # PEM certificate content stored for injection into .rsc scripts
-    ca_certificate = models.TextField(
+    wireguard_private_key = models.TextField(
         blank=True, null=True,
-        help_text="PEM content of ca.crt for this router's VPN"
+        help_text="Router's WireGuard private key (stored server-side, injected into RSC)"
     )
-    client_certificate = models.TextField(
-        blank=True, null=True,
-        help_text="PEM content of client.crt"
+    wireguard_public_key = models.CharField(
+        max_length=64, blank=True, null=True,
+        help_text="Router's WireGuard public key (registered as peer on server)"
     )
-    client_key = models.TextField(
-        blank=True, null=True,
-        help_text="PEM content of client.key (should be encrypted at rest)"
-    )
-    # Static VPN IP mapped via CCD (Client Config Directory)
+    
+    # Keep ca/client cert fields as nullable for any v6 OpenVPN fallback
+    ca_certificate = models.TextField(blank=True, null=True)
+    client_certificate = models.TextField(blank=True, null=True)
+    client_key = models.TextField(blank=True, null=True)
     vpn_ip_address = models.GenericIPAddressField(
-        protocol='IPv4',
-        null=True,
-        blank=True,
-        unique=True,
-        help_text="Static IP assigned in OpenVPN CCD (e.g. 10.8.0.55)"
+        protocol='IPv4', null=True, blank=True, unique=True,
+        help_text="Static VPN IP assigned to this router (WireGuard AllowedIPs)"
     )
-    # FK to the VPN certificate record for lifecycle management
     vpn_certificate = models.ForeignKey(
-        'vpn.VPNCertificate',
-        null=True,
-        blank=True,
-        on_delete=models.SET_NULL,
-        related_name='provisioned_routers',
-        help_text="The active VPN certificate for this router"
+        'vpn.VPNCertificate', null=True, blank=True,
+        on_delete=models.SET_NULL, related_name='provisioned_routers',
     )
-    vpn_provisioned = models.BooleanField(
-        default=False,
-        help_text="Whether VPN certificates and CCD have been provisioned"
-    )
+    vpn_provisioned = models.BooleanField(default=False)
     vpn_provisioned_at = models.DateTimeField(null=True, blank=True)
-    vpn_last_seen = models.DateTimeField(
-        null=True, blank=True,
-        help_text="Last time this router was seen connected via VPN tunnel"
-    )
+    vpn_last_seen = models.DateTimeField(null=True, blank=True)
 
     # ────────────────────────────────────────────────────────────────
     # SERVICE FLAGS & LEGACY COMPATIBILITY
@@ -495,23 +480,18 @@ class Router(AuditMixin):
         super().save(*args, **kwargs)
 
         # ────────────────────────────────────────────────────────────────
-        # 8. Trigger LipaNet-Style VPN Provisioning if not already done
+        # 8. Trigger WireGuard Provisioning if not already done
         # ────────────────────────────────────────────────────────────────
         if self.enable_openvpn and not self.vpn_provisioned:
             try:
                 from apps.vpn.services.vpn_provisioning_service import VPNProvisioningService
                 service = VPNProvisioningService()
-                # This will assign IP, generate certs, write CCD, and update router
                 service.provision_router(self)
-                # The provision_router method will call save() again with the VPN IP
-                # That second save will trigger the global map sync below
             except Exception as e:
-                logger.error(f"VPN Auto-Provisioning failed for {self.name}: {e}")
+                logger.error(f"WireGuard Auto-Provisioning failed for {self.name}: {e}")
 
         # ────────────────────────────────────────────────────────────────
         # 9. Update the Central RADIUS Phonebook (GlobalRouterMap)
-        #    RADIUS traffic ONLY happens over the VPN.
-        #    Do NOT sync unless we have a VPN IP!
         # ────────────────────────────────────────────────────────────────
         if self.vpn_ip_address:
             self._sync_to_global_map()

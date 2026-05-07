@@ -210,6 +210,8 @@ class MikrotikScriptGenerator:
 :do {{ :foreach i in=[/ip dhcp-server find name="netily-dhcp"] do={{ /ip dhcp-server remove $i }} }} on-error={{}}
 :do {{ :foreach i in=[/ip dhcp-server network find comment="Netily DHCP Network"] do={{ /ip dhcp-server network remove $i }} }} on-error={{}}
 :do {{ :foreach i in=[/interface ovpn-client find name="Netily-VPN"] do={{ /interface ovpn-client remove $i }} }} on-error={{}}
+:do {{ :foreach i in=[/interface wireguard find name="Netily-VPN"] do={{ /interface wireguard remove $i }} }} on-error={{}}
+:do {{ :foreach i in=[/ip address find comment="Netily-WG-IP"] do={{ /ip address remove $i }} }} on-error={{}}
 :do {{ :foreach i in=[/ppp profile find name="netily-pppoe-profile"] do={{ /ppp profile remove $i }} }} on-error={{}}
 :do {{ :foreach i in=[/interface pppoe-server server find name="netily-pppoe"] do={{ /interface pppoe-server server remove $i }} }} on-error={{}}
 :do {{ :foreach i in=[/interface bridge find name="netily-bridge"] do={{
@@ -243,50 +245,84 @@ class MikrotikScriptGenerator:
 """
 
     def _section_openvpn(self, r: Router, cipher: str, auth: str, is_v6: bool) -> str:
-        vpn_host = self._get_vpn_host(r)
-
-        ca_fetch = ""
-        if r.ca_certificate:
-            ca_url = f"{self.base_url}/api/v1/network/provision/{r.auth_key}/certs/ca.crt"
-            ca_fetch = f"""
-:do {{
-    /tool fetch url="{ca_url}" dst-path="netily-vpn-ca.crt" http-header-field="ngrok-skip-browser-warning: true"
-    :delay 1s
-    /certificate import file-name="netily-vpn-ca.crt" passphrase=""
-    :put "VPN CA certificate imported."
-}} on-error={{
-    :put "Note: VPN CA cert not available. Using unverified TLS."
-}}
-"""
+        """
+        WireGuard tunnel for v7, OpenVPN username/password fallback for v6.
+        """
+        from apps.vpn.services.wireguard_manager import (
+            get_server_public_key, get_server_endpoint
+        )
         
         if is_v6:
-            ovpn_cmd = f'/interface ovpn-client add name="Netily-VPN" connect-to="{self._escape_ros_string(vpn_host)}" port={r.openvpn_port} user="{self._escape_ros_string(r.openvpn_username)}" password="{self._escape_ros_string(r.openvpn_password)}" cipher={cipher} auth={auth} protocol=udp add-default-route=no comment="Netily Cloud Controller Tunnel"'
-        else:
-            ovpn_cmd = f'/interface ovpn-client add name="Netily-VPN" connect-to="{self._escape_ros_string(vpn_host)}" port={r.openvpn_port} user="{self._escape_ros_string(r.openvpn_username)}" password="{self._escape_ros_string(r.openvpn_password)}" cipher=aes256-cbc auth=sha1 protocol=udp add-default-route=no comment="Netily Cloud Controller Tunnel"'
+            # ── v6 fallback: OpenVPN user/password (unchanged) ──────────────────
+            vpn_host = self._get_vpn_host(r)
+            return f"""# ─────────────────────────────────────────────────────────────
+# 3. OPENVPN TUNNEL (RouterOS v6 fallback)
+# ─────────────────────────────────────────────────────────────
+:put "RouterOS v6: establishing OpenVPN tunnel..."
+/interface ovpn-client add name="Netily-VPN" \\
+    connect-to="{self._escape_ros_string(vpn_host)}" \\
+    port={r.openvpn_port} \\
+    user="{self._escape_ros_string(r.openvpn_username)}" \\
+    password="{self._escape_ros_string(r.openvpn_password)}" \\
+    cipher=aes256-cbc auth=sha1 protocol=udp \\
+    add-default-route=no \\
+    comment="Netily Cloud Controller Tunnel"
+:delay 8s
+:put "OpenVPN tunnel configured (v6 mode)."
+"""
+
+        # ── v7: WireGuard ────────────────────────────────────────────────────────
+        wg_private_key   = r.wireguard_private_key or ''
+        wg_server_pubkey = get_server_public_key()
+        wg_endpoint      = get_server_endpoint()
+        vpn_ip           = r.vpn_ip_address or ''
+        vpn_network_cidr = self.vpn_network_cidr
+
+        if not wg_private_key or not wg_server_pubkey:
+            return f"""# ─────────────────────────────────────────────────────────────
+# 3. WIREGUARD TUNNEL — KEYS NOT YET PROVISIONED
+# ─────────────────────────────────────────────────────────────
+:put "WARNING: WireGuard keys not provisioned. Re-run after server-side provisioning."
+"""
 
         return f"""# ─────────────────────────────────────────────────────────────
-# 3. OPENVPN TUNNEL (Username/Password Authentication)
+# 3. WIREGUARD TUNNEL
 # ─────────────────────────────────────────────────────────────
-:put "Establishing Cloud VPN tunnel..."
-{ca_fetch}
-{ovpn_cmd}
+:put "Configuring WireGuard VPN tunnel..."
 
-:put "Waiting for VPN tunnel..."
-:delay 8s
+# Remove any existing Netily WireGuard interface
+:do {{ /interface wireguard remove [find name="Netily-VPN"] }} on-error={{}}
+:do {{ /ip address remove [find comment="Netily-WG-IP"] }} on-error={{}}
 
-:local vpnRunning false
-:do {{
-    :if ([/interface ovpn-client get [find name="Netily-VPN"] running] = true) do={{
-        :set vpnRunning true
-    }}
-}} on-error={{}}
+# Create WireGuard interface with router's unique private key
+/interface wireguard add \\
+    name="Netily-VPN" \\
+    private-key="{self._escape_ros_string(wg_private_key)}" \\
+    listen-port=0 \\
+    comment="Netily Cloud Controller WireGuard"
 
-:if ($vpnRunning = true) do={{
-    :put "VPN tunnel established successfully!"
-}} else={{
-    :put "WARNING: VPN tunnel not yet connected. It may take a moment."
-    :put "The router will keep trying to connect in the background."
-}}
+# Assign static VPN IP
+/ip address add \\
+    address="{vpn_ip}/{self.vpn_network_cidr.split('/')[1]}" \\
+    interface="Netily-VPN" \\
+    comment="Netily-WG-IP"
+
+# Add server as peer
+/interface wireguard peers add \\
+    interface="Netily-VPN" \\
+    public-key="{self._escape_ros_string(wg_server_pubkey)}" \\
+    endpoint-address="{wg_endpoint.split(':')[0]}" \\
+    endpoint-port={wg_endpoint.split(':')[1] if ':' in wg_endpoint else '51820'} \\
+    allowed-address="{vpn_network_cidr}" \\
+    persistent-keepalive=25 \\
+    comment="Netily Cloud Server"
+
+# Allow WireGuard traffic in firewall
+:do {{ /ip firewall filter remove [find comment="Netily-WG-Input"] }} on-error={{}}
+/ip firewall filter add chain=input action=accept protocol=udp dst-port=0 in-interface=all-ethernet comment="Netily-WG-Input"
+
+:delay 5s
+:put "WireGuard VPN tunnel configured — IP: {vpn_ip}"
 """
 
     def _section_firewall(self, r: Router) -> str:
@@ -564,7 +600,7 @@ class MikrotikScriptGenerator:
 :put "════════════════════════════════════════════════════════"
 :put " NETILY CLOUD CONTROLLER — SETUP COMPLETE"
 :put " Router:  {self._escape_ros_string(r.name)}"
-:put " VPN:     {self._escape_ros_string(vpn_host)}:{r.openvpn_port}"
+:put " VPN:     WireGuard (v7) / OpenVPN v6 fallback"
 :put " RADIUS:  {self.vpn_gateway}:1812/1813"
 :put " Portal:  {self.get_tenant_portal_url()}"
 :put "════════════════════════════════════════════════════════"

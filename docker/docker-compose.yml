@@ -65,7 +65,7 @@ services:
       - static_volume:/app/staticfiles
       - media_volume:/app/media
       - /var/run/docker.sock:/var/run/docker.sock
-      - openvpn_ccd:/etc/openvpn/ccd
+      - wireguard_peers:/etc/wireguard/peers
     env_file: ../.env
     environment:
       - PYTHONPATH=/app
@@ -81,6 +81,8 @@ services:
       - BASE_URL=${BASE_URL:-https://api.netily.co.ke}
       - FRONTEND_URL=${FRONTEND_URL:-https://netily.co.ke}
       - VPN_NETWORK_CIDR=${VPN_NETWORK_CIDR:-10.8.0.0/16}
+      - WG_PEERS_DIR=/etc/wireguard/peers
+      - WG_SERVER_PORT=${WG_SERVER_PORT:-51820}
     cap_add:
       - NET_ADMIN
     depends_on:
@@ -88,7 +90,7 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
-      openvpn:
+      wireguard:
          condition: service_started
     ports:
       - "8000:8000"
@@ -116,7 +118,7 @@ services:
     volumes:
       - ../:/app
       - /var/run/docker.sock:/var/run/docker.sock
-      - openvpn_ccd:/etc/openvpn/ccd
+      - wireguard_peers:/etc/wireguard/peers
     env_file: ../.env
     environment:
       - PYTHONPATH=/app
@@ -128,6 +130,8 @@ services:
       - OPENVPN_MANAGEMENT_HOST=netily-openvpn
       - VPN_GATEWAY_IP=${VPN_GATEWAY_IP:-10.8.0.1}
       - VPN_NETWORK_CIDR=${VPN_NETWORK_CIDR:-10.8.0.0/16}
+      - WG_PEERS_DIR=/etc/wireguard/peers
+      - WG_SERVER_PORT=${WG_SERVER_PORT:-51820}
     cap_add:
       - NET_ADMIN
     depends_on:
@@ -201,7 +205,7 @@ services:
     depends_on:
       db:
         condition: service_healthy
-      openvpn:
+      wireguard:
         condition: service_started
     deploy:
       resources:
@@ -266,55 +270,32 @@ services:
     networks:
       - isp_network
 
-  openvpn:
-    image: kylemanna/openvpn:latest
-    container_name: netily-openvpn
+  wireguard:
+    image: linuxserver/wireguard:latest
+    container_name: netily-openvpn   # Keep alias so internal DNS works
     restart: unless-stopped
     cap_add:
       - NET_ADMIN
-    ports:
-      - "1194:1194/udp"
-      - "1194:1194/tcp"
-    volumes:
-      - openvpn_data:/etc/openvpn
-      - openvpn_ccd:/etc/openvpn/ccd
-      - openvpn_logs:/var/log/openvpn
-      - ../radius_config/ports:/etc/openvpn/ports:ro
+      - SYS_MODULE
     environment:
-      - OPENVPN_OPTS=--management 0.0.0.0 7505
-      - VPN_NETWORK_CIDR=${VPN_NETWORK_CIDR:-10.8.0.0/16}
-    command: >
-      sh -c "ovpn_run &
-             echo 'Waiting for tun0...' &&
-             while ! ip link show tun0 > /dev/null 2>&1; do sleep 1; done &&
-             echo 'tun0 is up! Applying Forwarding Rules...' &&
-             iptables -t nat -I POSTROUTING -o tun0 -j MASQUERADE &&
-             iptables -I FORWARD -i tun0 -p udp -m multiport --dports 1812,1813 -j ACCEPT &&
-             iptables -I FORWARD -o tun0 -p udp -m multiport --sports 1812,1813 -j ACCEPT &&
-             echo 'Waiting for RADIUS container to be resolvable...' &&
-             for i in $$(seq 1 30); do
-               BASE_IP=$$(getent hosts netily-radius-isp | awk '{ print $$1 }')
-               if [ -n \"$$BASE_IP\" ]; then
-                 echo \"RADIUS container resolved to: $$BASE_IP (attempt $$i)\"
-                 break
-               fi
-               echo \"Attempt $$i/30: netily-radius-isp not yet resolvable, sleeping 2s...\"
-               sleep 2
-             done &&
-             if [ -n \"$$BASE_IP\" ]; then
-               echo \"Forwarding 1812/1813 to Shared Radius ($$BASE_IP)\" &&
-               iptables -t nat -C PREROUTING -i tun0 -p udp --dport 1812 -j DNAT --to-destination $$BASE_IP:1812 2>/dev/null ||
-               iptables -t nat -A PREROUTING -i tun0 -p udp --dport 1812 -j DNAT --to-destination $$BASE_IP:1812 &&
-               iptables -t nat -C PREROUTING -i tun0 -p udp --dport 1813 -j DNAT --to-destination $$BASE_IP:1813 2>/dev/null ||
-               iptables -t nat -A PREROUTING -i tun0 -p udp --dport 1813 -j DNAT --to-destination $$BASE_IP:1813 &&
-               echo \"RADIUS DNAT rules applied\"
-             else
-               echo \"ERROR: Shared RADIUS container not found after 30 attempts\"
-             fi &&
-             echo 'All Rules Applied.' &&
-             wait"
+      - PUID=1000
+      - PGID=1000
+      - TZ=Africa/Nairobi
+      - SERVERURL=${WG_SERVER_HOST:-vpn.netily.co.ke}
+      - SERVERPORT=${WG_SERVER_PORT:-51820}
+      - PEERS=0          # We manage peers manually via Django
+      - PEERDNS=8.8.8.8
+      - INTERNAL_SUBNET=${VPN_NETWORK_CIDR:-10.8.0.0/16}
+      - ALLOWEDIPS=0.0.0.0/0
+    volumes:
+      - wireguard_config:/config
+      - wireguard_peers:/etc/wireguard/peers
+      - /lib/modules:/lib/modules:ro
+    ports:
+      - "${WG_SERVER_PORT:-51820}:51820/udp"
     sysctls:
       - net.ipv4.ip_forward=1
+      - net.ipv4.conf.all.src_valid_mark=1
     deploy:
       resources:
         limits:
@@ -345,9 +326,8 @@ volumes:
   redis_data:
   static_volume:
   media_volume:
-  openvpn_data:
-  openvpn_ccd:
-  openvpn_logs:
+  wireguard_config:
+  wireguard_peers:
   freeradius_data:
   freeradius_logs:
   certbot_www:
