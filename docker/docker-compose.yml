@@ -219,7 +219,7 @@ services:
         aliases:
           - netily-radius-isp
       vpn_network:
-        ipv4_address: 10.10.0.3    # Static IP for RADIUS - eliminates DNS race condition
+        ipv4_address: 10.10.0.250    # Static IP for RADIUS - high range to avoid conflicts
         aliases:
           - netily-radius-vpn
 
@@ -295,8 +295,8 @@ services:
       - PEERDNS=8.8.8.8
       - INTERNAL_SUBNET=${VPN_NETWORK_CIDR:-10.8.0.0/16}
       - ALLOWEDIPS=0.0.0.0/0
-      # PERMANENT FIX: Force IP, MTU 1320, and forward straight to 10.10.0.3
-      - POSTUP=ip addr add 10.8.0.1/16 dev %i || true; ip link set dev %i mtu 1320; iptables -t nat -A PREROUTING -p udp -m multiport --dports 1812,1813,3799 -j DNAT --to-destination 10.10.0.3; iptables -t nat -A POSTROUTING -o %i -j MASQUERADE
+      # PERMANENT FIX: Force IP, MTU 1320, and forward straight to 10.10.0.250
+      - POSTUP=ip addr add 10.8.0.1/16 dev %i || true; ip link set dev %i mtu 1320; iptables -t nat -A PREROUTING -p udp -m multiport --dports 1812,1813,3799 -j DNAT --to-destination 10.10.0.250; iptables -t nat -A POSTROUTING -o %i -j MASQUERADE
     volumes:
       - wireguard_config:/config
       - wireguard_peers:/etc/wireguard/peers
