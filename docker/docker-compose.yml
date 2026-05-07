@@ -183,9 +183,12 @@ services:
       dockerfile: docker/Dockerfile.radius
     container_name: netily_radius
     restart: unless-stopped
-    # FIX: Removed -X flag to turn off debug mode (reduces log verbosity)
-    command: freeradius -f
-    # FIX: Added log rotation to prevent disk space exhaustion
+    # PERMANENT FIX: Add the route back to the VPN before starting FreeRADIUS
+    command: >
+      sh -c "VPN_IP=$$(getent hosts netily-openvpn-isp | awk '{ print $$1 }') &&
+             echo 'Adding route for 10.8.0.0/16 via '$$VPN_IP &&
+             ip route add 10.8.0.0/16 via $$VPN_IP || true &&
+             freeradius -f"
     logging:
       driver: "json-file"
       options:
@@ -291,6 +294,8 @@ services:
       - PEERDNS=8.8.8.8
       - INTERNAL_SUBNET=${VPN_NETWORK_CIDR:-10.8.0.0/16}
       - ALLOWEDIPS=0.0.0.0/0
+      # PERMANENT FIX: Set MTU, dynamically find Radius IP, and DNAT ports
+      - POSTUP=ip link set dev %i mtu 1320; RADIUS_IP=$$(getent hosts netily-radius-isp | awk '{ print $$1 }'); iptables -t nat -A PREROUTING -p udp -m multiport --dports 1812,1813,3799 -j DNAT --to-destination $$RADIUS_IP; iptables -t nat -A POSTROUTING -o %i -j MASQUERADE
     volumes:
       - wireguard_config:/config
       - wireguard_peers:/etc/wireguard/peers

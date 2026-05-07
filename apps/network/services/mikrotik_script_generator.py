@@ -211,6 +211,7 @@ class MikrotikScriptGenerator:
 :do {{ :foreach i in=[/ip dhcp-server network find comment="Netily DHCP Network"] do={{ /ip dhcp-server network remove $i }} }} on-error={{}}
 :do {{ :foreach i in=[/interface ovpn-client find name="Netily-VPN"] do={{ /interface ovpn-client remove $i }} }} on-error={{}}
 :do {{ :foreach i in=[/interface wireguard find name="Netily-VPN"] do={{ /interface wireguard remove $i }} }} on-error={{}}
+:do {{ :foreach i in=[/interface wireguard peers remove [find where interface="Netily-VPN"]] }} on-error={{}}
 :do {{ :foreach i in=[/ip address find comment="Netily-WG-IP"] do={{ /ip address remove $i }} }} on-error={{}}
 :do {{ :foreach i in=[/ppp profile find name="netily-pppoe-profile"] do={{ /ppp profile remove $i }} }} on-error={{}}
 :do {{ :foreach i in=[/interface pppoe-server server find name="netily-pppoe"] do={{ /interface pppoe-server server remove $i }} }} on-error={{}}
@@ -290,39 +291,48 @@ class MikrotikScriptGenerator:
 # ─────────────────────────────────────────────────────────────
 :put "Configuring WireGuard VPN tunnel..."
 
-# Remove any existing Netily WireGuard interface
+# Remove any existing Netily WireGuard interface and peers
+:do {{ /interface wireguard peers remove [find where interface="Netily-VPN"] }} on-error={{}}
 :do {{ /interface wireguard remove [find name="Netily-VPN"] }} on-error={{}}
 :do {{ /ip address remove [find comment="Netily-WG-IP"] }} on-error={{}}
 
-# Create WireGuard interface with router's unique private key
+# Create WireGuard interface with router's unique private key and MTU fix
 /interface wireguard add \\
     name="Netily-VPN" \\
     private-key="{self._escape_ros_string(wg_private_key)}" \\
-    listen-port=0 \\
+    listen-port=51820 \\
+    mtu=1320 \\
     comment="Netily Cloud Controller WireGuard"
 
-# Assign static VPN IP
+# Assign static VPN IP (crucial for RADIUS)
 /ip address add \\
     address="{vpn_ip}/{self.vpn_network_cidr.split('/')[1]}" \\
     interface="Netily-VPN" \\
     comment="Netily-WG-IP"
 
-# Add server as peer
+# Add server as peer with allowed-address=0.0.0.0/0 (allows all traffic)
 /interface wireguard peers add \\
     interface="Netily-VPN" \\
     public-key="{self._escape_ros_string(wg_server_pubkey)}" \\
     endpoint-address="{wg_endpoint.split(':')[0]}" \\
     endpoint-port={wg_endpoint.split(':')[1] if ':' in wg_endpoint else '51820'} \\
-    allowed-address="{vpn_network_cidr}" \\
+    allowed-address=0.0.0.0/0 \\
     persistent-keepalive=25 \\
     comment="Netily Cloud Server"
 
+# Allow RADIUS traffic to leave via the tunnel (critical for accounting)
+/ip firewall filter add chain=output action=accept protocol=udp dst-port=1812,1813,3799 out-interface="Netily-VPN" place-before=0 comment="Netily-RADIUS-Output"
+
 # Allow WireGuard traffic in firewall
 :do {{ /ip firewall filter remove [find comment="Netily-WG-Input"] }} on-error={{}}
-/ip firewall filter add chain=input action=accept protocol=udp dst-port=0 in-interface=all-ethernet comment="Netily-WG-Input"
+/ip firewall filter add chain=input action=accept protocol=udp dst-port=51820 in-interface=all-ethernet comment="Netily-WG-Input"
+
+# Ensure established/related connections are allowed
+/ip firewall filter add chain=input action=accept connection-state=established,related comment="Netily-Established"
 
 :delay 5s
-:put "WireGuard VPN tunnel configured — IP: {vpn_ip}"
+:put "WireGuard VPN tunnel configured — IP: {vpn_ip} (MTU: 1320, AllowedIPs: 0.0.0.0/0)"
+:put "RADIUS accounting traffic allowed via tunnel"
 """
 
     def _section_firewall(self, r: Router) -> str:
@@ -335,7 +345,6 @@ class MikrotikScriptGenerator:
 /ip firewall filter add chain=input action=accept src-address={self.vpn_network_cidr} comment="Netily-VPN-Input-Allow"
 /ip firewall filter add chain=forward action=accept src-address={self.vpn_network_cidr} comment="Netily-VPN-Forward-Allow"
 /ip firewall filter add chain=forward action=accept dst-address={self.vpn_network_cidr} comment="Netily-VPN-Forward-Return"
-/ip firewall filter add chain=input action=accept connection-state=established,related comment="Netily-Established"
 """
 
     def _section_bridge_ports(self, r: Router, gateway_cidr: str) -> str:
