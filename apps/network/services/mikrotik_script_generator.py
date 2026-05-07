@@ -83,15 +83,11 @@ class MikrotikScriptGenerator:
             absolute_api_path = self.request.build_absolute_uri(api_path)
         else:
             absolute_api_path = f"{self.base_url}{api_path}"
-        base_api_url = absolute_api_path.split('?')[0]
-
-        # ── CRITICAL FIX: Force Stage 2 to HTTP ─────────────────────────────────
-        # Stage 1 (this script, ~2KiB) stays HTTPS — auth_key is the security gate.
-        # Stage 2 (config, ~163KiB) MUST use HTTP. HTTPS + large payloads + MikroTik
-        # /tool fetch = silent packet drop due to MTU/TLS fragmentation black hole.
-        # The WireGuard private key in the config is protected by the auth_key token
-        # and the short-lived provision_slug — both already validated by this point.
-        config_fetch_url = base_api_url.replace('https://', 'http://', 1)
+        
+        # ── USE PURE HTTPS: No HTTP bypass anymore ───────────────────────────
+        # The MSS clamping in firewall will prevent fragmentation issues
+        # No need to downgrade to HTTP — HTTPS works with proper MTU handling
+        config_fetch_url = absolute_api_path
         # ────────────────────────────────────────────────────────────────────────
 
         return f"""# ═══════════════════════════════════════════════════════════════
@@ -130,9 +126,7 @@ class MikrotikScriptGenerator:
 :put ("RouterOS version detected: v" . $rosVersion)
 
 # ─── Download Version-Specific Configuration ─────────────────
-# NOTE: HTTP intentional — HTTPS causes MTU/TLS fragmentation failure
-# with large payloads (~163KiB) on MikroTik /tool fetch.
-# Auth security is provided by the auth_key + provision_slug token pair.
+# Using HTTPS with MSS clamping to prevent fragmentation
 :local configUrl ("{config_fetch_url}?version=" . $rosVersion . "&router={r.id}&subdomain={subdomain}")
 :put ("Downloading config from: " . $configUrl)
 
@@ -622,16 +616,25 @@ class MikrotikScriptGenerator:
 """
 
     def _section_nat(self, r: Router) -> str:
+        """UPDATED: Added MSS clamping to prevent HTTPS fragmentation"""
         return f"""# ─────────────────────────────────────────────────────────────
-# 14. MASQUERADE & NAT
+# 14. MASQUERADE, NAT & MSS CLAMPING
 # ─────────────────────────────────────────────────────────────
-:put "Configuring NAT..."
+:put "Configuring NAT and MSS clamping..."
 
 :do {{
     :if ([:len [/ip firewall nat find comment="Netily-Masquerade"]] = 0) do={{
         /ip firewall nat add chain=srcnat action=masquerade comment="Netily-Masquerade"
     }}
 }} on-error={{}}
+
+# Clamp MSS to prevent fragmentation on HTTPS fetches through the tunnel
+# This fixes large config payloads (~160KiB) failing due to MTU/TLS fragmentation
+:do {{ /ip firewall mangle remove [find comment="Netily-MSS-Clamp"] }} on-error={{}}
+/ip firewall mangle add chain=forward protocol=tcp tcp-flags=syn \\
+    action=change-mss new-mss=clamp-to-pmtu comment="Netily-MSS-Clamp"
+/ip firewall mangle add chain=output protocol=tcp tcp-flags=syn \\
+    action=change-mss new-mss=1360 comment="Netily-MSS-Clamp"
 """
 
     def _section_schedulers(self, r: Router) -> str:
