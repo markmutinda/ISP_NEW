@@ -3,11 +3,14 @@ Lipanet-Style Cloud Controller Script Generator (v4.6)
 Hardcoded 3-minute interim updates for automatic accounting
 """
 
+import logging
 from django.conf import settings
 from apps.network.models.router_models import Router
 from django.utils import timezone
 from django_tenants.utils import schema_context
 from urllib.parse import urlparse
+
+logger = logging.getLogger(__name__)
 
 
 class MikrotikScriptGenerator:
@@ -249,10 +252,6 @@ class MikrotikScriptGenerator:
         """
         WireGuard tunnel for v7, OpenVPN username/password fallback for v6.
         """
-        from apps.vpn.services.wireguard_manager import (
-            get_server_public_key, get_server_endpoint
-        )
-        
         if is_v6:
             # ── v6 fallback: OpenVPN user/password (unchanged) ──────────────────
             vpn_host = self._get_vpn_host(r)
@@ -273,19 +272,48 @@ class MikrotikScriptGenerator:
 """
 
         # ── v7: WireGuard ────────────────────────────────────────────────────────
-        wg_private_key   = r.wireguard_private_key or ''
-        wg_server_pubkey = get_server_public_key()
-        wg_endpoint      = get_server_endpoint()
-        vpn_ip           = r.vpn_ip_address or ''
+        wg_private_key = r.wireguard_private_key or ''
+        
+        try:
+            from apps.vpn.services.wireguard_manager import (
+                get_server_public_key, get_server_endpoint
+            )
+            wg_server_pubkey = get_server_public_key()
+            wg_endpoint = get_server_endpoint()
+        except Exception as e:
+            logger.error(f"[SCRIPT GEN] WireGuard key lookup failed for {r.name}: {e}")
+            wg_server_pubkey = ''
+            wg_endpoint = ''
+
+        vpn_ip = r.vpn_ip_address or ''
         vpn_network_cidr = self.vpn_network_cidr
 
+        # If WireGuard keys are missing, fall back to OpenVPN instead of returning a broken stub
         if not wg_private_key or not wg_server_pubkey:
+            logger.warning(
+                f"[SCRIPT GEN] WireGuard keys missing for router '{r.name}': "
+                f"private_key={'set' if wg_private_key else 'MISSING'}, "
+                f"server_pubkey={'set' if wg_server_pubkey else 'MISSING'}. "
+                f"Falling back to OpenVPN."
+            )
+            vpn_host = self._get_vpn_host(r)
             return f"""# ─────────────────────────────────────────────────────────────
-# 3. WIREGUARD TUNNEL — KEYS NOT YET PROVISIONED
+# 3. OPENVPN TUNNEL (WireGuard keys not provisioned — falling back)
 # ─────────────────────────────────────────────────────────────
-:put "WARNING: WireGuard keys not provisioned. Re-run after server-side provisioning."
+:put "WireGuard keys not ready, using OpenVPN fallback..."
+/interface ovpn-client add name="Netily-VPN" \\
+    connect-to="{self._escape_ros_string(vpn_host)}" \\
+    port={r.openvpn_port} \\
+    user="{self._escape_ros_string(r.openvpn_username)}" \\
+    password="{self._escape_ros_string(r.openvpn_password)}" \\
+    cipher=aes256-cbc auth=sha1 protocol=udp \\
+    add-default-route=no \\
+    comment="Netily Cloud Controller Tunnel (fallback)"
+:delay 8s
+:put "OpenVPN fallback tunnel configured."
 """
 
+        # Full WireGuard configuration
         return f"""# ─────────────────────────────────────────────────────────────
 # 3. WIREGUARD TUNNEL
 # ─────────────────────────────────────────────────────────────

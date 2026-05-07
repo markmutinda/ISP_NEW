@@ -49,26 +49,55 @@ class ProvisionRateThrottle(AnonRateThrottle):
 
 # ─── Helper ───────────────────────────────────────────────────
 def _get_router_by_auth_key(auth_key: str) -> Router:
-    """Lookup router by auth_key across all ISP tenants. Raises Http404 if not found."""
-    from django.db import connection
-    from apps.core.models import Tenant
+    """
+    Lookup router by auth_key across all ISP tenants. Raises Http404 if not found.
     
-    # Check every active ISP to find which one owns this router
+    FIX: Properly resets schema between tenant attempts to avoid
+    querying the wrong schema on subsequent iterations.
+    """
+    from django.db import connection
+    from apps.core.models import Tenant, RouterTenantIndex
+    from django_tenants.utils import schema_context
+
+    # Fast path: use the index table (if available)
+    try:
+        with schema_context('public'):
+            index_row = RouterTenantIndex.objects.select_related('tenant').filter(
+                router_auth_key=auth_key,
+                is_active=True,
+            ).first()
+
+        if index_row:
+            tenant = index_row.tenant
+            connection.set_tenant(tenant)
+            router = Router.objects.filter(auth_key=auth_key, is_active=True).first()
+            if router:
+                logger.debug(f"[PROVISION] Router found via index: {router.name} (tenant={tenant.schema_name})")
+                return router
+    except Exception as e:
+        logger.warning(f"[PROVISION] Index lookup failed: {e}")
+
+    # Fallback: scan all tenants (reset schema between each)
+    connection.set_schema_to_public()
     tenants = Tenant.objects.filter(is_active=True)
+    
     for tenant in tenants:
         try:
             connection.set_tenant(tenant)
-            router = Router.objects.get(auth_key=auth_key, is_active=True)
-            # If found, we intentionally leave the connection on this tenant 
-            # so the rest of the script generator works!
-            return router 
-        except Router.DoesNotExist:
+            router = Router.objects.filter(auth_key=auth_key, is_active=True).first()
+            if router:
+                logger.debug(f"[PROVISION] Router found via fallback scan: {router.name} (tenant={tenant.schema_name})")
+                return router
+        except Exception as e:
+            logger.warning(f"[PROVISION] Error checking tenant {tenant.schema_name}: {e}")
             continue
-        except Exception:
-            continue
-            
-    # If we check all ISPs and don't find it, revert to public and fail
+        finally:
+            # CRITICAL: Always reset schema to public after each tenant attempt
+            connection.set_schema_to_public()
+
+    # If we check all ISPs and don't find it, ensure we're on public schema
     connection.set_schema_to_public()
+    logger.error(f"[PROVISION] Router not found for auth_key={auth_key}")
     raise Http404("Router not found")
 
 
@@ -118,14 +147,22 @@ class ProvisionBaseScriptView(APIView):
     authentication_classes = []  # No auth needed
 
     def get(self, request, auth_key, slug):
-        router = _get_router_by_auth_key(auth_key)
+        try:
+            router = _get_router_by_auth_key(auth_key)
+        except Http404:
+            logger.error(f"[PROVISION BASE] Router not found for auth_key={auth_key}")
+            raise
 
         # Validate slug
         if router.provision_slug and router.provision_slug != slug:
+            logger.warning(
+                f"[PROVISION BASE] Slug mismatch for router '{router.name}': "
+                f"expected={router.provision_slug}, got={slug}"
+            )
             raise Http404("Invalid provisioning link")
 
         # Generate Stage 1 script
-        gen = MikrotikScriptGenerator(router, request=request)  # <-- ADDED request=request
+        gen = MikrotikScriptGenerator(router, request=request)
         script = gen.generate_base_script()
 
         # Log the provisioning attempt
@@ -161,13 +198,17 @@ class ProvisionConfigView(APIView):
     authentication_classes = []
 
     def get(self, request, auth_key, slug):
-        router = _get_router_by_auth_key(auth_key)
+        try:
+            router = _get_router_by_auth_key(auth_key)
+        except Http404:
+            logger.error(f"[PROVISION CONFIG] Router not found for auth_key={auth_key}")
+            raise
 
         # Validate slug (same security check as Stage 1)
         if router.provision_slug and router.provision_slug != slug:
             logger.warning(
-                f"Provision config: Invalid slug for router '{router.name}' (id={router.id}). "
-                f"Expected={router.provision_slug}, got={slug}"
+                f"[PROVISION CONFIG] Slug mismatch for router '{router.name}': "
+                f"expected={router.provision_slug}, got={slug}"
             )
             raise Http404("Invalid provisioning link")
 
@@ -178,14 +219,23 @@ class ProvisionConfigView(APIView):
         # Optional cross-validation (if Stage 1 sent the router ID)
         if router_id and str(router.id) != str(router_id):
             logger.warning(
-                f"Provision config: Router ID mismatch. "
-                f"auth_key={auth_key}, expected={router.id}, got={router_id}"
+                f"[PROVISION CONFIG] Router ID mismatch: auth_key={auth_key}, "
+                f"expected={router.id}, got={router_id}"
             )
             raise Http404("Router mismatch")
 
         # Generate the version-specific config
-        gen = MikrotikScriptGenerator(router)
-        config = gen.generate_config_script(version)
+        try:
+            gen = MikrotikScriptGenerator(router)
+            config = gen.generate_config_script(version)
+        except Exception as e:
+            logger.error(
+                f"[PROVISION CONFIG] Script generation failed for router '{router.name}': {e}",
+                exc_info=True
+            )
+            from rest_framework.response import Response
+            from rest_framework import status as drf_status
+            return Response({'error': str(e)}, status=drf_status.HTTP_500_INTERNAL_SERVER_ERROR)
 
         # Update router provisioning state
         router.routeros_version = version
@@ -193,7 +243,7 @@ class ProvisionConfigView(APIView):
         router.save(update_fields=['routeros_version', 'last_provisioned_at'])
 
         logger.info(
-            f"Provision Stage 2: Router '{router.name}' (id={router.id}) "
+            f"[PROVISION CONFIG] Router '{router.name}' (id={router.id}) "
             f"downloaded v{version} config from {request.META.get('REMOTE_ADDR', '?')}"
         )
 
@@ -225,15 +275,23 @@ class ProvisionCertView(APIView):
     }
 
     def get(self, request, auth_key, cert_type):
-        router = _get_router_by_auth_key(auth_key)
+        try:
+            router = _get_router_by_auth_key(auth_key)
+        except Http404:
+            logger.error(f"[PROVISION CERT] Router not found for auth_key={auth_key}")
+            raise
 
         if cert_type not in self.CERT_MAP:
+            logger.warning(f"[PROVISION CERT] Unknown cert type: {cert_type} for router '{router.name}'")
             raise Http404(f"Unknown cert type: {cert_type}")
 
         field_name, filename = self.CERT_MAP[cert_type]
         content = getattr(router, field_name, None)
 
         if not content:
+            logger.warning(
+                f"[PROVISION CERT] Certificate '{cert_type}' not configured for router '{router.name}'"
+            )
             raise Http404(f"Certificate '{cert_type}' not configured for this router")
 
         logger.info(
@@ -262,7 +320,12 @@ class ProvisionHotspotHTMLView(APIView):
     authentication_classes = []
 
     def get(self, request, auth_key, page):
-        router = _get_router_by_auth_key(auth_key)
+        try:
+            router = _get_router_by_auth_key(auth_key)
+        except Http404:
+            logger.error(f"[PROVISION HTML] Router not found for auth_key={auth_key}")
+            raise
+
         gen = MikrotikScriptGenerator(router)
 
         if page == 'login.html':
@@ -270,6 +333,7 @@ class ProvisionHotspotHTMLView(APIView):
         elif page == 'status.html':
             html = gen.generate_status_html()
         else:
+            logger.warning(f"[PROVISION HTML] Unknown hotspot page: {page} for router '{router.name}'")
             raise Http404(f"Unknown hotspot page: {page}")
 
         logger.info(
@@ -296,10 +360,21 @@ class LegacyScriptDownloadView(APIView):
     def get(self, request):
         auth_key = request.query_params.get('auth_key')
         if not auth_key:
+            logger.error("[PROVISION LEGACY] Missing auth_key parameter")
             raise Http404("Missing auth_key")
 
-        router = _get_router_by_auth_key(auth_key)
+        try:
+            router = _get_router_by_auth_key(auth_key)
+        except Http404:
+            logger.error(f"[PROVISION LEGACY] Router not found for auth_key={auth_key}")
+            raise
+
         gen = MikrotikScriptGenerator(router)
         script = gen.generate_config_script("7")
+
+        logger.info(
+            f"Provision Legacy: Router '{router.name}' (id={router.id}) "
+            f"downloaded full script from {request.META.get('REMOTE_ADDR', '?')}"
+        )
 
         return _plain_text_response(script, filename='netily_setup.rsc')
