@@ -84,12 +84,11 @@ class MikrotikScriptGenerator:
         else:
             absolute_api_path = f"{self.base_url}{api_path}"
         
-        # CRITICAL FIX: Use HTTP instead of HTTPS for the config download
-        # MikroTik RouterOS has SSL certificate issues; HTTP works reliably
-        config_url = absolute_api_path.replace('https://', 'http://')
+        # Split to remove any existing query params
+        base_api_url = absolute_api_path.split('?')[0]
         
-        # Remove the router parameter to avoid validation mismatches
-        base_api_url = config_url.split('?')[0]
+        # THE FIX: Force HTTP for the Stage 2 URL to bypass MikroTik SSL validation issues
+        base_api_url = base_api_url.replace('https://', 'http://')
 
         return f"""# ═══════════════════════════════════════════════════════════════
 # Netily Cloud Controller — Base Script (Stage 1)
@@ -127,12 +126,11 @@ class MikrotikScriptGenerator:
 :put ("RouterOS version detected: v" . $rosVersion)
 
 # ─── Download Version-Specific Configuration ────────────────
-# Using HTTP to avoid SSL issues (the initial script was HTTPS, but this fetch will be HTTP)
-:local configUrl "{config_url}?version=" . $rosVersion . "&subdomain={subdomain}"
-:put "Downloading config from: $configUrl"
+:local configUrl ("{base_api_url}?version=" . $rosVersion . "&router={r.id}&subdomain={subdomain}")
+:put ("Downloading config from: " . $configUrl)
 
 :do {{
-    /tool fetch url=$configUrl dst-path="netily_conf.rsc"
+    /tool fetch url=$configUrl dst-path="netily_conf.rsc" http-header-field="ngrok-skip-browser-warning: true"
     :delay 2s
     :put "Config downloaded. Importing..."
     /import netily_conf.rsc
@@ -607,7 +605,7 @@ class MikrotikScriptGenerator:
 
 # 1. Define VIP Network (The PPPoE Pool Range)
 # (Any user with an IP in this range will NOT be restricted)
-/ip firewall address-list add list=allowed-ips address={r.pppoe_pool} comment="Netily-PPPoE-VIPs"
+/ip firewall address-list add list="allowed-ips" address={r.pppoe_pool} comment="Netily-PPPoE-VIPs"
 
 # 2. Mark VIP Connections
 /ip firewall mangle add chain=prerouting src-address-list=allowed-ips action=mark-connection new-connection-mark=allowed-con passthrough=yes comment="Netily-VIP-Mark"
