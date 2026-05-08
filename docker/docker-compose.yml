@@ -295,8 +295,8 @@ services:
       - PEERDNS=8.8.8.8
       - INTERNAL_SUBNET=${VPN_NETWORK_CIDR:-10.8.0.0/16}
       - ALLOWEDIPS=0.0.0.0/0
-      # PERMANENT FIX: Add FORWARD policy, assign IP, MTU 1320, and DNAT to RADIUS
-      - POSTUP=iptables -P FORWARD ACCEPT; ip addr add 10.8.0.1/16 dev %i || true; ip link set dev %i mtu 1320; iptables -t nat -A PREROUTING -p udp -m multiport --dports 1812,1813,3799 -j DNAT --to-destination 10.10.0.250; iptables -t nat -A POSTROUTING -o %i -j MASQUERADE
+      # PERMANENT FIX: Add sleep delay, explicitly name wg0, set FORWARD policy, assign IP, MTU 1320, and DNAT to RADIUS
+      - POSTUP=iptables -P FORWARD ACCEPT; sleep 2; ip addr add 10.8.0.1/16 dev wg0 || true; ip link set dev wg0 mtu 1320; iptables -t nat -A PREROUTING -p udp -m multiport --dports 1812,1813,3799 -j DNAT --to-destination 10.10.0.250; iptables -t nat -A POSTROUTING -o wg0 -j MASQUERADE
     volumes:
       - wireguard_config:/config
       - wireguard_peers:/etc/wireguard/peers
