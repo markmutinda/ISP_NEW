@@ -20,17 +20,31 @@ class MikrotikScriptGenerator:
 
         # ── VPN Gateway Logic ─────────────────────────────────────────
         self.vpn_gateway = getattr(settings, 'VPN_GATEWAY_IP', '10.8.0.1')
-        
-        # ── VPN Network CIDR (dynamic from settings) ───────────────────
         self.vpn_network_cidr = getattr(settings, 'VPN_NETWORK_CIDR', '10.8.0.0/16')
         
         # ── Production URLs Logic ─────────────────────────────────────
         self.base_url = getattr(settings, 'BASE_URL', 'https://api.netily.co.ke').rstrip('/')
         self.portal_url = getattr(settings, 'FRONTEND_URL', 'https://netily.co.ke').rstrip('/')
-        self.active_url = self.base_url
+
+        # API URL must always point to Django — never the frontend.
+        # Use explicit API_URL env var if set, otherwise derive from BASE_URL,
+        # guarding against BASE_URL accidentally being set to the frontend domain.
+        _api_url = getattr(settings, 'API_URL', '').rstrip('/')
+        if not _api_url:
+            _portal_host = self.portal_url.split('://')[-1]
+            _base_host = self.base_url.split('://')[-1]
+            if _base_host == _portal_host:
+                # BASE_URL is the frontend domain — auto-derive the API subdomain
+                _api_url = f"https://api.{_portal_host}"
+            else:
+                _api_url = self.base_url
         
-        # ── Provisioning download base ────────────────────────────
-        self.provision_base = f"{self.active_url}/api/v1/network/provision"
+        self.api_url = _api_url
+        self.active_url = self.api_url  # kept for legacy references
+        
+        # ── Provisioning download base — always the API, never the frontend ──
+        self.provision_base = f"{self.api_url}/api/v1/network/provision"
+        
         self.vpn_server_ip = getattr(settings, 'VPN_SERVER_IP', '10.8.0.1')
         self.vpn_api_url = getattr(settings, 'VPN_API_URL', f'http://{self.vpn_server_ip}:8000')
 
@@ -46,7 +60,7 @@ class MikrotikScriptGenerator:
         vpn_host = r.openvpn_server
         if not vpn_host or vpn_host == "vpn.yourisp.com":
             from urllib.parse import urlparse
-            parsed_url = urlparse(self.base_url)
+            parsed_url = urlparse(self.api_url)
             root_domain = parsed_url.netloc.replace('api.', '')
             return f"vpn.{root_domain}"
         return vpn_host
@@ -79,8 +93,8 @@ class MikrotikScriptGenerator:
         subdomain = r.tenant_subdomain or 'public'
         api_path = f"/api/v1/network/provision/{r.auth_key}/{r.provision_slug}/config"
         
-        # Force the official API domain as per Senior Dev's standardization
-        absolute_api_path = f"{self.base_url}{api_path}"
+        # Use the newly stabilized api_url
+        absolute_api_path = f"{self.api_url}{api_path}"
         config_fetch_url = absolute_api_path.split('?')[0]
 
         return f"""# ═══════════════════════════════════════════════════════════════
@@ -484,8 +498,8 @@ class MikrotikScriptGenerator:
 # ─────────────────────────────────────────────────────────────
 :put "No SSL certificates configured — hotspot will use HTTP only."
 """
-        ssl_cert_url = f"{self.base_url}/api/v1/network/provision/{r.auth_key}/certs/ssl.crt"
-        ssl_key_url = f"{self.base_url}/api/v1/network/provision/{r.auth_key}/certs/ssl.key"
+        ssl_cert_url = f"{self.api_url}/api/v1/network/provision/{r.auth_key}/certs/ssl.crt"
+        ssl_key_url = f"{self.api_url}/api/v1/network/provision/{r.auth_key}/certs/ssl.key"
         passphrase = self._escape_ros_string(r.ssl_passphrase or '')
 
         return f"""# ─────────────────────────────────────────────────────────────
