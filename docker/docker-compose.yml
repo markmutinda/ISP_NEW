@@ -4,6 +4,7 @@ services:
   db:
     image: postgres:15-alpine
     container_name: netily_db
+    restart: unless-stopped      # <-- ADDED - Ensures DB restarts on boot/crash
     volumes:
       - postgres_data:/var/lib/postgresql/data
     env_file: ../.env
@@ -26,6 +27,7 @@ services:
   redis:
     image: redis:7-alpine
     container_name: netily_redis
+    restart: unless-stopped      # <-- ADDED - Ensures Redis restarts on boot/crash
     command: redis-server --maxmemory 50mb --maxmemory-policy allkeys-lru
     volumes:
       - redis_data:/data
