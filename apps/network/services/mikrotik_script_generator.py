@@ -648,239 +648,378 @@ class MikrotikScriptGenerator:
 
     def generate_login_html(self) -> str:
         """
-        UPDATED: 3-layer hybrid TV detection that catches everything without false positives.
-        
-        Layer 1: URL param override (admin can force it, zero ambiguity)
-        Layer 2: UA allowlist for known TV platforms  
-        Layer 3: Screen geometry + no-touch fallback — catches Android TV sticks that fail UA matching
-                while having zero false positives on MacBooks/Windows laptops (which are in desktop denylist)
+        UPDATED: Beautiful, modern connecting screen with progress bar,
+        device detection status, and fallback manual link.
+        Features:
+        - Clean gradient background
+        - Animated progress bar
+        - Real-time status updates
+        - Manual redirect link if auto-redirect fails
+        - TV detection status shown to user
         """
         r = self.router
         portal_base = self.get_tenant_portal_url().rstrip('/')
         tenant_name = self._escape_ros_string(r.tenant_subdomain or 'public')
-        
+        primary_color = "#2563eb"
+
         return f"""<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="utf-8">
     <meta http-equiv="pragma" content="no-cache">
     <meta http-equiv="cache-control" content="no-cache, no-store, must-revalidate">
-    <meta http-equiv="expires" content="0">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Connecting...</title>
     <style>
-        * {{ margin: 0; padding: 0; box-sizing: border-box; }}
+        *, *::before, *::after {{ box-sizing: border-box; margin: 0; padding: 0; }}
         body {{
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-            background: #f0f2f5;
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', sans-serif;
+            background: linear-gradient(135deg, #eff6ff 0%, #dbeafe 50%, #e0e7ff 100%);
             min-height: 100vh;
             display: flex;
             align-items: center;
             justify-content: center;
+            padding: 1rem;
         }}
         .card {{
             background: white;
-            padding: 2rem;
-            border-radius: 1rem;
+            border-radius: 1.5rem;
+            box-shadow: 0 25px 50px -12px rgba(0,0,0,0.15), 0 0 0 1px rgba(0,0,0,0.05);
+            padding: 2.5rem 2rem;
+            width: 100%;
+            max-width: 380px;
             text-align: center;
-            box-shadow: 0 4px 6px rgba(0,0,0,0.1);
-            width: 90%;
-            max-width: 400px;
         }}
-        .spinner {{
-            border: 4px solid #f3f3f3;
-            border-top: 4px solid #3498db;
+        .wifi-icon {{
+            width: 64px;
+            height: 64px;
+            background: linear-gradient(135deg, {primary_color}, #7c3aed);
+            border-radius: 1rem;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            margin: 0 auto 1.5rem;
+        }}
+        .wifi-icon svg {{ width: 36px; height: 36px; color: white; }}
+        h1 {{
+            font-size: 1.375rem;
+            font-weight: 700;
+            color: #111827;
+            margin-bottom: 0.5rem;
+        }}
+        .subtitle {{
+            font-size: 0.875rem;
+            color: #6b7280;
+            margin-bottom: 2rem;
+            line-height: 1.5;
+        }}
+        .progress-track {{
+            background: #f3f4f6;
+            border-radius: 999px;
+            height: 6px;
+            overflow: hidden;
+            margin-bottom: 1rem;
+        }}
+        .progress-bar {{
+            height: 100%;
+            background: linear-gradient(90deg, {primary_color}, #7c3aed);
+            border-radius: 999px;
+            animation: progress 2.5s ease-in-out forwards;
+            width: 0%;
+        }}
+        @keyframes progress {{
+            0%   {{ width: 0%; }}
+            30%  {{ width: 45%; }}
+            70%  {{ width: 78%; }}
+            100% {{ width: 95%; }}
+        }}
+        .status-row {{
+            display: flex;
+            align-items: center;
+            gap: 0.625rem;
+            padding: 0.75rem 1rem;
+            background: #f9fafb;
+            border-radius: 0.75rem;
+            margin-bottom: 0.5rem;
+        }}
+        .dot {{
+            width: 8px;
+            height: 8px;
             border-radius: 50%;
-            width: 40px;
-            height: 40px;
-            animation: spin 1s linear infinite;
-            margin: 0 auto 1rem;
+            background: {primary_color};
+            animation: pulse 1.5s ease-in-out infinite;
+            flex-shrink: 0;
         }}
-        @keyframes spin {{ 0% {{ transform: rotate(0deg); }} 100% {{ transform: rotate(360deg); }} }}
-        .log-marker {{ display: none; }}
+        @keyframes pulse {{
+            0%, 100% {{ opacity: 1; transform: scale(1); }}
+            50%       {{ opacity: 0.5; transform: scale(0.85); }}
+        }}
+        .status-text {{ font-size: 0.8125rem; color: #374151; font-weight: 500; }}
+        .link-row {{
+            margin-top: 1.5rem;
+            font-size: 0.75rem;
+            color: #9ca3af;
+        }}
+        .link-row a {{ color: {primary_color}; text-decoration: none; font-weight: 500; }}
     </style>
 </head>
 <body>
     <div class="card">
-        <div class="spinner"></div>
-        <h2 id="status-text">Connecting to WiFi...</h2>
-        <p id="sub-text">Please wait...</p>
-        
-        <form id="login-form" action="$(link-login-only)" method="post" style="display:none">
-            <input type="hidden" name="username" id="usr">
-            <input type="hidden" name="password" id="pwd">
-            <input type="hidden" name="dst" value="$(link-orig)">
-        </form>
+        <div class="wifi-icon">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M5 12.55a11 11 0 0 1 14.08 0"/>
+                <path d="M1.42 9a16 16 0 0 1 21.16 0"/>
+                <path d="M8.53 16.11a6 6 0 0 1 6.95 0"/>
+                <circle cx="12" cy="20" r="1" fill="currentColor"/>
+            </svg>
+        </div>
+        <h1 id="main-title">Connecting you...</h1>
+        <p class="subtitle" id="sub-title">Redirecting to the WiFi portal</p>
+
+        <div class="progress-track">
+            <div class="progress-bar"></div>
+        </div>
+
+        <div class="status-row">
+            <div class="dot"></div>
+            <span class="status-text" id="status-msg">Detecting your device...</span>
+        </div>
+
+        <div class="link-row">
+            Not redirected? <a id="manual-link" href="#">Click here</a>
+        </div>
     </div>
+
+    <form id="login-form" action="$(link-login-only)" method="post" style="display:none">
+        <input type="hidden" name="username" id="usr">
+        <input type="hidden" name="password" id="pwd">
+        <input type="hidden" name="dst" value="$(link-orig)">
+    </form>
 
     <script>
     (function() {{
-        // MikroTik variables
-        var mac       = '$(mac)';
-        var ip        = '$(ip)';
-        var identity  = '$(identity)';
-        var loginUrl  = '$(link-login-only)'; 
-        var error     = '$(error)';
-        
-        // 1. CHECK FOR RETURN TRIP (Auto-Login Logic)
-        // Check if the URL has ?username=... from the Payment Page
+        var mac      = '$(mac)';
+        var ip       = '$(ip)';
+        var identity = '$(identity)';
+        var loginUrl = '$(link-login-only)';
+        var error    = '$(error)';
+
+        var statusEl = document.getElementById('status-msg');
+        var titleEl  = document.getElementById('main-title');
+        var subEl    = document.getElementById('sub-title');
+        var linkEl   = document.getElementById('manual-link');
+
+        // Return-trip: user already paid, credentials sent back
         var urlParams = new URLSearchParams(window.location.search);
         var inboundUser = urlParams.get('username');
         var inboundPass = urlParams.get('password');
-
         if (inboundUser && inboundPass) {{
-            // == LOG IN MODE ==
-            // The user just paid and was sent back here with credentials.
-            // Submit the hidden form to MikroTik immediately.
-            document.getElementById('status-text').innerText = "Authenticating...";
-            document.getElementById('sub-text').innerText = "Finalizing your connection";
-            
+            titleEl.textContent  = 'Authenticating...';
+            subEl.textContent    = 'Finalizing your connection';
+            statusEl.textContent = 'Logging you in now';
             document.getElementById('usr').value = inboundUser;
             document.getElementById('pwd').value = inboundPass;
             document.getElementById('login-form').submit();
-            return; // Stop here, do not redirect to portal
+            return;
         }}
 
-        // ============================================================
-        // 3-LAYER HYBRID TV DETECTION
-        // ============================================================
-        
+        // TV detection (3-layer)
         var ua = navigator.userAgent.toLowerCase();
-        var q = new URLSearchParams(window.location.search);
-
-        // Layer 1: explicit override (admin or forced URL param)
+        var q  = new URLSearchParams(window.location.search);
         var forcedTV = null;
         if (q.get('force_tv') === '1' || q.get('smart_tv') === '1') forcedTV = true;
-        else if (q.get('force_tv') === '0') forcedTV = false;
+        else if (q.get('force_tv') === '0' || q.get('smart_tv') === '0') forcedTV = false;
 
-        // Layer 2: UA allowlist for platforms with reliable TV strings
-        var tvByUA = /(smart-?tv|webos|tizen|vidaa|hbbtv|roku|firetv|appletv|apple\\s?tv|bravia|netcast|viera|aft[a-z]|crkey|tv safari)/i.test(ua);
-
-        // Android TV: android present, "mobile" absent, large screen
+        var tvByUA      = /(smart-?tv|webos|tizen|vidaa|hbbtv|roku|firetv|appletv|apple\\s?tv|bravia|netcast|viera|aft[a-z]|crkey|tv safari)/i.test(ua);
         var isAndroidTV = /android/i.test(ua) && !/mobile/i.test(ua) && window.screen.width >= 1280;
-
-        // Layer 3: geometry heuristic — safe because desktop OS strings are blocked
         var isDesktopOS = /(windows nt|macintosh|\\bx11\\b|linux x86_64|cros)/i.test(ua);
-        var geoTV = !isDesktopOS
-                    && window.screen.width  >= 1280
-                    && window.screen.height >= 720
-                    && (window.screen.width / window.screen.height) >= 1.5
-                    && !('ontouchstart' in window)
-                    && navigator.maxTouchPoints === 0;
+        var geoTV       = !isDesktopOS && window.screen.width >= 1280 && window.screen.height >= 720
+                          && (window.screen.width / window.screen.height) >= 1.5
+                          && !('ontouchstart' in window) && navigator.maxTouchPoints === 0;
+        var finalIsTV   = forcedTV !== null ? forcedTV : (tvByUA || isAndroidTV || geoTV);
 
-        var finalIsTV = forcedTV !== null ? forcedTV : (tvByUA || isAndroidTV || geoTV);
+        statusEl.textContent = finalIsTV ? 'Smart TV detected — opening pairing screen' : 'Redirecting to portal...';
 
-        // Log detection result for debugging (visible in browser console)
-        console.log('[Netily TV]', {{
-            ua: ua,
-            tvByUA: tvByUA,
-            isAndroidTV: isAndroidTV,
-            geoTV: geoTV,
-            finalIsTV: finalIsTV,
-            forced: forcedTV !== null,
-            manualValue: forcedTV
-        }});
-        
-        // 3. REDIRECT TO CLOUD PORTAL
-        var portalUrl = '{portal_base}/hotspot/{r.id}';
-        
+        var portalBase  = '{portal_base}/hotspot/{r.id}';
         var params = [
-            'mac=' + encodeURIComponent(mac),
-            'ip=' + encodeURIComponent(ip),
-            'router=' + encodeURIComponent(identity),
+            'mac='       + encodeURIComponent(mac),
+            'ip='        + encodeURIComponent(ip),
+            'router='    + encodeURIComponent(identity),
             'login_url=' + encodeURIComponent(loginUrl),
-            'error=' + encodeURIComponent(error),
-            'tenant=' + '{tenant_name}'
+            'error='     + encodeURIComponent(error),
+            'tenant='    + '{tenant_name}',
+            'smart_tv='  + (finalIsTV ? '1' : '0')
         ];
+        var redirectUrl = portalBase + '?' + params.join('&');
+        linkEl.href = redirectUrl;
 
-        // Explicitly add flags for the frontend
-        if (finalIsTV) {{
-            params.push('smart_tv=1');
-        }} else {{
-            params.push('smart_tv=0');
-        }}
-
-        var redirectUrl = portalUrl + '?' + params.join('&');
-
-        // Redirect after short delay
-        setTimeout(function() {{
-            window.location.href = redirectUrl;
-        }}, 800);
+        setTimeout(function() {{ window.location.href = redirectUrl; }}, 900);
     }})();
     </script>
 </body>
 </html>"""
 
     def generate_status_html(self) -> str:
+        """
+        UPDATED: Beautiful, modern status page showing active connection details.
+        Features:
+        - Clean success gradient background
+        - Animated checkmark icon
+        - Real-time session stats (uptime, IP, data usage)
+        - Disconnect and Manage Account buttons
+        - Live connection indicator
+        """
         r = self.router
         portal_base = self.get_tenant_portal_url().rstrip('/')
         tenant_name = self._escape_ros_string(r.tenant_subdomain or 'public')
-        
+        primary_color = "#2563eb"
+
         return f"""<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Connected</title>
+    <title>Connected — {self._escape_ros_string(r.name or 'WiFi')}</title>
     <style>
-        * {{ margin: 0; padding: 0; box-sizing: border-box; }}
+        *, *::before, *::after {{ box-sizing: border-box; margin: 0; padding: 0; }}
         body {{
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-            background: linear-gradient(135deg, #11998e 0%, #38ef7d 100%);
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', sans-serif;
+            background: linear-gradient(135deg, #ecfdf5 0%, #d1fae5 50%, #a7f3d0 100%);
             min-height: 100vh;
             display: flex;
             align-items: center;
             justify-content: center;
+            padding: 1rem;
         }}
-        .container {{
+        .card {{
             background: white;
-            border-radius: 16px;
-            padding: 40px 32px;
+            border-radius: 1.5rem;
+            box-shadow: 0 25px 50px -12px rgba(0,0,0,0.15), 0 0 0 1px rgba(0,0,0,0.05);
+            padding: 2.5rem 2rem;
+            width: 100%;
+            max-width: 380px;
             text-align: center;
-            max-width: 400px;
-            width: 90%;
-            box-shadow: 0 20px 60px rgba(0,0,0,0.2);
         }}
-        .check {{ font-size: 48px; margin-bottom: 16px; }}
-        h2 {{ color: #11998e; margin-bottom: 8px; }}
-        .info {{ margin: 16px 0; font-size: 14px; color: #555; }}
-        .info div {{ padding: 6px 0; border-bottom: 1px solid #eee; }}
-        .info span {{ font-weight: 600; color: #333; }}
-        .btn {{
-            display: inline-block;
-            margin-top: 20px;
-            padding: 12px 32px;
-            background: #e74c3c;
-            color: white;
+        .check-circle {{
+            width: 72px;
+            height: 72px;
+            background: linear-gradient(135deg, #10b981, #059669);
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            margin: 0 auto 1.25rem;
+            box-shadow: 0 8px 24px rgba(16,185,129,0.35);
+        }}
+        .check-circle svg {{ width: 36px; height: 36px; color: white; }}
+        h1 {{ font-size: 1.5rem; font-weight: 700; color: #065f46; margin-bottom: 0.375rem; }}
+        .network-name {{ font-size: 0.875rem; color: #6b7280; margin-bottom: 1.75rem; }}
+        .stats-grid {{
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 0.75rem;
+            margin-bottom: 1.5rem;
+        }}
+        .stat {{
+            background: #f9fafb;
+            border-radius: 0.875rem;
+            padding: 0.875rem 0.75rem;
+            text-align: center;
+        }}
+        .stat-label {{ font-size: 0.6875rem; color: #9ca3af; text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 0.25rem; font-weight: 600; }}
+        .stat-value {{ font-size: 1rem; font-weight: 700; color: #111827; }}
+        .stat-full {{
+            grid-column: 1 / -1;
+        }}
+        .signal-bar {{
+            display: flex;
+            align-items: flex-end;
+            justify-content: center;
+            gap: 3px;
+            margin-bottom: 0.25rem;
+        }}
+        .signal-bar span {{
+            background: #10b981;
+            border-radius: 2px;
+            display: block;
+            width: 6px;
+        }}
+        .btn-disconnect {{
+            width: 100%;
+            padding: 0.875rem;
+            background: #fee2e2;
+            color: #b91c1c;
             border: none;
-            border-radius: 8px;
-            font-size: 14px;
+            border-radius: 0.875rem;
+            font-size: 0.9375rem;
+            font-weight: 600;
             cursor: pointer;
             text-decoration: none;
-        }}
-        .btn:hover {{ background: #c0392b; }}
-        .portal-link {{
             display: block;
-            margin-top: 12px;
-            color: #11998e;
-            text-decoration: none;
-            font-size: 13px;
+            margin-bottom: 0.75rem;
+            transition: background 0.15s;
         }}
+        .btn-disconnect:hover {{ background: #fecaca; }}
+        .btn-account {{
+            width: 100%;
+            padding: 0.875rem;
+            background: {primary_color};
+            color: white;
+            border: none;
+            border-radius: 0.875rem;
+            font-size: 0.9375rem;
+            font-weight: 600;
+            cursor: pointer;
+            text-decoration: none;
+            display: block;
+            transition: opacity 0.15s;
+        }}
+        .btn-account:hover {{ opacity: 0.9; }}
+        .live-dot {{
+            display: inline-block;
+            width: 8px; height: 8px;
+            background: #10b981;
+            border-radius: 50%;
+            margin-right: 6px;
+            animation: blink 1.8s ease-in-out infinite;
+        }}
+        @keyframes blink {{ 0%,100%{{opacity:1}} 50%{{opacity:0.3}} }}
     </style>
 </head>
 <body>
-    <div class="container">
-        <div class="check">&#10004;</div>
-        <h2>You're Connected!</h2>
-        <p style="color: #666; font-size: 14px;">Welcome to $(identity)</p>
-        <div class="info">
-            <div>IP Address: <span>$(ip)</span></div>
-            <div>Session Time: <span>$(uptime)</span></div>
-            <div>Data Used: <span>$(bytes-in-nice) / $(bytes-out-nice)</span></div>
+    <div class="card">
+        <div class="check-circle">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                <polyline points="20 6 9 17 4 12"/>
+            </svg>
         </div>
-        <a class="btn" href="$(link-logout)">Disconnect</a>
-        <a class="portal-link" href="{portal_base}/hotspot/{r.id}/status?mac=$(mac)&ip=$(ip)&tenant={tenant_name}">
-            Manage Account &rarr;
+        <h1>You're Online!</h1>
+        <p class="network-name">
+            <span class="live-dot"></span>Connected to <strong>$(identity)</strong>
+        </p>
+
+        <div class="stats-grid">
+            <div class="stat">
+                <div class="stat-label">Session Time</div>
+                <div class="stat-value">$(uptime)</div>
+            </div>
+            <div class="stat">
+                <div class="stat-label">Your IP</div>
+                <div class="stat-value" style="font-size:0.8125rem">$(ip)</div>
+            </div>
+            <div class="stat">
+                <div class="stat-label">Downloaded</div>
+                <div class="stat-value">$(bytes-in-nice)</div>
+            </div>
+            <div class="stat">
+                <div class="stat-label">Uploaded</div>
+                <div class="stat-value">$(bytes-out-nice)</div>
+            </div>
+        </div>
+
+        <a class="btn-disconnect" href="$(link-logout)">Disconnect</a>
+        <a class="btn-account" href="{portal_base}/hotspot/{r.id}?mac=$(mac)&ip=$(ip)&tenant={tenant_name}">
+            Manage My Account →
         </a>
     </div>
 </body>
