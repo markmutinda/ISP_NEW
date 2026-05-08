@@ -188,13 +188,7 @@ services:
       dockerfile: docker/Dockerfile.radius
     container_name: netily_radius
     restart: unless-stopped
-    # PERMANENT FIX: Add the route back to the VPN before starting FreeRADIUS
-    command: >
-      sh -c "while ! getent hosts netily-openvpn-isp; do sleep 1; done &&
-             VPN_IP=$$(getent hosts netily-openvpn-isp | awk '{ print $$1 }') &&
-             echo 'Adding route for 10.8.0.0/16 via '$$VPN_IP &&
-             if [ -n \"$$VPN_IP\" ]; then ip route add 10.8.0.0/16 via $$VPN_IP || true; fi &&
-             freeradius -f"
+    # REMOVED: command: override - using the Dockerfile's native startup script
     logging:
       driver: "json-file"
       options:
