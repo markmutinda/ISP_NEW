@@ -335,6 +335,8 @@ services:
                    sleep 3 &&
                    docker exec netily-openvpn ip addr add 10.8.0.1/16 dev wg0 || true &&
                    docker exec netily-openvpn iptables -t nat -A POSTROUTING -o wg0 -j MASQUERADE || true &&
+                   # === PERMANENT FIX: Forward Radius ports to FreeRADIUS container ===
+                   docker exec netily-openvpn iptables -t nat -A PREROUTING -p udp -m multiport --dports 1812,1813,3799 -j DNAT --to-destination 10.10.0.250 || true &&
                    VPN_IP=$$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}} {{end}}' netily-openvpn | awk '{print $$1}') &&
                    ip route replace 10.8.0.0/16 via $$VPN_IP &&
                    echo 'Infrastructure successfully healed!'
