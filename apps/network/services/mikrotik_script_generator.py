@@ -265,16 +265,25 @@ class MikrotikScriptGenerator:
         # ── v7: WireGuard ────────────────────────────────────────────────────────
         wg_private_key = r.wireguard_private_key or ''
         
-        try:
-            from apps.vpn.services.wireguard_manager import (
-                get_server_public_key, get_server_endpoint
-            )
-            wg_server_pubkey = get_server_public_key()
-            wg_endpoint = get_server_endpoint()
-        except Exception as e:
-            logger.error(f"[SCRIPT GEN] WireGuard key lookup failed for {r.name}: {e}")
-            wg_server_pubkey = ''
-            wg_endpoint = ''
+        # FIX: Read WireGuard server details ONLY from settings/env — never call
+        # Docker socket here. Docker socket calls can hang for 10+ seconds
+        # causing MikroTik /tool fetch to time out.
+        import os as _os
+        wg_server_pubkey = (
+            getattr(settings, 'WG_SERVER_PUBLIC_KEY', '')
+            or _os.environ.get('WG_SERVER_PUBLIC_KEY', '')
+        )
+        _wg_host = (
+            getattr(settings, 'WG_SERVER_HOST', '')
+            or _os.environ.get('WG_SERVER_HOST', '')
+            or getattr(settings, 'VPN_SERVER_IP', '')
+            or _os.environ.get('VPN_SERVER_IP', self.vpn_server_ip)
+        )
+        _wg_port = str(
+            getattr(settings, 'WG_SERVER_PORT', '')
+            or _os.environ.get('WG_SERVER_PORT', '51820')
+        )
+        wg_endpoint = f"{_wg_host}:{_wg_port}" if _wg_host else ''
 
         vpn_ip = r.vpn_ip_address or ''
         vpn_network_cidr = self.vpn_network_cidr
@@ -325,7 +334,7 @@ class MikrotikScriptGenerator:
 
 # Assign static VPN IP (crucial for RADIUS)
 /ip address add \\
-    address="{vpn_ip}/{self.vpn_network_cidr.split('/')[1]}" \\
+    address="{vpn_ip}/{vpn_network_cidr.split('/')[1]}" \\
     interface="Netily-VPN" \\
     comment="Netily-WG-IP"
 
