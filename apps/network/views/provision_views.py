@@ -252,10 +252,13 @@ class ProvisionConfigView(APIView):
 """
             return _plain_text_response(error_script, filename='error.rsc')
 
-        # Update router provisioning state
-        router.routeros_version = version
-        router.last_provisioned_at = timezone.now()
-        router.save(update_fields=['routeros_version', 'last_provisioned_at'])
+        # FIX: Update router provisioning state WITHOUT triggering signals
+        # Using update() bypasses the save() signals that can hang for 10+ seconds
+        # causing MikroTik /tool fetch to time out with "timeout waiting data"
+        Router.objects.filter(pk=router.pk).update(
+            routeros_version=version,
+            last_provisioned_at=timezone.now()
+        )
 
         logger.info(
             f"[PROVISION CONFIG] Router '{router.name}' (id={router.id}) "
