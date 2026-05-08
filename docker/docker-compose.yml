@@ -53,10 +53,11 @@ services:
              python manage.py migrate_schemas --tenant 2>&1 &&
              echo 'Migrations complete.' &&
              echo 'Setting up routes...' &&
+             while ! getent hosts netily-openvpn-isp; do sleep 1; done &&
              VPN_IP=$$(getent hosts netily-openvpn-isp | awk '{ print $$1 }') &&
              echo 'VPN Gateway found at: '$$VPN_IP &&
              echo 'Adding route for '$${VPN_NETWORK_CIDR:-10.8.0.0/16}' via '$$VPN_IP &&
-             ip route add $${VPN_NETWORK_CIDR:-10.8.0.0/16} via $$VPN_IP || true &&
+             if [ -n \"$$VPN_IP\" ]; then ip route add $${VPN_NETWORK_CIDR:-10.8.0.0/16} via $$VPN_IP || true; fi &&
              echo 'Route added successfully!' &&
              gunicorn config.wsgi:application --bind 0.0.0.0:8000 --workers 2 --timeout 300"
     working_dir: /app
@@ -110,10 +111,12 @@ services:
     restart: unless-stopped
     working_dir: /app
     command: >
-      sh -c "VPN_IP=$$(getent hosts netily-openvpn-isp | awk '{ print $$1 }') &&
+      sh -c "while ! getent hosts netily-openvpn-isp; do sleep 1; done &&
+             VPN_IP=$$(getent hosts netily-openvpn-isp | awk '{ print $$1 }') &&
              echo 'VPN Gateway found at: '$$VPN_IP &&
              echo 'Adding route for '$${VPN_NETWORK_CIDR:-10.8.0.0/16}' via '$$VPN_IP &&
-             ip route add $${VPN_NETWORK_CIDR:-10.8.0.0/16} via $$VPN_IP || true &&
+             if [ -n \"$$VPN_IP\" ]; then ip route add $${VPN_NETWORK_CIDR:-10.8.0.0/16} via $$VPN_IP || true; fi &&
+             echo 'Route added successfully!' &&
              celery -A config worker -l info --concurrency=4 -Q default,celery,radius,billing,notifications"
     volumes:
       - ../:/app
@@ -185,9 +188,10 @@ services:
     restart: unless-stopped
     # PERMANENT FIX: Add the route back to the VPN before starting FreeRADIUS
     command: >
-      sh -c "VPN_IP=$$(getent hosts netily-openvpn-isp | awk '{ print $$1 }') &&
+      sh -c "while ! getent hosts netily-openvpn-isp; do sleep 1; done &&
+             VPN_IP=$$(getent hosts netily-openvpn-isp | awk '{ print $$1 }') &&
              echo 'Adding route for 10.8.0.0/16 via '$$VPN_IP &&
-             ip route add 10.8.0.0/16 via $$VPN_IP || true &&
+             if [ -n \"$$VPN_IP\" ]; then ip route add 10.8.0.0/16 via $$VPN_IP || true; fi &&
              freeradius -f"
     logging:
       driver: "json-file"
