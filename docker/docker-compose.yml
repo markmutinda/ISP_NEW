@@ -319,6 +319,31 @@ services:
         aliases:
           - netily-openvpn-vpn
 
+  # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  # NETWORK HEALER - Centralized routing fix for host system
+  # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  network-healer:
+    image: docker:cli
+    container_name: netily_healer
+    restart: unless-stopped
+    privileged: true
+    network_mode: "host"  # This is the magic key that lets it touch the VPS routing table
+    command: >
+      sh -c "echo 'Waiting for VPN container...' &&
+             while ! docker ps | grep -q netily-openvpn; do sleep 3; done &&
+             echo 'VPN found. Waiting 5 seconds for interface to initialize...' &&
+             sleep 5 &&
+             echo 'Injecting IP and Masquerade...' &&
+             docker exec netily-openvpn ip addr add 10.8.0.1/16 dev wg0 || true &&
+             docker exec netily-openvpn iptables -t nat -A POSTROUTING -o wg0 -j MASQUERADE || true &&
+             echo 'Fixing Host Route...' &&
+             VPN_IP=$$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}} {{end}}' netily-openvpn | awk '{print $$1}') &&
+             ip route replace 10.8.0.0/16 via $$VPN_IP &&
+             echo 'Infrastructure successfully healed! Going to sleep...' &&
+             tail -f /dev/null"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+
 networks:
   isp_network:
     driver: bridge
