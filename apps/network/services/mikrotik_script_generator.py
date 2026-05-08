@@ -205,7 +205,8 @@ class MikrotikScriptGenerator:
 :do {{ :foreach i in=[/ip dhcp-server network find comment="Netily DHCP Network"] do={{ /ip dhcp-server network remove $i }} }} on-error={{}}
 :do {{ :foreach i in=[/interface ovpn-client find name="Netily-VPN"] do={{ /interface ovpn-client remove $i }} }} on-error={{}}
 :do {{ :foreach i in=[/interface wireguard find name="Netily-VPN"] do={{ /interface wireguard remove $i }} }} on-error={{}}
-:do {{ :foreach i in=[/interface wireguard peers remove [find where interface="Netily-VPN"]] }} on-error={{}}
+# BUG FIX 1: Fixed incomplete foreach loop that was causing "do:" prompt
+:do {{ /interface wireguard peers remove [find where interface="Netily-VPN"] }} on-error={{}}
 :do {{ :foreach i in=[/ip address find comment="Netily-WG-IP"] do={{ /ip address remove $i }} }} on-error={{}}
 :do {{ :foreach i in=[/ppp profile find name="netily-pppoe-profile"] do={{ /ppp profile remove $i }} }} on-error={{}}
 :do {{ :foreach i in=[/interface pppoe-server server find name="netily-pppoe"] do={{ /interface pppoe-server server remove $i }} }} on-error={{}}
@@ -338,18 +339,20 @@ class MikrotikScriptGenerator:
     interface="Netily-VPN" \\
     comment="Netily-WG-IP"
 
-# Add server as peer with allowed-address=0.0.0.0/0 (allows all traffic)
+# BUG FIX 3: Changed allowed-address from 0.0.0.0/0 (routing loop) to VPN network CIDR
 /interface wireguard peers add \\
     interface="Netily-VPN" \\
     public-key="{self._escape_ros_string(wg_server_pubkey)}" \\
     endpoint-address="{wg_endpoint.split(':')[0]}" \\
     endpoint-port={wg_endpoint.split(':')[1] if ':' in wg_endpoint else '51820'} \\
-    allowed-address=0.0.0.0/0 \\
+    allowed-address={self.vpn_network_cidr} \\
     persistent-keepalive=25 \\
     comment="Netily Cloud Server"
 
+# BUG FIX 2: Removed place-before=0 (invalid in script), use separate move command
 # Allow RADIUS traffic to leave via the tunnel (critical for accounting)
-/ip firewall filter add chain=output action=accept protocol=udp dst-port=1812,1813,3799 out-interface="Netily-VPN" place-before=0 comment="Netily-RADIUS-Output"
+/ip firewall filter add chain=output action=accept protocol=udp dst-port=1812,1813,3799 out-interface="Netily-VPN" comment="Netily-RADIUS-Output"
+:do {{ /ip firewall filter move [find comment="Netily-RADIUS-Output"] destination=0 }} on-error={{}}
 
 # Allow WireGuard traffic in firewall
 :do {{ /ip firewall filter remove [find comment="Netily-WG-Input"] }} on-error={{}}
@@ -359,7 +362,7 @@ class MikrotikScriptGenerator:
 /ip firewall filter add chain=input action=accept connection-state=established,related comment="Netily-Established"
 
 :delay 5s
-:put "WireGuard VPN tunnel configured — IP: {vpn_ip} (MTU: 1320, AllowedIPs: 0.0.0.0/0)"
+:put "WireGuard VPN tunnel configured — IP: {vpn_ip} (MTU: 1320, AllowedIPs: {self.vpn_network_cidr})"
 :put "RADIUS accounting traffic allowed via tunnel"
 """
 
