@@ -322,7 +322,7 @@ services:
           - netily-openvpn-vpn
 
   # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  # NETWORK HEALER - Centralized routing fix for host system
+  # NETWORK HEALER - Active Watchdog (survives ANY container restart)
   # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
   network-healer:
     image: docker:cli
@@ -331,18 +331,24 @@ services:
     privileged: true
     network_mode: "host"  # This is the magic key that lets it touch the VPS routing table
     command: >
-      sh -c "echo 'Waiting for VPN container...' &&
-             while ! docker ps | grep -q netily-openvpn; do sleep 3; done &&
-             echo 'VPN found. Waiting 5 seconds for interface to initialize...' &&
-             sleep 5 &&
-             echo 'Injecting IP and Masquerade...' &&
-             docker exec netily-openvpn ip addr add 10.8.0.1/16 dev wg0 || true &&
-             docker exec netily-openvpn iptables -t nat -A POSTROUTING -o wg0 -j MASQUERADE || true &&
-             echo 'Fixing Host Route...' &&
-             VPN_IP=$$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}} {{end}}' netily-openvpn | awk '{print $$1}') &&
-             ip route replace 10.8.0.0/16 via $$VPN_IP &&
-             echo 'Infrastructure successfully healed! Going to sleep...' &&
-             tail -f /dev/null"
+      sh -c "echo 'Active Healer Watchdog Started...' &&
+             while true; do
+               # 1. Check if the VPN container is currently running
+               if docker ps | grep -q netily-openvpn; then
+                 # 2. Quietly check if the 10.8.0.1 IP is missing from the wg0 interface
+                 if ! docker exec netily-openvpn ip addr show wg0 2>/dev/null | grep -q '10.8.0.1'; then
+                   echo 'Network break detected! Initiating healing sequence...' &&
+                   sleep 3 &&
+                   docker exec netily-openvpn ip addr add 10.8.0.1/16 dev wg0 || true &&
+                   docker exec netily-openvpn iptables -t nat -A POSTROUTING -o wg0 -j MASQUERADE || true &&
+                   VPN_IP=$$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}} {{end}}' netily-openvpn | awk '{print $$1}') &&
+                   ip route replace 10.8.0.0/16 via $$VPN_IP &&
+                   echo 'Infrastructure successfully healed!'
+                 fi
+               fi
+               # 3. Wait 10 seconds before checking again (uses virtually zero CPU)
+               sleep 10
+             done"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
 
