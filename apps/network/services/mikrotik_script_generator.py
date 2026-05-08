@@ -102,21 +102,13 @@ class MikrotikScriptGenerator:
 # ═══════════════════════════════════════════════════════════════
 :put ">>> NETILY CLOUD CONTROLLER v4.6 <<<"
 
-# ─── Fix MTU/MSS FIRST before any HTTPS fetch ───────────────
-:put "Applying MSS clamp for HTTPS compatibility..."
-:do {{ /ip firewall mangle remove [find comment="Netily-Bootstrap-MSS"] }} on-error={{}}
-/ip firewall mangle add chain=output protocol=tcp tcp-flags=syn action=change-mss new-mss=1360 comment="Netily-Bootstrap-MSS" place-before=0
-/ip firewall mangle add chain=forward protocol=tcp tcp-flags=syn action=change-mss new-mss=clamp-to-pmtu comment="Netily-Bootstrap-MSS" place-before=0
-:delay 1s
-:put "MSS clamp applied."
-
 # ─── Download Version-Specific Configuration ─────────────────
 :local configUrl ("{config_fetch_url}?version=7&router={r.id}&subdomain={subdomain}")
 :put ("Downloading config from: " . $configUrl)
 
 :do {{
-    # Clean production fetch: No headers, enforced certificate check
-    /tool fetch url=$configUrl dst-path="netily_conf.rsc" check-certificate=yes
+    # Bypass cert check for initial bootstrap since router has no CA bundle yet
+    /tool fetch url=$configUrl dst-path="netily_conf.rsc" check-certificate=no
     :delay 2s
     /import netily_conf.rsc
     :put ">>> Stage 2 complete."
