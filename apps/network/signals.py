@@ -140,6 +140,7 @@ def deprovision_vpn_before_delete(sender, instance, **kwargs):
       - The VPN IP is returned to the pool immediately.
       - The OpenVPN CCD file is removed (router can no longer connect).
       - The certificate is revoked.
+      - The WireGuard peer is removed from the container.
 
     We use pre_delete (not post_delete) because post_delete signals
     receive an instance with no PK, making save() impossible, and
@@ -209,6 +210,20 @@ def deprovision_vpn_before_delete(sender, instance, **kwargs):
         logger.debug("[PRE-DELETE] IPPoolManager not available — skipping pool release")
     except Exception as e:
         logger.warning(f"[PRE-DELETE] IP pool release failed: {e}")
+
+    # 5. Remove the WireGuard peer from the container (FIX FOR CLUTTER BUG)
+    # Without this, wg show output accumulates stale public keys forever.
+    try:
+        if instance.wireguard_public_key:
+            from apps.vpn.services.wireguard_manager import remove_peer
+            remove_peer(instance.wireguard_public_key)
+            logger.info(f"[PRE-DELETE] WireGuard peer removed for {instance.name} (key: {instance.wireguard_public_key[:16]}...)")
+        else:
+            logger.debug(f"[PRE-DELETE] No WireGuard public key for {instance.name} — skipping peer removal")
+    except ImportError:
+        logger.debug("[PRE-DELETE] wireguard_manager not available — skipping peer removal")
+    except Exception as e:
+        logger.warning(f"[PRE-DELETE] WireGuard peer removal failed for {instance.name}: {e}")
 
 
 # ────────────────────────────────────────────────────────────────
