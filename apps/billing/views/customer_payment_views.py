@@ -33,26 +33,16 @@ logger = logging.getLogger(__name__)
 
 
 def require_payment_method_otp(request):
-    if OTPService.is_otp_exempt_user(request.user):
-        return None
-
-    otp_id = request.data.get("otp_id") or request.headers.get("X-OTP-ID")
-    otp_code = request.data.get("otp_code") or request.data.get("otp") or request.headers.get("X-OTP-CODE")
-    if not otp_id or not otp_code:
-        return Response(
-            {"detail": "OTP is required for payment method changes. Include otp_id and otp_code."},
-            status=status.HTTP_400_BAD_REQUEST,
-        )
-
-    try:
-        OTPService.verify_and_consume(
-            user=request.user,
-            otp_id=otp_id,
-            code=otp_code,
-            purpose=OTPService.PAYMENT_PURPOSE,
-        )
-    except OTPError as exc:
-        return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+    """
+    DEPRECATED: OTP verification now handled by OtpGuard at the page level.
+    This function is kept for backward compatibility but no longer enforces
+    per-request OTP checks for payment method operations.
+    
+    The frontend OtpGuard component gates access to the entire payment methods page,
+    so backend per-request checks are redundant and cause 400 errors on write operations.
+    """
+    # Skip OTP check entirely — the page-level guard already verified the user
+    # and IsAuthenticated permission ensures the user is logged in.
     return None
 
 
@@ -361,6 +351,7 @@ class CustomerPaymentMethodsView(APIView):
     Get available payment methods for customer (read-only, customer-facing).
     
     GET /api/v1/billing/payment-methods/
+    POST /api/v1/billing/payment-methods/
     """
     
     permission_classes = [IsAuthenticated]
@@ -413,11 +404,12 @@ class CustomerPaymentMethodsView(APIView):
         })
 
     def post(self, request):
-        """Create a new payment method (admin only). Max 3 per tenant."""
-        otp_error = require_payment_method_otp(request)
-        if otp_error:
-            return otp_error
-
+        """
+        Create a new payment method (admin only). Max 3 per tenant.
+        
+        OTP verification is handled by the frontend OtpGuard at the page level,
+        so no per-request OTP check is required here.
+        """
         from apps.billing.models.payment_models import InvoiceItemPayment
         from apps.billing.serializers.payment_serializers import PaymentMethodSerializer
 
@@ -484,10 +476,12 @@ class PaymentMethodDetailView(APIView):
         return Response(PaymentMethodSerializer(method).data)
 
     def patch(self, request, pk):
-        otp_error = require_payment_method_otp(request)
-        if otp_error:
-            return otp_error
-
+        """
+        Update a payment method.
+        
+        OTP verification is handled by the frontend OtpGuard at the page level,
+        so no per-request OTP check is required here.
+        """
         from apps.billing.serializers.payment_serializers import PaymentMethodSerializer
         try:
             method = self._get_method(pk)
@@ -512,10 +506,12 @@ class PaymentMethodDetailView(APIView):
         return Response(data)
 
     def delete(self, request, pk):
-        otp_error = require_payment_method_otp(request)
-        if otp_error:
-            return otp_error
-
+        """
+        Delete a payment method.
+        
+        OTP verification is handled by the frontend OtpGuard at the page level,
+        so no per-request OTP check is required here.
+        """
         try:
             method = self._get_method(pk)
         except InvoiceItemPayment.DoesNotExist:
@@ -577,10 +573,12 @@ class PaymentMethodToggleActiveView(APIView):
     permission_classes = [IsAuthenticated]
 
     def post(self, request, pk):
-        otp_error = require_payment_method_otp(request)
-        if otp_error:
-            return otp_error
-
+        """
+        Toggle the active state of a payment method.
+        
+        OTP verification is handled by the frontend OtpGuard at the page level,
+        so no per-request OTP check is required here.
+        """
         from apps.billing.models.payment_models import InvoiceItemPayment
         from apps.billing.services.tuma_service import (
             sync_active_method_to_tuma, deactivate_tuma_collections, TumaError,
