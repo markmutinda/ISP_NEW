@@ -903,10 +903,12 @@ mute 20
             api = mikrotik_api_module.MikrotikAPI(router)
             device_info = api.sync_device_info()
             
-            # Update router model with synced data if needed
-            router.model = device_info.get('model', router.model)
-            router.firmware_version = device_info.get('firmware_version', router.firmware_version)
-            router.save(update_fields=['model', 'firmware_version'])
+            # FIX: Only overwrite if we actually got a value back
+            if device_info.get('model'):
+                router.model = device_info['model']
+            if device_info.get('firmware_version'):
+                router.firmware_version = device_info['firmware_version']
+            router.save(update_fields=['model', 'firmware_version', 'updated_at'])
             
             return Response(device_info)
         except Exception as e:
@@ -2867,16 +2869,19 @@ class RouterAuthenticateView(APIView):
             else:
                 ip = request.META.get('REMOTE_ADDR', 'Unknown')
             
-            # Update router
+            # FIX: Update router with proper field preservation
             router.ip_address = ip
-            router.mac_address = data.get('mac', 'Unknown')
-            router.firmware_version = data.get('version', 'Unknown')
-            router.model = data.get('model', 'Unknown')
+            router.mac_address = data.get('mac') or router.mac_address
+            router.firmware_version = data.get('version') or router.firmware_version
+            router.model = data.get('model') or router.model
             router.is_authenticated = True
             router.authenticated_at = timezone.now()
             router.status = "online"
             router.last_seen = timezone.now()
-            router.save()
+            router.save(update_fields=[
+                'ip_address', 'mac_address', 'firmware_version', 'model',
+                'is_authenticated', 'authenticated_at', 'status', 'last_seen', 'updated_at'
+            ])
             
             # Create event
             RouterEvent.objects.create(
@@ -2940,25 +2945,30 @@ class RouterHeartbeatView(APIView):
             from django.db import connection
             connection.set_tenant(tenant)
             
-            # Update heartbeat
-            router.last_seen = timezone.now()
-            router.status = 'online'
-            
-            # Optional: Update statistics if provided
-            if 'active_users' in data:
-                router.active_users = data['active_users']
-            
-            if 'total_users' in data:
-                router.total_users = data['total_users']
-            
-            if 'uptime' in data:
-                router.uptime = data['uptime']
-            
+            # FIX: Use existing values to never blank out stored data
             if 'ip' in data:
                 router.ip_address = data['ip']
-                router.save(update_fields=['last_seen', 'status', 'ip_address', 'active_users', 'total_users', 'uptime'])
-            else:
-                router.save(update_fields=['last_seen', 'status', 'active_users', 'total_users', 'uptime'])
+
+            # Only update model/firmware if the heartbeat sends them (some heartbeats don't)
+            if data.get('model'):
+                router.model = data['model']
+            if data.get('version'):
+                router.firmware_version = data['version']
+
+            # Always preserve existing values if new ones not sent
+            router.last_seen = timezone.now()
+            router.status = 'online'
+            if data.get('active_users') is not None:
+                router.active_users = data['active_users']
+            if data.get('total_users') is not None:
+                router.total_users = data['total_users']
+            if data.get('uptime'):
+                router.uptime = data['uptime']
+
+            router.save(update_fields=[
+                'last_seen', 'status', 'active_users', 'total_users', 'uptime',
+                'ip_address', 'model', 'firmware_version', 'updated_at'
+            ])
             
             logger.debug(f"Heartbeat from router {router.name} (ID: {router.id}) in tenant {tenant.schema_name}")
             

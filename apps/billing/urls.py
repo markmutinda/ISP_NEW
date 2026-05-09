@@ -23,6 +23,7 @@ from .views.hotspot_admin_views import (
     GlobalHotspotPlanListView,
     HotspotClientViewSet,
     ActiveSubscriptionsView,  # <--- ADDED: Active Subscriptions View
+    RouterIncomeView,         # <--- ADDED: Router Income View
 )
 from .views.hotspot_voucher_admin_views import (  # ADDED: Hotspot Voucher Admin Views
     HotspotVoucherGenerateView,
@@ -242,6 +243,13 @@ hotspot_admin_urlpatterns = [
     path('admin/active-subscriptions/', 
          ActiveSubscriptionsView.as_view(), 
          name='hotspot-active-subscriptions'),
+    
+    # ============================================================
+    # ROUTER INCOME (ADDED - Total income per router)
+    # ============================================================
+    path('admin/routers/<int:router_id>/income/',
+         RouterIncomeView.as_view(),
+         name='hotspot-router-income'),
     
     # Plans CRUD (per-router) — prefixed with "admin/" to avoid collision with public plans endpoint
     path('admin/routers/<int:router_id>/plans/', 
