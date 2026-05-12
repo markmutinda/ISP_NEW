@@ -551,6 +551,7 @@ class RouterIncomeView(APIView):
     def get(self, request, router_id):
         from apps.billing.models.hotspot_models import HotspotSession
         from apps.billing.models.payment_models import Payment
+        from apps.network.models.router_models import PPPoEUser
         from django.db.models import Sum
 
         # Verify router exists and user has access (tenant-scoped via Router lookup)
@@ -563,11 +564,16 @@ class RouterIncomeView(APIView):
         ).aggregate(total=Sum('amount'))['total'] or 0
 
         # PPPoE income: payments linked to customers whose active service
-        # is on this router. We join via ServiceConnection → router.
-        # This is safe because ServiceConnection.router FK is tenant-scoped.
+        # is on this router. FIXED: Traverse via PPPoEUser → service_connection → customer
+        pppoe_customer_ids = (
+            PPPoEUser.objects
+            .filter(router_id=router_id, service_connection__isnull=False)
+            .values_list('service_connection__customer_id', flat=True)
+        )
+
         pppoe_income = Payment.objects.filter(
             status='COMPLETED',
-            customer__services__router_id=router_id,
+            customer_id__in=pppoe_customer_ids,
         ).aggregate(total=Sum('amount'))['total'] or 0
 
         total = float(hotspot_income) + float(pppoe_income)
