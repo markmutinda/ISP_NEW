@@ -4,7 +4,7 @@ services:
   db:
     image: postgres:15-alpine
     container_name: netily_db
-    restart: unless-stopped      # <-- ADDED - Ensures DB restarts on boot/crash
+    restart: unless-stopped
     volumes:
       - postgres_data:/var/lib/postgresql/data
     env_file: ../.env
@@ -21,13 +21,18 @@ services:
       resources:
         limits:
           memory: 200M
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
     networks:
       - isp_network
 
   redis:
     image: redis:7-alpine
     container_name: netily_redis
-    restart: unless-stopped      # <-- ADDED - Ensures Redis restarts on boot/crash
+    restart: unless-stopped
     command: redis-server --maxmemory 50mb --maxmemory-policy allkeys-lru
     volumes:
       - redis_data:/data
@@ -40,6 +45,11 @@ services:
       resources:
         limits:
           memory: 60M
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
     networks:
       - isp_network
 
@@ -101,6 +111,11 @@ services:
       resources:
         limits:
           memory: 512M
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
     networks:
       - isp_network
       - vpn_network
@@ -148,6 +163,11 @@ services:
       resources:
         limits:
           memory: 512M
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
     networks:
       - isp_network
       - vpn_network
@@ -179,6 +199,11 @@ services:
       resources:
         limits:
           memory: 80M
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
     networks:
       - isp_network
 
@@ -189,11 +214,6 @@ services:
     container_name: netily_radius
     restart: unless-stopped
     # REMOVED: command: override - using the Dockerfile's native startup script
-    logging:
-      driver: "json-file"
-      options:
-        max-size: "50m"
-        max-file: "3"
     cap_add:
       - NET_ADMIN
     env_file: ../.env
@@ -214,6 +234,11 @@ services:
       resources:
         limits:
           memory: 60M
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
     networks:
       isp_network:
         aliases:
@@ -238,6 +263,11 @@ services:
       resources:
         limits:
           memory: 300M
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
     networks:
       - isp_network
 
@@ -261,6 +291,11 @@ services:
       resources:
         limits:
           memory: 30M
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
     networks:
       - isp_network
 
@@ -271,6 +306,11 @@ services:
       - certbot_www:/var/www/certbot
       - certbot_certs:/etc/letsencrypt
     entrypoint: "/bin/sh -c 'trap exit TERM; while :; do sleep 6h & wait $${!}; certbot renew; done;'"
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
     networks:
       - isp_network
 
@@ -307,6 +347,11 @@ services:
       resources:
         limits:
           memory: 50M
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
     networks:
       isp_network:
         aliases:
@@ -347,6 +392,11 @@ services:
              done"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
 
 networks:
   isp_network:
