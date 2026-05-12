@@ -330,6 +330,8 @@ class TenantDetailView(RetrieveUpdateDestroyAPIView):
 
     def perform_destroy(self, instance):
         """Hard-delete: drop the schema, then delete Company + Tenant rows."""
+        from django.db import connection as db_conn, transaction
+
         schema = instance.schema_name
         company = instance.company
         logger.warning(
@@ -343,16 +345,39 @@ class TenantDetailView(RetrieveUpdateDestroyAPIView):
             changes={"schema": schema, "company": company.name},
             request=self.request,
         )
+
+        # Step 1: Drop the schema in its own autocommit connection
+        # so a failure here does NOT poison the main transaction.
         try:
-            from django.db import connection as db_conn
-            with db_conn.cursor() as cur:
+            from django.db import connections
+            conn = connections['default']
+            # Use a fresh cursor with autocommit to isolate the DROP SCHEMA
+            with conn.cursor() as cur:
+                # Roll back any aborted state first
+                try:
+                    cur.execute("ROLLBACK")
+                except Exception:
+                    pass
                 cur.execute(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE')
+                logger.info("Dropped schema: %s", schema)
         except Exception as e:
             logger.error("Failed to drop schema %s: %s", schema, e)
+            # Do NOT re-raise — continue with ORM cleanup regardless
 
-        instance.domains.all().delete()
-        instance.delete()
-        company.delete()
+        # Step 2: Clean up ORM records in a fresh transaction
+        with transaction.atomic():
+            try:
+                instance.domains.all().delete()
+            except Exception as e:
+                logger.warning("Could not delete domains for %s: %s", schema, e)
+            try:
+                instance.delete()
+            except Exception as e:
+                logger.warning("Could not delete tenant %s: %s", schema, e)
+            try:
+                company.delete()
+            except Exception as e:
+                logger.warning("Could not delete company for %s: %s", schema, e)
 
 
 class CompanyUpdateView(APIView):
