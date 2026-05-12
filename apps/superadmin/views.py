@@ -19,11 +19,11 @@ from django.utils import timezone
 from django.utils.text import slugify
 from rest_framework import status
 from rest_framework.generics import ListAPIView, RetrieveUpdateDestroyAPIView
-from rest_framework.permissions import IsAuthenticated, IsAdminUser  # Add IsAdminUser here
+from rest_framework.permissions import IsAuthenticated, IsAdminUser
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from apps.core.models import Tenant, Company, Domain, User, AuditLog, GlobalSystemSettings, Changelog, FeatureRequest  # Added FeatureRequest here
+from apps.core.models import Tenant, Company, Domain, User, AuditLog, GlobalSystemSettings, Changelog, FeatureRequest
 from .permissions import IsSuperAdmin
 from .serializers import (
     TenantListSerializer,
@@ -37,15 +37,18 @@ from .serializers import (
     DashboardKPISerializer,
     AuditLogSerializer,
 )
-from apps.core.serializers import ChangelogSerializer, FeatureRequestSerializer  # Added FeatureRequestSerializer here
-from django_tenants.utils import schema_context, get_public_schema_name  # Add this import
-from django.shortcuts import get_object_or_404  # Add this import
+from apps.core.serializers import ChangelogSerializer, FeatureRequestSerializer
+from django_tenants.utils import schema_context, get_public_schema_name
+from django.shortcuts import get_object_or_404
 
 logger = logging.getLogger(__name__)
 
 SUPERADMIN_PERMS = [IsAuthenticated, IsSuperAdmin]
 
 PAGE_SIZE = 20  # Match DRF global setting
+
+# ── CRITICAL SAFETY GUARD: Protected schemas that must never be deleted ──
+PROTECTED_SCHEMAS = {'public', 'information_schema', 'pg_catalog', 'pg_toast'}
 
 
 def _ensure_public():
@@ -178,7 +181,10 @@ class TenantListView(ListAPIView):
 
     def get_queryset(self):
         _ensure_public()
-        qs = Tenant.objects.select_related("company").prefetch_related("domains").all()
+        # Exclude protected schemas from the list
+        qs = Tenant.objects.select_related("company").prefetch_related("domains").exclude(
+            schema_name__in=PROTECTED_SCHEMAS
+        ).all()
 
         # Search
         search = self.request.query_params.get("search")
@@ -305,7 +311,10 @@ class TenantDetailView(RetrieveUpdateDestroyAPIView):
 
     def get_queryset(self):
         _ensure_public()
-        return Tenant.objects.select_related("company").prefetch_related("domains").all()
+        # Exclude protected schemas from being accessed/deleted
+        return Tenant.objects.select_related("company").prefetch_related("domains").exclude(
+            schema_name__in=PROTECTED_SCHEMAS
+        ).all()
 
     def get_serializer_class(self):
         if self.request.method in ("PATCH", "PUT"):
@@ -331,9 +340,19 @@ class TenantDetailView(RetrieveUpdateDestroyAPIView):
     def perform_destroy(self, instance):
         """Hard-delete: drop the schema, then delete Company + Tenant rows."""
         from django.db import connection as db_conn, transaction
+        from rest_framework.exceptions import PermissionDenied
 
         schema = instance.schema_name
         company = instance.company
+
+        # ── CRITICAL SAFETY GUARD ──────────────────────────────────────────
+        if schema in PROTECTED_SCHEMAS:
+            raise PermissionDenied(
+                f"Schema '{schema}' is protected and cannot be deleted. "
+                f"This is a critical system schema."
+            )
+        # ──────────────────────────────────────────────────────────────────
+
         logger.warning(
             "SUPERADMIN %s is deleting tenant %s (schema=%s)",
             self.request.user.email, instance.subdomain, schema,
@@ -346,36 +365,36 @@ class TenantDetailView(RetrieveUpdateDestroyAPIView):
             request=self.request,
         )
 
-        # Step 1: Drop the schema in its own autocommit connection
-        # so a failure here does NOT poison the main transaction.
+        # Step 1: Make sure we're on public schema before any ORM work
+        connection.set_schema_to_public()
+
+        # Step 2: Drop the tenant schema using raw SQL with autocommit isolation
         try:
-            from django.db import connections
-            conn = connections['default']
-            # Use a fresh cursor with autocommit to isolate the DROP SCHEMA
-            with conn.cursor() as cur:
-                # Roll back any aborted state first
-                try:
-                    cur.execute("ROLLBACK")
-                except Exception:
-                    pass
+            with connection.cursor() as cur:
+                # Ensure we're on public first
+                cur.execute('SET search_path TO "public"')
                 cur.execute(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE')
                 logger.info("Dropped schema: %s", schema)
         except Exception as e:
             logger.error("Failed to drop schema %s: %s", schema, e)
-            # Do NOT re-raise — continue with ORM cleanup regardless
+            # Don't re-raise — continue cleanup
 
-        # Step 2: Clean up ORM records in a fresh transaction
+        # Step 3: Delete ORM records (domains → tenant → company) in public schema
+        connection.set_schema_to_public()
         with transaction.atomic():
             try:
                 instance.domains.all().delete()
             except Exception as e:
                 logger.warning("Could not delete domains for %s: %s", schema, e)
             try:
-                instance.delete()
+                # Delete the tenant by PK directly to avoid any schema confusion
+                from apps.core.models import Tenant as TenantModel
+                TenantModel.objects.filter(pk=instance.pk).delete()
             except Exception as e:
                 logger.warning("Could not delete tenant %s: %s", schema, e)
             try:
-                company.delete()
+                from apps.core.models import Company as CompanyModel
+                CompanyModel.objects.filter(pk=company.pk).delete()
             except Exception as e:
                 logger.warning("Could not delete company for %s: %s", schema, e)
 
@@ -447,7 +466,6 @@ class TenantActivateView(APIView):
 
         if set_expiry_date:
             # Superadmin is directly overriding the expiry date (e.g. to fix double-payment)
-            from datetime import date as date_type
             import datetime as _dt
             try:
                 parsed_date = _dt.date.fromisoformat(str(set_expiry_date))
