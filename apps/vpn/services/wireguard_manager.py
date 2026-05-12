@@ -146,3 +146,25 @@ def list_connected_peers() -> list:
     except Exception as e:
         logger.error(f"[WG] list_connected_peers failed: {e}")
         return []
+
+
+def get_wireguard_interface_stats() -> dict:
+    """
+    Fetches basic health stats for the WireGuard interface.
+    Required by the Celery check_vpn_health task.
+    """
+    try:
+        # Ask the WireGuard container if the interface is running
+        success, output = docker_exec(['wg', 'show', WG_INTERFACE])
+        
+        # If the command succeeds and the interface name is in the output, it's alive
+        if success and WG_INTERFACE in output:
+            return {
+                'status': 'active',
+                'interface': WG_INTERFACE,
+            }
+        return {'status': 'inactive'}
+        
+    except Exception as e:
+        logger.error(f"[WG] Interface stats check failed: {e}")
+        return {'status': 'error', 'error': str(e)}
