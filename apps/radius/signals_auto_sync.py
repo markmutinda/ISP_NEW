@@ -384,6 +384,23 @@ def auto_create_radius_for_service(sender, instance, created, **kwargs):
                      f"{f', ip_pool={radius_ip_pool}' if radius_ip_pool else ''}"
                      f"{f', assigned_ip={assigned_ip_obj.ip_address if assigned_ip_obj else ''}' if assigned_ip_obj else ''}")
         
+        # ────────────────────────────────────────────────────────────
+        # 🆕 SEND NEW SUBSCRIPTION SMS NOTIFICATION
+        # ────────────────────────────────────────────────────────────
+        # Send SMS notification when a new subscription is created (service is ACTIVE)
+        if instance.status == 'ACTIVE' and instance.plan:
+            try:
+                from apps.messaging.services.notification_sender import SMSNotifier
+                SMSNotifier.pppoe_new_subscription(
+                    customer=customer,
+                    plan_name=instance.plan.name,
+                    amount=float(instance.plan.base_price),
+                    expires_at=create_kwargs.get('expiration_date'),
+                )
+                logger.info(f"New subscription SMS sent to customer {customer.id} for plan {instance.plan.name}")
+            except Exception as e:
+                logger.warning(f"New subscription SMS failed for customer {customer.id}: {e}")
+        
         # NOTE: Welcome SMS (pppoe_welcome) is sent from service_views.activate,
         # NOT from this signal, to avoid duplicate SMS.
         

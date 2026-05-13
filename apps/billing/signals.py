@@ -62,15 +62,13 @@ def handle_payment_completion(sender, instance, created, **kwargs):
         # ── SMS: payment confirmation with deduplication ──
         if customer:
             try:
-                from apps.messaging.services.notification_sender import _send_once, _fmt_phone, _customer_phone
-                phone = _fmt_phone(_customer_phone(customer))
-                # Dedup payment confirmation per payment ID (1 hour TTL)
-                _send_once(
-                    f"payment_confirm:{instance.id}",
-                    phone,
-                    f"Hi {customer.user.first_name or 'Customer'}, payment of KES {instance.amount:,.0f} received. Ref: {instance.payment_reference or instance.mpesa_receipt or ''}. Thank you!",
-                    ttl=3600
+                from apps.messaging.services.notification_sender import SMSNotifier
+                SMSNotifier.pppoe_payment(
+                    customer=customer,
+                    amount=float(instance.amount),
+                    reference=instance.payment_reference or instance.mpesa_receipt or '',
                 )
+                logger.info(f"Payment confirmation SMS sent to customer {customer.id} for payment {instance.id}")
             except Exception as e:
                 logger.warning(f"Payment confirmation SMS failed: {e}")
 

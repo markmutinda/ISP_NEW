@@ -264,7 +264,20 @@ class TumaWebhookView(APIView):
                                     
                                 logger.info(f"Successfully activated PPPoE service for {payment.customer}. New expiry: {new_expiry}")
                                 
-                                # 6. (Optional but recommended) Kick the suspended session off the router
+                                # 6. Send renewal SMS notification
+                                try:
+                                    from apps.messaging.services.notification_sender import SMSNotifier
+                                    plan_name = plan.name if plan else ''
+                                    SMSNotifier.pppoe_renewal(
+                                        customer=payment.customer,
+                                        plan_name=plan_name,
+                                        expires_at=new_expiry,
+                                    )
+                                    logger.info(f"Renewal SMS sent to {payment.customer.phone} for PPPoE renewal")
+                                except Exception as e:
+                                    logger.warning(f"Renewal SMS failed for payment {payment.payment_number}: {e}")
+                                
+                                # 7. (Optional but recommended) Kick the suspended session off the router
                                 # so it immediately reconnects and picks up the new active profile.
                                 try:
                                     from apps.radius.services.coa_service import CoAService

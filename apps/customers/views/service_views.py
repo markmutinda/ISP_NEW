@@ -156,32 +156,6 @@ class ServiceConnectionViewSet(viewsets.ModelViewSet):
             return None
 
     @action(detail=True, methods=['post'])
-    def change_plan(self, request, customer_pk=None, pk=None):
-        service = self.get_object()
-        plan_id = request.data.get('plan_id')
-
-        if not plan_id:
-            return Response(
-                {'error': 'plan_id is required'},
-                status=status.HTTP_400_BAD_REQUEST
-            )
-
-        plan = get_object_or_404(Plan.objects.filter(is_active=True), id=plan_id)
-        previous_plan_name = service.plan.name if service.plan else None
-
-        sync_service_plan_fields(service, plan)
-        service.updated_by = request.user
-        service.save()
-
-        return Response({
-            'status': 'success',
-            'message': f'Plan changed from {previous_plan_name or "No Plan"} to {plan.name}.',
-            'service_id': service.id,
-            'plan_id': service.plan_id,
-            'plan_name': service.plan.name if service.plan else None,
-        })
-
-    @action(detail=True, methods=['post'])
     def activate(self, request, customer_pk=None, pk=None):
         """
         Activate a service OR record a payment for an already-active service.
@@ -214,11 +188,15 @@ class ServiceConnectionViewSet(viewsets.ModelViewSet):
         service = self.get_object()
         customer = service.customer
         
+        # Track old status for resume SMS
+        old_status = service.status
+        
         # Track if we actually performed activation
         was_activated = False
         new_expiration = None
         assigned_ip = None
         creds_data = None
+        creds_obj = None
         
         # ── STEP 1: Activation block (only if service is NOT already active) ──
         if service.status != 'ACTIVE':
@@ -250,20 +228,20 @@ class ServiceConnectionViewSet(viewsets.ModelViewSet):
             try:
                 has_credentials = False
                 try:
-                    credentials = customer.radius_credentials
+                    creds_obj = customer.radius_credentials
                     has_credentials = True
                 except CustomerRadiusCredentials.DoesNotExist:
                     has_credentials = False
                 
                 if has_credentials:
-                    credentials.expiration_date = new_expiration
-                    credentials.is_enabled = True
-                    credentials.disabled_reason = ''
+                    creds_obj.expiration_date = new_expiration
+                    creds_obj.is_enabled = True
+                    creds_obj.disabled_reason = ''
                     
                     if assigned_ip and service.auth_connection_type == 'STATIC':
-                        credentials.framed_ip_address = assigned_ip
+                        creds_obj.framed_ip_address = assigned_ip
                     
-                    credentials.save()
+                    creds_obj.save()
                     
                     logger.info(
                         f"Activated service {service.id} for {customer.customer_code}: "
@@ -293,7 +271,7 @@ class ServiceConnectionViewSet(viewsets.ModelViewSet):
                         if assigned_ip and auth_type == 'STATIC':
                             credentials_data['framed_ip_address'] = assigned_ip
                         
-                        credentials = CustomerRadiusCredentials.objects.create(**credentials_data)
+                        creds_obj = CustomerRadiusCredentials.objects.create(**credentials_data)
                         
                         logger.info(
                             f"Activated service {service.id} for {customer.customer_code}: "
@@ -309,6 +287,36 @@ class ServiceConnectionViewSet(viewsets.ModelViewSet):
                     'is_enabled': creds_obj.is_enabled,
                 }
                 
+                # ────────────────────────────────────────────────────────────
+                # SEND WELCOME SMS WITH PPPOE CREDENTIALS
+                # ────────────────────────────────────────────────────────────
+                # Send welcome SMS with username/password for new activations
+                try:
+                    from apps.messaging.services.notification_sender import SMSNotifier
+                    
+                    SMSNotifier.pppoe_welcome(
+                        customer=customer,
+                        username=creds_obj.username,
+                        password=creds_obj.password
+                    )
+                    logger.info(f"Welcome SMS sent to customer {customer.id} with PPPoE credentials")
+                    
+                except Exception as e:
+                    logger.warning(f"Welcome SMS failed for customer {customer.id}: {e}")
+                # ────────────────────────────────────────────────────────────
+                
+                # ────────────────────────────────────────────────────────────
+                # SEND SERVICE RESUMED SMS (if coming from SUSPENDED)
+                # ────────────────────────────────────────────────────────────
+                if old_status == 'SUSPENDED':
+                    try:
+                        from apps.messaging.services.notification_sender import SMSNotifier
+                        SMSNotifier.pppoe_resumed(customer=customer)
+                        logger.info(f"Service resumed SMS sent to customer {customer.id}")
+                    except Exception as e:
+                        logger.warning(f"Resumed SMS failed for customer {customer.id}: {e}")
+                # ────────────────────────────────────────────────────────────
+                
             except Exception as radius_err:
                 logger.error(
                     f"RADIUS setup failed for service {service.id} "
@@ -316,7 +324,7 @@ class ServiceConnectionViewSet(viewsets.ModelViewSet):
                     exc_info=True,
                 )
             
-            # SMS notification for new activation
+            # SMS notification for new activation (plan details)
             try:
                 from apps.messaging.services.notification_sender import SMSNotifier
                 SMSNotifier.pppoe_new_subscription(
@@ -325,6 +333,7 @@ class ServiceConnectionViewSet(viewsets.ModelViewSet):
                     amount=float(service.monthly_price or 0),
                     expires_at=new_expiration,
                 )
+                logger.info(f"New subscription SMS sent to customer {customer.id}")
             except Exception as e:
                 logger.warning(f"New subscription SMS failed: {e}")
         
@@ -458,6 +467,56 @@ class ServiceConnectionViewSet(viewsets.ModelViewSet):
         return Response(response_data)
     
     @action(detail=True, methods=['post'])
+    def change_plan(self, request, customer_pk=None, pk=None):
+        """
+        Change the plan for a service connection.
+        
+        POST /customers/{customer_pk}/services/{pk}/change_plan/
+        Body: { "plan_id": 2 }
+        """
+        service = self.get_object()
+        plan_id = request.data.get('plan_id')
+
+        if not plan_id:
+            return Response(
+                {'error': 'plan_id is required'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        new_plan = get_object_or_404(Plan.objects.filter(is_active=True), id=plan_id)
+        
+        # Capture old plan name BEFORE changing
+        old_plan_name = service.plan.name if service.plan else None
+        
+        # Update the service with new plan
+        sync_service_plan_fields(service, new_plan)
+        service.updated_by = request.user
+        service.save()
+        
+        # ────────────────────────────────────────────────────────────
+        # SEND PLAN CHANGE SMS NOTIFICATION
+        # ────────────────────────────────────────────────────────────
+        try:
+            from apps.messaging.services.notification_sender import SMSNotifier
+            SMSNotifier.pppoe_plan_changed(
+                customer=service.customer,
+                old_plan=old_plan_name,
+                new_plan=new_plan.name,
+            )
+            logger.info(f"Plan change SMS sent to customer {service.customer.id}: {old_plan_name} → {new_plan.name}")
+        except Exception as e:
+            logger.warning(f"Plan change SMS failed for customer {service.customer.id}: {e}")
+        # ────────────────────────────────────────────────────────────
+
+        return Response({
+            'status': 'success',
+            'message': f'Plan changed from {old_plan_name or "No Plan"} to {new_plan.name}.',
+            'service_id': service.id,
+            'plan_id': service.plan_id,
+            'plan_name': service.plan.name if service.plan else None,
+        })
+    
+    @action(detail=True, methods=['post'])
     def suspend(self, request, customer_pk=None, pk=None):
         """Suspend a service"""
         service = self.get_object()
@@ -561,13 +620,13 @@ class ServiceConnectionViewSet(viewsets.ModelViewSet):
         }
         """
         from apps.billing.models import Plan
-        from apps.radius.signals_auto_sync import _get_or_create_bandwidth_profile
-        from apps.radius.models import CustomerRadiusCredentials
         from apps.radius.signals_auto_sync import (
             _get_or_create_bandwidth_profile, 
             generate_pppoe_username, 
             generate_password
         )
+        from apps.radius.models import CustomerRadiusCredentials
+        
         service = self.get_object()
         customer = service.customer
         
@@ -627,8 +686,7 @@ class ServiceConnectionViewSet(viewsets.ModelViewSet):
         
         if not hasattr(customer, 'radius_credentials'):
             if service.auth_connection_type in ('PPPOE', 'HOTSPOT', 'STATIC'):
-                phone = customer.user.phone_number or ''
-                username = generate_pppoe_username(phone, customer.customer_code)
+                username = generate_pppoe_username(customer)
                 password = generate_password()
                 profile = _get_or_create_bandwidth_profile(service)
                 
@@ -686,6 +744,9 @@ class ServiceConnectionViewSet(viewsets.ModelViewSet):
             service.activation_date = service.activation_date or now
             service.save()
         
+        # ────────────────────────────────────────────────────────────
+        # SEND RENEWAL SMS NOTIFICATION
+        # ────────────────────────────────────────────────────────────
         try:
             from apps.messaging.services.notification_sender import SMSNotifier
             SMSNotifier.pppoe_renewal(
@@ -693,9 +754,14 @@ class ServiceConnectionViewSet(viewsets.ModelViewSet):
                 plan_name=new_plan.name if new_plan else (service.plan.name if service.plan else ""),
                 expires_at=credentials.expiration_date,
             )
+            logger.info(f"Renewal SMS sent to customer {customer.id}")
         except Exception as e:
             logger.warning(f"Renewal SMS failed: {e}")
+        # ────────────────────────────────────────────────────────────
 
+        # ────────────────────────────────────────────────────────────
+        # SEND PLAN CHANGE SMS (if plan was changed during extension)
+        # ────────────────────────────────────────────────────────────
         if plan_changed and new_plan:
             try:
                 from apps.messaging.services.notification_sender import SMSNotifier
@@ -704,8 +770,10 @@ class ServiceConnectionViewSet(viewsets.ModelViewSet):
                     old_plan=old_plan_name,
                     new_plan=new_plan.name,
                 )
+                logger.info(f"Plan change SMS sent to customer {customer.id}: {old_plan_name} → {new_plan.name}")
             except Exception as e:
                 logger.warning(f"Plan change SMS failed: {e}")
+        # ────────────────────────────────────────────────────────────
         
         msg_parts = [f'Subscription extended by {human_label}']
         if plan_changed:
