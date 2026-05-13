@@ -402,20 +402,23 @@ class GatewayDispatcher:
         """
         Send an SMS through the configured gateway.
         
-        Balance pre-check only — no deduction here.
-        - Manual sends: deducted by CreditBillingService in ViewSet
-        - Automated sends: deducted by notification_sender._dispatch
+        SINGLE SOURCE OF TRUTH for credit deduction.
+        - For inbuilt system: deducts credits from wallet before sending
+        - For external providers: no deduction (they pay their provider directly)
+        - On provider failure for inbuilt: refunds the deducted credits
         """
         phone = _fmt_phone(to)
 
-        # Balance pre-check only — no deduction here.
-        # Manual sends: deducted by CreditBillingService in ViewSet
-        # Automated sends: deducted by notification_sender._dispatch
+        # ─── CREDIT DEDUCTION (only for inbuilt system) ───
         if self.use_inbuilt:
             from apps.messaging.models import TenantSMSWallet
             from apps.messaging.services.credit_billing_service import CreditBillingService
+            from django.db import transaction as _tx
+
+            # Check if enough credits exist
             wallet = TenantSMSWallet.objects.filter(is_active=True).first()
             required = CreditBillingService.sms_units_for_message(message)
+            
             if not wallet or wallet.sms_units < required:
                 return {
                     'success': False,
@@ -423,10 +426,42 @@ class GatewayDispatcher:
                     'status': 'failed',
                 }
 
+            # DEDUCT HERE — single source of truth
+            try:
+                with _tx.atomic():
+                    CreditBillingService.debit_for_sms(message_text=message)
+            except Exception as e:
+                return {
+                    'success': False,
+                    'error': str(e),
+                    'status': 'failed',
+                }
+
+        # ─── SEND VIA PROVIDER ───
         try:
             ok, msg_id, cost = self.backend.send(phone, message)
-            return {'success': ok, 'provider_id': msg_id, 'cost': cost, 'status': 'sent' if ok else 'failed'}
+            
+            # If sending failed and we're using inbuilt system, refund the credits
+            if not ok and self.use_inbuilt:
+                from apps.messaging.services.credit_billing_service import CreditBillingService
+                units = CreditBillingService.sms_units_for_message(message)
+                CreditBillingService.refund_units(units, notes=f"Provider send failure")
+                logger.warning(f"Refunded {units} units due to send failure")
+            
+            return {
+                'success': ok, 
+                'provider_id': msg_id, 
+                'cost': cost, 
+                'status': 'sent' if ok else 'failed'
+            }
         except Exception as e:
+            # On exception, refund the credits if using inbuilt system
+            if self.use_inbuilt:
+                from apps.messaging.services.credit_billing_service import CreditBillingService
+                units = CreditBillingService.sms_units_for_message(message)
+                CreditBillingService.refund_units(units, notes=f"Provider exception: {e}")
+                logger.warning(f"Refunded {units} units due to exception: {e}")
+            
             provider_name = 'INBUILT-BYTEWAVE' if self.use_inbuilt else self.config.provider
             logger.error(f"[{provider_name}] SMS send failed: {e}")
             return {'success': False, 'error': str(e), 'status': 'failed'}

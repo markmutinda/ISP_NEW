@@ -479,6 +479,19 @@ def _dispatch_router_offline_sms(router_name: str):
         print(f"-> Sending to: {phone}")
         try:
             dispatcher = GatewayDispatcher()
+
+            # 🆕 Deduct from wallet if using inbuilt system
+            if dispatcher.use_inbuilt:
+                from apps.messaging.services.credit_billing_service import CreditBillingService
+                from django.db import transaction as _tx
+                try:
+                    with _tx.atomic():
+                        CreditBillingService.debit_for_sms(message_text=message)
+                except Exception as credit_err:
+                    print(f"   ❌ Credit deduction failed: {credit_err}")
+                    logger.warning(f"Router alert SMS skipped — insufficient credits: {credit_err}")
+                    continue  # skip this phone, move to next
+
             result = dispatcher.send_sms(to=phone, message=message)
             print(f"   Gateway result: success={result.get('success')}, error={result.get('error')}")
 
@@ -660,6 +673,19 @@ def _dispatch_router_online_sms(router_name: str):
         print(f"-> Sending to: {phone}")
         try:
             dispatcher = GatewayDispatcher()
+
+            # 🆕 Deduct from wallet if using inbuilt system
+            if dispatcher.use_inbuilt:
+                from apps.messaging.services.credit_billing_service import CreditBillingService
+                from django.db import transaction as _tx
+                try:
+                    with _tx.atomic():
+                        CreditBillingService.debit_for_sms(message_text=message)
+                except Exception as credit_err:
+                    print(f"   ❌ Credit deduction failed: {credit_err}")
+                    logger.warning(f"Router online alert SMS skipped — insufficient credits: {credit_err}")
+                    continue  # skip this phone, move to next
+
             result = dispatcher.send_sms(to=phone, message=message)
             print(f"   Gateway result: success={result.get('success')}, error={result.get('error')}")
 
