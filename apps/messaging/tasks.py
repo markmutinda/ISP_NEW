@@ -91,7 +91,8 @@ def send_payment_confirmation_sms(self, customer_id, amount, reference='', schem
         try:
             from apps.customers.models import Customer
             customer = Customer.objects.select_related('user').get(id=customer_id)
-            phone = customer.phone_number or customer.user.phone_number
+            # FIX: Customer has no phone_number field - use user.phone_number directly
+            phone = customer.user.phone_number
             if not phone:
                 return
 
@@ -133,7 +134,8 @@ def send_welcome_sms(self, customer_id, schema_name=None):
         try:
             from apps.customers.models import Customer
             customer = Customer.objects.select_related('user').get(id=customer_id)
-            phone = customer.phone_number or customer.user.phone_number
+            # FIX: Customer has no phone_number field - use user.phone_number directly
+            phone = customer.user.phone_number
             if not phone:
                 return
 
@@ -173,7 +175,8 @@ def send_expiry_reminder_sms(self, customer_id, days_left=2, schema_name=None):
         try:
             from apps.customers.models import Customer
             customer = Customer.objects.select_related('user').get(id=customer_id)
-            phone = customer.phone_number or customer.user.phone_number
+            # FIX: Customer has no phone_number field - use user.phone_number directly
+            phone = customer.user.phone_number
             if not phone:
                 return
 
@@ -214,7 +217,8 @@ def send_service_suspension_sms(self, customer_id, reason='', schema_name=None):
         try:
             from apps.customers.models import Customer
             customer = Customer.objects.select_related('user').get(id=customer_id)
-            phone = customer.phone_number or customer.user.phone_number
+            # FIX: Customer has no phone_number field - use user.phone_number directly
+            phone = customer.user.phone_number
             if not phone:
                 return
 

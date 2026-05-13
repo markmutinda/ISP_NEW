@@ -613,7 +613,10 @@ def notify_expiring_soon(hours_before: int = 24):
     FIXED: Now loops through all tenants to send expiration warnings.
     """
     from apps.radius.models import CustomerRadiusCredentials
-    from apps.notifications.services import notification_service
+    # 🚨 FIXED: Import NotificationManager and instantiate it
+    from apps.notifications.services.notification_manager import NotificationManager
+    notification_service = NotificationManager()
+    
     TenantModel = get_tenant_model()
     now = timezone.now()
     expiry_window = now + timedelta(hours=hours_before)

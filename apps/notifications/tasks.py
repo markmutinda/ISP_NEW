@@ -3,6 +3,7 @@ from django.utils import timezone
 import logging
 from .services import NotificationManager
 from .models import Notification, BulkNotification, AlertRule
+from django.db import models
 from django.db import ProgrammingError
 
 logger = logging.getLogger(__name__)
