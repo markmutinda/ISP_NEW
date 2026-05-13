@@ -75,15 +75,25 @@ def _dispatch(phone: str, message: str) -> bool:
         return False
     try:
         from apps.messaging.services.gateway_dispatcher import GatewayDispatcher
+        from apps.messaging.models import SMSNotificationSettings
+
         dispatcher = GatewayDispatcher()
 
-        # For inbuilt system, deduct units before sending (automated path)
-        if dispatcher.use_inbuilt:
+        # Determine if inbuilt system is active from EITHER the gateway config
+        # OR the notification settings (they should be in sync, but check both
+        # to handle the case where they drift apart).
+        notif_settings = SMSNotificationSettings.get_settings()
+        is_inbuilt = dispatcher.use_inbuilt or notif_settings.use_inbuilt_system
+
+        if is_inbuilt:
             from apps.messaging.services.credit_billing_service import CreditBillingService
             from django.db import transaction
             try:
                 with transaction.atomic():
-                    CreditBillingService.debit_for_sms(message_text=message)
+                    CreditBillingService.debit_for_sms(
+                        message_text=message,
+                        # No sms_message object yet — ledger entry links to None
+                    )
             except Exception as e:
                 logger.warning(f"Automated SMS skipped — insufficient credits: {e}")
                 return False
@@ -95,7 +105,6 @@ def _dispatch(phone: str, message: str) -> bool:
         logger.warning(f"SMS failed to {phone[:6]}***: {result.get('error')}")
         return False
     except ValueError as e:
-        # No active gateway configured
         logger.warning(f"SMS not sent (no gateway): {e}")
         return False
     except Exception as e:

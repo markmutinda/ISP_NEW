@@ -28,12 +28,27 @@ class CreditBillingService:
     @staticmethod
     @transaction.atomic
     def debit_for_sms(message_text: str, sms_message=None) -> Decimal:
+        from apps.messaging.models import SMSNotificationSettings
+        
         # 1. Check if they are using an external gateway
         gateway = SMSGatewayConfig.objects.filter(is_active=True).first()
         
-        # If there is a gateway and it's NOT the inbuilt system, they pay their own provider.
-        # Bypass the wallet check and return 0 units debited.
-        if gateway and not gateway.use_inbuilt_system:
+        # Determine inbuilt from EITHER source — notification settings is the
+        # user-facing toggle; gateway config should mirror it but may drift.
+        try:
+            notif_settings = SMSNotificationSettings.get_settings()
+            notif_inbuilt = notif_settings.use_inbuilt_system if notif_settings else False
+        except Exception:
+            notif_inbuilt = False
+        
+        gateway_inbuilt = gateway.use_inbuilt_system if gateway else False
+        
+        # Use inbuilt if EITHER source says true (this prevents drift issues)
+        use_inbuilt = notif_inbuilt or gateway_inbuilt
+        
+        # If they are NOT using the inbuilt system (either source says false),
+        # they are using their own provider keys — no wallet deduction.
+        if not use_inbuilt:
             return Decimal("0.0000")
 
         # 2. If using Inbuilt System, proceed with wallet deduction
