@@ -106,6 +106,7 @@ class FUPUsageWindowSerializer(serializers.ModelSerializer):
     plan_name = serializers.SerializerMethodField()
     policy_name = serializers.CharField(source='policy.name', read_only=True)
     total_gb = serializers.SerializerMethodField()
+    limit_gb = serializers.SerializerMethodField()  # ADDED: convert limit_bytes to GB
 
     class Meta:
         model = FUPUsageWindow
@@ -115,7 +116,7 @@ class FUPUsageWindowSerializer(serializers.ModelSerializer):
             'service_connection', 'customer', 'customer_name', 'customer_code',
             'period_start', 'period_end',
             'download_bytes', 'upload_bytes', 'total_bytes', 'total_gb',
-            'limit_bytes', 'usage_percent', 'status',
+            'limit_bytes', 'limit_gb', 'usage_percent', 'status',
             'first_exceeded_at', 'is_throttled', 'throttled_at', 'unthrottled_at',
             'created_at', 'updated_at',
         ]
@@ -151,6 +152,12 @@ class FUPUsageWindowSerializer(serializers.ModelSerializer):
 
     def get_total_gb(self, obj):
         return obj.total_gb
+
+    def get_limit_gb(self, obj):
+        """Convert limit_bytes from bytes to GB for frontend display."""
+        if obj.limit_bytes is None:
+            return None
+        return round(obj.limit_bytes / (1024 ** 3), 2)
 
 
 class FUPViolationSerializer(serializers.ModelSerializer):

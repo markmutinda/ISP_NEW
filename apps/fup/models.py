@@ -190,6 +190,23 @@ class FUPUsageWindow(models.Model):
             models.Index(fields=['policy', 'service_connection']),
             models.Index(fields=['policy', 'hotspot_session']),
         ]
+        # ✅ REPLACED unique_together with conditional UniqueConstraints
+        # unique_together = ('policy', 'service_connection', 'period_start', 'period_end')  # ❌ REMOVED
+        
+        constraints = [
+            # For PPPoE connections (service_connection is NOT NULL)
+            models.UniqueConstraint(
+                fields=['policy', 'service_connection', 'period_start', 'period_end'],
+                condition=models.Q(service_connection__isnull=False),
+                name='unique_fup_window_pppoe',
+            ),
+            # For Hotspot sessions (hotspot_session is NOT NULL)
+            models.UniqueConstraint(
+                fields=['policy', 'hotspot_session', 'period_start', 'period_end'],
+                condition=models.Q(hotspot_session__isnull=False),
+                name='unique_fup_window_hotspot',
+            ),
+        ]
         verbose_name = 'FUP Usage Window'
         verbose_name_plural = 'FUP Usage Windows'
 
