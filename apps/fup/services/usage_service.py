@@ -91,7 +91,9 @@ class FUPUsageService:
                 plan_duration = getattr(service_connection.plan, 'validity_days', 30) or 30
             elif activation_date:
                 activation = activation_date
-                plan_duration = 30
+                # For hotspot sessions, we need to use the plan's actual duration
+                # This will be overridden by the caller for hotspot sessions
+                plan_duration = 30  # Default fallback
             else:
                 activation = now
                 plan_duration = 30
@@ -108,6 +110,30 @@ class FUPUsageService:
             raise ValueError(f'Unsupported reset period: {policy.reset_period}')
 
         return start, end
+
+    # ─── Hotspot Subscription Window Resolution ──────────────────────────────
+
+    def _resolve_subscription_window_for_hotspot(self, activated_at, total_minutes, now):
+        """
+        Resolve subscription window for hotspot plans using minutes instead of days.
+        
+        This is critical for 1-hour, 6-hour, 12-hour, and multi-day hotspot plans
+        that don't align with the 30-day default used for PPPoE subscriptions.
+        
+        Args:
+            activated_at: When the session was activated
+            total_minutes: Total validity period in minutes (e.g., 60 for 1 hour)
+            now: Current datetime
+        
+        Returns:
+            tuple: (period_start, period_end) for the current subscription period
+        """
+        delta = timedelta(minutes=total_minutes)
+        elapsed = now - activated_at
+        periods_passed = int(elapsed.total_seconds() // delta.total_seconds())
+        period_start = activated_at + (delta * periods_passed)
+        period_end = period_start + delta
+        return period_start, period_end
 
     # ─── RADIUS Usage Query ───────────────────────────────────────────────────
 
@@ -190,6 +216,7 @@ class FUPUsageService:
         """
         FIX: Now creates a proper FUPUsageWindow so the dashboard shows hotspot users.
         Also respects PEAK_HOURS — skips tracking outside peak window.
+        FIX: Properly handles SUBSCRIPTION reset period using hotspot plan duration.
         """
         policy = self.get_active_policy_for_hotspot_session(hotspot_session)
         if not policy:
@@ -206,7 +233,20 @@ class FUPUsageService:
             return None
 
         activation = hotspot_session.activated_at or hotspot_session.created_at
-        period_start, period_end = self.resolve_window(policy, activation_date=activation, now=now)
+        
+        # 🆕 FIX: For SUBSCRIPTION reset period, use hotspot plan's actual duration
+        if policy.reset_period == 'SUBSCRIPTION' and hotspot_session.plan:
+            plan = hotspot_session.plan
+            # Get total validity in minutes from the hotspot plan
+            total_minutes = plan.total_validity_minutes or 60  # Default 60 min (1 hour)
+            period_start, period_end = self._resolve_subscription_window_for_hotspot(
+                activation, total_minutes, now
+            )
+        else:
+            # For other reset periods (DAILY, WEEKLY, MONTHLY, PEAK_HOURS)
+            period_start, period_end = self.resolve_window(
+                policy, activation_date=activation, now=now
+            )
 
         upload_bytes, download_bytes, total_bytes = self.get_radacct_usage_bytes(
             username=username, period_start=period_start, period_end=period_end,
@@ -217,7 +257,7 @@ class FUPUsageService:
         if limit_bytes > 0:
             usage_percent = round(Decimal(total_bytes) / Decimal(limit_bytes) * Decimal('100'), 2)
 
-        # FIX: Create actual FUPUsageWindow for dashboard visibility
+        # Create actual FUPUsageWindow for dashboard visibility
         usage_window, _ = FUPUsageWindow.objects.update_or_create(
             policy=policy,
             hotspot_session=hotspot_session,
