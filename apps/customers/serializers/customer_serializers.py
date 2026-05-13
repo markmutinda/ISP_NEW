@@ -118,10 +118,14 @@ class CustomerCreateSerializer(serializers.ModelSerializer):
             **validated_data
         )
 
-        # Auto SMS: welcome message
+        # Auto SMS: welcome message with tenant context
         try:
             from apps.messaging.tasks import send_welcome_sms
-            send_welcome_sms.delay(customer_id=customer.id)
+            from django.db import connection
+            send_welcome_sms.delay(
+                customer_id=customer.id,
+                schema_name=connection.schema_name,
+            )
         except Exception:
             pass
         

@@ -965,12 +965,14 @@ class ServiceConnection(AuditMixin):
             created_by=user
         )
 
-        # Auto SMS: service suspension
+        # Auto SMS: service suspension with tenant context
         try:
             from apps.messaging.tasks import send_service_suspension_sms
+            from django.db import connection
             send_service_suspension_sms.delay(
                 customer_id=self.customer.id,
                 reason=reason,
+                schema_name=connection.schema_name,
             )
         except Exception:
             pass
