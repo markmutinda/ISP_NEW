@@ -91,21 +91,42 @@ def send_payment_confirmation_sms(self, customer_id, amount, reference='', schem
         try:
             from apps.customers.models import Customer
             customer = Customer.objects.select_related('user').get(id=customer_id)
-            # FIX: Customer has no phone_number field - use user.phone_number directly
             phone = customer.user.phone_number
             if not phone:
                 return
 
             name = customer.user.first_name or 'Customer'
-            default_msg = f"Hi {name}, your payment of KES {amount:,.2f} has been received. Ref: {reference}. Thank you!"
+
+            # FIX: fetch plan name and expiry info since templates may use {plan_name} and {expiry_date}
+            plan_name = ''
+            expiry_date = ''
+            try:
+                service = customer.services.filter(
+                    status='ACTIVE', plan__isnull=False
+                ).order_by('-activation_date').first()
+                if service and service.plan:
+                    plan_name = service.plan.name or ''
+                    # Get expiry from RADIUS credentials
+                    if hasattr(customer, 'radius_credentials') and customer.radius_credentials:
+                        creds = customer.radius_credentials
+                        if creds.expiration_date:
+                            expiry_date = creds.expiration_date.strftime('%d %b %Y')
+            except Exception:
+                pass
+
+            default_msg = (
+                f"Hi {name}, your payment of KES {amount:,.2f} has been received. "
+                f"Ref: {reference}. Thank you!"
+            )
             
-            # Pull from DB: event_type must match the value saved from the frontend React Select component
             msg = _get_rendered_message(
                 event_type='pppoe_payment',
                 default_msg=default_msg,
                 name=name,
                 amount=f"{amount:,.2f}",
-                reference=reference
+                reference=reference,
+                plan_name=plan_name,
+                expiry_date=expiry_date,
             )
             
             _send_auto_sms(phone, msg, 'auto_payment_confirmation')
@@ -134,18 +155,43 @@ def send_welcome_sms(self, customer_id, schema_name=None):
         try:
             from apps.customers.models import Customer
             customer = Customer.objects.select_related('user').get(id=customer_id)
-            # FIX: Customer has no phone_number field - use user.phone_number directly
             phone = customer.user.phone_number
             if not phone:
                 return
 
             name = customer.user.first_name or 'Customer'
-            default_msg = f"Welcome {name}! Your account has been set up. Contact support if you need any help. Enjoy your service!"
+
+            # FIX: Fetch actual RADIUS credentials for welcome message
+            username = ''
+            password = ''
+            plan_name = ''
+            try:
+                creds = customer.radius_credentials
+                if creds:
+                    username = creds.username or ''
+                    password = creds.password or ''
+                # Also fetch plan name if available
+                service = customer.services.filter(
+                    status='ACTIVE', plan__isnull=False
+                ).order_by('-activation_date').first()
+                if service and service.plan:
+                    plan_name = service.plan.name or ''
+            except Exception:
+                pass
+
+            default_msg = (
+                f"Welcome {name}! Your internet service is now active. "
+                f"Username: {username} / Password: {password}. "
+                f"Contact support if you need help."
+            )
             
             msg = _get_rendered_message(
                 event_type='pppoe_welcome',
                 default_msg=default_msg,
-                name=name
+                name=name,
+                username=username,
+                password=password,
+                plan_name=plan_name,
             )
             
             _send_auto_sms(phone, msg, 'auto_welcome_message')
@@ -175,19 +221,46 @@ def send_expiry_reminder_sms(self, customer_id, days_left=2, schema_name=None):
         try:
             from apps.customers.models import Customer
             customer = Customer.objects.select_related('user').get(id=customer_id)
-            # FIX: Customer has no phone_number field - use user.phone_number directly
             phone = customer.user.phone_number
             if not phone:
                 return
 
             name = customer.user.first_name or 'Customer'
-            default_msg = f"Hi {name}, your internet plan expires in {days_left} day(s). Please renew to avoid service interruption."
+
+            # FIX: fetch plan, expiry, and amount due info
+            plan_name = ''
+            expiry_date = ''
+            amount_due = ''
+            username = ''
+            try:
+                creds = customer.radius_credentials
+                if creds:
+                    if creds.expiration_date:
+                        expiry_date = creds.expiration_date.strftime('%d %b %Y')
+                    username = creds.username or ''
+                service = customer.services.filter(
+                    status='ACTIVE', plan__isnull=False
+                ).order_by('-activation_date').first()
+                if service and service.plan:
+                    plan_name = service.plan.name or ''
+                    amount_due = f"{float(service.plan.base_price):,.0f}"
+            except Exception:
+                pass
+
+            default_msg = (
+                f"Hi {name}, your internet plan expires in {days_left} day(s). "
+                f"Please renew to avoid service interruption."
+            )
             
             msg = _get_rendered_message(
                 event_type='pppoe_expiry',
                 default_msg=default_msg,
                 name=name,
-                days_left=days_left
+                days_left=days_left,
+                plan_name=plan_name,
+                expiry_date=expiry_date,
+                amount_due=amount_due,
+                username=username,
             )
             
             _send_auto_sms(phone, msg, 'auto_expiry_reminder')
@@ -217,19 +290,37 @@ def send_service_suspension_sms(self, customer_id, reason='', schema_name=None):
         try:
             from apps.customers.models import Customer
             customer = Customer.objects.select_related('user').get(id=customer_id)
-            # FIX: Customer has no phone_number field - use user.phone_number directly
             phone = customer.user.phone_number
             if not phone:
                 return
 
             name = customer.user.first_name or 'Customer'
-            default_msg = f"Hi {name}, your internet service has been suspended. Reason: {reason} Please contact support or make a payment to restore service." if reason else f"Hi {name}, your internet service has been suspended. Please contact support or make a payment to restore service."
+
+            # Fetch plan name for context (optional)
+            plan_name = ''
+            try:
+                service = customer.services.filter(
+                    status='ACTIVE', plan__isnull=False
+                ).order_by('-activation_date').first()
+                if service and service.plan:
+                    plan_name = service.plan.name or ''
+            except Exception:
+                pass
+
+            default_msg = (
+                f"Hi {name}, your internet service has been suspended. "
+                f"Reason: {reason} Please contact support or make a payment to restore service."
+                if reason else
+                f"Hi {name}, your internet service has been suspended. "
+                f"Please contact support or make a payment to restore service."
+            )
             
             msg = _get_rendered_message(
                 event_type='pppoe_suspended',
                 default_msg=default_msg,
                 name=name,
-                reason=reason
+                reason=reason,
+                plan_name=plan_name,
             )
             
             _send_auto_sms(phone, msg, 'auto_service_suspension')

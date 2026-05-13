@@ -63,6 +63,28 @@ def _render(template: str, **ctx) -> str:
     return template
 
 
+def _get_rendered_message(event_type: str, default_msg: str, **context) -> str:
+    """
+    Fetches the active custom template for a given event from the database.
+    Replaces {variable} placeholders with actual values.
+    Falls back to the hardcoded default_msg if no template exists.
+    """
+    from apps.messaging.models import SMSTemplate
+    
+    # Query the database for the user's saved template for this specific event
+    template = SMSTemplate.objects.filter(event_type=event_type, is_active=True).first()
+    
+    if not template or not template.content.strip():
+        return default_msg
+        
+    msg = template.content
+    # Dynamically inject the context variables (e.g., {name}, {amount}) into the text
+    for key, value in context.items():
+        msg = msg.replace(f"{{{key}}}", str(value))
+        
+    return msg
+
+
 def _get_settings():
     from apps.messaging.models import SMSNotificationSettings
     return SMSNotificationSettings.get_settings()
@@ -169,13 +191,16 @@ class SMSNotifier:
         if not phone:
             return False
         plan = session.plan
-        msg = _render(
-            "Hi! Your {plan_name} plan purchase is confirmed. "
-            "Access code: {access_code}. Enjoy your browsing!",
+        default_msg = (
+            f"Hi! Your {plan.name if plan else ''} plan purchase is confirmed. "
+            f"Access code: {session.access_code or ''}. Enjoy your browsing!"
+        )
+        msg = _get_rendered_message(
+            event_type='hotspot_new_subscription',
+            default_msg=default_msg,
             plan_name=plan.name if plan else '',
             access_code=session.access_code or '',
         )
-        # Dedup within 1 hour
         result = _send_once(f"hs_new:{session.session_id}", phone, msg, ttl=3600)
         _log_sms(phone, msg, msg_type='automated', recipient_name=session.phone_number)
         return result
@@ -197,9 +222,13 @@ class SMSNotifier:
                 timezone.get_current_timezone()
             ).strftime("%H:%M")
             expires = f" Expires at {expires}"
-        msg = _render(
-            "WiFi Active! Code: {access_code}. Plan: {plan_name} ({duration}){expires}. "
-            "Speed: {speed}. Enjoy!",
+        default_msg = (
+            f"WiFi Active! Code: {session.access_code or ''}. Plan: {plan.name if plan else ''} ({plan.duration_display if hasattr(plan, 'duration_display') else ''}){expires}. "
+            f"Speed: {plan.speed_display if hasattr(plan, 'speed_display') else ''}. Enjoy!"
+        )
+        msg = _get_rendered_message(
+            event_type='hotspot_welcome',
+            default_msg=default_msg,
             access_code=session.access_code or '',
             plan_name=plan.name if plan else '',
             duration=plan.duration_display if hasattr(plan, 'duration_display') else '',
@@ -222,9 +251,13 @@ class SMSNotifier:
         from django.utils import timezone
         mins = max(0, int((session.expires_at - timezone.now()).total_seconds() / 60)) \
             if session.expires_at else 0
-        msg = _render(
-            "Your {plan_name} hotspot session expires in {minutes_left} minutes. "
-            "Renew to stay connected! Code: {access_code}",
+        default_msg = (
+            f"Your {session.plan.name if session.plan else ''} hotspot session expires in {mins} minutes. "
+            f"Renew to stay connected! Code: {session.access_code or ''}"
+        )
+        msg = _get_rendered_message(
+            event_type='hotspot_expiry_warning',
+            default_msg=default_msg,
             plan_name=session.plan.name if session.plan else '',
             minutes_left=mins,
             access_code=session.access_code or '',
@@ -242,8 +275,10 @@ class SMSNotifier:
         phone = _fmt_phone(session.phone_number)
         if not phone:
             return False
-        msg = _render(
-            "Your {plan_name} session has expired. Buy a new plan to reconnect!",
+        default_msg = f"Your {session.plan.name if session.plan else ''} session has expired. Buy a new plan to reconnect!"
+        msg = _get_rendered_message(
+            event_type='hotspot_session_expired',
+            default_msg=default_msg,
             plan_name=session.plan.name if session.plan else '',
         )
         result = _send_once(f"hs_expired:{session.session_id}", phone, msg, ttl=3600)
@@ -259,8 +294,10 @@ class SMSNotifier:
         phone = _fmt_phone(session.phone_number)
         if not phone:
             return False
-        msg = _render(
-            "Payment for {plan_name} failed. {reason} Please try again.",
+        default_msg = f"Payment for {session.plan.name if session.plan else ''} failed. {reason} Please try again."
+        msg = _get_rendered_message(
+            event_type='hotspot_payment_failed',
+            default_msg=default_msg,
             plan_name=session.plan.name if session.plan else '',
             reason=reason or '',
         )
@@ -282,10 +319,16 @@ class SMSNotifier:
         if not phone:
             return False
         name = customer.user.first_name or "Customer"
-        msg = _render(
-            "Hi {customer_name}, your internet is ready! "
-            "Username: {username} | Password: {password} | Welcome aboard!",
-            customer_name=name, username=username, password=password,
+        default_msg = (
+            f"Hi {name}, your internet is ready! "
+            f"Username: {username} | Password: {password} | Welcome aboard!"
+        )
+        msg = _get_rendered_message(
+            event_type='pppoe_welcome',
+            default_msg=default_msg,
+            customer_name=name,
+            username=username,
+            password=password,
         )
         result = _send_once(f"pppoe_welcome:{customer.id}", phone, msg, ttl=3600)
         _log_sms(phone, msg, msg_type='automated', recipient_name=name, customer_id=customer.id)
@@ -312,13 +355,20 @@ class SMSNotifier:
         except Exception:
             username = password = ''
         
-        msg = _render(
-            "Hi {customer_name}, welcome! Plan: {plan_name} | "
-            "Username: {username} | Password: {password} | "
-            "Expires: {expires_at}. KES {amount} paid.",
-            customer_name=name, plan_name=plan_name,
-            username=username, password=password,
-            expires_at=expiry_str, amount=f"{float(amount):,.0f}",
+        default_msg = (
+            f"Hi {name}, welcome! Plan: {plan_name} | "
+            f"Username: {username} | Password: {password} | "
+            f"Expires: {expiry_str}. KES {float(amount):,.0f} paid."
+        )
+        msg = _get_rendered_message(
+            event_type='pppoe_new_subscription',
+            default_msg=default_msg,
+            customer_name=name,
+            plan_name=plan_name,
+            username=username,
+            password=password,
+            expires_at=expiry_str,
+            amount=f"{float(amount):,.0f}",
         )
         result = _send_once(f"pppoe_new:{customer.id}", phone, msg, ttl=3600)
         _log_sms(phone, msg, msg_type='automated', recipient_name=name, customer_id=customer.id)
@@ -334,10 +384,27 @@ class SMSNotifier:
         if not phone:
             return False
         name = customer.user.first_name or "Customer"
-        msg = _render(
-            "Hi {customer_name}, payment of KES {amount} received. "
-            "Reference: {reference}. Thank you!",
-            customer_name=name, amount=f"{float(amount):,.0f}", reference=reference or '',
+        
+        # Fetch plan name for context
+        plan_name = ''
+        try:
+            service = customer.services.filter(status='ACTIVE', plan__isnull=False).first()
+            if service and service.plan:
+                plan_name = service.plan.name or ''
+        except Exception:
+            pass
+        
+        default_msg = (
+            f"Hi {name}, payment of KES {float(amount):,.0f} received. "
+            f"Reference: {reference}. Thank you!"
+        )
+        msg = _get_rendered_message(
+            event_type='pppoe_payment',
+            default_msg=default_msg,
+            customer_name=name,
+            amount=f"{float(amount):,.0f}",
+            reference=reference or '',
+            plan_name=plan_name,
         )
         result = _send_once(f"pppoe_pay:{customer.id}:{reference}", phone, msg, ttl=3600)
         _log_sms(phone, msg, msg_type='automated', recipient_name=name, customer_id=customer.id)
@@ -354,10 +421,16 @@ class SMSNotifier:
             return False
         name = customer.user.first_name or "Customer"
         expiry_str = expires_at.strftime('%d %b %Y') if expires_at else 'N/A'
-        msg = _render(
-            "Hi {customer_name}, subscription renewed! Plan: {plan_name} | "
-            "Expires: {expires_at}. Thank you!",
-            customer_name=name, plan_name=plan_name, expires_at=expiry_str,
+        default_msg = (
+            f"Hi {name}, subscription renewed! Plan: {plan_name} | "
+            f"Expires: {expiry_str}. Thank you!"
+        )
+        msg = _get_rendered_message(
+            event_type='pppoe_renewal',
+            default_msg=default_msg,
+            customer_name=name,
+            plan_name=plan_name,
+            expires_at=expiry_str,
         )
         result = _send_once(f"pppoe_renew:{customer.id}:{expiry_str}", phone, msg, ttl=3600)
         _log_sms(phone, msg, msg_type='automated', recipient_name=name, customer_id=customer.id)
@@ -385,12 +458,18 @@ class SMSNotifier:
             expiry_date = 'N/A'
             amount_due = ''
         
-        msg = _render(
-            "Hi {customer_name}, your {plan_name} plan expires in {days_left} day(s) "
-            "({expiry_date}). Renew now{amount_due} to avoid disconnection.",
-            customer_name=name, plan_name=plan_name,
-            days_left=days_left, expiry_date=expiry_date,
-            amount_due=f" - {amount_due}" if amount_due else '',
+        default_msg = (
+            f"Hi {name}, your {plan_name} plan expires in {days_left} day(s) "
+            f"({expiry_date}). Renew now{ ' - ' + amount_due if amount_due else ''} to avoid disconnection."
+        )
+        msg = _get_rendered_message(
+            event_type='pppoe_expiry_reminder',
+            default_msg=default_msg,
+            customer_name=name,
+            plan_name=plan_name,
+            days_left=days_left,
+            expiry_date=expiry_date,
+            amount_due=amount_due,
         )
         # Dedup per customer per day (86400s)
         result = _send_once(f"pppoe_expiry:{customer.id}:{days_left}", phone, msg, ttl=86400)
@@ -407,10 +486,15 @@ class SMSNotifier:
         if not phone:
             return False
         name = customer.user.first_name or "Customer"
-        msg = _render(
-            "Hi {customer_name}, your internet service has been suspended. "
-            "Reason: {reason}. Contact support to restore.",
-            customer_name=name, reason=reason or 'subscription expired',
+        default_msg = (
+            f"Hi {name}, your internet service has been suspended. "
+            f"Reason: {reason or 'subscription expired'}. Contact support to restore."
+        )
+        msg = _get_rendered_message(
+            event_type='pppoe_suspended',
+            default_msg=default_msg,
+            customer_name=name,
+            reason=reason or 'subscription expired',
         )
         result = _send_once(f"pppoe_suspend:{customer.id}", phone, msg, ttl=3600)
         _log_sms(phone, msg, msg_type='automated', recipient_name=name, customer_id=customer.id)
@@ -430,10 +514,15 @@ class SMSNotifier:
         service = customer.services.filter(status='ACTIVE').first()
         plan_name = service.plan.name if (service and service.plan) else ''
         
-        msg = _render(
-            "Hi {customer_name}, your internet service has been restored! "
-            "Plan: {plan_name}. Welcome back.",
-            customer_name=name, plan_name=plan_name,
+        default_msg = (
+            f"Hi {name}, your internet service has been restored! "
+            f"Plan: {plan_name}. Welcome back."
+        )
+        msg = _get_rendered_message(
+            event_type='pppoe_resumed',
+            default_msg=default_msg,
+            customer_name=name,
+            plan_name=plan_name,
         )
         result = _send_once(f"pppoe_resume:{customer.id}", phone, msg, ttl=3600)
         _log_sms(phone, msg, msg_type='automated', recipient_name=name, customer_id=customer.id)
@@ -449,10 +538,16 @@ class SMSNotifier:
         if not phone:
             return False
         name = customer.user.first_name or "Customer"
-        msg = _render(
-            "Hi {customer_name}, your plan has been changed from {old_plan} "
-            "to {new_plan}. Enjoy!",
-            customer_name=name, old_plan=old_plan, new_plan=new_plan,
+        default_msg = (
+            f"Hi {name}, your plan has been changed from {old_plan} "
+            f"to {new_plan}. Enjoy!"
+        )
+        msg = _get_rendered_message(
+            event_type='pppoe_plan_changed',
+            default_msg=default_msg,
+            customer_name=name,
+            old_plan=old_plan,
+            new_plan=new_plan,
         )
         result = _send_once(f"pppoe_plan:{customer.id}:{new_plan}", phone, msg, ttl=3600)
         _log_sms(phone, msg, msg_type='automated', recipient_name=name, customer_id=customer.id)
@@ -468,9 +563,13 @@ class SMSNotifier:
         if not phone:
             return False
         name = customer.user.first_name or "Customer"
-        msg = _render(
-            "Hi {customer_name}, invoice #{invoice_number} of KES {amount} "
-            "is due on {due_date}. Pay to avoid disconnection.",
+        default_msg = (
+            f"Hi {name}, invoice #{invoice.invoice_number or str(invoice.id)} of KES {float(invoice.total_amount):,.0f} "
+            f"is due on {invoice.due_date.strftime('%d %b %Y') if invoice.due_date else 'N/A'}. Pay to avoid disconnection."
+        )
+        msg = _get_rendered_message(
+            event_type='pppoe_invoice_issued',
+            default_msg=default_msg,
             customer_name=name,
             invoice_number=invoice.invoice_number or str(invoice.id),
             amount=f"{float(invoice.total_amount):,.0f}",
@@ -492,10 +591,15 @@ class SMSNotifier:
                 return False
             
             plan = voucher.batch.hotspot_plan if (voucher.batch and hasattr(voucher.batch, 'hotspot_plan')) else None
-            msg = _render(
-                "Voucher: {code} | PIN: {pin} | Plan: {plan_name} | "
-                "Value: KES {face_value}. Enjoy your internet!",
-                code=voucher.code, pin=voucher.pin or '',
+            default_msg = (
+                f"Voucher: {voucher.code} | PIN: {voucher.pin or ''} | Plan: {plan.name if plan else 'Hotspot'} | "
+                f"Value: KES {float(voucher.face_value):,.0f}. Enjoy your internet!"
+            )
+            msg = _get_rendered_message(
+                event_type='hotspot_voucher_sold',
+                default_msg=default_msg,
+                code=voucher.code,
+                pin=voucher.pin or '',
                 plan_name=plan.name if plan else 'Hotspot',
                 face_value=f"{float(voucher.face_value):,.0f}",
             )
@@ -516,10 +620,15 @@ class SMSNotifier:
             phone = _fmt_phone(_customer_phone(customer))
             if not phone:
                 return False
-            msg = _render(
-                "Your voucher is ready! Code: {code} | PIN: {pin} | "
-                "Value: KES {face_value}.",
-                code=voucher.code, pin=voucher.pin or '',
+            default_msg = (
+                f"Your voucher is ready! Code: {voucher.code} | PIN: {voucher.pin or ''} | "
+                f"Value: KES {float(voucher.face_value):,.0f}."
+            )
+            msg = _get_rendered_message(
+                event_type='voucher_sold',
+                default_msg=default_msg,
+                code=voucher.code,
+                pin=voucher.pin or '',
                 face_value=f"{float(voucher.face_value):,.0f}",
             )
             result = _send_once(f"voucher:{voucher.id}", phone, msg, ttl=3600)
