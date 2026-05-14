@@ -882,3 +882,29 @@ class LoginOTPChallenge(models.Model):
 
     def __str__(self):
         return f"LoginChallenge<{self.user_id}:{self.id}>"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# LEAD TELEGRAM ALERT SIGNAL
+# ─────────────────────────────────────────────────────────────────────────────
+
+from django.db.models.signals import post_save
+from django.dispatch import receiver
+
+
+@receiver(post_save, sender=Lead)
+def notify_admins_of_new_lead(sender, instance, created, **kwargs):
+    """
+    Send a Telegram alert to superadmins whenever a new lead is created via the public landing page.
+    This runs asynchronously in a Celery task so the form submission doesn't wait for Telegram.
+    """
+    if created:  # Only trigger when a NEW lead is created, not updated
+        from apps.notifications.tasks import send_telegram_lead_alert
+        
+        # Send to the celery queue (async)
+        send_telegram_lead_alert.delay(
+            name=instance.name,
+            email=instance.email,
+            phone=instance.phone or 'N/A',
+            company=instance.company_name or 'Not specified'
+        )

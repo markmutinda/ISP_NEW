@@ -176,57 +176,101 @@ def process_alert_rules_task():
 
 @shared_task
 def retry_failed_notifications_task():
-    """Background task to retry failed notifications"""
-    try:
-        manager = NotificationManager()
-        failed_notifications = Notification.objects.filter(
-            status='failed',
-            retry_count__lt=models.F('max_retries'),
-            next_retry_at__lte=timezone.now()
-        )
-        
-        retried = 0
-        successful = 0
-        
-        for notification in failed_notifications:
-            success = manager.send_notification(notification)
-            if success:
-                successful += 1
-            retried += 1
-        
-        return {
-            'retried': retried,
-            'successful': successful
-        }
-    except Exception as e:
-        logger.error(f"Error retrying failed notifications: {str(e)}")
-        raise
+    """
+    Finds notifications that failed and attempts to resend them.
+    Loops through all tenants to find failures in each schema.
+    """
+    from django_tenants.utils import schema_context, get_tenant_model
+    from .services import NotificationManager
+    from .models import Notification
+    
+    TenantModel = get_tenant_model()
+    # Get all tenants except the public schema
+    tenants = TenantModel.objects.exclude(schema_name='public')
+    
+    total_retried = 0
+    total_successful = 0
+    
+    for tenant in tenants:
+        with schema_context(tenant.schema_name):
+            try:
+                manager = NotificationManager()
+                failed_notifications = Notification.objects.filter(
+                    status='failed',
+                    retry_count__lt=models.F('max_retries'),
+                    next_retry_at__lte=timezone.now()
+                )
+                
+                retried = 0
+                successful = 0
+                
+                for notification in failed_notifications:
+                    try:
+                        success = manager.send_notification(notification)
+                        if success:
+                            successful += 1
+                        retried += 1
+                    except Exception as e:
+                        logger.error(f"Error retrying notification {notification.id} in {tenant.schema_name}: {str(e)}")
+                        retried += 1
+                
+                total_retried += retried
+                total_successful += successful
+                
+                if retried > 0:
+                    logger.info(f"Retried {retried} notifications in {tenant.schema_name}, {successful} successful")
+                    
+            except Exception as e:
+                logger.error(f"Error retrying failed notifications in {tenant.schema_name}: {str(e)}")
+    
+    return {
+        'retried': total_retried,
+        'successful': total_successful
+    }
+
 
 @shared_task
 def clean_old_notifications_task(days_old=90):
-    """Background task to clean old notifications"""
-    try:
-        from django.utils import timezone
-        from datetime import timedelta
-        
-        cutoff_date = timezone.now() - timedelta(days=days_old)
-        
-        # Delete old notifications (keep failed for debugging)
-        deleted_count, _ = Notification.objects.filter(
-            created_at__lt=cutoff_date,
-            status__in=['sent', 'delivered', 'read']
-        ).delete()
-        
-        # Archive or delete old logs
-        # Implement based on your needs
-        
-        return {
-            'deleted_notifications': deleted_count,
-            'cutoff_date': cutoff_date
-        }
-    except Exception as e:
-        logger.error(f"Error cleaning old notifications: {str(e)}")
-        raise
+    """
+    Background task to clean old notifications across all tenants.
+    Loops through all tenants and deletes old notifications in each schema.
+    """
+    from django_tenants.utils import schema_context, get_tenant_model
+    from django.utils import timezone
+    from datetime import timedelta
+    from .models import Notification
+    
+    TenantModel = get_tenant_model()
+    # Get all tenants except the public schema
+    tenants = TenantModel.objects.exclude(schema_name='public')
+    
+    cutoff_date = timezone.now() - timedelta(days=days_old)
+    total_deleted = 0
+    
+    for tenant in tenants:
+        with schema_context(tenant.schema_name):
+            try:
+                # Delete old notifications (keep failed for debugging)
+                deleted_count, _ = Notification.objects.filter(
+                    created_at__lt=cutoff_date,
+                    status__in=['sent', 'delivered', 'read']
+                ).delete()
+                
+                total_deleted += deleted_count
+                
+                if deleted_count > 0:
+                    logger.info(f"Deleted {deleted_count} old notifications in {tenant.schema_name}")
+                    
+            except Exception as e:
+                logger.error(f"Error cleaning old notifications in {tenant.schema_name}: {str(e)}")
+    
+    logger.info(f"Total notifications deleted across all tenants: {total_deleted}")
+    
+    return {
+        'deleted_notifications': total_deleted,
+        'cutoff_date': cutoff_date,
+        'days_old': days_old
+    }
 
 
 @shared_task
@@ -323,3 +367,55 @@ def process_alert_rules_task_for_tenant(schema_name):
                 'error': str(e),
                 'schema': schema_name
             }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# TELEGRAM LEAD ALERT TASK
+# ─────────────────────────────────────────────────────────────────────────────
+
+@shared_task(bind=True, max_retries=2, default_retry_delay=30)
+def send_telegram_lead_alert(self, name: str, email: str, phone: str, company: str):
+    """
+    Send a Telegram alert to the superadmin group when a new ISP lead submits the contact form.
+    
+    This runs asynchronously in the background so the lead form submission doesn't have
+    to wait for the Telegram API to respond.
+    
+    Args:
+        name: Lead's full name
+        email: Lead's email address
+        phone: Lead's phone number
+        company: Lead's ISP/company name
+    """
+    from apps.notifications.services.telegram_service import TelegramService
+    
+    try:
+        # Format a nice looking message using basic HTML tags
+        message = (
+            f"🚨 <b>NEW ISP LEAD ALERT</b> 🚨\n\n"
+            f"👤 <b>Name:</b> {name}\n"
+            f"🏢 <b>Company:</b> {company}\n"
+            f"📞 <b>Phone:</b> {phone}\n"
+            f"✉️ <b>Email:</b> {email}\n\n"
+            f"<i>Log in to the Netily Superadmin dashboard to view details.</i>"
+        )
+        
+        service = TelegramService()
+        success = service.send_message_to_admins(message)
+        
+        if success:
+            logger.info(f"Telegram lead alert sent successfully for lead: {name} ({email})")
+        else:
+            logger.warning(f"Telegram lead alert failed for lead: {name} ({email})")
+            # Don't retry on failure — lead is already saved in the system
+            # This prevents duplicate notifications if the API is temporarily down
+            
+        return {'success': success, 'lead': name, 'email': email}
+        
+    except Exception as e:
+        logger.error(f"Error sending Telegram lead alert for {name} ({email}): {str(e)}")
+        # Only retry on connection/network errors, not on validation errors
+        if 'ConnectionError' in str(e) or 'timeout' in str(e).lower():
+            raise self.retry(exc=e)
+        # Otherwise, return failure without retry
+        return {'success': False, 'error': str(e), 'lead': name, 'email': email}

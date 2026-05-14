@@ -7,6 +7,8 @@ from pathlib import Path
 from datetime import timedelta
 import sys
 
+from ISP_NEW import config
+
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent.parent
 RUNNING_TESTS = 'test' in sys.argv
@@ -497,3 +499,9 @@ WG_SERVER_PORT       = int(os.environ.get('WG_SERVER_PORT', '51820'))
 WG_SERVER_PUBLIC_KEY = os.environ.get('WG_SERVER_PUBLIC_KEY', '')
 WG_INTERFACE         = os.environ.get('WG_INTERFACE', 'wg0')
 WG_PEERS_DIR         = os.environ.get('WG_PEERS_DIR', '/etc/wireguard/peers')
+
+
+# TELEGRAM SETTINGS
+TELEGRAM_BOT_TOKEN = config('TELEGRAM_BOT_TOKEN', default='')
+_chat_ids = config('TELEGRAM_ADMIN_CHAT_IDS', default='')
+TELEGRAM_ADMIN_CHAT_IDS = [x.strip() for x in _chat_ids.split(',') if x.strip()]
