@@ -252,15 +252,25 @@ class CaptivePortalView(APIView):
                         'support_phone': '',
                         'announcement_text': '',
                         'gateway_ip': '',
+                        'router_logo_url': None,  # ← NEW
                     }
                     branding_data = None
                 else:
+                    # Build portal_config with router_logo_url
+                    router_logo_url = None
+                    if getattr(router, 'logo', None):
+                        try:
+                            router_logo_url = request.build_absolute_uri(router.logo.url)
+                        except Exception:
+                            pass
+
                     portal_config = {
                         'template_id': router.template_id or 1,
                         'hotspot_name': router.hotspot_name or router.name,
                         'support_phone': router.support_phone or '',
                         'announcement_text': router.announcement_text or '',
                         'gateway_ip': router.gateway_ip,
+                        'router_logo_url': router_logo_url,  # ← NEW
                     }
 
                     branding_data = None
@@ -290,6 +300,17 @@ class CaptivePortalView(APIView):
                                 portal_config['support_phone'] = branding.support_phone
                     except Exception:
                         logger.debug("CaptivePortal: no branding found for router %s", router_id)
+
+                    # ── FALLBACK: use Router.logo if no branding logo set ──
+                    if router and getattr(router, 'logo', None):
+                        try:
+                            router_logo_url = request.build_absolute_uri(router.logo.url)
+                            if branding_data is None:
+                                branding_data = {'logo_url': router_logo_url}
+                            elif not branding_data.get('logo_url'):
+                                branding_data['logo_url'] = router_logo_url
+                        except Exception:
+                            pass
 
                 plans_data = []
                 if router is not None:
@@ -429,11 +450,24 @@ class HotspotPlansView(APIView):
                 'support_email': branding.support_email,
             }
 
+        # FALLBACK: use Router.logo if no branding logo
+        router_logo_url = None
+        if getattr(router, 'logo', None):
+            try:
+                router_logo_url = request.build_absolute_uri(router.logo.url)
+                if branding_data is None:
+                    branding_data = {'logo_url': router_logo_url}
+                elif not branding_data.get('logo_url'):
+                    branding_data['logo_url'] = router_logo_url
+            except Exception:
+                pass
+
         portal_config = {
             'template_id': router.template_id or 1,
             'hotspot_name': router.hotspot_name or router.name,
             'support_phone': router.support_phone or (branding.support_phone if branding else ''),
             'announcement_text': router.announcement_text or '',
+            'router_logo_url': router_logo_url,  # ← NEW
         }
 
         payload = {
