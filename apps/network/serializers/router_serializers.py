@@ -1,6 +1,7 @@
 # apps/network/serializers/router_serializers.py
 
 from rest_framework import serializers
+from django.conf import settings
 from apps.network.models.router_models import Router, RouterEvent
 from apps.core.models import Company
 
@@ -32,6 +33,7 @@ class RouterSerializer(serializers.ModelSerializer):
     auth_status = serializers.SerializerMethodField()
     is_editable = serializers.SerializerMethodField()
     magic_link = serializers.SerializerMethodField()
+    remote_access_url = serializers.SerializerMethodField()
 
     class Meta:
         model = Router
@@ -56,6 +58,8 @@ class RouterSerializer(serializers.ModelSerializer):
             'config_type',
             # Captive Portal Customisation
             'template_id', 'hotspot_name', 'support_phone', 'announcement_text', 'logo',
+            # Remote access ports (HAProxy managed)
+            'winbox_remote_port', 'api_remote_port', 'remote_access_url',
             'created_at', 'updated_at',
         ]
         extra_kwargs = {
@@ -91,6 +95,9 @@ class RouterSerializer(serializers.ModelSerializer):
             'ca_certificate': {'read_only': True},
             'client_certificate': {'read_only': True},
             'client_key': {'read_only': True},
+            # Remote access ports (can be updated by system, but read-only for API)
+            'winbox_remote_port': {'read_only': True},
+            'api_remote_port': {'read_only': True},
 
             # Captive portal UI fields - allow read/write
             'template_id': {'required': False},
@@ -125,6 +132,22 @@ class RouterSerializer(serializers.ModelSerializer):
             if hasattr(request, 'tenant') and request.tenant and obj.tenant_subdomain:
                 return request.tenant.subdomain == obj.tenant_subdomain
         return False
+
+    def get_remote_access_url(self, obj):
+        """
+        Generate remote access URLs for Winbox and API access via HAProxy.
+        Returns None if router doesn't have remote ports assigned or VPN not provisioned.
+        """
+        if not obj.winbox_remote_port or not obj.api_remote_port or not obj.vpn_provisioned:
+            return None
+            
+        vpn_host = getattr(settings, 'WG_SERVER_HOST', 'vpn.netily.co.ke')
+        
+        return {
+            'winbox': f"{vpn_host}:{obj.winbox_remote_port}",
+            'api': f"{vpn_host}:{obj.api_remote_port}",
+            'instructions': f"Open Winbox → Connect to {vpn_host}:{obj.winbox_remote_port} (username: {obj.api_username or 'netily_api'})"
+        }
     
     def create(self, validated_data):
         request = self.context.get('request')

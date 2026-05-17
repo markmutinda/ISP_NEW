@@ -53,6 +53,26 @@ services:
     networks:
       - isp_network
 
+  haproxy:
+    image: haproxy:2.9-alpine
+    container_name: netily_haproxy
+    restart: unless-stopped
+    network_mode: host   # Critical: bypasses Docker proxy, HAProxy owns the ports directly
+    volumes:
+      - ./haproxy:/etc/haproxy
+      - /var/run/docker.sock:/var/run/docker.sock
+    depends_on:
+      - wireguard
+    deploy:
+      resources:
+        limits:
+          memory: 64M
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
   web:
     build: 
       context: ..

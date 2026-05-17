@@ -179,6 +179,18 @@ class Router(AuditMixin):
     vpn_last_seen = models.DateTimeField(null=True, blank=True)
 
     # ────────────────────────────────────────────────────────────────
+    # REMOTE ACCESS PORTS (assigned by HAProxy manager)
+    # ────────────────────────────────────────────────────────────────
+    winbox_remote_port = models.PositiveIntegerField(
+        null=True, blank=True,
+        help_text="External port for remote Winbox access via VPN gateway"
+    )
+    api_remote_port = models.PositiveIntegerField(
+        null=True, blank=True,
+        help_text="External port for remote API access via VPN gateway"
+    )
+
+    # ────────────────────────────────────────────────────────────────
     # SERVICE FLAGS & LEGACY COMPATIBILITY
     # ────────────────────────────────────────────────────────────────
     router_type = models.CharField(max_length=50, choices=ROUTER_TYPES, default='mikrotik')
@@ -286,6 +298,8 @@ class Router(AuditMixin):
             models.Index(fields=['auth_key']),
             models.Index(fields=['tenant_subdomain']),
             models.Index(fields=['status']),
+            models.Index(fields=['winbox_remote_port']),
+            models.Index(fields=['api_remote_port']),
         ]
 
     def __str__(self):
