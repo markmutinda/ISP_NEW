@@ -59,7 +59,7 @@ services:
     restart: unless-stopped
     network_mode: host   # Critical: bypasses Docker proxy, HAProxy owns the ports directly
     volumes:
-      - ./haproxy:/etc/haproxy
+      - ./haproxy:/usr/local/etc/haproxy
       - /var/run/docker.sock:/var/run/docker.sock
     depends_on:
       - wireguard

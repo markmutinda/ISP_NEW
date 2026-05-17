@@ -1,7 +1,7 @@
 global
     log stdout format raw local0
     maxconn 4096
-    daemon
+   
 
 defaults
     log global
