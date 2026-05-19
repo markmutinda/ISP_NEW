@@ -40,6 +40,7 @@ from .serializers import (
 from apps.core.serializers import ChangelogSerializer, FeatureRequestSerializer
 from django_tenants.utils import schema_context, get_public_schema_name
 from django.shortcuts import get_object_or_404
+from .tasks import queue_changelog_notifications
 
 logger = logging.getLogger(__name__)
 
@@ -2004,9 +2005,17 @@ class SuperadminChangelogListView(APIView):
         _ensure_public()
         serializer = ChangelogSerializer(data=request.data)
         if serializer.is_valid():
+            notification_channels = serializer.get_notification_channels_requested()
             changelog = serializer.save()
+            if notification_channels and changelog.is_published:
+                queue_changelog_notifications(changelog.id, notification_channels)
             _log_action(request.user, "create", "Changelog", changelog.title, changelog.id, request=request)
-            return Response(serializer.data, status=status.HTTP_201_CREATED)
+            response_data = ChangelogSerializer(changelog).data
+            response_data["notification_request"] = {
+                "channels": notification_channels,
+                "queued": bool(notification_channels and changelog.is_published),
+            }
+            return Response(response_data, status=status.HTTP_201_CREATED)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
 

@@ -6,6 +6,7 @@ from datetime import timedelta
 import uuid
 
 from apps.core.models import User
+from apps.core.email_delivery import send_transactional_email
 from apps.core.otp_service import OTPService, OTPRateLimitedError, OTPError
 
 
@@ -103,3 +104,22 @@ class OTPServiceTests(TestCase):
             tenant_scope="tenant_demo",
             session_scope="browser-a",
         )
+
+
+@override_settings(
+    EMAIL_BACKEND="django.core.mail.backends.locmem.EmailBackend",
+    RESEND_API_KEY="",
+)
+class TransactionalEmailTests(TestCase):
+    def test_smtp_fallback_returns_delivery_feedback(self):
+        result = send_transactional_email(
+            subject="Welcome",
+            recipient="tenant@example.com",
+            plain_message="Plain body",
+            html_message="<p>HTML body</p>",
+            from_email="Netily <noreply@example.com>",
+        )
+
+        self.assertTrue(result["sent"])
+        self.assertEqual(result["provider"], "smtp")
+        self.assertEqual(len(mail.outbox), 1)

@@ -622,15 +622,55 @@ class ChangelogSerializer(serializers.ModelSerializer):
     """Serializer for Changelog model"""
     
     update_type_display = serializers.CharField(source='get_update_type_display', read_only=True)
+    notify_email = serializers.BooleanField(write_only=True, required=False, default=False)
+    notify_sms = serializers.BooleanField(write_only=True, required=False, default=False)
+    notify_in_app = serializers.BooleanField(write_only=True, required=False, default=True)
     
     class Meta:
         model = Changelog
         fields = [
             'id', 'title', 'version', 'content', 'update_type',
             'update_type_display', 'is_published', 'release_date',
+            'notification_channels', 'notification_sent_at', 'notification_summary',
+            'notify_email', 'notify_sms', 'notify_in_app',
             'created_at', 'updated_at'
         ]
-        read_only_fields = ['id', 'created_at', 'updated_at']
+        read_only_fields = ['id', 'notification_channels', 'notification_sent_at', 'notification_summary', 'created_at', 'updated_at']
+
+    def validate(self, data):
+        data = super().validate(data)
+        notify_email = data.get('notify_email', False)
+        notify_sms = data.get('notify_sms', False)
+        notify_in_app = data.get('notify_in_app', False)
+        is_published = data.get('is_published', getattr(self.instance, 'is_published', True))
+
+        if (notify_email or notify_sms or notify_in_app) and not is_published:
+            raise serializers.ValidationError({
+                'is_published': 'Publish the changelog before sending tenant notifications.'
+            })
+        return data
+
+    def create(self, validated_data):
+        validated_data.pop('notify_email', None)
+        validated_data.pop('notify_sms', None)
+        validated_data.pop('notify_in_app', None)
+        return super().create(validated_data)
+
+    def update(self, instance, validated_data):
+        validated_data.pop('notify_email', None)
+        validated_data.pop('notify_sms', None)
+        validated_data.pop('notify_in_app', None)
+        return super().update(instance, validated_data)
+
+    def get_notification_channels_requested(self):
+        channels = []
+        if self.validated_data.get('notify_email'):
+            channels.append('email')
+        if self.validated_data.get('notify_sms'):
+            channels.append('sms')
+        if self.validated_data.get('notify_in_app'):
+            channels.append('in_app')
+        return channels
 
 
 class FeatureRequestSerializer(serializers.ModelSerializer):

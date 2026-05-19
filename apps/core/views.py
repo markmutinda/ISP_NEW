@@ -21,13 +21,13 @@ from .models import GlobalSystemSettings  # Add this
 from .serializers import GlobalSystemSettingsSerializer, CustomTokenRefreshSerializer  # Add this
 from rest_framework_simplejwt.exceptions import InvalidToken  # Already needed for token fix
 from .serializers import CompanyRegisterSerializer
-from django.core.mail import send_mail  # Add this for email
 from django.template.loader import render_to_string  # For email template
 from django.utils.html import strip_tags  # For plain text email
 from .models import Domain   # ← This is your custom Domain in core/models.
 import logging
 from django.shortcuts import get_object_or_404  # Add this import
 from .otp_service import OTPService, OTPError, OTPRateLimitedError
+from .email_delivery import send_transactional_email
 
 from .models import User, Company, SystemSettings, AuditLog, Tenant, Changelog, FeatureRequest, FeatureUpvote  # Add FeatureRequest and FeatureUpvote here
 from .serializers import (
@@ -1183,15 +1183,12 @@ class CompanyRegisterView(generics.CreateAPIView):
         user.set_password(data['admin_password'])
         user.save()
 
-        try:
-            self.send_welcome_email(
-                user=user,
-                tenant=tenant,
-                domain_name=domain_name,
-                password=data['admin_password'],
-            )
-        except Exception:
-            logger.exception("Welcome email failed for tenant registration: %s", tenant.subdomain)
+        email_result = self.send_welcome_email(
+            user=user,
+            tenant=tenant,
+            domain_name=domain_name,
+            password=data['admin_password'],
+        )
     
         # Removed sensitive debug print line
         
@@ -1201,7 +1198,7 @@ class CompanyRegisterView(generics.CreateAPIView):
         # Generate tokens
         refresh = RefreshToken.for_user(user)
         
-        return Response({
+        response_payload = {
             'message': 'Company created successfully',
             'company': company.name,
             'tenant': tenant.subdomain,
@@ -1224,7 +1221,14 @@ class CompanyRegisterView(generics.CreateAPIView):
                     'subdomain': tenant.subdomain,
                 },
             },
-        }, status=status.HTTP_201_CREATED)
+            'welcome_email': email_result,
+        }
+        if not email_result.get('sent'):
+            response_payload['warnings'] = [
+                'Tenant was created, but the welcome email was not delivered.'
+            ]
+
+        return Response(response_payload, status=status.HTTP_201_CREATED)
 
     def send_welcome_email(self, user, tenant, domain_name, password):
         """Send welcome email with subdomain and credentials"""
@@ -1242,15 +1246,20 @@ class CompanyRegisterView(generics.CreateAPIView):
         html_message = render_to_string('emails/welcome_email.html', context)
         plain_message = strip_tags(html_message)
         
-        # Send email
-        send_mail(
-            subject,
-            plain_message,
-            settings.DEFAULT_FROM_EMAIL,
-            [user.email],
+        result = send_transactional_email(
+            subject=subject,
+            recipient=user.email,
+            plain_message=plain_message,
             html_message=html_message,
-            fail_silently=False,
+            from_email=settings.DEFAULT_FROM_EMAIL,
         )
+        if not result.get('sent'):
+            logger.error(
+                "Welcome email failed for tenant registration %s: %s",
+                tenant.subdomain,
+                result.get('error'),
+            )
+        return result
 
 
 class PlatformChangelogView(APIView):

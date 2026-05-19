@@ -79,6 +79,8 @@ class DomainSerializer(serializers.ModelSerializer):
 
 class TenantListSerializer(serializers.ModelSerializer):
     """Lightweight serializer for the tenant table."""
+    status = serializers.SerializerMethodField()
+    subscription_expiry = serializers.SerializerMethodField()
     company_name = serializers.CharField(source="company.name", read_only=True)
     company_email = serializers.EmailField(source="company.email", read_only=True)
     company_phone = serializers.CharField(source="company.phone_number", read_only=True)
@@ -86,6 +88,9 @@ class TenantListSerializer(serializers.ModelSerializer):
     company_logo = serializers.ImageField(source="company.logo", read_only=True)
     subscription_plan = serializers.SerializerMethodField()
     subscription_status = serializers.SerializerMethodField()
+    subscription_status_code = serializers.SerializerMethodField()
+    subscription_status_display = serializers.SerializerMethodField()
+    tenant_status_display = serializers.SerializerMethodField()
     days_left = serializers.SerializerMethodField()
     domains = DomainSerializer(many=True, read_only=True)
     
@@ -105,6 +110,7 @@ class TenantListSerializer(serializers.ModelSerializer):
             "billing_cycle", "monthly_rate", "next_billing_date",
             "company_name", "company_email", "company_phone",
             "company_type", "company_logo", "subscription_plan", "subscription_status",
+            "subscription_status_code", "subscription_status_display", "tenant_status_display",
             "days_left", "domains",
             "is_active", "created_at", "updated_at",
             # NEW FIELDS
@@ -112,31 +118,78 @@ class TenantListSerializer(serializers.ModelSerializer):
             "current_cycle_status", "current_cycle_start", "current_cycle_end",
         ]
 
-    def get_days_left(self, obj):
-        if not obj.subscription_expiry:
+    def _get_subscription(self, obj):
+        try:
+            return CompanySubscription.objects.select_related('plan').filter(company=obj.company).first()
+        except Exception:
             return None
-        delta = obj.subscription_expiry - timezone.now().date()
+
+    def _get_effective_expiry(self, obj):
+        sub = self._get_subscription(obj)
+        if sub:
+            if sub.is_trial and sub.trial_ends_at:
+                return sub.trial_ends_at.date()
+            if sub.current_period_end:
+                return sub.current_period_end.date()
+        return obj.subscription_expiry
+
+    def get_status(self, obj):
+        sub = self._get_subscription(obj)
+        if sub:
+            if sub.status == 'trialing':
+                return 'trial'
+            return sub.status
+        return obj.status
+
+    def get_subscription_expiry(self, obj):
+        return self._get_effective_expiry(obj)
+
+    def get_days_left(self, obj):
+        expiry = self._get_effective_expiry(obj)
+        if not expiry:
+            return None
+        delta = expiry - timezone.now().date()
         return max(delta.days, 0)
 
     def get_subscription_plan(self, obj):
         """Read plan name from CompanySubscription (authoritative source)."""
-        try:
-            sub = CompanySubscription.objects.select_related('plan').filter(company=obj.company).first()
-            if sub and sub.plan:
-                return sub.plan.name
-        except Exception:
-            pass
+        sub = self._get_subscription(obj)
+        if sub and sub.plan:
+            return sub.plan.name
         return getattr(obj.company, 'subscription_plan', None)
 
     def get_subscription_status(self, obj):
-        """Return actual subscription status from CompanySubscription."""
-        try:
-            sub = CompanySubscription.objects.filter(company=obj.company).first()
-            if sub:
-                return sub.status
-        except Exception:
-            pass
+        return self.get_subscription_status_display(obj)
+
+    def get_subscription_status_code(self, obj):
+        sub = self._get_subscription(obj)
+        if sub:
+            return sub.status
         return obj.status
+
+    def get_subscription_status_display(self, obj):
+        labels = {
+            'active': 'Active',
+            'trialing': 'Trial',
+            'past_due': 'Payment overdue',
+            'cancelled': 'Cancelled',
+            'expired': 'Expired',
+            'trial': 'Trial',
+            'suspended': 'Suspended',
+        }
+        code = self.get_subscription_status_code(obj)
+        return labels.get(code, code.replace('_', ' ').title())
+
+    def get_tenant_status_display(self, obj):
+        labels = {
+            'active': 'Active',
+            'trial': 'Trial',
+            'suspended': 'Suspended',
+            'cancelled': 'Cancelled',
+            'expired': 'Expired',
+        }
+        code = self.get_status(obj)
+        return labels.get(code, code.replace('_', ' ').title())
     
     def get_active_cycle(self, obj):
         """Helper to get the active billing cycle for a tenant."""

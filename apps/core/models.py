@@ -653,6 +653,9 @@ class Changelog(models.Model):
     
     is_published = models.BooleanField(default=True, help_text="Uncheck to hide from ISPs as a draft")
     release_date = models.DateField(auto_now_add=True)
+    notification_channels = models.JSONField(default=list, blank=True)
+    notification_sent_at = models.DateTimeField(null=True, blank=True)
+    notification_summary = models.JSONField(default=dict, blank=True)
     
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)

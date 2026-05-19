@@ -10,6 +10,7 @@ from django.template.loader import render_to_string
 from django.utils.html import strip_tags
 from typing import Dict, List, Optional, Tuple, Union
 import threading
+from apps.core.email_delivery import send_transactional_email
 
 logger = logging.getLogger(__name__)
 
@@ -87,6 +88,34 @@ class EmailService:
                 tracking_bcc = f"track-{metadata['notification_id']}@tracking.{settings.DOMAIN}"
                 final_bcc.append(tracking_bcc)
             
+            if len(valid_recipients) == 1 and not cc and not final_bcc and not attachments:
+                helper_result = send_transactional_email(
+                    subject=subject,
+                    recipient=valid_recipients[0],
+                    plain_message=text_message,
+                    html_message=html_message,
+                    from_email=sender,
+                )
+                self._log_email_send(
+                    recipients=valid_recipients,
+                    subject=subject,
+                    success=helper_result.get('sent', False),
+                    message_id=helper_result.get('message_id'),
+                    metadata=metadata
+                )
+                if helper_result.get('sent'):
+                    return True, helper_result.get('message_id'), {
+                        'recipients': valid_recipients,
+                        'backend': helper_result.get('provider', self.backend),
+                        'attempts': helper_result.get('attempts', []),
+                    }
+                return False, None, {
+                    'error': helper_result.get('error', 'Email delivery failed'),
+                    'recipients': valid_recipients,
+                    'backend': helper_result.get('provider', self.backend),
+                    'attempts': helper_result.get('attempts', []),
+                }
+
             # Send based on backend
             if self.backend == 'django':
                 success, message_id = self._send_via_django(
