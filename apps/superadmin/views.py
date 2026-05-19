@@ -25,6 +25,7 @@ from rest_framework.views import APIView
 
 from apps.core.models import Tenant, Company, Domain, User, AuditLog, GlobalSystemSettings, Changelog, FeatureRequest
 from .permissions import IsSuperAdmin
+from .models import TenantDeletionJob
 from .serializers import (
     TenantListSerializer,
     TenantDetailSerializer,
@@ -40,7 +41,7 @@ from .serializers import (
 from apps.core.serializers import ChangelogSerializer, FeatureRequestSerializer
 from django_tenants.utils import schema_context, get_public_schema_name
 from django.shortcuts import get_object_or_404
-from .tasks import queue_changelog_notifications
+from .tasks import queue_changelog_notifications, queue_tenant_deletion
 
 logger = logging.getLogger(__name__)
 
@@ -79,6 +80,28 @@ def _log_action(user, action, model_name, object_repr=None, object_id=None, chan
         )
     except Exception as e:
         logger.error("Failed to write audit log: %s", e)
+
+
+def _serialize_deletion_job(job: TenantDeletionJob) -> dict:
+    return {
+        "id": str(job.id),
+        "tenant_id": str(job.tenant_id) if job.tenant_id else None,
+        "company_name": job.company_name,
+        "subdomain": job.subdomain,
+        "schema_name": job.schema_name,
+        "status": job.status,
+        "current_step": job.current_step,
+        "progress_percent": job.progress_percent,
+        "status_message": job.status_message,
+        "error_message": job.error_message,
+        "requested_options": job.requested_options,
+        "cleanup_summary": job.cleanup_summary,
+        "step_history": job.step_history,
+        "created_at": job.created_at.isoformat() if job.created_at else None,
+        "updated_at": job.updated_at.isoformat() if job.updated_at else None,
+        "started_at": job.started_at.isoformat() if job.started_at else None,
+        "finished_at": job.finished_at.isoformat() if job.finished_at else None,
+    }
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -398,6 +421,91 @@ class TenantDetailView(RetrieveUpdateDestroyAPIView):
                 CompanyModel.objects.filter(pk=company.pk).delete()
             except Exception as e:
                 logger.warning("Could not delete company for %s: %s", schema, e)
+
+
+    def destroy(self, request, *args, **kwargs):
+        return Response(
+            {
+                "detail": "Permanent deletion now runs as a tracked background job. "
+                "Use the tenant delete-request endpoint instead."
+            },
+            status=status.HTTP_405_METHOD_NOT_ALLOWED,
+        )
+
+
+class TenantDeletionRequestView(APIView):
+    permission_classes = SUPERADMIN_PERMS
+
+    def post(self, request, pk):
+        _ensure_public()
+        tenant = get_object_or_404(
+            Tenant.objects.select_related("company").exclude(schema_name__in=PROTECTED_SCHEMAS),
+            pk=pk,
+        )
+
+        confirmation_name = str(request.data.get("confirmation_name", "")).strip()
+        allowed_confirmations = {tenant.company.name.strip().lower(), tenant.subdomain.strip().lower()}
+        if confirmation_name.lower() not in allowed_confirmations:
+            return Response(
+                {
+                    "detail": "Confirmation text does not match the tenant name.",
+                    "expected": tenant.company.name,
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        active_job = (
+            TenantDeletionJob.objects.filter(
+                tenant=tenant,
+                status__in=[TenantDeletionJob.STATUS_QUEUED, TenantDeletionJob.STATUS_RUNNING],
+            )
+            .order_by("-created_at")
+            .first()
+        )
+        if active_job:
+            return Response(_serialize_deletion_job(active_job), status=status.HTTP_202_ACCEPTED)
+
+        job = TenantDeletionJob.objects.create(
+            tenant=tenant,
+            requested_by=request.user,
+            company_name=tenant.company.name,
+            subdomain=tenant.subdomain,
+            schema_name=tenant.schema_name,
+            status=TenantDeletionJob.STATUS_QUEUED,
+            current_step=TenantDeletionJob.STEP_QUEUED,
+            progress_percent=0,
+            status_message="Deletion queued. Access revocation will start shortly.",
+            requested_options={
+                "cleanup_media": True,
+                "cleanup_integrations": True,
+                "revoke_access_immediately": True,
+            },
+        )
+
+        _log_action(
+            request.user,
+            "delete",
+            "TenantDeletionJob",
+            object_repr=tenant.subdomain,
+            object_id=job.id,
+            changes={
+                "tenant_id": str(tenant.id),
+                "schema_name": tenant.schema_name,
+                "status": "queued",
+            },
+            request=request,
+        )
+        queue_tenant_deletion(str(job.id))
+        return Response(_serialize_deletion_job(job), status=status.HTTP_202_ACCEPTED)
+
+
+class TenantDeletionJobDetailView(APIView):
+    permission_classes = SUPERADMIN_PERMS
+
+    def get(self, request, job_id):
+        _ensure_public()
+        job = get_object_or_404(TenantDeletionJob.objects.select_related("tenant"), pk=job_id)
+        return Response(_serialize_deletion_job(job))
 
 
 class CompanyUpdateView(APIView):
