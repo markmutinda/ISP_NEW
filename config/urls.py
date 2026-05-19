@@ -121,6 +121,7 @@ hotspot_admin_api_urlpatterns = [
 # This is called by Tuma's servers
 # ==========================
 from apps.superadmin.views import SubscriptionStkCallbackView
+from apps.subscriptions.views import BillingCalculatorView
 
 tuma_webhook_api_urlpatterns = [
     path('webhooks/tuma/', include(tuma_public_urlpatterns)),
@@ -131,6 +132,12 @@ tuma_webhook_api_urlpatterns = [
 urlpatterns = [
     # Admin URLs (using custom admin site)
     path('admin/', admin_site.urls),
+
+    # Public calculator aliases for frontend/proxy compatibility
+    path('api/billing-calculator', BillingCalculatorView.as_view(), name='billing-calculator-compat-no-slash'),
+    path('api/billing-calculator/', BillingCalculatorView.as_view(), name='billing-calculator-compat'),
+    path('billing-estimator', BillingCalculatorView.as_view(), name='billing-estimator-compat-no-slash'),
+    path('billing-estimator/', BillingCalculatorView.as_view(), name='billing-estimator-compat'),
     
     # API URLs (versioned)
     path('api/v1/', include(api_urlpatterns)),
