@@ -71,9 +71,18 @@ class TenantDeletionJob(models.Model):
     class Meta:
         ordering = ["-created_at"]
         indexes = [
-            models.Index(fields=["status", "created_at"]),
-            models.Index(fields=["tenant", "created_at"]),
-            models.Index(fields=["schema_name", "created_at"]),
+            models.Index(
+                fields=["status", "created_at"],
+                name="superadmin__status_7e0cca_idx",
+            ),
+            models.Index(
+                fields=["tenant", "created_at"],
+                name="superadmin__tenant_i_bdb6cb_idx",
+            ),
+            models.Index(
+                fields=["schema_name", "created_at"],
+                name="superadmin__schema__0cc857_idx",
+            ),
         ]
 
     def __str__(self):

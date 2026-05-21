@@ -117,7 +117,7 @@ class DashboardView(APIView):
         now = timezone.now()
         thirty_days_ago = now - timedelta(days=30)
 
-        tenants = Tenant.objects.all()
+        tenants = Tenant.objects.exclude(schema_name__in=PROTECTED_SCHEMAS)
         total_tenants = tenants.count()
         active_tenants = tenants.filter(status="active").count()
         trial_tenants = tenants.filter(status="trial").count()
@@ -919,9 +919,11 @@ class PaymentListView(APIView):
         """Fetch billing.Payment records across all tenant schemas via raw SQL."""
         data = []
         try:
-            tenants = Tenant.objects.filter(
-                status__in=["active", "trial"]
-            ).select_related("company")
+            tenants = (
+                Tenant.objects.filter(status__in=["active", "trial"])
+                .exclude(schema_name__in=PROTECTED_SCHEMAS)
+                .select_related("company")
+            )
 
             for tenant in tenants:
                 schema = tenant.schema_name
@@ -1013,7 +1015,9 @@ class PaymentSummaryView(APIView):
         tenant_this_month = Decimal("0.00")
         tenant_last_month = Decimal("0.00")
         try:
-            tenants = Tenant.objects.filter(status__in=["active", "trial"])
+            tenants = Tenant.objects.filter(status__in=["active", "trial"]).exclude(
+                schema_name__in=PROTECTED_SCHEMAS
+            )
             for tenant in tenants:
                 schema = tenant.schema_name
                 try:
