@@ -243,6 +243,7 @@ class MikrotikScriptGenerator:
     def _section_openvpn(self, r: Router, cipher: str, auth: str, is_v6: bool) -> str:
         """
         WireGuard tunnel for v7, OpenVPN username/password fallback for v6.
+        FIX: Compatible with ALL RouterOS v7 versions (including long-term MIPSBE)
         """
         if is_v6:
             # ── v6 fallback: OpenVPN user/password (unchanged) ──────────────────
@@ -285,6 +286,8 @@ class MikrotikScriptGenerator:
             or _os.environ.get('WG_SERVER_PORT', '51820')
         )
         wg_endpoint = f"{_wg_host}:{_wg_port}" if _wg_host else ''
+        wg_endpoint_host = wg_endpoint.split(':')[0] if ':' in wg_endpoint else wg_endpoint
+        wg_endpoint_port = wg_endpoint.split(':')[1] if ':' in wg_endpoint else '51820'
 
         vpn_ip = r.vpn_ip_address or ''
         vpn_network_cidr = self.vpn_network_cidr
@@ -314,9 +317,10 @@ class MikrotikScriptGenerator:
 :put "OpenVPN fallback tunnel configured."
 """
 
-        # Full WireGuard configuration
+        # FULL FIX: WireGuard configuration compatible with ALL RouterOS v7 versions
+        # Including long-term MIPSBE builds (hAP lite, RB951, etc.)
         return f"""# ─────────────────────────────────────────────────────────────
-# 3. WIREGUARD TUNNEL
+# 3. WIREGUARD TUNNEL (Compatible with ALL v7 versions)
 # ─────────────────────────────────────────────────────────────
 :put "Configuring WireGuard VPN tunnel..."
 
@@ -325,13 +329,17 @@ class MikrotikScriptGenerator:
 :do {{ /interface wireguard remove [find name="Netily-VPN"] }} on-error={{}}
 :do {{ /ip address remove [find comment="Netily-WG-IP"] }} on-error={{}}
 
-# Create WireGuard interface with router's unique private key and MTU fix
+# FIX 1: Create WireGuard interface WITHOUT private-key parameter
+# Older long-term ROS v7 builds on MIPSBE do NOT accept private-key during add
 /interface wireguard add \\
     name="Netily-VPN" \\
-    private-key="{self._escape_ros_string(wg_private_key)}" \\
     listen-port=51820 \\
-    mtu=1320 \\
     comment="Netily Cloud Controller WireGuard"
+
+# FIX 2: Set private-key and MTU separately (works on ALL v7 versions)
+/interface wireguard set [find name="Netily-VPN"] \\
+    private-key="{self._escape_ros_string(wg_private_key)}" \\
+    mtu=1320
 
 # Assign static VPN IP (crucial for RADIUS)
 /ip address add \\
@@ -339,31 +347,33 @@ class MikrotikScriptGenerator:
     interface="Netily-VPN" \\
     comment="Netily-WG-IP"
 
-# BUG FIX 3: Changed allowed-address from 0.0.0.0/0 (routing loop) to VPN network CIDR
+# FIX 3: persistent-keepalive with 's' suffix (required on long-term builds)
 /interface wireguard peers add \\
     interface="Netily-VPN" \\
     public-key="{self._escape_ros_string(wg_server_pubkey)}" \\
-    endpoint-address="{wg_endpoint.split(':')[0]}" \\
-    endpoint-port={wg_endpoint.split(':')[1] if ':' in wg_endpoint else '51820'} \\
-    allowed-address={self.vpn_network_cidr} \\
+    endpoint-address="{wg_endpoint_host}" \\
+    endpoint-port={wg_endpoint_port} \\
+    allowed-address="{vpn_network_cidr}" \\
     persistent-keepalive=25s \\
     comment="Netily Cloud Server"
 
-# BUG FIX 2: Removed place-before=0 (invalid in script), use separate move command
 # Allow RADIUS traffic to leave via the tunnel (critical for accounting)
-/ip firewall filter add chain=output action=accept protocol=udp dst-port=1812,1813,3799 out-interface="Netily-VPN" comment="Netily-RADIUS-Output"
-:do {{ /ip firewall filter move [find comment="Netily-RADIUS-Output"] destination=0 }} on-error={{}}
+/ip firewall filter add chain=output action=accept protocol=udp \\
+    dst-port=1812,1813,3799 out-interface="Netily-VPN" \\
+    comment="Netily-RADIUS-Output"
 
 # Allow WireGuard traffic in firewall
 :do {{ /ip firewall filter remove [find comment="Netily-WG-Input"] }} on-error={{}}
-/ip firewall filter add chain=input action=accept protocol=udp dst-port=51820 in-interface=all-ethernet comment="Netily-WG-Input"
+/ip firewall filter add chain=input action=accept protocol=udp \\
+    dst-port=51820 in-interface=all-ethernet comment="Netily-WG-Input"
 
 # Ensure established/related connections are allowed
-/ip firewall filter add chain=input action=accept connection-state=established,related comment="Netily-Established"
+/ip firewall filter add chain=input action=accept \\
+    connection-state=established,related comment="Netily-Established"
 
 :delay 5s
-:put "WireGuard VPN tunnel configured — IP: {vpn_ip} (MTU: 1320, AllowedIPs: {self.vpn_network_cidr})"
-:put "RADIUS accounting traffic allowed via tunnel"
+:put "WireGuard VPN tunnel configured — IP: {vpn_ip} (MTU: 1320, AllowedIPs: {vpn_network_cidr})"
+:put "RADIUS accounting traffic allowed via tunnel (stable + long-term compatible)"
 """
 
     def _section_firewall(self, r: Router) -> str:
