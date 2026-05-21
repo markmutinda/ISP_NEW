@@ -338,7 +338,7 @@ class Tenant(BaseModel, TenantMixin):
 
     # Trial & Subscription control
     trial_start = models.DateField(default=timezone.now)
-    trial_days = models.PositiveIntegerField(default=14)
+    trial_days = models.PositiveIntegerField(default=7)
     subscription_expiry = models.DateField(null=True, blank=True)
 
     # Limits & Features

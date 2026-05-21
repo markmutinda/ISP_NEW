@@ -125,7 +125,7 @@ class CompanySubscription(models.Model):
     )
     
     # Trial duration in days
-    TRIAL_DURATION_DAYS = 14
+    TRIAL_DURATION_DAYS = 7
     
     BILLING_PERIOD_CHOICES = (
         ('monthly', 'Monthly'),
