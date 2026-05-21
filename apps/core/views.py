@@ -1020,6 +1020,13 @@ class CompanyRegisterView(generics.CreateAPIView):
         import logging as _logging
         import traceback as _traceback
         _log = _logging.getLogger(__name__)
+        request_id = request.headers.get("X-Request-ID", "")
+
+        _log.info(
+            "Company registration request received request_id=%s remote_addr=%s",
+            request_id or "-",
+            request.META.get("REMOTE_ADDR", "-"),
+        )
 
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
@@ -1072,6 +1079,7 @@ class CompanyRegisterView(generics.CreateAPIView):
         # Start in public schema
         from django.db import connection
         connection.set_schema_to_public()
+        request_id = request.headers.get("X-Request-ID", "")
         
         # 1. Generate Slug BEFORE creating the object
         from django.utils.text import slugify
@@ -1227,6 +1235,14 @@ class CompanyRegisterView(generics.CreateAPIView):
             response_payload['warnings'] = [
                 'Tenant was created, but the welcome email was not delivered.'
             ]
+
+        _log.info(
+            "Company registration completed request_id=%s company=%s tenant=%s welcome_email_sent=%s",
+            request_id or "-",
+            company.name,
+            tenant.subdomain,
+            email_result.get("sent"),
+        )
 
         return Response(response_payload, status=status.HTTP_201_CREATED)
 
