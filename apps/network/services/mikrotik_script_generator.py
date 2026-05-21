@@ -205,16 +205,14 @@ class MikrotikScriptGenerator:
 :do {{ :foreach i in=[/ip dhcp-server network find comment="Netily DHCP Network"] do={{ /ip dhcp-server network remove $i }} }} on-error={{}}
 :do {{ :foreach i in=[/interface ovpn-client find name="Netily-VPN"] do={{ /interface ovpn-client remove $i }} }} on-error={{}}
 :do {{ :foreach i in=[/interface wireguard find name="Netily-VPN"] do={{ /interface wireguard remove $i }} }} on-error={{}}
-# BUG FIX 1: Fixed incomplete foreach loop that was causing "do:" prompt
 :do {{ /interface wireguard peers remove [find where interface="Netily-VPN"] }} on-error={{}}
 :do {{ :foreach i in=[/ip address find comment="Netily-WG-IP"] do={{ /ip address remove $i }} }} on-error={{}}
 :do {{ :foreach i in=[/ppp profile find name="netily-pppoe-profile"] do={{ /ppp profile remove $i }} }} on-error={{}}
 :do {{ :foreach i in=[/interface pppoe-server server find name="netily-pppoe"] do={{ /interface pppoe-server server remove $i }} }} on-error={{}}
-:do {{ :foreach i in=[/interface bridge find name="netily-bridge"] do={{
-    /interface bridge port remove [find bridge="netily-bridge"]
-    /ip address remove [find interface="netily-bridge"]
-    /interface bridge remove $i
-}} }} on-error={{}}
+# MIPS FIX: Flattened bridge cleanup - multi-line do= blocks break hAP lite parser
+:do {{ /interface bridge port remove [find bridge="netily-bridge"] }} on-error={{}}
+:do {{ /ip address remove [find interface="netily-bridge"] }} on-error={{}}
+:do {{ /interface bridge remove [find name="netily-bridge"] }} on-error={{}}
 :do {{ /ip firewall filter remove [find comment~"Netily"] }} on-error={{}}
 :do {{ /ip firewall nat remove [find comment~"Netily"] }} on-error={{}}
 :do {{ /ip firewall mangle remove [find comment~"Netily"] }} on-error={{}}
