@@ -15,7 +15,15 @@ def _csv_env(name):
     return [item.strip() for item in value.split(',') if item.strip()]
 
 
-_default_hosts = ['api.netily.co.ke', '.netily.co.ke', 'localhost', '127.0.0.1']
+_default_hosts = [
+    'api.netily.co.ke',
+    '.netily.co.ke',
+    'localhost',
+    '127.0.0.1',
+    'web',
+    'backend',
+    'api',
+]
 _env_hosts = _csv_env('DJANGO_ALLOWED_HOSTS')
 
 # Common deployment env names used across DO/nginx/compose setups.
@@ -183,6 +191,7 @@ LOGGING = {
         'django': {'handlers': ['console'], 'level': 'WARNING', 'propagate': False},
         'django.request': {'handlers': ['console'], 'level': 'ERROR', 'propagate': False},
         'apps': {'handlers': ['console'], 'level': 'WARNING', 'propagate': False},  # Changed from INFO to WARNING
+        'apps.core.views': {'handlers': ['console'], 'level': 'INFO', 'propagate': False},
     },
 }
 
