@@ -39,9 +39,9 @@ class Migration(migrations.Migration):
             options={
                 "ordering": ["-created_at"],
                 "indexes": [
-                    models.Index(fields=["status", "created_at"], name="superadmin__status_7e0cca_idx"),
-                    models.Index(fields=["tenant", "created_at"], name="superadmin__tenant_i_bdb6cb_idx"),
-                    models.Index(fields=["schema_name", "created_at"], name="superadmin__schema__0cc857_idx"),
+                    models.Index(fields=["status", "created_at"], name="sadm_tdel_status_created_idx"),
+                    models.Index(fields=["tenant", "created_at"], name="sadm_tdel_tenant_created_idx"),
+                    models.Index(fields=["schema_name", "created_at"], name="sadm_tdel_schema_created_idx"),
                 ],
             },
         ),
