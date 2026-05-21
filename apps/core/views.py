@@ -1278,6 +1278,65 @@ class CompanyRegisterView(generics.CreateAPIView):
         return result
 
 
+class CompanyRegistrationStatusView(APIView):
+    """Confirm whether a public registration request completed successfully."""
+    permission_classes = [AllowAny]
+
+    def get(self, request):
+        from django.db import connection
+
+        connection.set_schema_to_public()
+
+        company_name = (request.query_params.get("company_name") or "").strip()
+        company_email = (request.query_params.get("company_email") or "").strip()
+
+        if not company_name or not company_email:
+            return Response(
+                {"detail": "company_name and company_email are required."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        tenant = (
+            Tenant.objects.select_related("company")
+            .filter(
+                company__name__iexact=company_name,
+                company__email__iexact=company_email,
+            )
+            .order_by("-created_at")
+            .first()
+        )
+
+        if not tenant or not tenant.company:
+            return Response(
+                {"ready": False, "detail": "Registration is still being finalized."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        base_domain = getattr(settings, "TENANT_BASE_DOMAIN", None)
+        if base_domain:
+            domain_name = f"{tenant.subdomain}.{base_domain}"
+            domain_protocol = "https"
+        else:
+            domain_name = (
+                f"{tenant.subdomain}.localhost:8000"
+                if settings.DEBUG
+                else f"{tenant.subdomain}.localhost"
+            )
+            domain_protocol = "http"
+
+        return Response(
+            {
+                "ready": True,
+                "company": tenant.company.name,
+                "subdomain": tenant.subdomain,
+                "tenant_domain": domain_name,
+                "login_url": f"{domain_protocol}://{domain_name}/admin/login/",
+                "dashboard_url": f"{domain_protocol}://{domain_name}/admin/",
+            },
+            status=status.HTTP_200_OK,
+        )
+
+
 class PlatformChangelogView(APIView):
     """
     Read-only view for ISPs to see platform updates.

@@ -25,6 +25,7 @@ urlpatterns = [
     path('settings/', views.GlobalSystemSettingsView.as_view(), name='system-settings'),
     path('branding/', views.TenantBrandingView.as_view(), name='tenant-branding'),
     path('companies/register/', views.CompanyRegisterView.as_view(), name='company-register'),
+    path('companies/register/status/', views.CompanyRegistrationStatusView.as_view(), name='company-register-status'),
 
     # Email verification
     path('auth/verify-email/<uuid:token>/', views.VerifyEmailView.as_view(), name='verify_email'),
