@@ -32,7 +32,7 @@ _droplet_ip = os.environ.get('DROPLET_IP', '').strip()
 _public_ip = os.environ.get('PUBLIC_IP', '').strip()
 _server_ip = os.environ.get('SERVER_IP', '').strip()
 
-ALLOWED_HOSTS = _env_hosts or _default_hosts
+ALLOWED_HOSTS = list(dict.fromkeys(_default_hosts + _env_hosts))
 for host in [_domain, _droplet_ip, _public_ip, _server_ip]:
     if host and host not in ALLOWED_HOSTS:
         ALLOWED_HOSTS.append(host)
