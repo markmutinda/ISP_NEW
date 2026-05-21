@@ -97,25 +97,13 @@ class MikrotikScriptGenerator:
         absolute_api_path = f"{self.api_url}{api_path}"
         config_fetch_url = absolute_api_path.split('?')[0]
 
-        return f"""# ═══════════════════════════════════════════════════════════════
-# Netily Cloud Controller — Base Script (Stage 1)
-# ═══════════════════════════════════════════════════════════════
-:put ">>> NETILY CLOUD CONTROLLER v4.6 <<<"
-
-# ─── Download Version-Specific Configuration ─────────────────
+        return f""":put ">>> NETILY CLOUD CONTROLLER v4.6 <<<"
 :local configUrl ("{config_fetch_url}?version=7&router={r.id}&subdomain={subdomain}")
 :put ("Downloading config from: " . $configUrl)
-
-:do {{
-    # Bypass cert check for initial bootstrap since router has no CA bundle yet
-    /tool fetch url=$configUrl dst-path="netily_conf.rsc" check-certificate=no
-    :delay 2s
-    /import netily_conf.rsc
-    :put ">>> Stage 2 complete."
-}} on-error={{
-    :put "ERROR: Configuration download failed!"
-    :error "Provisioning failed"
-}}
+/tool fetch url=$configUrl dst-path="netily_conf.rsc" check-certificate=no
+:delay 2s
+/import netily_conf.rsc
+:put ">>> Stage 2 complete."
 """
 
     def generate_config_script(self, version: str = "7") -> str:
@@ -222,18 +210,10 @@ class MikrotikScriptGenerator:
 
     def _section_api_user(self, r: Router) -> str:
         password = self._escape_ros_string(r.api_password)
-        return f"""# ─────────────────────────────────────────────────────────────
-# 2. API USER (Cloud Management Access)
-# ─────────────────────────────────────────────────────────────
-:put "Configuring API user..."
-
-:if ([:len [/user find name="{self._escape_ros_string(r.api_username)}"]] = 0) do={{
-    /user add name="{self._escape_ros_string(r.api_username)}" group=full password="{password}" comment="Netily Cloud API"
-}} else={{
-    /user set [find name="{self._escape_ros_string(r.api_username)}"] password="{password}" group=full
-}}
-
-# Allow access from the VPN Tunnel and the local Docker network
+        username = self._escape_ros_string(r.api_username)
+        return f""":put "Configuring API user..."
+:do {{ /user remove [find name="{username}"] }} on-error={{}}
+/user add name="{username}" group=full password="{password}" comment="Netily Cloud API"
 /ip service set api disabled=no port={r.api_port} address={self.vpn_gateway}/32,127.0.0.0/8,172.18.0.0/16
 /ip service set api-ssl disabled=yes
 """
@@ -396,10 +376,7 @@ class MikrotikScriptGenerator:
             
             port_cmds.append(f"""
 :do {{ /interface bridge port remove [find interface="{safe_port}"] }} on-error={{}}
-:do {{ 
-    /interface bridge port add bridge="netily-bridge" interface="{safe_port}"
-    :put " + Added {safe_port} to netily-bridge"
-}} on-error={{ :put " ! Error adding {safe_port} (check hardware)" }}
+:do {{ /interface bridge port add bridge="netily-bridge" interface="{safe_port}" }} on-error={{ :put "Error adding {safe_port}" }}
 """)
 
         ports_script = "\n".join(port_cmds)
@@ -410,9 +387,8 @@ class MikrotikScriptGenerator:
 :put "Configuring Bridge Topology..."
 
 # 1. Create the single master bridge
-:if ([:len [/interface bridge find name="netily-bridge"]] = 0) do={{
-    /interface bridge add name="netily-bridge" comment="Netily Hotspot & PPPoE"
-}}
+:do {{ /interface bridge remove [find name="netily-bridge"] }} on-error={{}}
+/interface bridge add name="netily-bridge" comment="Netily Hotspot & PPPoE"
 
 # 2. Assign Gateway IP to the bridge (using calculated CIDR)
 :do {{ /ip address remove [find interface="netily-bridge"] }} on-error={{}}
@@ -521,32 +497,13 @@ class MikrotikScriptGenerator:
 
 :do {{ /certificate remove [find name~"netily-ssl"] }} on-error={{}}
 
-:do {{
-    /tool fetch url="{ssl_cert_url}" dst-path="netily-ssl.crt" http-header-field="ngrok-skip-browser-warning: true"
-    :delay 1s
-    /certificate import file-name="netily-ssl.crt" passphrase="{passphrase}"
-    :put "SSL certificate imported."
-}} on-error={{
-    :put "WARNING: Could not download SSL certificate."
-}}
-
-:do {{
-    /tool fetch url="{ssl_key_url}" dst-path="netily-ssl.key" http-header-field="ngrok-skip-browser-warning: true"
-    :delay 1s
-    /certificate import file-name="netily-ssl.key" passphrase="{passphrase}"
-    :put "SSL key imported."
-}}
-
+/tool fetch url="{ssl_cert_url}" dst-path="netily-ssl.crt" check-certificate=no
+:delay 1s
+:do {{ /certificate import file-name="netily-ssl.crt" passphrase="{passphrase}" }} on-error={{ :put "SSL cert import warning" }}
+/tool fetch url="{ssl_key_url}" dst-path="netily-ssl.key" check-certificate=no
+:delay 1s
+:do {{ /certificate import file-name="netily-ssl.key" passphrase="{passphrase}" }} on-error={{ :put "SSL key import warning" }}
 :delay 2s
-:do {{
-    :local certName [/certificate find where name~"netily-ssl"]
-    :if ([:len $certName] > 0) do={{
-        /ip hotspot profile set netily-profile ssl-certificate=[/certificate get $certName name]
-        :put "SSL applied to hotspot profile."
-    }}
-}} on-error={{
-    :put "Note: SSL cert not applied (might need manual assignment)."
-}}
 """
 
     def _section_hotspot_html(self, r: Router) -> str:
@@ -558,20 +515,12 @@ class MikrotikScriptGenerator:
 # ─────────────────────────────────────────────────────────────
 :put "Downloading hotspot pages..."
 
-# Detect the directory MikroTik just assigned
-:local dir [/ip hotspot profile get [find name="netily-profile"] html-directory]
+:local dir "hotspot"
+:do {{ :set dir [/ip hotspot profile get [find name="netily-profile"] html-directory] }} on-error={{}}
 :if ($dir = "") do={{ :set dir "hotspot" }}
 
-# Overwrite the default login and status pages with our Cloud Redirectors
-:do {{
-    /tool fetch url="{login_url}" dst-path=($dir . "/login.html")
-    :put " -> login.html installed successfully!"
-}} on-error={{ :put ">>> ERROR: Failed to download login.html" }}
-
-:do {{
-    /tool fetch url="{status_url}" dst-path=($dir . "/status.html")
-    :put " -> status.html installed successfully!"
-}} on-error={{ :put ">>> ERROR: Failed to download status.html" }}
+:do {{ /tool fetch url="{login_url}" dst-path=($dir . "/login.html") check-certificate=no }} on-error={{ :put "ERROR: login.html failed" }}
+:do {{ /tool fetch url="{status_url}" dst-path=($dir . "/status.html") check-certificate=no }} on-error={{ :put "ERROR: status.html failed" }}
 """
 
     def _section_pppoe(self, r: Router, pppoe_local: str) -> str:
@@ -626,11 +575,8 @@ class MikrotikScriptGenerator:
 # ─────────────────────────────────────────────────────────────
 :put "Configuring NAT..."
 
-:do {{
-    :if ([:len [/ip firewall nat find comment="Netily-Masquerade"]] = 0) do={{
-        /ip firewall nat add chain=srcnat action=masquerade comment="Netily-Masquerade"
-    }}
-}} on-error={{}}
+:do {{ /ip firewall nat remove [find comment="Netily-Masquerade"] }} on-error={{}}
+/ip firewall nat add chain=srcnat action=masquerade comment="Netily-Masquerade"
 """
 
     def _section_schedulers(self, r: Router) -> str:
