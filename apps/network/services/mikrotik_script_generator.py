@@ -346,7 +346,7 @@ class MikrotikScriptGenerator:
     endpoint-address="{wg_endpoint.split(':')[0]}" \\
     endpoint-port={wg_endpoint.split(':')[1] if ':' in wg_endpoint else '51820'} \\
     allowed-address={self.vpn_network_cidr} \\
-    persistent-keepalive=25 \\
+    persistent-keepalive=25s \\
     comment="Netily Cloud Server"
 
 # BUG FIX 2: Removed place-before=0 (invalid in script), use separate move command
