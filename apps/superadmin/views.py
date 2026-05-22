@@ -2627,6 +2627,7 @@ class LeadListView(APIView):
                 Q(name__icontains=search) |
                 Q(email__icontains=search) |
                 Q(company_name__icontains=search) |
+                Q(lead_source__icontains=search) |
                 Q(phone__icontains=search)
             )
 
@@ -2641,6 +2642,7 @@ class LeadListView(APIView):
                 "email": l.email,
                 "phone": l.phone,
                 "company_name": l.company_name,
+                "lead_source": l.lead_source,
                 "message": l.message,
                 "created_at": l.created_at.isoformat(),
             }
@@ -2668,6 +2670,12 @@ class LeadStatsView(APIView):
         this_month = Lead.objects.filter(created_at__gte=now.replace(day=1, hour=0, minute=0, second=0)).count()
         last_30 = Lead.objects.filter(created_at__gte=now - timedelta(days=30)).count()
         last_7 = Lead.objects.filter(created_at__gte=now - timedelta(days=7)).count()
+        source_breakdown = list(
+            Lead.objects.exclude(lead_source="")
+            .values("lead_source")
+            .annotate(count=Count("id"))
+            .order_by("-count", "lead_source")[:6]
+        )
 
         # Monthly trend for last 6 months
         trend = []
@@ -2688,5 +2696,6 @@ class LeadStatsView(APIView):
             "this_month": this_month,
             "last_30_days": last_30,
             "last_7_days": last_7,
+            "source_breakdown": source_breakdown,
             "trend": trend,
         })

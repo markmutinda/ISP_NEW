@@ -1506,6 +1506,7 @@ class SubmitLeadView(APIView):
         email = request.data.get("email", "").strip()
         phone = request.data.get("phone", "").strip()
         company = request.data.get("company", "").strip()
+        lead_source = request.data.get("lead_source", "").strip()
         message = request.data.get("message", "").strip()
 
         if not name or not email:
@@ -1519,6 +1520,7 @@ class SubmitLeadView(APIView):
                 email=email,
                 phone=phone,
                 company_name=company,
+                lead_source=lead_source,
                 message=message,
             )
 
@@ -1528,7 +1530,15 @@ class SubmitLeadView(APIView):
             try:
                 send_mail(
                     subject=f"New Lead: {name} ({company or 'No company'})",
-                    message=f"New lead submitted:\n\nName: {name}\nEmail: {email}\nPhone: {phone}\nCompany: {company}\nMessage: {message}",
+                    message=(
+                        f"New lead submitted:\n\n"
+                        f"Name: {name}\n"
+                        f"Email: {email}\n"
+                        f"Phone: {phone}\n"
+                        f"Company: {company}\n"
+                        f"Lead Source: {lead_source or 'Not specified'}\n"
+                        f"Message: {message}"
+                    ),
                     from_email=settings.DEFAULT_FROM_EMAIL,
                     recipient_list=[settings.DEFAULT_FROM_EMAIL],
                     fail_silently=True,
