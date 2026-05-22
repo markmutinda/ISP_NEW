@@ -282,7 +282,6 @@ class MikrotikScriptGenerator:
 :do {{ /interface wireguard set [find name="Netily-VPN"] private-key="{self._escape_ros_string(wg_private_key)}" }} on-error={{ :put "Error: Could not set WireGuard private key" }}
 :do {{ /ip address add address="{vpn_ip}/{vpn_network_cidr.split('/')[1]}" interface="Netily-VPN" comment="Netily-WG-IP" }} on-error={{ :put "Warning: WireGuard IP may already exist" }}
 
-# MIPSBE/hAP Lite Compatibility: Using allowed-address=0.0.0.0/0 and persistent-keepalive=15s
 :do {{ /interface wireguard peers add interface="Netily-VPN" public-key="{self._escape_ros_string(wg_server_pubkey)}" endpoint-address="{wg_endpoint_host}" endpoint-port={wg_endpoint_port} allowed-address=0.0.0.0/0 persistent-keepalive=15s comment="Netily Cloud Server" }} on-error={{ :put "Error: Could not add WireGuard peer" }}
 
 :do {{ /ip firewall filter add chain=output action=accept protocol=udp dst-port=1812,1813,3799 out-interface="Netily-VPN" comment="Netily-RADIUS-Output" }} on-error={{}}
@@ -349,7 +348,7 @@ class MikrotikScriptGenerator:
 """
 
     def _section_radius(self, r: Router) -> str:
-        # THE FATAL FIX: Removed authentication-port=1812 accounting-port=1813 completely
+        # Removed authentication-port and accounting-port (deprecated on v7)
         radius_cmd = (
             f'/radius add address={self.vpn_gateway} secret="{self._escape_ros_string(r.shared_secret)}" '
             f'service=hotspot,ppp timeout=3000ms comment="Netily-Cloud-RADIUS"'
@@ -365,7 +364,7 @@ class MikrotikScriptGenerator:
 """
 
     def _section_hotspot(self, r: Router, gateway_ip: str) -> str:
-        # THE FATAL FIX 2: Removed rate-limit="" which crashes the v7 parser
+        # Removed rate-limit="" (crashes v7 parser)
         profile_cmd = f'/ip hotspot profile add name="netily-profile" hotspot-address="{gateway_ip}" dns-name="{self._escape_ros_string(r.dns_name)}" login-by=http-pap,mac-cookie use-radius=yes radius-accounting=yes http-cookie-lifetime=1d'
         server_cmd = f'/ip hotspot add name="netily-hotspot" interface="netily-bridge" address-pool="netily-pool" profile="netily-profile" disabled=no'
         
@@ -468,8 +467,8 @@ class MikrotikScriptGenerator:
 """
 
     def _section_anti_sharing(self, r: Router, is_v6: bool) -> str:
-        # THE FATAL FIX 3: Removed set:1 requirement for v7
-        ttl_action = "set:1" if is_v6 else "1"
+        # CRITICAL FIX: Always use "set:1" for new-ttl (works on both v6 and v7)
+        ttl_action = "set:1"
         return f"""# ─────────────────────────────────────────────────────────────
 # 13. SMART ANTI-SHARING
 # ─────────────────────────────────────────────────────────────
