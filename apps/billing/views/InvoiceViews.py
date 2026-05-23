@@ -110,18 +110,25 @@ class PlanViewSet(viewsets.ModelViewSet):
         """Get plans dashboard statistics"""
         queryset = self.get_queryset()
         
+        from apps.billing.models.hotspot_models import HotspotPlan  # ADD THIS IMPORT
+
         total_plans = queryset.count()
         active_plans = queryset.filter(is_active=True).count()
         inactive_plans = queryset.filter(is_active=False).count()
         
-        # Count by plan type
-        hotspot_plans = queryset.filter(plan_type='HOTSPOT').count()
+        # Count by plan type (Plan model only)
+        hotspot_plans_in_plan_model = queryset.filter(plan_type='HOTSPOT').count()
         pppoe_plans = queryset.filter(plan_type='PPPOE').count()
         static_plans = queryset.filter(plan_type='STATIC').count()
         internet_plans = queryset.filter(plan_type='INTERNET').count()
         addon_plans = queryset.filter(plan_type='ADDON').count()
         bundle_plans = queryset.filter(plan_type='BUNDLE').count()
         topup_plans = queryset.filter(plan_type='TOPUP').count()
+        
+        # ADD: Also count HotspotPlan model records (these are the real hotspot plans)
+        hotspot_plans_count = HotspotPlan.objects.filter(is_active=True).count()
+        # Combine both sources for the hotspot count
+        total_hotspot = hotspot_plans_in_plan_model + hotspot_plans_count
         
         # Calculate total subscribers
         total_subscribers = sum(plan.subscriber_count for plan in queryset)
@@ -130,10 +137,10 @@ class PlanViewSet(viewsets.ModelViewSet):
         popular_plans = queryset.filter(is_popular=True).count()
         
         stats = {
-            'total_plans': total_plans,
-            'active_plans': active_plans,
+            'total_plans': total_plans + hotspot_plans_count,  # ADD hotspot plans to total
+            'active_plans': active_plans + hotspot_plans_count,
             'inactive_plans': inactive_plans,
-            'hotspot_plans': hotspot_plans,
+            'hotspot_plans': total_hotspot,   # CHANGED: was just queryset.filter count
             'pppoe_plans': pppoe_plans,
             'static_plans': static_plans,
             'internet_plans': internet_plans,
