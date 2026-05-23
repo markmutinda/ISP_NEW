@@ -6,7 +6,7 @@ from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.permissions import IsAuthenticated
 from django_filters.rest_framework import DjangoFilterBackend
 from django.utils import timezone
-from django.db.models import Q, Sum
+from django.db.models import Q, Sum, Count
 from rest_framework import serializers
 from decimal import Decimal
 import json
@@ -50,26 +50,6 @@ class PlanViewSet(viewsets.ModelViewSet):
         else:
             return [IsAuthenticated(), IsCompanyStaff()]
     
-    def get_queryset(self):
-        """
-        Return plans for the current tenant.
-        With django-tenants, the schema is set automatically via middleware,
-        so we just return all plans (they're already tenant-scoped).
-        """
-        user = self.request.user
-        
-        # Public endpoint: only active public plans
-        if self.action == 'public':
-            return Plan.objects.filter(is_active=True, is_public=True)
-        
-        # For authenticated users, return all plans in current tenant
-        # django-tenants handles the schema isolation automatically
-        if user.is_superuser:
-            return Plan.objects.all()
-        
-        # Regular users see all plans in their tenant
-        return Plan.objects.all()
-
     def perform_create(self, serializer):
         """Save plan with creator info"""
         user = self.request.user
@@ -110,7 +90,7 @@ class PlanViewSet(viewsets.ModelViewSet):
         """Get plans dashboard statistics"""
         queryset = self.get_queryset()
         
-        from apps.billing.models.hotspot_models import HotspotPlan  # ADD THIS IMPORT
+        from apps.billing.models.hotspot_models import HotspotPlan
 
         total_plans = queryset.count()
         active_plans = queryset.filter(is_active=True).count()
@@ -137,10 +117,10 @@ class PlanViewSet(viewsets.ModelViewSet):
         popular_plans = queryset.filter(is_popular=True).count()
         
         stats = {
-            'total_plans': total_plans + hotspot_plans_count,  # ADD hotspot plans to total
+            'total_plans': total_plans + hotspot_plans_count,
             'active_plans': active_plans + hotspot_plans_count,
             'inactive_plans': inactive_plans,
-            'hotspot_plans': total_hotspot,   # CHANGED: was just queryset.filter count
+            'hotspot_plans': total_hotspot,
             'pppoe_plans': pppoe_plans,
             'static_plans': static_plans,
             'internet_plans': internet_plans,
@@ -224,24 +204,23 @@ class PlanViewSet(viewsets.ModelViewSet):
         return Response(summary)
 
     def get_queryset(self):
-        """Filter plans by company"""
-        # For public endpoint, show all active public plans (no company filter for public)
+        """Filter plans for the current tenant."""
+        user = self.request.user
+
+        # Public endpoint: only active public plans
         if self.action == 'public':
             return Plan.objects.filter(is_active=True, is_public=True)
-        
-        user = self.request.user
-        
+
+        # django-tenants handles schema isolation via middleware.
+        # No company filter needed — all queries are already scoped to the tenant schema.
         if user.is_superuser:
-            company_id = self.request.query_params.get('company_id')
-            if company_id:
-                return Plan.objects.filter(company_id=company_id)
+            schema_name = self.request.query_params.get('schema_name')
+            if schema_name:
+                return Plan.objects.filter(schema_name=schema_name)
             return Plan.objects.all()
-        
-        # Regular users can only see plans from their company
-        if hasattr(user, 'company') and user.company:
-            return Plan.objects.filter(company=user.company)
-        
-        return Plan.objects.none()
+
+        # Non-superusers see all plans in their current tenant schema
+        return Plan.objects.all()
 
 
 class BillingCycleViewSet(viewsets.ModelViewSet):
