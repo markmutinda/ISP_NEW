@@ -131,6 +131,12 @@ class LoyaltyRewardSerializer(serializers.ModelSerializer):
 
 
 class LoyaltyRewardWriteSerializer(serializers.ModelSerializer):
+    hotspot_reward_speed_mbps = serializers.CharField(
+        required=False,
+        allow_blank=True,
+        default='5',
+    )
+    
     class Meta:
         model = LoyaltyReward
         fields = [
@@ -139,6 +145,10 @@ class LoyaltyRewardWriteSerializer(serializers.ModelSerializer):
             'voucher_batch_id', 'credit_amount',
             'hotspot_reward_minutes', 'hotspot_reward_speed_mbps',
         ]
+    
+    # Add this method to ensure empty strings are converted to the default '5'
+    def validate_hotspot_reward_speed_mbps(self, value):
+        return value if value else '5'
 
 
 class PointsRuleSerializer(serializers.ModelSerializer):

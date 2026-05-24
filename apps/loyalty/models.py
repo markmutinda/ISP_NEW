@@ -149,10 +149,10 @@ class LoyaltyMember(models.Model):
     customer = models.OneToOneField(
         'customers.Customer',
         on_delete=models.CASCADE,
-        null=True, blank=True,  # ← ADDED null=True, blank=True
+        null=True, blank=True,
         related_name='loyalty_member'
     )
-    hotspot_client = models.OneToOneField(  # ← ADD THIS FIELD
+    hotspot_client = models.OneToOneField(
         'billing.HotspotClient',
         on_delete=models.SET_NULL,
         null=True, blank=True,
@@ -299,7 +299,10 @@ class LoyaltyReward(models.Model):
         help_text='Minutes of free hotspot internet access for this reward'
     )
     hotspot_reward_speed_mbps = models.CharField(
-        max_length=10, blank=True, default='5',
+        max_length=10, 
+        null=True,
+        blank=True, 
+        default='5',
         help_text='Speed (Mbps) during the reward session, e.g. "5"'
     )
 

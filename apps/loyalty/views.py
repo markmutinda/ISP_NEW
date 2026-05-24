@@ -69,27 +69,31 @@ class LoyaltyTierViewSet(viewsets.ModelViewSet):
 class LoyaltyMemberViewSet(viewsets.ReadOnlyModelViewSet):
     permission_classes = [IsAuthenticated]
     serializer_class = LoyaltyMemberSerializer
-    queryset = LoyaltyMember.objects.select_related('customer__user', 'tier').all()
 
     def get_queryset(self):
-        qs = super().get_queryset()
+        # 1. ADD 'hotspot_client' to select_related
+        qs = LoyaltyMember.objects.select_related(
+            'customer__user', 'tier', 'hotspot_client'
+        ).all()
+        
         params = self.request.query_params
-
-        # Search
         search = params.get('search')
+        
         if search:
             qs = qs.filter(
                 Q(customer__user__first_name__icontains=search) |
                 Q(customer__user__last_name__icontains=search) |
                 Q(customer__user__email__icontains=search) |
-                Q(customer__customer_code__icontains=search)
+                Q(customer__customer_code__icontains=search) |
+                Q(hotspot_client__canonical_phone__icontains=search) |
+                Q(hotspot_client__canonical_username__icontains=search)
             )
-
+            
         # Filter by tier
         tier = params.get('tier')
         if tier and tier != 'all':
             qs = qs.filter(tier__level=tier)
-
+            
         # Sort
         sort = params.get('sort', '-lifetime_points')
         allowed_sorts = [
@@ -102,7 +106,7 @@ class LoyaltyMemberViewSet(viewsets.ReadOnlyModelViewSet):
         ]
         if sort in allowed_sorts:
             qs = qs.order_by(sort)
-
+            
         return qs
 
     @action(detail=False, methods=['post'], url_path='award')

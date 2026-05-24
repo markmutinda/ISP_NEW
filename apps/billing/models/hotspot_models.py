@@ -783,6 +783,10 @@ class HotspotSession(models.Model):
             # Already active (or failed/expired) — nothing to do
             return
 
+        # ADD THESE TWO LINES BEFORE CHANGING THE STATUS
+        prev_status = locked.status  
+        locked._prev_status = prev_status  
+
         locked.status = 'active'
         locked.access_code = access_code or locked.access_code or self.generate_access_code()
         locked.radius_username = access_code or locked.access_code or self.generate_access_code()
