@@ -36,14 +36,14 @@ class LoyaltyTierSerializer(serializers.ModelSerializer):
 
 
 class LoyaltyMemberSerializer(serializers.ModelSerializer):
-    name = serializers.CharField(source='customer.full_name', read_only=True)
-    email = serializers.CharField(source='customer.email', read_only=True)
+    name = serializers.SerializerMethodField()
+    email = serializers.SerializerMethodField()
     phone = serializers.SerializerMethodField()
     tier_name = serializers.CharField(source='tier.name', read_only=True, default='')
     tier_level = serializers.CharField(source='tier.level', read_only=True, default='bronze')
-    customer_id = serializers.IntegerField(source='customer.id', read_only=True)
-    customer_code = serializers.CharField(source='customer.customer_code', read_only=True)
-    customer_status = serializers.CharField(source='customer.status', read_only=True)
+    customer_id = serializers.SerializerMethodField()
+    customer_code = serializers.SerializerMethodField()
+    customer_status = serializers.SerializerMethodField()
 
     class Meta:
         model = LoyaltyMember
@@ -56,13 +56,47 @@ class LoyaltyMemberSerializer(serializers.ModelSerializer):
             'joined_date', 'last_activity',
         ]
 
+    def get_name(self, obj):
+        if obj.customer:
+            return obj.customer.full_name
+        if obj.hotspot_client:
+            return obj.hotspot_client.canonical_username or 'Hotspot User'
+        return 'Unknown'
+
+    def get_email(self, obj):
+        if obj.customer:
+            return obj.customer.email or ''
+        return ''
+
     def get_phone(self, obj):
-        c = obj.customer
-        return c.user.phone_number if hasattr(c.user, 'phone_number') else c.alternative_phone or ''
+        if obj.customer and hasattr(obj.customer, 'user'):
+            return getattr(obj.customer.user, 'phone_number', '') or ''
+        if obj.hotspot_client:
+            p = obj.hotspot_client.canonical_phone or ''
+            # Don't return MAC addresses as phone numbers
+            return p if not p.startswith('MAC-') else ''
+        return ''
+
+    def get_customer_id(self, obj):
+        if obj.customer:
+            return obj.customer.id
+        return None
+
+    def get_customer_code(self, obj):
+        if obj.customer:
+            return obj.customer.customer_code
+        if obj.hotspot_client:
+            return obj.hotspot_client.canonical_username or ''
+        return ''
+
+    def get_customer_status(self, obj):
+        if obj.customer:
+            return obj.customer.status
+        return 'hotspot'
 
 
 class PointsTransactionSerializer(serializers.ModelSerializer):
-    member_name = serializers.CharField(source='member.customer.full_name', read_only=True)
+    member_name = serializers.SerializerMethodField()
     member_id = serializers.IntegerField(source='member.id', read_only=True)
     reward_name = serializers.CharField(source='reward.name', read_only=True, default=None)
 
@@ -75,6 +109,13 @@ class PointsTransactionSerializer(serializers.ModelSerializer):
             'created_at',
         ]
 
+    def get_member_name(self, obj):
+        if obj.member.customer:
+            return obj.member.customer.full_name
+        if obj.member.hotspot_client:
+            return obj.member.hotspot_client.canonical_username or 'Hotspot User'
+        return 'Unknown'
+
 
 class LoyaltyRewardSerializer(serializers.ModelSerializer):
     is_available = serializers.BooleanField(read_only=True)
@@ -85,6 +126,7 @@ class LoyaltyRewardSerializer(serializers.ModelSerializer):
             'id', 'name', 'description', 'points_cost', 'category',
             'status', 'stock_quantity', 'redemption_count', 'valid_until',
             'image', 'voucher_batch_id', 'credit_amount', 'is_available',
+            'hotspot_reward_minutes', 'hotspot_reward_speed_mbps',
         ]
 
 
@@ -95,6 +137,7 @@ class LoyaltyRewardWriteSerializer(serializers.ModelSerializer):
             'name', 'description', 'points_cost', 'category',
             'status', 'stock_quantity', 'valid_until', 'image',
             'voucher_batch_id', 'credit_amount',
+            'hotspot_reward_minutes', 'hotspot_reward_speed_mbps',
         ]
 
 

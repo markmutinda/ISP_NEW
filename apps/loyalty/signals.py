@@ -1,10 +1,11 @@
 """
-Loyalty Signals — auto-award points on payment, auto-enroll customers.
+Loyalty Signals — auto-award points on payment, auto-enroll customers, and hotspot sessions.
 """
 import logging
-from django.db.models.signals import post_save
+from django.db.models.signals import post_save, pre_save
 from django.dispatch import receiver
 from django.db import transaction
+from django.db.models import F
 
 logger = logging.getLogger(__name__)
 
@@ -131,3 +132,82 @@ def auto_enroll_customer_in_loyalty(sender, instance, created, **kwargs):
             logger.error(f'Loyalty auto-enroll failed for customer_id={customer_id}: {e}', exc_info=True)
 
     transaction.on_commit(_do_enroll)
+
+
+@receiver(pre_save, sender='billing.HotspotSession')
+def _track_hotspot_session_prev_status(sender, instance, **kwargs):
+    """Cache previous status so post_save knows if this is a new activation."""
+    if instance.pk:
+        try:
+            instance._prev_status = sender.objects.get(pk=instance.pk).status
+        except sender.DoesNotExist:
+            instance._prev_status = None
+    else:
+        instance._prev_status = None
+
+
+@receiver(post_save, sender='billing.HotspotSession')
+def award_hotspot_loyalty_points(sender, instance, created, **kwargs):
+    """Award loyalty points when a hotspot session becomes active (first time only)."""
+    if instance.status != 'active':
+        return
+    prev_status = getattr(instance, '_prev_status', None)
+    if prev_status == 'active':
+        return  # Already was active — skip double-award
+    if not instance.hotspot_client:
+        return
+
+    session_id = str(instance.session_id)
+
+    def _do_award():
+        try:
+            from apps.billing.models.hotspot_models import HotspotSession
+            from .models import LoyaltySettings, LoyaltyMember, PointsTransaction
+            from decimal import Decimal
+
+            session = HotspotSession.objects.select_related('hotspot_client', 'plan').get(
+                session_id=session_id
+            )
+            if not session.hotspot_client:
+                return
+
+            settings_obj = LoyaltySettings.load()
+            if not settings_obj.program_active:
+                return
+
+            # Idempotency: check if points already awarded for this session
+            dedup_desc = f'Hotspot session {session_id}'
+            member, _ = LoyaltyMember.get_or_create_for_hotspot(session.hotspot_client)
+            if not member:
+                return
+
+            if PointsTransaction.objects.filter(
+                member=member, description=dedup_desc
+            ).exists():
+                return  # Already awarded
+
+            amount = float(session.amount)
+            if settings_obj.currency_unit <= 0:
+                return
+            points = int(amount / settings_obj.currency_unit) * settings_obj.points_per_currency
+
+            if points > 0:
+                member.award_points(
+                    points=points,
+                    description=dedup_desc,
+                    transaction_type='earned',
+                )
+                # Update spend analytics using F expressions
+                LoyaltyMember.objects.filter(pk=member.pk).update(
+                    total_spent=F('total_spent') + Decimal(str(amount)),
+                    total_payments=F('total_payments') + 1,
+                )
+                logger.info(
+                    f'Loyalty: awarded {points} pts to hotspot client '
+                    f'{session.hotspot_client.canonical_username} for KES {amount:.0f}'
+                )
+
+        except Exception as e:
+            logger.error(f'Hotspot loyalty award error: {e}', exc_info=True)
+
+    transaction.on_commit(_do_award)

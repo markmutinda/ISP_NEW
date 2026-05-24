@@ -8,6 +8,7 @@ Industry best-practice loyalty system with:
 - Full transaction audit trail
 - Points expiry with configurable window
 - Auto-enrollment for all customers
+- Hotspot client support for anonymous WiFi users
 """
 from django.db import models
 from django.conf import settings
@@ -139,13 +140,23 @@ class LoyaltyTier(models.Model):
 
 class LoyaltyMember(models.Model):
     """
-    One-to-one link between a Customer and their loyalty profile.
-    Auto-created for all existing and new customers.
+    One-to-one link between a Customer (registered) or HotspotClient (anonymous)
+    and their loyalty profile.
+    
+    For hotspot clients, customer will be null and hotspot_client will be set.
+    For registered customers, customer will be set and hotspot_client will be null.
     """
     customer = models.OneToOneField(
         'customers.Customer',
         on_delete=models.CASCADE,
+        null=True, blank=True,  # ← ADDED null=True, blank=True
         related_name='loyalty_member'
+    )
+    hotspot_client = models.OneToOneField(  # ← ADD THIS FIELD
+        'billing.HotspotClient',
+        on_delete=models.SET_NULL,
+        null=True, blank=True,
+        related_name='loyalty_member',
     )
     tier = models.ForeignKey(
         LoyaltyTier,
@@ -175,7 +186,33 @@ class LoyaltyMember(models.Model):
         ]
 
     def __str__(self):
-        return f'{self.customer} – {self.current_points} pts'
+        if self.customer:
+            return f'{self.customer} – {self.current_points} pts'
+        if self.hotspot_client:
+            return f'Hotspot: {self.hotspot_client} – {self.current_points} pts'
+        return f'LoyaltyMember {self.id} – {self.current_points} pts'
+
+    @classmethod
+    def get_or_create_for_hotspot(cls, hotspot_client):
+        """Get or create a LoyaltyMember for a HotspotClient (anonymous WiFi users)."""
+        try:
+            return cls.objects.get(hotspot_client=hotspot_client), False
+        except cls.DoesNotExist:
+            settings_obj = LoyaltySettings.load()
+            if not settings_obj.program_active:
+                return None, False
+            bronze = LoyaltyTier.objects.filter(level='bronze').first()
+            member = cls.objects.create(
+                hotspot_client=hotspot_client,
+                tier=bronze,
+            )
+            if settings_obj.signup_bonus > 0:
+                member.award_points(
+                    points=settings_obj.signup_bonus,
+                    description='Hotspot welcome bonus',
+                    transaction_type='bonus',
+                )
+            return member, True
 
     def recalculate_tier(self):
         """Promote or maintain tier based on lifetime_points."""
@@ -254,6 +291,16 @@ class LoyaltyReward(models.Model):
     credit_amount = models.DecimalField(
         max_digits=10, decimal_places=2, null=True, blank=True,
         help_text='Account credit amount (for credit-type rewards)'
+    )
+
+    # Hotspot reward fields for immediate internet access rewards
+    hotspot_reward_minutes = models.IntegerField(
+        null=True, blank=True,
+        help_text='Minutes of free hotspot internet access for this reward'
+    )
+    hotspot_reward_speed_mbps = models.CharField(
+        max_length=10, blank=True, default='5',
+        help_text='Speed (Mbps) during the reward session, e.g. "5"'
     )
 
     created_at = models.DateTimeField(auto_now_add=True)

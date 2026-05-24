@@ -64,6 +64,14 @@ from .views.hotspot_ad_views import (
     HotspotAdAdminViewSet,
 )
 
+# ==========================
+# Hotspot Loyalty URLs (ADDED)
+# ==========================
+from .views.hotspot_loyalty_views import (
+    HotspotLoyaltyInfoView,
+    HotspotLoyaltyRedeemView,
+)
+
 router = DefaultRouter()
 
 # Invoice URLs
@@ -214,6 +222,10 @@ hotspot_urlpatterns = [
     path('ads/serve/', HotspotAdServeView.as_view(), name='hotspot-ad-serve'),
     path('ads/grant-access/', HotspotAdGrantView.as_view(), name='hotspot-ad-grant'),
     path('ads/media/<int:pk>/', HotspotAdMediaView.as_view(), name='hotspot-ad-media'),  # ADDED: Media serving with range support
+    
+    # ── Loyalty Program (Public — captive portal) ──
+    path('loyalty-info/', HotspotLoyaltyInfoView.as_view(), name='hotspot-loyalty-info'),
+    path('loyalty-redeem/', HotspotLoyaltyRedeemView.as_view(), name='hotspot-loyalty-redeem'),
 ]
 
 # ==========================
