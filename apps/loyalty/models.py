@@ -87,8 +87,8 @@ class LoyaltySettings(models.Model):
     notify_monthly_summary = models.BooleanField(default=False)
 
     # Program control
-    program_active = models.BooleanField(default=True)
-    auto_enroll_new_customers = models.BooleanField(default=True)
+    program_active = models.BooleanField(default=False)
+    auto_enroll_new_customers = models.BooleanField(default=False)
 
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)

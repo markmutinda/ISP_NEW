@@ -299,37 +299,37 @@ class SMSNotificationSettings(models.Model):
     )
 
     # ── HOTSPOT NOTIFICATIONS ─────────────────────────────────────────────
-    hotspot_new_subscription = models.BooleanField(default=True,
+    hotspot_new_subscription = models.BooleanField(default=False,
         help_text="SMS when a hotspot user makes a new purchase")
-    hotspot_welcome = models.BooleanField(default=True,
+    hotspot_welcome = models.BooleanField(default=False,
         help_text="Welcome SMS when a hotspot session activates")
-    hotspot_session_expiry = models.BooleanField(default=True,
+    hotspot_session_expiry = models.BooleanField(default=False,
         help_text="Notify hotspot user when their session is about to expire")
     hotspot_expiry_minutes_before = models.PositiveIntegerField(default=15,
         help_text="How many minutes before expiry to send the hotspot reminder")
-    hotspot_payment_failed = models.BooleanField(default=True,
+    hotspot_payment_failed = models.BooleanField(default=False,
         help_text="Notify when hotspot STK push payment fails")
-    hotspot_session_expired = models.BooleanField(default=True,
+    hotspot_session_expired = models.BooleanField(default=False,
         help_text="Notify when hotspot session has fully expired")
 
     # ── PPPOE / STATIC NOTIFICATIONS ─────────────────────────────────────
-    pppoe_welcome = models.BooleanField(default=True,
+    pppoe_welcome = models.BooleanField(default=False,
         help_text="Welcome SMS when a new PPPoE/Static customer is activated")
-    pppoe_payment_confirmation = models.BooleanField(default=True,
+    pppoe_payment_confirmation = models.BooleanField(default=False,
         help_text="SMS confirmation after a PPPoE payment is received")
-    pppoe_expiry_reminder = models.BooleanField(default=True,
+    pppoe_expiry_reminder = models.BooleanField(default=False,
         help_text="Remind PPPoE customer before subscription expires")
     pppoe_expiry_days_before = models.PositiveIntegerField(default=4,
         help_text="How many days before expiry to send the PPPoE reminder")
-    pppoe_service_suspended = models.BooleanField(default=True,
+    pppoe_service_suspended = models.BooleanField(default=False,
         help_text="Notify when PPPoE service is suspended")
-    pppoe_service_resumed = models.BooleanField(default=True,
+    pppoe_service_resumed = models.BooleanField(default=False,
         help_text="Notify when PPPoE service is restored")
-    pppoe_plan_changed = models.BooleanField(default=True,
+    pppoe_plan_changed = models.BooleanField(default=False,
         help_text="Notify customer when their plan is changed")
-    pppoe_renewal_confirmation = models.BooleanField(default=True,
+    pppoe_renewal_confirmation = models.BooleanField(default=False,
         help_text="Confirm successful subscription renewal")
-    pppoe_new_subscription = models.BooleanField(default=True,
+    pppoe_new_subscription = models.BooleanField(default=False,
         help_text="SMS when admin creates a new PPPoE subscription for a customer")
 
     # ── SYSTEM NOTIFICATIONS ───────────────────────────────────────────────
