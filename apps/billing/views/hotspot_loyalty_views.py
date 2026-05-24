@@ -162,8 +162,12 @@ class HotspotLoyaltyRedeemView(APIView):
                 txn.reward = reward
                 txn.save(update_fields=['reward'])
 
-                # Generate unique access code
-                access_code = _generate_unique_access_code()
+                # FIX 1: Use the client's permanent canonical_username as access code
+                # This ensures the same user appears with consistent identity
+                if member.hotspot_client and member.hotspot_client.canonical_username:
+                    access_code = member.hotspot_client.canonical_username
+                else:
+                    access_code = _generate_unique_access_code()
 
                 expires_at = timezone.now() + timedelta(minutes=reward.hotspot_reward_minutes)
 
@@ -193,6 +197,39 @@ class HotspotLoyaltyRedeemView(APIView):
                         transaction_type='adjusted',
                     )
                     return Response({'error': 'Failed to activate access. Points refunded.'}, status=500)
+
+                # FIX 2: CREATE HotspotSession so user appears in hotspot tab and online tab
+                try:
+                    from apps.billing.models.hotspot_models import HotspotSession, HotspotPlan
+                    from apps.network.models.router_models import Router as RouterModel
+
+                    router_obj = RouterModel.objects.filter(id=router_id, is_active=True).first()
+
+                    # Build a minimal plan-like object for session (no real HotspotPlan needed)
+                    # Try to find any active plan on this router for display purposes
+                    display_plan = HotspotPlan.objects.filter(
+                        router_id=router_id, is_active=True
+                    ).first() if router_obj else None
+
+                    if router_obj and display_plan:
+                        session_id = HotspotSession.generate_session_id()
+                        session = HotspotSession.objects.create(
+                            session_id=session_id,
+                            router=router_obj,
+                            plan=display_plan,
+                            phone_number=member.hotspot_client.canonical_phone or 'LOYALTY',
+                            mac_address=mac_address or '',
+                            amount=0,  # Free reward
+                            status='active',
+                            access_code=access_code,
+                            radius_username=access_code,
+                            activated_at=timezone.now(),
+                            expires_at=expires_at,
+                            hotspot_client=member.hotspot_client,
+                        )
+                        logger.info(f'Created loyalty HotspotSession {session_id} for {access_code}')
+                except Exception as e:
+                    logger.warning(f'Could not create HotspotSession for loyalty reward: {e}')
 
                 # Update reward redemption counter atomically
                 LoyaltyReward.objects.filter(pk=reward.pk).update(
