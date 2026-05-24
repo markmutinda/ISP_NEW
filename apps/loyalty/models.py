@@ -106,6 +106,23 @@ class LoyaltySettings(models.Model):
         self.pk = 1
         super().save(*args, **kwargs)
 
+        # Auto-generate tiers the moment the program is turned ON in the dashboard
+        if self.program_active:
+            from apps.loyalty.models import LoyaltyTier
+            if not LoyaltyTier.objects.exists():
+                tier_defaults = [
+                    ('bronze',   'Bronze',   0,    49,   '1.00', 'bg-amber-500'),
+                    ('silver',   'Silver',   50,   199,  '1.25', 'bg-slate-400'),
+                    ('gold',     'Gold',     200,  499,  '1.50', 'bg-yellow-500'),
+                    ('platinum', 'Platinum', 500,  999,  '2.00', 'bg-slate-600'),
+                    ('diamond',  'Diamond',  1000, None, '3.00', 'bg-cyan-500'),
+                ]
+                for level, name, min_p, max_p, mult, color in tier_defaults:
+                    LoyaltyTier.objects.get_or_create(level=level, defaults={
+                        'name': name, 'min_points': min_p, 'max_points': max_p,
+                        'points_multiplier': mult, 'color': color,
+                    })
+
     @classmethod
     def load(cls):
         obj, _ = cls.objects.get_or_create(pk=1)
@@ -201,7 +218,25 @@ class LoyaltyMember(models.Model):
             settings_obj = LoyaltySettings.load()
             if not settings_obj.program_active:
                 return None, False
+
+            # --- NEW FAILSAFE: Ensure tiers exist before proceeding ---
             bronze = LoyaltyTier.objects.filter(level='bronze').first()
+            if not bronze:
+                tier_defaults = [
+                    ('bronze',   'Bronze',   0,    49,   '1.00', 'bg-amber-500'),
+                    ('silver',   'Silver',   50,   199,  '1.25', 'bg-slate-400'),
+                    ('gold',     'Gold',     200,  499,  '1.50', 'bg-yellow-500'),
+                    ('platinum', 'Platinum', 500,  999,  '2.00', 'bg-slate-600'),
+                    ('diamond',  'Diamond',  1000, None, '3.00', 'bg-cyan-500'),
+                ]
+                for level, name, min_p, max_p, mult, color in tier_defaults:
+                    LoyaltyTier.objects.get_or_create(level=level, defaults={
+                        'name': name, 'min_points': min_p, 'max_points': max_p,
+                        'points_multiplier': mult, 'color': color,
+                    })
+                bronze = LoyaltyTier.objects.filter(level='bronze').first()
+            # ----------------------------------------------------------
+
             member = cls.objects.create(
                 hotspot_client=hotspot_client,
                 tier=bronze,
