@@ -158,56 +158,64 @@ def award_hotspot_loyalty_points(sender, instance, created, **kwargs):
         return
 
     session_id = str(instance.session_id)
+    
+    # 1. CAPTURE THE SCHEMA BEFORE THE TRANSACTION CLOSES
+    from django.db import connection
+    schema_name = connection.schema_name
 
     def _do_award():
-        try:
-            from apps.billing.models.hotspot_models import HotspotSession
-            from .models import LoyaltySettings, LoyaltyMember, PointsTransaction
-            from decimal import Decimal
+        from django_tenants.utils import schema_context
+        
+        # 2. FORCE THE DEFERRED FUNCTION TO USE THE CAPTURED SCHEMA
+        with schema_context(schema_name):
+            try:
+                from apps.billing.models.hotspot_models import HotspotSession
+                from .models import LoyaltySettings, LoyaltyMember, PointsTransaction
+                from decimal import Decimal
 
-            session = HotspotSession.objects.select_related('hotspot_client', 'plan').get(
-                session_id=session_id
-            )
-            if not session.hotspot_client:
-                return
-
-            settings_obj = LoyaltySettings.load()
-            if not settings_obj.program_active:
-                return
-
-            # Idempotency: check if points already awarded for this session
-            dedup_desc = f'Hotspot session {session_id}'
-            member, _ = LoyaltyMember.get_or_create_for_hotspot(session.hotspot_client)
-            if not member:
-                return
-
-            if PointsTransaction.objects.filter(
-                member=member, description=dedup_desc
-            ).exists():
-                return  # Already awarded
-
-            amount = float(session.amount)
-            if settings_obj.currency_unit <= 0:
-                return
-            points = int(amount / settings_obj.currency_unit) * settings_obj.points_per_currency
-
-            if points > 0:
-                member.award_points(
-                    points=points,
-                    description=dedup_desc,
-                    transaction_type='earned',
+                session = HotspotSession.objects.select_related('hotspot_client', 'plan').get(
+                    session_id=session_id
                 )
-                # Update spend analytics using F expressions
-                LoyaltyMember.objects.filter(pk=member.pk).update(
-                    total_spent=F('total_spent') + Decimal(str(amount)),
-                    total_payments=F('total_payments') + 1,
-                )
-                logger.info(
-                    f'Loyalty: awarded {points} pts to hotspot client '
-                    f'{session.hotspot_client.canonical_username} for KES {amount:.0f}'
-                )
+                if not session.hotspot_client:
+                    return
 
-        except Exception as e:
-            logger.error(f'Hotspot loyalty award error: {e}', exc_info=True)
+                settings_obj = LoyaltySettings.load()
+                if not settings_obj.program_active:
+                    return
+
+                # Idempotency: check if points already awarded for this session
+                dedup_desc = f'Hotspot session {session_id}'
+                member, _ = LoyaltyMember.get_or_create_for_hotspot(session.hotspot_client)
+                if not member:
+                    return
+
+                if PointsTransaction.objects.filter(
+                    member=member, description=dedup_desc
+                ).exists():
+                    return  # Already awarded
+
+                amount = float(session.amount)
+                if settings_obj.currency_unit <= 0:
+                    return
+                points = int(amount / settings_obj.currency_unit) * settings_obj.points_per_currency
+
+                if points > 0:
+                    member.award_points(
+                        points=points,
+                        description=dedup_desc,
+                        transaction_type='earned',
+                    )
+                    # Update spend analytics using F expressions
+                    LoyaltyMember.objects.filter(pk=member.pk).update(
+                        total_spent=F('total_spent') + Decimal(str(amount)),
+                        total_payments=F('total_payments') + 1,
+                    )
+                    logger.info(
+                        f'Loyalty: awarded {points} pts to hotspot client '
+                        f'{session.hotspot_client.canonical_username} for KES {amount:.0f}'
+                    )
+
+            except Exception as e:
+                logger.error(f'Hotspot loyalty award error: {e}', exc_info=True)
 
     transaction.on_commit(_do_award)
