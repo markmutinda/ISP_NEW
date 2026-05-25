@@ -183,14 +183,16 @@ class MpesaConfiguration(AuditMixin):
     
     def get_callback_url(self, request=None):
         """
-        Default STK callback URL.
-        NOTE: C2B callbacks are separate and should be configured explicitly where needed.
+        Default C2B Callback URL for M-Pesa transactions.
+        NOTE: This is specifically for C2B (Customer to Business) webhook callbacks.
+        For STK Push callbacks, use a different endpoint.
         """
         if self.callback_url:
             return self.callback_url
 
         sub_domain = self.schema_name.replace('tenant_', '')
-        return f"https://{sub_domain}.netily.co.ke/api/v1/billing/mpesa/callback/"
+        # FIX: Point to the new C2B webhook view instead of legacy STK callback
+        return f"https://{sub_domain}.netily.co.ke/api/v1/billing/mpesa/c2b-callback/"
     
     def get_timeout_url(self, request=None):
         if self.timeout_url:

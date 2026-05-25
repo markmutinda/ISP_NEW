@@ -370,15 +370,16 @@ class MpesaSTKPush:
             if not validation_url.endswith('/'):
                 validation_url += '/'
             
-            # Determine API URL
+            # FIX: Use v1 API instead of v2 - v1 is more stable and battle-tested
+            # The v2 API frequently returns 404 or 400 errors on production
             if is_sandbox:
-                api_url = "https://sandbox.safaricom.co.ke/mpesa/c2b/v2/registerurl"
+                api_url = "https://sandbox.safaricom.co.ke/mpesa/c2b/v1/registerurl"
             else:
-                api_url = "https://api.safaricom.co.ke/mpesa/c2b/v2/registerurl"
+                api_url = "https://api.safaricom.co.ke/mpesa/c2b/v1/registerurl"
             
             headers = {"Authorization": f"Bearer {access_token}", "Content-Type": "application/json"}
             
-            # V2 payload format
+            # V1 payload format (slightly different from v2)
             payload = {
                 "ShortCode": business_shortcode,
                 "ResponseType": "Completed",  # Safaricom will send data even if our server is down
@@ -387,6 +388,7 @@ class MpesaSTKPush:
             }
             
             logger.info(f"Registering C2B URLs for shortcode {business_shortcode}")
+            logger.info(f"Using API: {api_url} (v1 endpoint for stability)")
             logger.info(f"Confirmation URL: {confirmation_url}")
             logger.info(f"Validation URL: {validation_url}")
             
@@ -459,6 +461,7 @@ class MpesaSTKPush:
                 business_shortcode = self.config.get('business_shortcode')
                 is_sandbox = self.config.get('environment') == 'sandbox'
             
+            # Use v1 for deregistration as well for consistency
             if is_sandbox:
                 api_url = "https://sandbox.safaricom.co.ke/mpesa/c2b/v1/registerurl"
             else:
@@ -466,22 +469,32 @@ class MpesaSTKPush:
             
             headers = {"Authorization": f"Bearer {access_token}", "Content-Type": "application/json"}
             
-            # For deregistration, you need to use the deregister endpoint
-            # Note: Some versions of the API use a different endpoint
+            # For deregistration, you need to use the register endpoint with empty URLs
+            # This effectively unregisters the URLs
             payload = {
-                "ShortCode": business_shortcode
+                "ShortCode": business_shortcode,
+                "ResponseType": "Cancelled",
+                "ConfirmationURL": "",  # Empty to deregister
+                "ValidationURL": ""     # Empty to deregister
             }
             
-            # This is a placeholder - actual deregistration endpoint may differ
-            # You may need to use the same register endpoint with empty URLs
-            response = requests.post(api_url.replace('register', 'deregister'), 
-                                     json=payload, headers=headers, timeout=30)
+            logger.info(f"Deregistering C2B URLs for shortcode {business_shortcode}")
             
-            return {
-                'success': response.status_code == 200,
-                'message': 'URLs deregistered' if response.status_code == 200 else 'Deregistration failed',
-                'data': response.json() if response.status_code == 200 else {}
-            }
+            response = requests.post(api_url, json=payload, headers=headers, timeout=30)
+            
+            if response.status_code == 200:
+                response_data = response.json()
+                return {
+                    'success': response_data.get('ResponseCode') == '0',
+                    'message': 'URLs deregistered successfully' if response_data.get('ResponseCode') == '0' else 'Deregistration failed',
+                    'data': response_data
+                }
+            else:
+                return {
+                    'success': False,
+                    'message': 'Deregistration failed',
+                    'data': response.json() if response.text else {}
+                }
             
         except Exception as e:
             logger.error(f"Error deregistering C2B URLs: {str(e)}")
