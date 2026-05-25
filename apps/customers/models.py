@@ -653,10 +653,13 @@ class ServiceConnection(AuditMixin):
     )
 
     # === Billing Account Number ===
+    # Changed default to empty string; signal will populate for PPPoE/Static services.
+    # For other service types, the model's save() will generate a fallback number.
     billing_account_number = models.CharField(
         max_length=20,
         unique=True,
-        default=generate_billing_account_number,
+        blank=True,        # Allows empty in Python before the signal runs
+        default='',        # Signal (or fallback in save) will fill this in
         editable=True,
         db_index=True,
         help_text="The Account Number the customer uses when paying via Paybill. Usually 6-10 alphanumeric characters."
@@ -880,14 +883,16 @@ class ServiceConnection(AuditMixin):
 
     def save(self, *args, **kwargs):
         """
-        Auto-populate fields and ensure unique billing account number
+        Auto-populate fields and ensure unique billing account number.
+        For PPPoE/Static services, the signal will set billing_account_number before this.
+        For other types, if still empty, generate a fallback.
         """
-        # Generate unique billing account number if not set or if it conflicts
+        # Generate unique billing account number if still empty (fallback for non-PPPoE/Static services)
         if not self.billing_account_number:
             self.billing_account_number = self._generate_unique_account_number()
         else:
-            # Ensure uniqueness even when manually set
-            original_number = self.billing_account_number
+            # Ensure uniqueness even when manually set (including signal-set values)
+            # This loop will only run if a conflict somehow occurs (unlikely due to signal handling)
             while ServiceConnection.objects.exclude(pk=self.pk).filter(
                 billing_account_number=self.billing_account_number
             ).exists():
@@ -914,7 +919,7 @@ class ServiceConnection(AuditMixin):
         super().save(*args, **kwargs)
 
     def _generate_unique_account_number(self):
-        """Generate a unique billing account number"""
+        """Generate a unique billing account number (fallback when no phone number is available)"""
         max_attempts = 10
         for attempt in range(max_attempts):
             # Generate different formats based on attempt

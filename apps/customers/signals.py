@@ -200,33 +200,59 @@ def cleanup_ip_on_service_deletion(sender, instance, **kwargs):
 @receiver(pre_save, sender=ServiceConnection)
 def auto_generate_billing_account_number(sender, instance, **kwargs):
     """
-    Auto-generate billing_account_number for PPPoE/Static services
-    if one hasn't been assigned yet.
-    
-    This runs before save so the account number is available immediately
-    after creation.
+    Auto-generate billing_account_number for PPPoE/Static services.
+    Uses the customer's phone number (last 9 digits, e.g. 712345678).
+    Falls back to sequential code if phone unavailable or duplicate.
     """
-    # Only for PPPoE and Static connection types
     auth_type = (instance.auth_connection_type or '').upper()
     if auth_type not in ('PPPOE', 'STATIC'):
         return
 
-    # Don't overwrite if already set
     if instance.billing_account_number and instance.billing_account_number.strip():
         return
 
-    # Skip if no PK yet on customer (shouldn't happen, but guard)
     if not instance.customer_id:
         return
 
     try:
+        customer = instance.customer
+        phone = ''
+        if customer.user and customer.user.phone_number:
+            # Strip to digits only, take last 9 digits (e.g. 712345678)
+            digits = ''.join(ch for ch in customer.user.phone_number if ch.isdigit())
+            if digits.startswith('254') and len(digits) >= 12:
+                phone = digits[3:]  # remove 254 prefix → 9 digits
+            elif digits.startswith('0') and len(digits) >= 10:
+                phone = digits[1:]  # remove leading 0 → 9 digits
+            else:
+                phone = digits[-9:] if len(digits) >= 9 else digits
+
+        if phone:
+            # Check uniqueness — if taken, append a suffix
+            candidate = phone
+            if not ServiceConnection.objects.exclude(pk=instance.pk).filter(
+                billing_account_number=candidate
+            ).exists():
+                instance.billing_account_number = candidate
+                logger.info(f"Billing account set to phone {candidate} for customer {instance.customer_id}")
+                return
+            
+            # Phone already taken (e.g. same customer, second service) — append 'B', 'C', etc.
+            for suffix in ['B', 'C', 'D', 'E']:
+                candidate = phone + suffix
+                if not ServiceConnection.objects.exclude(pk=instance.pk).filter(
+                    billing_account_number=candidate
+                ).exists():
+                    instance.billing_account_number = candidate
+                    logger.info(f"Billing account set to {candidate} for customer {instance.customer_id}")
+                    return
+
+        # Fallback to existing sequential logic
         from apps.customers.billing_account import generate_billing_account_number
         account_number = generate_billing_account_number(instance.customer, instance)
         instance.billing_account_number = account_number
-        logger.info(
-            f"Auto-generated billing account number {account_number} "
-            f"for customer {instance.customer_id}"
-        )
+        logger.info(f"Fallback billing account {account_number} for customer {instance.customer_id}")
+
     except Exception as e:
         logger.error(f"Failed to auto-generate billing account number: {e}")
 
