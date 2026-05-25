@@ -1,5 +1,6 @@
 # apps/billing/models/payment_models.py
 from django.db import models
+from django.db import transaction, IntegrityError  # ADDED: transaction and IntegrityError for retry loop
 from django.core.validators import MinValueValidator
 from django.core.exceptions import ValidationError
 from django.utils import timezone
@@ -645,7 +646,7 @@ class InvoiceItemPayment(models.Model):
         return None
 
 
-# ==================== Payment Model (UPDATED - PayHero Removed) ====================
+# ==================== Payment Model (UPDATED - WITH RETRY LOOP) ====================
 
 class Payment(models.Model):
     PAYMENT_STATUS = [
@@ -775,12 +776,21 @@ class Payment(models.Model):
         return f"Payment #{self.payment_number} - {customer_ref}"
 
     def save(self, *args, **kwargs):
+        # 1. Handle standard fields first
+        if self.net_amount == 0 and self.amount:
+            self.net_amount = self.amount - self.transaction_fee
+        
+        if not self.schema_name and self.customer:
+            self.schema_name = self.customer.schema_name
+            
+        # 2. Handle ID Generation with Concurrency Protection (RETRY LOOP)
         if not self.payment_number:
             year = timezone.now().year
             month = timezone.now().month
+            prefix = f'PAY-{year}-{month:02d}-'
             
             last_payment = Payment.objects.filter(
-                payment_number__startswith=f'PAY-{year}-{month:02d}-'
+                payment_number__startswith=prefix
             ).order_by('-payment_number').first()
             
             if last_payment and last_payment.payment_number:
@@ -788,20 +798,26 @@ class Payment(models.Model):
                     last_num = int(last_payment.payment_number.split('-')[-1])
                     new_num = last_num + 1
                 except (IndexError, ValueError):
-                    new_num = Payment.objects.count() + 1
+                    new_num = 1
             else:
                 new_num = 1
             
-            self.payment_number = f"PAY-{year}-{month:02d}-{new_num:05d}"
-        
-        if self.net_amount == 0 and self.amount:
-            self.net_amount = self.amount - self.transaction_fee
-        
-        # FIX: Only try to get schema_name from customer if customer exists
-        if not self.schema_name and self.customer:
-            self.schema_name = self.customer.schema_name
-            
-        super().save(*args, **kwargs)
+            # Retry loop: If another transaction steals the number, increment and try again
+            while True:
+                self.payment_number = f"{prefix}{new_num:05d}"
+                try:
+                    # Nested atomic block prevents the main transaction from aborting on error
+                    with transaction.atomic():
+                        super().save(*args, **kwargs)
+                    break  # Success! Exit the loop.
+                except IntegrityError as e:
+                    if 'payment_number' in str(e) or 'payment_number_key' in str(e):
+                        new_num += 1  # Number was taken, try the next one
+                    else:
+                        raise  # Re-raise if it's a completely different database error
+        else:
+            # Normal save for existing objects
+            super().save(*args, **kwargs)
     
     def mark_as_completed(self, transaction_id=None, receipt_number=None, processed_by=None):
         """Mark payment as completed"""
@@ -926,23 +942,7 @@ class Receipt(models.Model):
         return f"Receipt #{self.receipt_number} - {customer_ref}"
 
     def save(self, *args, **kwargs):
-        if not self.receipt_number:
-            year = timezone.now().year
-            last_receipt = Receipt.objects.filter(
-                receipt_number__startswith=f'RCPT-{year}'
-            ).order_by('-receipt_number').first()
-            
-            if last_receipt and last_receipt.receipt_number:
-                try:
-                    last_num = int(last_receipt.receipt_number.split('-')[-1])
-                    new_num = last_num + 1
-                except (IndexError, ValueError):
-                    new_num = Receipt.objects.count() + 1
-            else:
-                new_num = 1
-            
-            self.receipt_number = f"RCPT-{year}-{new_num:05d}"
-        
+        # 1. Handle standard fields first
         if not self.amount and self.payment:
             self.amount = self.payment.amount
         
@@ -952,11 +952,43 @@ class Receipt(models.Model):
         if not self.payment_reference and self.payment:
             self.payment_reference = self.payment.payment_reference
         
-        # FIX: Only try to get schema_name from payment if payment exists
         if not self.schema_name and self.payment:
             self.schema_name = self.payment.schema_name
-        
-        super().save(*args, **kwargs)
+
+        # 2. Handle ID Generation with Concurrency Protection (RETRY LOOP)
+        if not self.receipt_number:
+            year = timezone.now().year
+            prefix = f'RCPT-{year}-'
+            
+            last_receipt = Receipt.objects.filter(
+                receipt_number__startswith=prefix
+            ).order_by('-receipt_number').first()
+            
+            if last_receipt and last_receipt.receipt_number:
+                try:
+                    last_num = int(last_receipt.receipt_number.split('-')[-1])
+                    new_num = last_num + 1
+                except (IndexError, ValueError):
+                    new_num = 1
+            else:
+                new_num = 1
+            
+            # Retry loop: If another transaction steals the number, increment and try again
+            while True:
+                self.receipt_number = f"{prefix}{new_num:05d}"
+                try:
+                    # Nested atomic block prevents the main transaction from aborting on error
+                    with transaction.atomic():
+                        super().save(*args, **kwargs)
+                    break  # Success! Exit the loop.
+                except IntegrityError as e:
+                    if 'receipt_number' in str(e) or 'receipt_number_key' in str(e):
+                        new_num += 1  # Number was taken, try the next one
+                    else:
+                        raise  # Re-raise if it's a completely different database error
+        else:
+            # Normal save for existing objects
+            super().save(*args, **kwargs)
 
     def issue_receipt(self, user):
         if self.status == 'DRAFT':
