@@ -887,12 +887,16 @@ class ServiceConnection(AuditMixin):
         For PPPoE/Static services, the signal will set billing_account_number before this.
         For other types, if still empty, generate a fallback.
         """
-        # Generate unique billing account number if still empty (fallback for non-PPPoE/Static services)
+        # For PPPoE/Static: leave empty here so the pre_save signal in signals.py
+        # can set it from the customer's phone number before the DB write.
+        # For all other types: generate a random fallback immediately.
+        _auth_type = (self.auth_connection_type or '').upper()
         if not self.billing_account_number:
-            self.billing_account_number = self._generate_unique_account_number()
+            if _auth_type not in ('PPPOE', 'STATIC'):
+                self.billing_account_number = self._generate_unique_account_number()
+            # else: signal sets phone-based number (e.g. "712345678") before INSERT
         else:
-            # Ensure uniqueness even when manually set (including signal-set values)
-            # This loop will only run if a conflict somehow occurs (unlikely due to signal handling)
+            # Ensure uniqueness for manually-set or signal-set values
             while ServiceConnection.objects.exclude(pk=self.pk).filter(
                 billing_account_number=self.billing_account_number
             ).exists():

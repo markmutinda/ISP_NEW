@@ -56,7 +56,7 @@ class ServiceConnectionSerializer(serializers.ModelSerializer):
         read_only_fields = [
             'activation_date', 'suspension_date', 'termination_date',
             'installed_by', 'created_at', 'updated_at',
-            'billing_account_number',
+            # 'billing_account_number',  # REMOVED - now writable via API
             'mpesa_account_number',
             'paybill_account_number',
         ]
