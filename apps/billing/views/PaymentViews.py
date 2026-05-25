@@ -343,10 +343,23 @@ class MpesaConfigurationViewSet(viewsets.ModelViewSet):
                 'is_default': True,
             }
         )
+        
+        # ============================================================
+        # FIX: Clear the Tuma FK so the branch check is unambiguous
+        # ============================================================
         method.mpesa_configuration = config
+        method.tuma_configuration = None   # ← clear the Tuma FK
         method.is_active = True
         method.is_default = True
-        method.save(update_fields=['mpesa_configuration', 'is_active', 'is_default', 'updated_at'])
+        method.save(update_fields=[
+            'mpesa_configuration', 'tuma_configuration',
+            'is_active', 'is_default', 'updated_at',
+        ])
+
+        logger.info(
+            f"[{connection.schema_name}] Daraja activated as primary: "
+            f"shortcode={config.business_shortcode}, method={method.code}"
+        )
 
         return Response({
             'status': 'success',
@@ -932,6 +945,26 @@ class PaymentViewSet(viewsets.ModelViewSet):
                     payment.transaction_id = transaction_data['mpesa_receipt']
                     payment.payment_date = timezone.now()
                     payment.mark_as_completed()
+                    
+                    # ============================================================
+                    # FIX: Propagate completion to linked HotspotSession (Daraja hotspot flow)
+                    # ============================================================
+                    try:
+                        from apps.billing.models.hotspot_models import HotspotSession
+                        hotspot_session = (
+                            HotspotSession.objects
+                            .filter(payment=payment, status='pending')
+                            .select_related('plan', 'router')
+                            .first()
+                        )
+                        if hotspot_session:
+                            hotspot_session.mark_paid(payment.mpesa_receipt or '')
+                            logger.info(
+                                f"HotspotSession {hotspot_session.session_id} marked paid "
+                                f"via Daraja callback (receipt={payment.mpesa_receipt})"
+                            )
+                    except Exception as hs_err:
+                        logger.warning(f"Could not update hotspot session from Daraja callback: {hs_err}")
                     
                     # Update the MpesaTransaction
                     mpesa_transaction.mark_completed(

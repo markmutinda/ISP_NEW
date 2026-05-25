@@ -511,16 +511,38 @@ class HotspotPurchaseView(APIView):
             if not HotspotSession.objects.filter(access_code=code).exists():
                 return code
 
+    # ============================================================
+    # FIXED: _get_active_hotspot_payment_method with Daraja priority
+    # ============================================================
     def _get_active_hotspot_payment_method(self, schema_name: str):
         """
-        Resolve tenant's active payment method for hotspot checkout.
-
-        Accepts ANY active M-Pesa-capable method type.
-        Priority: default first, then most recently updated active method.
-        Falls back to ANY active method if no specific M-Pesa type found,
-        since Tuma-configured methods may have various types.
+        Resolve the active payment method for hotspot checkout.
+        Priority order:
+          1. Daraja (own Safaricom keys) — mpesa_configuration linked + active
+          2. Tuma-capable M-Pesa method
+          3. Any active method with a gateway config
         """
-        # First try: explicit M-Pesa capable types
+        # ── Priority 1: Tenant's own Daraja keys ──────────────────────────
+        daraja_method = (
+            InvoiceItemPayment.objects
+            .filter(
+                schema_name=schema_name,
+                is_active=True,
+                mpesa_configuration__isnull=False,
+                mpesa_configuration__is_active=True,
+            )
+            .select_related('mpesa_configuration', 'tuma_configuration')
+            .order_by('-is_default', '-updated_at')
+            .first()
+        )
+        if daraja_method:
+            logger.info(
+                f"[{schema_name}] Hotspot gateway → Daraja "
+                f"(shortcode={daraja_method.mpesa_configuration.business_shortcode})"
+            )
+            return daraja_method
+
+        # ── Priority 2: Any active M-Pesa capable method (Tuma etc.) ──────
         method = (
             InvoiceItemPayment.objects
             .filter(
@@ -532,18 +554,17 @@ class HotspotPurchaseView(APIView):
             .order_by('-is_default', '-updated_at')
             .first()
         )
-        
         if method:
-            return method
-        
-        # Fallback: any active method that has a tuma_configuration OR mpesa_configuration
-        # REMOVED: is_payhero_enabled filter
-        method = (
-            InvoiceItemPayment.objects
-            .filter(
-                schema_name=schema_name,
-                is_active=True,
+            logger.info(
+                f"[{schema_name}] Hotspot gateway → M-Pesa capable method "
+                f"(code={method.code}, type={method.method_type})"
             )
+            return method
+
+        # ── Priority 3: Fallback — any active method with a gateway ────────
+        fallback_method = (
+            InvoiceItemPayment.objects
+            .filter(schema_name=schema_name, is_active=True)
             .filter(
                 Q(tuma_configuration__isnull=False) |
                 Q(mpesa_configuration__isnull=False)
@@ -552,8 +573,13 @@ class HotspotPurchaseView(APIView):
             .order_by('-is_default', '-updated_at')
             .first()
         )
+        if fallback_method:
+            logger.info(
+                f"[{schema_name}] Hotspot gateway → fallback gateway method "
+                f"(code={fallback_method.code})"
+            )
         
-        return method
+        return fallback_method
 
     def _ensure_mpesa_stk_callback_url(self, mpesa_cfg):
         """
