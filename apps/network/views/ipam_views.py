@@ -364,11 +364,17 @@ class IPPoolViewSet(viewsets.ModelViewSet):
     
     @action(detail=True, methods=['get'], url_path='available-ips')
     def available_ips_list(self, request, pk=None):
-        """Get all AVAILABLE IPs from a pool — for the 'Long Dropdown' UI.
+        """Get AVAILABLE IPs from a pool — paginated for large pools.
         
-        Returns a lightweight list: [{id, ip_address, status}]
-        Used when creating a customer service to pick a specific static IP.
-        Supports ?search= to filter IPs by partial match.
+        Supports:
+        - Pagination: page_size (default 100, max 500)
+        - Search: search (partial match on IP address)
+        
+        Returns:
+        - pool_id, pool_name
+        - total_available: total count of available IPs in pool
+        - returned: number of IPs returned in this response
+        - results: list of {id, ip_address}
         """
         pool = self.get_object()
         ips = pool.ip_addresses.filter(status='AVAILABLE').order_by('ip_address')
@@ -378,14 +384,25 @@ class IPPoolViewSet(viewsets.ModelViewSet):
         if search:
             ips = ips.filter(ip_address__icontains=search)
         
-        # Limit to 500 for performance
-        ips = ips[:500]
+        # Get total count before pagination
+        total_available = ips.count()
+        
+        # Pagination — default 100, max 500
+        try:
+            page_size = min(int(request.query_params.get('page_size', 100)), 500)
+        except (ValueError, TypeError):
+            page_size = 100
+        
+        # Slice the queryset (simple pagination without offset)
+        ips = ips[:page_size]
         
         data = [{'id': ip.id, 'ip_address': ip.ip_address} for ip in ips]
+        
         return Response({
             'pool_id': pool.id,
             'pool_name': pool.name,
-            'total_available': pool.ip_addresses.filter(status='AVAILABLE').count(),
+            'total_available': total_available,
+            'returned': len(data),
             'results': data
         })
     

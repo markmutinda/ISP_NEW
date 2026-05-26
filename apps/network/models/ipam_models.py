@@ -231,28 +231,35 @@ class IPPool(AuditMixin):
                 'subnet_prefix': f'{self.subnet_prefix}.x.x is reserved/blocked '
                                   f'(VPN/System). Choose a different prefix.'
             })
-        
-        # NEW: Validate CIDR is appropriate for the prefix type
+
+        # NEW: Validate 3rd octet is not needed for large CIDRs
         if self.subnet_prefix and self.cidr_prefix is not None:
-            # Prevent using a /16 on a 3-octet prefix like 192.168.10
             prefix_parts = self.subnet_prefix.split('.')
+            
             if len(prefix_parts) == 3 and self.cidr_prefix < 24:
                 raise DjangoValidationError({
                     'cidr_prefix': f'Prefix {self.subnet_prefix} is a /24-style prefix. '
-                                   f'Use a /24 or smaller. For larger pools, use a 2-octet prefix like 10.50.'
+                                   f'Use /24 or smaller, or switch to a 2-octet prefix like 10.50.'
                 })
-        
-        # NEW: Prevent overlapping octets on the same prefix
-        if self.subnet_prefix and self.subnet_octet is not None:
-            overlapping = IPPool.objects.filter(
-                subnet_prefix=self.subnet_prefix,
-                subnet_octet=self.subnet_octet
-            ).exclude(pk=self.pk)
             
-            if overlapping.exists():
-                raise DjangoValidationError({
-                    'subnet_octet': f"Octet {self.subnet_octet} on prefix {self.subnet_prefix} is already used by pool '{overlapping.first().name}'."
-                })
+            # For /16 and larger with 2-octet prefix, force subnet_octet to 0
+            if len(prefix_parts) == 2 and self.cidr_prefix <= 16:
+                self.subnet_octet = 0  # Force it, don't let user confuse things
+
+        # NEW: Prevent overlapping octets on the same prefix
+        if self.subnet_prefix and self.subnet_octet is not None and self.cidr_prefix is not None:
+            # Only check overlap for /24 and smaller where octet is meaningful
+            if self.cidr_prefix >= 24:
+                overlapping = IPPool.objects.filter(
+                    subnet_prefix=self.subnet_prefix,
+                    subnet_octet=self.subnet_octet
+                ).exclude(pk=self.pk)
+                
+                if overlapping.exists():
+                    raise DjangoValidationError({
+                        'subnet_octet': f"Octet {self.subnet_octet} on prefix {self.subnet_prefix} "
+                                        f"is already used by pool '{overlapping.first().name}'."
+                    })
         
         # Optional: Validate that start_ip < end_ip if both are provided
         if self.start_ip and self.end_ip:
@@ -269,42 +276,54 @@ class IPPool(AuditMixin):
                 pass
     
     def _compute_from_subnet_builder(self):
-        """Compute start_ip, end_ip, gateway, network/broadcast from subnet builder fields.
+        """Compute start_ip, end_ip, gateway from subnet builder fields.
         
-        Optimized for large subnets to avoid creating massive lists in memory.
+        Handles CIDR values correctly:
+        - For /16 or larger: network is prefix.0.0 (3rd octet forced to 0)
+        - For /17 to /23: uses 3rd octet (defaults to 0 if not set)
+        - For /24 or smaller: requires 3rd octet
         """
-        if not (self.subnet_prefix and self.subnet_octet is not None and self.cidr_prefix):
+        if not (self.subnet_prefix and self.cidr_prefix):
             return  # Legacy mode — fields already set manually
-        
-        # Build the network string, e.g. "10.50.3.0/24"
+
         prefix_parts = self.subnet_prefix.split('.')
+
         if len(prefix_parts) == 2:
-            # e.g. "10.50" + octet 3 → "10.50.3.0"
-            net_str = f"{self.subnet_prefix}.{self.subnet_octet}.0/{self.cidr_prefix}"
+            # 2-octet prefix: e.g. "10.50" or "172.16"
+            if self.cidr_prefix <= 16:
+                # /16 or larger — 3rd octet is irrelevant, always use 0
+                net_str = f"{self.subnet_prefix}.0.0/{self.cidr_prefix}"
+            elif self.cidr_prefix <= 23:
+                # /17-/23 — 3rd octet matters, default to 0 if not set
+                octet = self.subnet_octet if self.subnet_octet is not None else 0
+                net_str = f"{self.subnet_prefix}.{octet}.0/{self.cidr_prefix}"
+            else:
+                # /24 or smaller — 3rd octet required
+                if self.subnet_octet is None:
+                    logger.error(f"subnet_octet is required for /{self.cidr_prefix} pool")
+                    return
+                net_str = f"{self.subnet_prefix}.{self.subnet_octet}.0/{self.cidr_prefix}"
         elif len(prefix_parts) == 3:
-            # e.g. "192.168.10" + octet ignored or used differently
-            # Here octet is the 4th-octet base, but for /24+ we use 0
+            # 3-octet prefix: e.g. "192.168.10" — only supports /24 or smaller
             net_str = f"{self.subnet_prefix}.0/{self.cidr_prefix}"
         else:
             return
-        
+
         try:
             network = ipaddress.IPv4Network(net_str, strict=False)
         except ValueError as e:
             logger.error(f"Invalid subnet: {net_str} — {e}")
             return
-        
-        # OPTIMIZED: Avoid list(network.hosts()) for large subnets — compute directly
-        # This prevents memory issues with /16 pools (65K+ items)
+
         first_host = network.network_address + 1
         last_host = network.broadcast_address - 1
-        
+
         self.network_address = str(network.network_address)
         self.broadcast_address = str(network.broadcast_address)
-        self.gateway = str(first_host)          # .1 = gateway
-        self.start_ip = str(first_host + 1)     # .2 = first usable
-        self.end_ip = str(last_host)            # .254/.last = last usable
-        self.total_ips = int(last_host) - int(first_host)  # excludes gateway
+        self.gateway = str(first_host)
+        self.start_ip = str(first_host + 1)
+        self.end_ip = str(last_host)
+        self.total_ips = int(last_host) - int(first_host)
     
     def save(self, *args, **kwargs):
         # Run validation before saving
