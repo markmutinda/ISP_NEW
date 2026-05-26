@@ -87,16 +87,15 @@ def populate_ip_pool_addresses(self, pool_id: int, schema_name: str = 'public'):
     Returns:
         dict: Result status and details
     """
+    # Guard: never run against public schema (IPPool doesn't exist there)
+    if schema_name == 'public':
+        logger.error(
+            f"[TASK] populate_ip_pool_addresses called with schema='public' "
+            f"for pool_id={pool_id}. Aborting."
+        )
+        return {'status': 'aborted', 'reason': 'public_schema', 'pool_id': pool_id}
+
     try:
-        # Guard: never run against public schema (IPPool doesn't exist there)
-        if schema_name == 'public':
-            logger.error(
-                f"[TASK] populate_ip_pool_addresses called with schema='public' "
-                f"for pool_id={pool_id}. This is a bug — IPPool only exists in "
-                f"tenant schemas. Aborting without retry."
-            )
-            return {"status": "aborted", "reason": "public_schema", "pool_id": pool_id}
-        
         # Switch to the correct tenant schema before accessing the model
         with schema_context(schema_name):
             from apps.network.models.ipam_models import IPPool
@@ -104,58 +103,30 @@ def populate_ip_pool_addresses(self, pool_id: int, schema_name: str = 'public'):
             # Fetch the pool
             pool = IPPool.objects.get(id=pool_id)
             
-            # Log before generation
-            logger.info(
-                f"[TASK] IPPool '{pool.name}' (id={pool_id}) schema={schema_name}: "
-                f"starting IP generation for {pool.total_ips} addresses"
-            )
-            
             # Perform the IP address population
             pool._populate_ip_addresses()
             
-            # Refresh usage counts after generation
-            pool.refresh_usage()
-            
             logger.info(
                 f"[TASK] IPPool '{pool.name}' (id={pool_id}) schema={schema_name}: "
-                f"IP generation complete. Total IPs: {pool.total_ips}, Used: {pool.used_ips}"
+                f"IP generation complete"
             )
             
             return {
-                "status": "success",
-                "pool_id": pool_id,
-                "pool_name": pool.name,
-                "schema": schema_name,
-                "total_ips": pool.total_ips,
-                "used_ips": pool.used_ips
+                'status': 'done',
+                'pool_id': pool_id,
+                'schema': schema_name,
+                'pool_name': pool.name
             }
             
     except IPPool.DoesNotExist:
-        error_msg = f"[TASK] IPPool id={pool_id} schema={schema_name} not found"
-        logger.error(error_msg)
+        logger.error(f"[TASK] IPPool id={pool_id} schema={schema_name} not found")
         return {
-            "status": "error",
-            "reason": "not_found",
-            "pool_id": pool_id,
-            "schema": schema_name
+            'status': 'error',
+            'reason': 'not_found',
+            'pool_id': pool_id,
+            'schema': schema_name
         }
         
     except Exception as exc:
-        error_msg = f"[TASK] IPPool id={pool_id} schema={schema_name} IP generation failed: {exc}"
-        logger.error(error_msg, exc_info=True)
-        
-        # Retry with exponential backoff
-        try:
-            raise self.retry(exc=exc, countdown=30, max_retries=3)
-        except self.MaxRetriesExceededError:
-            logger.error(
-                f"[TASK] IPPool id={pool_id} schema={schema_name} "
-                f"exhausted all retries. Manual intervention may be required."
-            )
-            return {
-                "status": "failed",
-                "reason": "max_retries_exceeded",
-                "pool_id": pool_id,
-                "schema": schema_name,
-                "error": str(exc)
-            }
+        logger.error(f"[TASK] IPPool id={pool_id} schema={schema_name} failed: {exc}")
+        raise self.retry(exc=exc, countdown=30)

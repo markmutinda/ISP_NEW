@@ -1,7 +1,7 @@
 import ipaddress
 import logging
 
-from django.db import models
+from django.db import models, connection, transaction
 from django.core.exceptions import ValidationError as DjangoValidationError
 from django.core.validators import MaxValueValidator, MinValueValidator
 from django.db.models.signals import pre_delete
@@ -344,27 +344,34 @@ class IPPool(AuditMixin):
         # Auto-generate IPAddress records for new cloud-led pools
         # For large pools, queue async task
         if is_new and self.subnet_prefix and self.start_ip and self.end_ip:
-            # For large pools, queue async task
             if self.total_ips > 1000:
                 try:
-                    from django.db import connection
                     from apps.network.tasks import populate_ip_pool_addresses
-                    # FIX: Capture schema BEFORE the transaction commits — connection.schema_name
-                    # is correct here (inside the HTTP request context), but we must
-                    # pass it explicitly because Celery runs in the public schema.
+                    
                     current_schema = connection.schema_name
+                    pool_id = self.id
+                    
                     if current_schema == 'public':
-                        import logging
-                        logging.getLogger(__name__).warning(
+                        # Fallback: sync (shouldn't happen from tenant request)
+                        logger.warning(
                             f"IPPool save called from public schema for pool {self.id} — "
                             "IP generation may fail. Falling back to sync."
                         )
                         self._populate_ip_addresses()
                     else:
-                        populate_ip_pool_addresses.delay(self.id, current_schema)
+                        # CRITICAL: use on_commit so the task runs AFTER the row exists
+                        # in the DB. Without this, Celery picks up the task before the
+                        # INSERT is visible and either can't find the pool or runs in
+                        # the wrong schema context.
+                        transaction.on_commit(
+                            lambda: populate_ip_pool_addresses.apply_async(
+                                args=[pool_id, current_schema],
+                                queue='default',
+                            )
+                        )
                         logger.info(
                             f"IPPool '{self.name}': queued IP generation for {self.total_ips} addresses "
-                            f"in schema '{current_schema}'"
+                            f"in schema '{current_schema}' (fires after commit)"
                         )
                 except Exception as e:
                     logger.warning(f"Could not queue IP generation, falling back to sync: {e}")
