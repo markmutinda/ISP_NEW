@@ -73,18 +73,25 @@ def reload_radius_clients(self):
 
 
 @shared_task(bind=True, queue='default', max_retries=3)
-def populate_ip_pool_addresses(self, pool_id: int):
+def populate_ip_pool_addresses(self, pool_id: int, schema_name: str = 'public'):
     """
-    Background task to generate IPAddress records for large pools.
+    Generate IPAddress records for a large pool.
+    Must receive schema_name so the worker switches to the correct tenant schema.
+    
     Called when pool has > 1000 IPs to avoid blocking the HTTP request.
     """
     try:
-        from apps.network.models.ipam_models import IPPool
-        pool = IPPool.objects.get(id=pool_id)
-        pool._populate_ip_addresses()
-        logger.info(f"[TASK] IPPool '{pool.name}' (id={pool_id}): IP generation complete")
+        # Switch to the correct tenant schema before accessing the model
+        with schema_context(schema_name):
+            from apps.network.models.ipam_models import IPPool
+            pool = IPPool.objects.get(id=pool_id)
+            pool._populate_ip_addresses()
+            logger.info(
+                f"[TASK] IPPool '{pool.name}' (id={pool_id}) schema={schema_name}: "
+                f"IP generation complete"
+            )
     except IPPool.DoesNotExist:
-        logger.error(f"[TASK] IPPool id={pool_id} not found")
+        logger.error(f"[TASK] IPPool id={pool_id} schema={schema_name} not found")
     except Exception as exc:
-        logger.error(f"[TASK] IPPool id={pool_id} IP generation failed: {exc}")
+        logger.error(f"[TASK] IPPool id={pool_id} schema={schema_name} IP generation failed: {exc}")
         raise self.retry(exc=exc, countdown=30)

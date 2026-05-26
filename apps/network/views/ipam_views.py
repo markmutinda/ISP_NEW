@@ -4,6 +4,8 @@ from rest_framework.decorators import action
 from rest_framework.response import Response
 from django_filters.rest_framework import DjangoFilterBackend
 from django.db.models import Q, Count, Sum
+from django.core.exceptions import ValidationError as DjangoValidationError
+from rest_framework.exceptions import ValidationError as DRFValidationError
 from netaddr import IPNetwork, IPAddress as NetIPAddress
 from rest_framework import serializers
 from apps.network.models.ipam_models import (
@@ -271,6 +273,26 @@ class IPPoolViewSet(viewsets.ModelViewSet):
         
         return qs
     
+    def perform_create(self, serializer):
+        """Handle Django ValidationError and convert to DRF ValidationError (400)."""
+        try:
+            serializer.save()
+        except DjangoValidationError as exc:
+            raise DRFValidationError(
+                detail=exc.message_dict if hasattr(exc, 'message_dict')
+                else {'non_field_errors': exc.messages}
+            )
+
+    def perform_update(self, serializer):
+        """Handle Django ValidationError and convert to DRF ValidationError (400)."""
+        try:
+            serializer.save()
+        except DjangoValidationError as exc:
+            raise DRFValidationError(
+                detail=exc.message_dict if hasattr(exc, 'message_dict')
+                else {'non_field_errors': exc.messages}
+            )
+    
     @action(detail=True, methods=['get'])
     def allocate_ip(self, request, pk=None):
         """Allocate an IP from pool"""
@@ -364,9 +386,10 @@ class IPPoolViewSet(viewsets.ModelViewSet):
     
     @action(detail=True, methods=['get'], url_path='available-ips')
     def available_ips_list(self, request, pk=None):
-        """Get AVAILABLE IPs from a pool — paginated for large pools.
+        """Get AVAILABLE IPs from a pool — with lazy generation and proper IP sorting.
         
         Supports:
+        - Lazy generation for pools without IPs
         - Pagination: page_size (default 100, max 500)
         - Search: search (partial match on IP address)
         
@@ -375,35 +398,76 @@ class IPPoolViewSet(viewsets.ModelViewSet):
         - total_available: total count of available IPs in pool
         - returned: number of IPs returned in this response
         - results: list of {id, ip_address}
+        - generating: boolean (if IPs are being generated)
+        - message: optional message for large pools
         """
+        import ipaddress as _iplib
+        
         pool = self.get_object()
-        ips = pool.ip_addresses.filter(status='AVAILABLE').order_by('ip_address')
         
-        # Optional search filter
-        search = request.query_params.get('search', '')
+        # ── Lazy generation ──────────────────────────────────────────────────
+        # Handles pools created before the threshold fix, or whose Celery task failed.
+        if pool.start_ip and pool.end_ip and pool.total_ips > 0:
+            if not pool.ip_addresses.exists():
+                if pool.total_ips <= 5000:
+                    # Safe to do inline — uses chunked bulk_create
+                    try:
+                        pool._populate_ip_addresses()
+                        logger.info(f"Lazy IP generation completed for pool '{pool.name}'")
+                    except Exception as e:
+                        logger.warning(f"Lazy IP generation failed for pool '{pool.name}': {e}")
+                else:
+                    # Very large pool — re-queue background task and tell the client
+                    try:
+                        from django.db import connection
+                        from apps.network.tasks import populate_ip_pool_addresses
+                        populate_ip_pool_addresses.delay(pool.id, connection.schema_name)
+                        logger.info(
+                            f"Re-queued background IP generation for large pool '{pool.name}' "
+                            f"in schema '{connection.schema_name}'"
+                        )
+                    except Exception as e:
+                        logger.warning(f"Could not queue background IP generation: {e}")
+                    
+                    return Response({
+                        'pool_id': pool.id,
+                        'pool_name': pool.name,
+                        'total_available': 0,
+                        'returned': 0,
+                        'results': [],
+                        'generating': True,
+                        'message': (
+                            f'IPs are being generated for this large pool '
+                            f'({pool.total_ips:,} addresses). Refresh in a few seconds.'
+                        ),
+                    })
+        
+        # ── Query ────────────────────────────────────────────────────────────
+        ips_qs = pool.ip_addresses.filter(status='AVAILABLE')
+        
+        search = request.query_params.get('search', '').strip()
         if search:
-            ips = ips.filter(ip_address__icontains=search)
+            ips_qs = ips_qs.filter(ip_address__icontains=search)
         
-        # Get total count before pagination
-        total_available = ips.count()
+        total_available = ips_qs.count()
         
-        # Pagination — default 100, max 500
         try:
             page_size = min(int(request.query_params.get('page_size', 100)), 500)
         except (ValueError, TypeError):
             page_size = 100
         
-        # Slice the queryset (simple pagination without offset)
-        ips = ips[:page_size]
-        
-        data = [{'id': ip.id, 'ip_address': ip.ip_address} for ip in ips]
+        # Fetch a slightly larger batch then sort numerically (strings sort wrong for IPs)
+        raw = list(ips_qs.values('id', 'ip_address')[:page_size * 2])
+        raw.sort(key=lambda x: int(_iplib.IPv4Address(x['ip_address'])))
+        raw = raw[:page_size]
         
         return Response({
             'pool_id': pool.id,
             'pool_name': pool.name,
             'total_available': total_available,
-            'returned': len(data),
-            'results': data
+            'returned': len(raw),
+            'results': raw,
+            'generating': False,
         })
     
     @action(detail=False, methods=['get'], url_path='subnet-prefix-options')

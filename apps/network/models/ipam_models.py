@@ -347,9 +347,13 @@ class IPPool(AuditMixin):
             # For large pools, queue async task
             if self.total_ips > 1000:
                 try:
+                    from django.db import connection
                     from apps.network.tasks import populate_ip_pool_addresses
-                    populate_ip_pool_addresses.delay(self.id)
-                    logger.info(f"IPPool '{self.name}': queued IP generation for {self.total_ips} addresses")
+                    populate_ip_pool_addresses.delay(self.id, connection.schema_name)
+                    logger.info(
+                        f"IPPool '{self.name}': queued IP generation for {self.total_ips} addresses "
+                        f"in schema '{connection.schema_name}'"
+                    )
                 except Exception as e:
                     logger.warning(f"Could not queue IP generation, falling back to sync: {e}")
                     self._populate_ip_addresses()
