@@ -482,11 +482,22 @@ def _resolve_bank_for_method(method, banks_list):
     elif mtype == 'BANK_TRANSFER':
         bank_name = _get('bank_name', 'bank_name')
         account = _get('account_number', 'account_number')
+        
         if bank_name and account:
+            # Defensive normalization helper function
+            def normalize(text):
+                return text.lower().replace("-", "").replace(" ", "").replace("bank", "")
+
+            clean_input = normalize(bank_name)
+            
+            # Special acronym exception checks for manual configurations
+            if "kcb" in bank_name.lower():
+                clean_input = "kenyacommercial"
+
             ref = next(
                 (b for b in banks_list
-                 if bank_name.lower() in b.get('name', '').lower()
-                 or b.get('name', '').lower() in bank_name.lower()),
+                 if clean_input in normalize(b.get('name', ''))
+                 or normalize(b.get('name', '')) in clean_input),
                 None,
             )
             if ref:
