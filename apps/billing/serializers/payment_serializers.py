@@ -224,7 +224,7 @@ class MpesaCallbackSerializer(serializers.Serializer):
 
 
 # ==========================
-# Payment Method Serializers (UPDATED - PayHero Removed)
+# Payment Method Serializers (UPDATED - With Frontend Bridge Validator)
 # ==========================
 
 class PaymentMethodSerializer(serializers.ModelSerializer):
@@ -240,7 +240,6 @@ class PaymentMethodSerializer(serializers.ModelSerializer):
         model = InvoiceItemPayment
         fields = [
             'id', 'name', 'code', 'method_type', 'description',
-            # REMOVED: 'channel_id', 'is_payhero_enabled',
             'mpesa_configuration', 'mpesa_configuration_details',
             'till_number', 'paybill_number', 'account_number', 'bank_name', 'custom_link', 'is_default',
             'is_active', 'requires_confirmation', 'confirmation_timeout',
@@ -250,7 +249,85 @@ class PaymentMethodSerializer(serializers.ModelSerializer):
         ]
         read_only_fields = ['created_at', 'updated_at', 'last_used']
 
-    # REMOVED: validate method that checked is_payhero_enabled and channel_id
+    # ═════════════════════════════════════════════════════════════════
+    # VALIDATE METHOD - FRONTEND BRIDGING INTERCEPTOR
+    # ═════════════════════════════════════════════════════════════════
+    def validate(self, data):
+        """
+        Defensive interceptor to automatically unpack the frontend's nested 'config' 
+        object and map properties to root model fields for Tuma API harmony.
+        
+        This bridges the gap between:
+        - Frontend (page_5.tsx) sending: { config: { bank_name: "Cooperative Bank", ... } }
+        - Backend expecting: config_json field or direct model fields
+        
+        When sync_active_method_to_tuma runs, it will automatically capture these
+        valid inputs and create the proper settlement links on Tuma.
+        """
+        # Safely extract data from raw initial request data payload mapping layers
+        initial_config = self.initial_data.get('config') or self.initial_data.get('config_json') or {}
+        config_json = data.get('config_json') or {}
+        
+        # Merge configurations to catch parameters from either source context
+        merged_config = {**config_json, **initial_config}
+        mtype = data.get('method_type') or (self.instance.method_type if self.instance else None)
+
+        if mtype == 'BANK_TRANSFER':
+            bank_name = data.get('bank_name') or merged_config.get('bank_name')
+            account_number = data.get('account_number') or merged_config.get('account_number')
+            
+            if not bank_name:
+                raise serializers.ValidationError({"bank_name": "Bank name is required for bank transfers."})
+            if not account_number:
+                raise serializers.ValidationError({"account_number": "Account number is required for bank transfers."})
+            
+            # Enforce flat root storage and structured JSON alignment simultaneously
+            data['bank_name'] = bank_name
+            data['account_number'] = account_number
+            data['config_json'] = {
+                "bank_name": bank_name,
+                "account_number": account_number
+            }
+            
+        elif mtype == 'MPESA_TILL':
+            till = data.get('till_number') or merged_config.get('till_number') or merged_config.get('shortcode')
+            if till:
+                data['till_number'] = till
+                data['config_json'] = {"till_number": till}
+                
+        elif mtype == 'MPESA_PAYBILL':
+            paybill = data.get('paybill_number') or merged_config.get('paybill_number') or merged_config.get('shortcode')
+            if paybill:
+                data['paybill_number'] = paybill
+                data['config_json'] = {"paybill_number": paybill}
+
+        elif mtype == 'MPESA_STK':
+            # Handle STK Push settlement details (can be either paybill or till)
+            paybill = data.get('paybill_number') or merged_config.get('paybill_number') or merged_config.get('shortcode')
+            till = data.get('till_number') or merged_config.get('till_number')
+            
+            if paybill:
+                data['paybill_number'] = paybill
+                existing_config = data.get('config_json') or {}
+                data['config_json'] = {**existing_config, "paybill_number": paybill}
+            if till:
+                data['till_number'] = till
+                existing_config = data.get('config_json') or {}
+                data['config_json'] = {**existing_config, "till_number": till}
+                
+        elif mtype == 'MOBILE_MONEY':
+            phone = merged_config.get('phone_number') or merged_config.get('phone')
+            provider = merged_config.get('mobile_provider') or 'SAFARICOM'
+            
+            if phone:
+                existing_config = data.get('config_json') or {}
+                data['config_json'] = {
+                    **existing_config,
+                    "phone_number": phone,
+                    "mobile_provider": provider
+                }
+
+        return data
 
 
 # ==========================
