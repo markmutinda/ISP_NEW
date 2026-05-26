@@ -47,8 +47,16 @@ SUBNET_PREFIX_CHOICES = [
     ('192.168.100', '192.168.100.x'),
 ]
 
-# CIDR mask options for pool sizing
+# CIDR mask options for pool sizing — EXPANDED
 CIDR_CHOICES = [
+    (16, '/16 — 65,534 usable IPs'),
+    (17, '/17 — 32,766 usable IPs'),
+    (18, '/18 — 16,382 usable IPs'),
+    (19, '/19 — 8,190 usable IPs'),
+    (20, '/20 — 4,094 usable IPs'),
+    (21, '/21 — 2,046 usable IPs'),
+    (22, '/22 — 1,022 usable IPs'),
+    (23, '/23 — 510 usable IPs'),
     (24, '/24 — 254 usable IPs'),
     (25, '/25 — 126 usable IPs'),
     (26, '/26 — 62 usable IPs'),
@@ -187,7 +195,7 @@ class IPPool(AuditMixin):
         null=True, blank=True,
         choices=CIDR_CHOICES,
         default=24,
-        help_text='CIDR mask: /24=254 IPs, /25=126, /26=62, etc.'
+        help_text='CIDR mask: /16=65K IPs, /24=254 IPs, /25=126, etc.'
     )
     
     # ── Computed / Legacy fields ──
@@ -224,6 +232,16 @@ class IPPool(AuditMixin):
                                   f'(VPN/System). Choose a different prefix.'
             })
         
+        # NEW: Validate CIDR is appropriate for the prefix type
+        if self.subnet_prefix and self.cidr_prefix is not None:
+            # Prevent using a /16 on a 3-octet prefix like 192.168.10
+            prefix_parts = self.subnet_prefix.split('.')
+            if len(prefix_parts) == 3 and self.cidr_prefix < 24:
+                raise DjangoValidationError({
+                    'cidr_prefix': f'Prefix {self.subnet_prefix} is a /24-style prefix. '
+                                   f'Use a /24 or smaller. For larger pools, use a 2-octet prefix like 10.50.'
+                })
+        
         # NEW: Prevent overlapping octets on the same prefix
         if self.subnet_prefix and self.subnet_octet is not None:
             overlapping = IPPool.objects.filter(
@@ -251,7 +269,10 @@ class IPPool(AuditMixin):
                 pass
     
     def _compute_from_subnet_builder(self):
-        """Compute start_ip, end_ip, gateway, network/broadcast from subnet builder fields."""
+        """Compute start_ip, end_ip, gateway, network/broadcast from subnet builder fields.
+        
+        Optimized for large subnets to avoid creating massive lists in memory.
+        """
         if not (self.subnet_prefix and self.subnet_octet is not None and self.cidr_prefix):
             return  # Legacy mode — fields already set manually
         
@@ -273,16 +294,17 @@ class IPPool(AuditMixin):
             logger.error(f"Invalid subnet: {net_str} — {e}")
             return
         
-        hosts = list(network.hosts())  # Excludes network & broadcast
-        if not hosts:
-            return
+        # OPTIMIZED: Avoid list(network.hosts()) for large subnets — compute directly
+        # This prevents memory issues with /16 pools (65K+ items)
+        first_host = network.network_address + 1
+        last_host = network.broadcast_address - 1
         
         self.network_address = str(network.network_address)
         self.broadcast_address = str(network.broadcast_address)
-        self.gateway = str(hosts[0])       # .1 = gateway
-        self.start_ip = str(hosts[1])      # .2 = first usable
-        self.end_ip = str(hosts[-1])       # .254 = last usable
-        self.total_ips = len(hosts) - 1    # Exclude gateway
+        self.gateway = str(first_host)          # .1 = gateway
+        self.start_ip = str(first_host + 1)     # .2 = first usable
+        self.end_ip = str(last_host)            # .254/.last = last usable
+        self.total_ips = int(last_host) - int(first_host)  # excludes gateway
     
     def save(self, *args, **kwargs):
         # Run validation before saving
@@ -301,11 +323,25 @@ class IPPool(AuditMixin):
         super().save(*args, **kwargs)
         
         # Auto-generate IPAddress records for new cloud-led pools
+        # For large pools, defer to background task to avoid request timeout
         if is_new and self.subnet_prefix and self.start_ip and self.end_ip:
-            self._populate_ip_addresses()
+            # For large pools, queue async task
+            if self.total_ips > 1000:
+                try:
+                    from apps.network.tasks import populate_ip_pool_addresses
+                    populate_ip_pool_addresses.delay(self.id)
+                    logger.info(f"IPPool '{self.name}': queued IP generation for {self.total_ips} addresses")
+                except Exception as e:
+                    logger.warning(f"Could not queue IP generation, falling back to sync: {e}")
+                    self._populate_ip_addresses()
+            else:
+                self._populate_ip_addresses()
     
     def _populate_ip_addresses(self):
-        """Generate IPAddress records or adopt orphans."""
+        """Generate IPAddress records or adopt orphans.
+        
+        Uses chunking for large pools to prevent database timeouts.
+        """
         if not self.start_ip or not self.end_ip:
             return
         
@@ -336,7 +372,7 @@ class IPPool(AuditMixin):
         if count_adopted > 0:
             logger.info(f"Pool '{self.name}': Adopted {count_adopted} orphaned IPs.")
 
-        # 2. Now generate NEW IPs for gaps
+        # 2. Now generate NEW IPs for gaps with chunking
         existing = set(
             IPAddress.objects.filter(ip_pool=self)
             .values_list('ip_address', flat=True)
@@ -358,9 +394,16 @@ class IPPool(AuditMixin):
                         description=f'Auto-generated for {self.name}',
                     ))
         
+        # CHUNKED bulk_create to prevent database timeout on large pools
         if new_addresses:
-            IPAddress.objects.bulk_create(new_addresses, ignore_conflicts=True)
-            logger.info(f"IPPool '{self.name}': generated {len(new_addresses)} new IP addresses "
+            CHUNK_SIZE = 500
+            created_count = 0
+            for i in range(0, len(new_addresses), CHUNK_SIZE):
+                chunk = new_addresses[i:i + CHUNK_SIZE]
+                IPAddress.objects.bulk_create(chunk, ignore_conflicts=True)
+                created_count += len(chunk)
+            
+            logger.info(f"IPPool '{self.name}': generated {created_count} new IP addresses "
                         f"({self.start_ip} → {self.end_ip})")
     
     def refresh_usage(self):

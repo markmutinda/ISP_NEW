@@ -70,3 +70,21 @@ def reload_radius_clients(self):
 
     logger.info("Triggered FreeRADIUS HUP to reload clients.")
     return {"ok": True, "stdout": result.stdout.strip()}
+
+
+@shared_task(bind=True, queue='default', max_retries=3)
+def populate_ip_pool_addresses(self, pool_id: int):
+    """
+    Background task to generate IPAddress records for large pools.
+    Called when pool has > 1000 IPs to avoid blocking the HTTP request.
+    """
+    try:
+        from apps.network.models.ipam_models import IPPool
+        pool = IPPool.objects.get(id=pool_id)
+        pool._populate_ip_addresses()
+        logger.info(f"[TASK] IPPool '{pool.name}' (id={pool_id}): IP generation complete")
+    except IPPool.DoesNotExist:
+        logger.error(f"[TASK] IPPool id={pool_id} not found")
+    except Exception as exc:
+        logger.error(f"[TASK] IPPool id={pool_id} IP generation failed: {exc}")
+        raise self.retry(exc=exc, countdown=30)
