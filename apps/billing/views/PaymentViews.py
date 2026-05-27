@@ -337,7 +337,7 @@ class MpesaConfigurationViewSet(viewsets.ModelViewSet):
             mpesa_configuration=config,
             defaults={
                 'name': f'M-Pesa {config.shortcode_type} (Daraja)',
-                'code': f'MPESA_DARAJA_{connection.schema_name[:8]}',
+                'code': f'DRJ_{config.business_shortcode}',
                 'method_type': method_type,
                 'is_active': True,
                 'is_default': True,

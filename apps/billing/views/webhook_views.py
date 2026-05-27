@@ -260,15 +260,24 @@ class MpesaC2BWebhookView(APIView):
                                 }
                             )
 
-                            # --- Record payment ---
+                            # Extract names safely from the C2B data
+                            first_name = data.get('FirstName', '')
+                            last_name = data.get('LastName', '')
+                            payer_full_name = f"{first_name} {last_name}".strip()
+
+                            # --- Record payment with improved payer name handling ---
                             payment = Payment.objects.create(
                                 amount=amount,
                                 payment_method=method,
                                 status='COMPLETED',
                                 transaction_id=trans_id,
                                 mpesa_receipt=trans_id,
+                                # Keep the hash in mpesa_phone for auditing/tracking if needed
                                 mpesa_phone=msisdn,
-                                payer_phone=msisdn,
+                                # Clear payer_phone to prevent the UI from displaying the hash
+                                payer_phone='',
+                                # Use real names provided by Safaricom
+                                payer_name=payer_full_name if payer_full_name else "M-Pesa User",
                                 mpesa_transaction=mpesa_txn,
                                 payment_date=timezone.now(),
                                 schema_name=target_tenant_schema,
@@ -343,7 +352,12 @@ class MpesaC2BWebhookView(APIView):
                         }
                     )
 
-                    # --- Record payment ---
+                    # Extract names safely from the C2B data
+                    first_name = data.get('FirstName', '')
+                    last_name = data.get('LastName', '')
+                    payer_full_name = f"{first_name} {last_name}".strip()
+
+                    # --- Record payment with improved payer name handling ---
                     payment = Payment.objects.create(
                         customer=service.customer,
                         amount=amount,
@@ -351,8 +365,12 @@ class MpesaC2BWebhookView(APIView):
                         status='COMPLETED',
                         transaction_id=trans_id,
                         mpesa_receipt=trans_id,
+                        # Keep the hash in mpesa_phone for auditing/tracking if needed
                         mpesa_phone=msisdn,
-                        payer_phone=msisdn,
+                        # Clear payer_phone to prevent the UI from displaying the hash
+                        payer_phone='',
+                        # Use real names provided by Safaricom
+                        payer_name=payer_full_name if payer_full_name else "M-Pesa User",
                         mpesa_transaction=mpesa_txn,
                         payment_date=timezone.now(),
                         schema_name=target_tenant_schema,

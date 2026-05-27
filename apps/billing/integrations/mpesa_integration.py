@@ -357,8 +357,8 @@ class MpesaSTKPush:
                 if not confirmation_url:
                     confirmation_url = self.config.get_callback_url()
                 if not validation_url:
-                    # FIX: Use the dedicated validation URL method instead of reusing callback URL
-                    validation_url = self.config.get_validation_url()
+                    # 🧠 FIX: Use dedicated validation URL method with fallback for backward compatibility
+                    validation_url = self.config.get_validation_url() if hasattr(self.config, 'get_validation_url') else self.config.get_callback_url()
             else:
                 business_shortcode = self.config.get('business_shortcode')
                 is_sandbox = self.config.get('environment') == 'sandbox'
