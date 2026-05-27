@@ -258,9 +258,10 @@ class MpesaTransaction(models.Model):
     
     merchant_request_id = models.CharField(max_length=100, unique=True)
     checkout_request_id = models.CharField(max_length=100, unique=True)
-    # CHANGE A: Added null=True to allow pending STK pushes without a transaction_id
+    
+    # 🧠 Widen transaction_id to 255 to accommodate long M-Pesa receipt numbers
     transaction_id = models.CharField(
-        max_length=50, 
+        max_length=255, 
         blank=True, 
         null=True,  # 🧠 Allow null values for pending STK pushes
         db_index=True, 
@@ -268,14 +269,14 @@ class MpesaTransaction(models.Model):
         help_text="M-Pesa Receipt Number (unique)"
     )
     
-    # 🧠 Widen lengths to 50 to prevent StringDataRightTruncation errors on concurrent webhooks
-    transaction_type = models.CharField(max_length=50, choices=TRANSACTION_TYPE, default='STK_PUSH')
+    # 🧠 Increase these fields to max_length=255 to prevent StringDataRightTruncation errors
+    transaction_type = models.CharField(max_length=255, choices=TRANSACTION_TYPE, default='STK_PUSH')
     amount = models.DecimalField(max_digits=12, decimal_places=2)
-    phone_number = models.CharField(max_length=50)
-    account_reference = models.CharField(max_length=50, blank=True)
+    phone_number = models.CharField(max_length=255)
+    account_reference = models.CharField(max_length=255, blank=True)
     transaction_desc = models.CharField(max_length=200, blank=True)
     
-    status = models.CharField(max_length=50, choices=TRANSACTION_STATUS, default='PENDING')
+    status = models.CharField(max_length=255, choices=TRANSACTION_STATUS, default='PENDING')
     result_code = models.IntegerField(null=True, blank=True)
     result_desc = models.TextField(blank=True)
     
@@ -301,7 +302,6 @@ class MpesaTransaction(models.Model):
     def __str__(self):
         return f"{self.transaction_id or 'Pending'} - {self.amount} - {self.status}"
     
-    # CHANGE B: Updated save method to convert empty strings to None for unique constraint
     def save(self, *args, **kwargs):
         # Convert empty strings to None so the unique constraint allows multiple pending checkouts
         if not self.transaction_id:
