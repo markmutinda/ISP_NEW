@@ -590,7 +590,8 @@ class InvoiceItemPayment(models.Model):
     
     till_number = models.CharField(max_length=20, null=True, blank=True)
     paybill_number = models.CharField(max_length=20, null=True, blank=True)
-    account_number = models.CharField(max_length=50, null=True, blank=True)
+    # 🧠 Widened to 255 to prevent truncation errors
+    account_number = models.CharField(max_length=255, null=True, blank=True)
     bank_name = models.CharField(max_length=100, null=True, blank=True)
     custom_link = models.URLField(null=True, blank=True)
     is_default = models.BooleanField(default=False)
