@@ -155,12 +155,20 @@ class MpesaC2BWebhookView(APIView):
                         if MpesaConfiguration.objects.filter(
                             business_shortcode=shortcode, is_active=True
                         ).exists():
+                            # 🧠 Check home subscription accounts first
                             if ServiceConnection.objects.filter(
                                 models.Q(billing_account_number__iexact=bill_ref) |
                                 models.Q(mpesa_account_number__iexact=bill_ref)
                             ).exists():
                                 target_tenant_schema = tenant.schema_name
-                                logger.info(f"Found matching tenant: {tenant.schema_name}")
+                                logger.info(f"Found matching tenant via ServiceConnection: {tenant.schema_name}")
+                                break
+                            
+                            # 🧠 Fallback: Check if this reference belongs to a temporary Hotspot Session
+                            from apps.billing.models.hotspot_models import HotspotSession
+                            if HotspotSession.objects.filter(session_id__icontains=bill_ref).exists():
+                                target_tenant_schema = tenant.schema_name
+                                logger.info(f"Found matching tenant via HotspotSession reference: {tenant.schema_name}")
                                 break
                     except Exception as e:
                         logger.debug(f"Error checking tenant {tenant.schema_name}: {e}")
@@ -182,7 +190,7 @@ class MpesaC2BWebhookView(APIView):
         with schema_context(target_tenant_schema):
             try:
                 with transaction.atomic():
-                    # --- Find service ---
+                    # --- Find service (try ServiceConnection first, then HotspotSession) ---
                     service = ServiceConnection.objects.filter(
                         models.Q(billing_account_number__iexact=bill_ref) |
                         models.Q(mpesa_account_number__iexact=bill_ref)
@@ -190,6 +198,98 @@ class MpesaC2BWebhookView(APIView):
                         'customer', 'plan',
                         'pppoe_user', 'hotspot_user'
                     ).first()
+
+                    # If no ServiceConnection found, check HotspotSession
+                    hotspot_session = None
+                    if not service:
+                        from apps.billing.models.hotspot_models import HotspotSession
+                        hotspot_session = HotspotSession.objects.filter(
+                            session_id__icontains=bill_ref,
+                            status='pending'
+                        ).select_related('plan', 'router').first()
+                        
+                        if hotspot_session:
+                            logger.info(f"Found HotspotSession {hotspot_session.session_id} for payment")
+                            
+                            # For hotspot sessions, we need to find or create a customer context
+                            # Hotspot sessions may not have a full Customer record
+                            # We'll process the payment and activate the session directly
+                            
+                            config = MpesaConfiguration.objects.filter(
+                                business_shortcode=shortcode, is_active=True
+                            ).first()
+
+                            if not config:
+                                logger.error(f"No active M-Pesa config for shortcode {shortcode}")
+                                return Response(
+                                    {"ResultCode": 1, "ResultDesc": "Configuration Error"},
+                                    status=status.HTTP_200_OK
+                                )
+
+                            # --- Idempotency: deduplicate by TransID ---
+                            try:
+                                mpesa_txn = MpesaTransaction.objects.create(
+                                    configuration=config,
+                                    transaction_id=trans_id,
+                                    merchant_request_id=f"C2B-{trans_id}",
+                                    checkout_request_id=f"C2B-{trans_id}",
+                                    transaction_type='C2B',
+                                    amount=amount,
+                                    phone_number=msisdn,
+                                    account_reference=bill_ref,
+                                    status='COMPLETED',
+                                    callback_data=data,
+                                    callback_received_at=timezone.now(),
+                                    schema_name=target_tenant_schema
+                                )
+                            except IntegrityError:
+                                logger.info(f"Duplicate C2B callback ignored: {trans_id}")
+                                return Response(
+                                    {"ResultCode": 0, "ResultDesc": "Duplicate"},
+                                    status=status.HTTP_200_OK
+                                )
+
+                            # --- Find or create payment method ---
+                            method, _ = InvoiceItemPayment.objects.get_or_create(
+                                method_type='MPESA_PAYBILL',
+                                schema_name=target_tenant_schema,
+                                defaults={
+                                    'name': 'M-Pesa Paybill',
+                                    'code': f'MPESA_PAYBILL_{target_tenant_schema[:10]}',
+                                    'is_active': True,
+                                }
+                            )
+
+                            # --- Record payment ---
+                            payment = Payment.objects.create(
+                                amount=amount,
+                                payment_method=method,
+                                status='COMPLETED',
+                                transaction_id=trans_id,
+                                mpesa_receipt=trans_id,
+                                mpesa_phone=msisdn,
+                                payer_phone=msisdn,
+                                mpesa_transaction=mpesa_txn,
+                                payment_date=timezone.now(),
+                                schema_name=target_tenant_schema,
+                                hotspot_session=hotspot_session,
+                                notes=f"C2B hotspot payment via Paybill. Session: {hotspot_session.session_id}. Ref: {trans_id}"
+                            )
+                            mpesa_txn.payment = payment
+                            mpesa_txn.save(update_fields=['payment'])
+
+                            # --- Mark hotspot session as paid and activate ---
+                            hotspot_session.mark_paid(trans_id)
+                            
+                            logger.info(
+                                f"Hotspot payment processed: {trans_id} | "
+                                f"Session: {hotspot_session.session_id} | Amount: KES {amount}"
+                            )
+                            
+                            return Response(
+                                {"ResultCode": 0, "ResultDesc": "Success"},
+                                status=status.HTTP_200_OK
+                            )
 
                     if not service:
                         logger.warning(f"Service not found for account {bill_ref} in {target_tenant_schema}")
