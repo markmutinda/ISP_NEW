@@ -258,9 +258,11 @@ class MpesaTransaction(models.Model):
     
     merchant_request_id = models.CharField(max_length=100, unique=True)
     checkout_request_id = models.CharField(max_length=100, unique=True)
+    # CHANGE A: Added null=True to allow pending STK pushes without a transaction_id
     transaction_id = models.CharField(
         max_length=50, 
         blank=True, 
+        null=True,  # 🧠 Allow null values for pending STK pushes
         db_index=True, 
         unique=True,
         help_text="M-Pesa Receipt Number (unique)"
@@ -298,7 +300,12 @@ class MpesaTransaction(models.Model):
     def __str__(self):
         return f"{self.transaction_id or 'Pending'} - {self.amount} - {self.status}"
     
+    # CHANGE B: Updated save method to convert empty strings to None for unique constraint
     def save(self, *args, **kwargs):
+        # Convert empty strings to None so the unique constraint allows multiple pending checkouts
+        if not self.transaction_id:
+            self.transaction_id = None
+
         if not self.schema_name and self.configuration:
             self.schema_name = self.configuration.schema_name
         
