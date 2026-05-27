@@ -157,10 +157,10 @@ class MpesaSTKPush:
             if hasattr(self.config, 'business_shortcode'):
                 business_shortcode = self.config.business_shortcode
                 
-                # 🧠 Fix: Extract subdomain from schema name to construct the dedicated STK callback route
+                # 🧠 Fix: Convert underscores to hyphens to match valid live DNS subdomain format
                 # The C2B URL (/daraja/c2b-callback/) is for Paybill/Till transactions only.
                 # STK Push requires the dedicated /mpesa/callback/ endpoint which handles the nested stkCallback structure.
-                sub_domain = self.config.schema_name.replace('tenant_', '')
+                sub_domain = self.config.schema_name.replace('tenant_', '').replace('_', '-')
                 callback_url = f"https://{sub_domain}.netily.co.ke/api/v1/billing/mpesa/callback/"
                 
                 is_sandbox = self.config.is_sandbox
@@ -207,51 +207,46 @@ class MpesaSTKPush:
             response = requests.post(url, json=payload, headers=headers, timeout=30)
             response_data = response.json()
             
-            # Create MpesaTransaction record if payment provided
-            if payment:
-                from ..models.payment_models import MpesaTransaction
-                
-                mpesa_txn = MpesaTransaction.objects.create(
-                    payment=payment,
-                    configuration=self.config if hasattr(self.config, 'id') else None,
-                    schema_name=payment.schema_name,
-                    merchant_request_id=response_data.get('MerchantRequestID', ''),
-                    checkout_request_id=response_data.get('CheckoutRequestID', ''),
-                    amount=amount,
-                    phone_number=encrypted_phone,
-                    account_reference=account_reference,
-                    transaction_desc=transaction_desc,
-                    request_payload=payload,
-                    response_payload=response_data
-                )
-                
-                # Link back to payment
-                payment.mpesa_transaction = mpesa_txn
-                payment.save(update_fields=['mpesa_transaction'])
-            
-            if response.status_code == 200:
-                if response_data.get('ResponseCode') == '0':
-                    return {
-                        'success': True,
-                        'message': 'STK Push initiated successfully',
-                        'data': {
-                            'checkout_request_id': response_data['CheckoutRequestID'],
-                            'merchant_request_id': response_data['MerchantRequestID'],
-                            'customer_message': response_data.get('CustomerMessage', 'Please check your phone and enter PIN')
-                        }
+            # 🧠 Safe Move: Only create the record if Safaricom accepts the payload and issues valid IDs
+            if response.status_code == 200 and response_data.get('ResponseCode') == '0':
+                if payment:
+                    from ..models.payment_models import MpesaTransaction
+                    
+                    mpesa_txn = MpesaTransaction.objects.create(
+                        payment=payment,
+                        configuration=self.config if hasattr(self.config, 'id') else None,
+                        schema_name=payment.schema_name,
+                        merchant_request_id=response_data.get('MerchantRequestID'),
+                        checkout_request_id=response_data.get('CheckoutRequestID'),
+                        amount=amount,
+                        phone_number=encrypted_phone,
+                        account_reference=account_reference,
+                        transaction_desc=transaction_desc,
+                        request_payload=payload,
+                        response_payload=response_data
+                    )
+                    
+                    # Link back to payment
+                    payment.mpesa_transaction = mpesa_txn
+                    payment.save(update_fields=['mpesa_transaction'])
+
+                return {
+                    'success': True,
+                    'message': 'STK Push initiated successfully',
+                    'data': {
+                        'checkout_request_id': response_data['CheckoutRequestID'],
+                        'merchant_request_id': response_data['MerchantRequestID'],
+                        'customer_message': response_data.get('CustomerMessage', 'Please check your phone and enter PIN')
                     }
-                else:
-                    return {
-                        'success': False,
-                        'message': f"M-Pesa Error: {response_data.get('ResponseDescription', 'Unknown error')}",
-                        'error_code': response_data.get('ResponseCode')
-                    }
+                }
             else:
-                logger.error(f"STK Push failed: {response.text}")
+                # Handle failure gracefully without dropping database rows
+                error_message = response_data.get('ResponseDescription', response_data.get('errorMessage', 'Unknown error'))
+                logger.error(f"STK Push initiation rejected by Safaricom: {error_message}")
                 return {
                     'success': False,
-                    'message': 'Failed to initiate STK Push',
-                    'error': response.text
+                    'message': f"M-Pesa Error: {error_message}",
+                    'error_code': response_data.get('ResponseCode', response.status_code)
                 }
                 
         except Exception as e:
