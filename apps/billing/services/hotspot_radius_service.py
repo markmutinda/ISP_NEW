@@ -108,6 +108,16 @@ class HotspotRadiusService:
                     reply_attributes['Mikrotik-Total-Limit'] = str(data_bytes)
                 except (ValueError, TypeError):
                     logger.warning(f"Invalid data limit for plan {plan.name}: {plan.data_limit_mb}")
+            # NEW: Also handle new-style data_limit_value / data_limit_unit fields
+            elif hasattr(plan, 'limitation_type') and plan.limitation_type == 'DATA' and plan.data_limit_value:
+                try:
+                    limit_val = float(plan.data_limit_value)
+                    unit = getattr(plan, 'data_limit_unit', 'MB')
+                    limit_mb = limit_val * 1024 if unit == 'GB' else limit_val
+                    data_bytes = int(limit_mb * 1024 * 1024)
+                    reply_attributes['Mikrotik-Total-Limit'] = str(data_bytes)
+                except (ValueError, TypeError):
+                    logger.warning(f"Invalid data_limit_value for plan {plan.name}: {plan.data_limit_value}")
             
             # FIX: Idle timeout - only set if the plan explicitly defines one.
             # Do NOT set a hardcoded idle timeout — it kicks users off when their
