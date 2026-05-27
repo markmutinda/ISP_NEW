@@ -264,21 +264,29 @@ class MpesaC2BWebhookView(APIView):
                                 }
                             )
 
-                            # --- Record payment ---
-                            payment = Payment.objects.create(
-                                amount=amount,
-                                payment_method=method,
-                                status='COMPLETED',
-                                transaction_id=trans_id,
-                                mpesa_receipt=trans_id,
-                                mpesa_phone=msisdn,
-                                payer_phone=msisdn,
-                                mpesa_transaction=mpesa_txn,
-                                payment_date=timezone.now(),
-                                schema_name=target_tenant_schema,
-                                hotspot_session=hotspot_session,
-                                notes=f"C2B hotspot payment via Paybill. Session: {hotspot_session.session_id}. Ref: {trans_id}"
-                            )
+                            # 🔍 DEBUG: Inspect the payload before the crash (Hotspot payment)
+                            payment_data = {
+                                "amount": amount,
+                                "payment_method": method,
+                                "status": 'COMPLETED',
+                                "transaction_id": trans_id,
+                                "mpesa_receipt": trans_id,
+                                "mpesa_phone": msisdn,
+                                "payer_phone": msisdn,
+                                "mpesa_transaction": mpesa_txn,
+                                "payment_date": timezone.now(),
+                                "schema_name": target_tenant_schema,
+                                "hotspot_session": hotspot_session,
+                                "notes": f"C2B hotspot payment via Paybill. Session: {hotspot_session.session_id}. Ref: {trans_id}"
+                            }
+                            
+                            # Check for length violations before save
+                            for key, value in payment_data.items():
+                                if isinstance(value, str) and len(value) > 50:
+                                    logger.error(f"⚠️ LENGTH_WARNING: Field '{key}' has value '{value}' with length {len(value)}")
+                            
+                            # Now attempt the creation
+                            payment = Payment.objects.create(**payment_data)
                             mpesa_txn.payment = payment
                             mpesa_txn.save(update_fields=['payment'])
 
@@ -347,21 +355,29 @@ class MpesaC2BWebhookView(APIView):
                         }
                     )
 
-                    # --- Record payment ---
-                    payment = Payment.objects.create(
-                        customer=service.customer,
-                        amount=amount,
-                        payment_method=method,
-                        status='COMPLETED',
-                        transaction_id=trans_id,
-                        mpesa_receipt=trans_id,
-                        mpesa_phone=msisdn,
-                        payer_phone=msisdn,
-                        mpesa_transaction=mpesa_txn,
-                        payment_date=timezone.now(),
-                        schema_name=target_tenant_schema,
-                        notes=f"C2B payment via Paybill. Account: {bill_ref}. Ref: {trans_id}"
-                    )
+                    # 🔍 DEBUG: Inspect the payload before the crash (Regular customer payment)
+                    payment_data = {
+                        "customer": service.customer,
+                        "amount": amount,
+                        "payment_method": method,
+                        "status": 'COMPLETED',
+                        "transaction_id": trans_id,
+                        "mpesa_receipt": trans_id,
+                        "mpesa_phone": msisdn,
+                        "payer_phone": msisdn,
+                        "mpesa_transaction": mpesa_txn,
+                        "payment_date": timezone.now(),
+                        "schema_name": target_tenant_schema,
+                        "notes": f"C2B payment via Paybill. Account: {bill_ref}. Ref: {trans_id}"
+                    }
+                    
+                    # Check for length violations before save
+                    for key, value in payment_data.items():
+                        if isinstance(value, str) and len(value) > 50:
+                            logger.error(f"⚠️ LENGTH_WARNING: Field '{key}' has value '{value}' with length {len(value)}")
+
+                    # Now attempt the creation
+                    payment = Payment.objects.create(**payment_data)
                     mpesa_txn.payment = payment
                     mpesa_txn.save(update_fields=['payment'])
 
