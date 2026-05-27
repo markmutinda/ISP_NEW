@@ -2689,7 +2689,7 @@ def _rebind_services_to_bridge(api, router):
             logger.warning(f"[REBIND] PPPoE server rebind failed: {e}")
 
 
-# ─── PORT MANAGER VIEW (UPDATED WITH REBIND) ─────────────────────────────────────────
+# ─── PORT MANAGER VIEW (UPDATED WITH REBIND AND hEX S FIX) ───────────────────────────
 
 class RouterPortManagerView(APIView):
     """
@@ -2730,8 +2730,12 @@ class RouterPortManagerView(APIView):
             if not api.connect():
                 return Response({'error': 'Failed to connect to router API'}, status=400)
 
-            ethernets  = list(api._execute('/interface/ethernet'))
-            wlans      = list(api._execute('/interface/wireless'))
+            ethernets = list(api._execute('/interface/ethernet'))
+            # FIX: Wrap wireless interface fetch in try-except for devices without wireless (e.g. hEX S, RB1100, CCR)
+            try:
+                wlans = list(api._execute('/interface/wireless'))
+            except Exception:
+                wlans = []  # Device has no wireless (e.g. hEX S, RB1100, CCR)
             bridge_ports = list(api._execute('/interface/bridge/port'))
             api.disconnect()
 
