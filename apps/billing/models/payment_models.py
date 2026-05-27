@@ -687,7 +687,8 @@ class Payment(models.Model):
         ('DISPUTED', 'Disputed'),
     ]
 
-    payment_number = models.CharField(max_length=50, unique=True)
+    # 🧠 Widen these fields to 255 to prevent truncation
+    payment_number = models.CharField(max_length=255, unique=True)
     
     # FIX: Made customer field optional for Hotspot-only payments
     # Using SET_NULL to preserve payment history even if customer is deleted
@@ -715,8 +716,8 @@ class Payment(models.Model):
         related_name='payments',
         help_text="Set to null if the payment method is deleted to preserve history"
     )
-    payment_reference = models.CharField(max_length=100, blank=True)
-    transaction_id = models.CharField(max_length=100, blank=True)
+    payment_reference = models.CharField(max_length=255, blank=True)
+    transaction_id = models.CharField(max_length=255, blank=True)
 
     # NEW FIELD: Explicit link to HotspotSession for STK payments
     hotspot_session = models.ForeignKey(
@@ -742,7 +743,7 @@ class Payment(models.Model):
 
     tuma_merchant_request_id = models.CharField(max_length=120, blank=True, db_index=True)
     tuma_checkout_request_id = models.CharField(max_length=120, blank=True, db_index=True)
-    tuma_status = models.CharField(max_length=20, blank=True)
+    tuma_status = models.CharField(max_length=50, blank=True)  # Already widened from 20 to 50
     tuma_result_code = models.IntegerField(null=True, blank=True)
     tuma_result_desc = models.TextField(blank=True)
     tuma_callback_payload = models.JSONField(null=True, blank=True)
@@ -753,7 +754,7 @@ class Payment(models.Model):
         default="default_schema"
     )
     
-    status = models.CharField(max_length=20, choices=PAYMENT_STATUS, default='PENDING')
+    status = models.CharField(max_length=50, choices=PAYMENT_STATUS, default='PENDING')  # Already widened from 20 to 50
     is_reconciled = models.BooleanField(default=False)
 
     # 🔧 FIX: Changed from timezone.now to timezone.now (callable) for naive datetime warning fix
@@ -762,16 +763,16 @@ class Payment(models.Model):
     reconciled_at = models.DateTimeField(null=True, blank=True)
 
     payer_name = models.CharField(max_length=200, blank=True)
-    payer_phone = models.CharField(max_length=20, blank=True)
+    payer_phone = models.CharField(max_length=50, blank=True)  # Already widened from 20 to 50
     payer_email = models.EmailField(blank=True)
     payer_id_number = models.CharField(max_length=50, blank=True)
 
     bank_name = models.CharField(max_length=100, blank=True)
-    account_number = models.CharField(max_length=50, blank=True)
+    account_number = models.CharField(max_length=255, blank=True)
     branch = models.CharField(max_length=100, blank=True)
-    cheque_number = models.CharField(max_length=50, blank=True)
+    cheque_number = models.CharField(max_length=255, blank=True)
 
-    mpesa_receipt = models.CharField(max_length=50, blank=True)
+    mpesa_receipt = models.CharField(max_length=255, blank=True)
     mpesa_phone = models.CharField(max_length=20, blank=True)
     mpesa_name = models.CharField(max_length=200, blank=True)
 
