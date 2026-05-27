@@ -156,7 +156,13 @@ class MpesaSTKPush:
             # Get business shortcode based on config type
             if hasattr(self.config, 'business_shortcode'):
                 business_shortcode = self.config.business_shortcode
-                callback_url = self.config.get_callback_url()
+                
+                # 🧠 Fix: Extract subdomain from schema name to construct the dedicated STK callback route
+                # The C2B URL (/daraja/c2b-callback/) is for Paybill/Till transactions only.
+                # STK Push requires the dedicated /mpesa/callback/ endpoint which handles the nested stkCallback structure.
+                sub_domain = self.config.schema_name.replace('tenant_', '')
+                callback_url = f"https://{sub_domain}.netily.co.ke/api/v1/billing/mpesa/callback/"
+                
                 is_sandbox = self.config.is_sandbox
             else:
                 business_shortcode = self.config.get('business_shortcode')
@@ -195,6 +201,7 @@ class MpesaSTKPush:
             
             # Log the request (without sensitive data)
             logger.info(f"STK Push request to {url} for amount {amount}")
+            logger.info(f"Using callback URL: {callback_url}")
             
             # Send request
             response = requests.post(url, json=payload, headers=headers, timeout=30)
@@ -378,16 +385,15 @@ class MpesaSTKPush:
             if not validation_url.endswith('/'):
                 validation_url += '/'
             
-            # FIX: Use v1 API instead of v2 - v1 is more stable and battle-tested
-            # The v2 API frequently returns 404 or 400 errors on production
+            # Use v2 API for better compatibility with Safaricom's latest API
             if is_sandbox:
-                api_url = "https://sandbox.safaricom.co.ke/mpesa/c2b/v1/registerurl"
+                api_url = "https://sandbox.safaricom.co.ke/mpesa/c2b/v2/registerurl"
             else:
-                api_url = "https://api.safaricom.co.ke/mpesa/c2b/v1/registerurl"
+                api_url = "https://api.safaricom.co.ke/mpesa/c2b/v2/registerurl"
             
             headers = {"Authorization": f"Bearer {access_token}", "Content-Type": "application/json"}
             
-            # V1 payload format (slightly different from v2)
+            # V2 payload format
             payload = {
                 "ShortCode": business_shortcode,
                 "ResponseType": "Completed",  # Safaricom will send data even if our server is down
@@ -396,7 +402,7 @@ class MpesaSTKPush:
             }
             
             logger.info(f"Registering C2B URLs for shortcode {business_shortcode}")
-            logger.info(f"Using API: {api_url} (v1 endpoint for stability)")
+            logger.info(f"Using API: {api_url} (v2 endpoint)")
             logger.info(f"Confirmation URL: {confirmation_url}")
             logger.info(f"Validation URL: {validation_url}")
             
@@ -408,16 +414,18 @@ class MpesaSTKPush:
             
             # Update the configuration with registration status
             if hasattr(self.config, 'id') and response.status_code == 200:
-                if response_data.get('ResponseCode') == '0':
+                # Check for successful registration OR "already registered" error code
+                if response_data.get('ResponseCode') == '0' or response_data.get('errorCode') == '500.003.1001':
                     self.config.last_validated_at = timezone.now()
                     self.config.validation_status = 'VALID'
                     self.config.save(update_fields=['last_validated_at', 'validation_status'])
             
             # Return formatted response
-            if response.status_code == 200 and response_data.get('ResponseCode') == '0':
+            # PRO-TIP: Treat error code 500.003.1001 (URLs already registered) as success
+            if response.status_code == 200 and (response_data.get('ResponseCode') == '0' or response_data.get('errorCode') == '500.003.1001'):
                 return {
                     'success': True,
-                    'message': 'URLs registered successfully with Safaricom',
+                    'message': 'URLs registered successfully or already active with Safaricom',
                     'data': response_data
                 }
             else:
@@ -469,11 +477,11 @@ class MpesaSTKPush:
                 business_shortcode = self.config.get('business_shortcode')
                 is_sandbox = self.config.get('environment') == 'sandbox'
             
-            # Use v1 for deregistration as well for consistency
+            # Use v2 for deregistration as well for consistency
             if is_sandbox:
-                api_url = "https://sandbox.safaricom.co.ke/mpesa/c2b/v1/registerurl"
+                api_url = "https://sandbox.safaricom.co.ke/mpesa/c2b/v2/registerurl"
             else:
-                api_url = "https://api.safaricom.co.ke/mpesa/c2b/v1/registerurl"
+                api_url = "https://api.safaricom.co.ke/mpesa/c2b/v2/registerurl"
             
             headers = {"Authorization": f"Bearer {access_token}", "Content-Type": "application/json"}
             
