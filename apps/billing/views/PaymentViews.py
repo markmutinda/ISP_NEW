@@ -935,7 +935,8 @@ class PaymentViewSet(viewsets.ModelViewSet):
                     checkout_request_id=checkout_request_id
                 )
                 
-                payment = mpesa_transaction.payment_record if hasattr(mpesa_transaction, 'payment_record') else None
+                # 🧠 Fixed typo: changed payment_record to payment attribute
+                payment = mpesa_transaction.payment if hasattr(mpesa_transaction, 'payment') else None
                 if payment:
                     transaction_data = result['transaction_data']
                     
