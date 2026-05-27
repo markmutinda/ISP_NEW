@@ -580,7 +580,8 @@ class InvoiceItemPayment(models.Model):
     ]
 
     name = models.CharField(max_length=100)
-    code = models.CharField(max_length=20, unique=True)
+    # 🧠 Widened to 100 to support long auto-generated webhook codes
+    code = models.CharField(max_length=100, unique=True)
     method_type = models.CharField(max_length=20, choices=METHOD_TYPES)
     description = models.TextField(blank=True)
 
