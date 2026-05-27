@@ -764,7 +764,8 @@ class Payment(models.Model):
     reconciled_at = models.DateTimeField(null=True, blank=True)
 
     payer_name = models.CharField(max_length=200, blank=True)
-    payer_phone = models.CharField(max_length=50, blank=True)  # Already widened from 20 to 50
+    # 🧠 Widened to 255 to support hashed strings
+    payer_phone = models.CharField(max_length=255, blank=True)
     payer_email = models.EmailField(blank=True)
     payer_id_number = models.CharField(max_length=50, blank=True)
 
@@ -774,9 +775,11 @@ class Payment(models.Model):
     cheque_number = models.CharField(max_length=255, blank=True)
 
     mpesa_receipt = models.CharField(max_length=255, blank=True)
-    mpesa_phone = models.CharField(max_length=20, blank=True)
+    # 🧠 Widened to 255 to support hashed strings
+    mpesa_phone = models.CharField(max_length=255, blank=True)
     mpesa_name = models.CharField(max_length=200, blank=True)
 
+    # Ensure notes is TextField (this allows unlimited length)
     notes = models.TextField(blank=True)
     failure_reason = models.TextField(blank=True)
 
