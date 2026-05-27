@@ -123,6 +123,10 @@ class MpesaC2BWebhookView(APIView):
 
     def post(self, request, *args, **kwargs):
         data = request.data
+        
+        # 🧠 DEBUG: Log the full payload exactly as it arrives from Safaricom
+        logger.info(f"DEBUG_PAYLOAD: Raw incoming data: {json.dumps(data, default=str)}")
+        
         trans_id = data.get('TransID')
         shortcode = data.get('BusinessShortCode')
         bill_ref = data.get('BillRefNumber', '').strip().upper()
