@@ -268,13 +268,14 @@ class MpesaTransaction(models.Model):
         help_text="M-Pesa Receipt Number (unique)"
     )
     
-    transaction_type = models.CharField(max_length=20, choices=TRANSACTION_TYPE, default='STK_PUSH')
+    # 🧠 Widen lengths to 50 to prevent StringDataRightTruncation errors on concurrent webhooks
+    transaction_type = models.CharField(max_length=50, choices=TRANSACTION_TYPE, default='STK_PUSH')
     amount = models.DecimalField(max_digits=12, decimal_places=2)
-    phone_number = models.CharField(max_length=20)
+    phone_number = models.CharField(max_length=50)
     account_reference = models.CharField(max_length=50, blank=True)
     transaction_desc = models.CharField(max_length=200, blank=True)
     
-    status = models.CharField(max_length=20, choices=TRANSACTION_STATUS, default='PENDING')
+    status = models.CharField(max_length=50, choices=TRANSACTION_STATUS, default='PENDING')
     result_code = models.IntegerField(null=True, blank=True)
     result_desc = models.TextField(blank=True)
     
