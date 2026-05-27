@@ -186,13 +186,30 @@ class MpesaConfiguration(AuditMixin):
         Default C2B Callback URL for M-Pesa transactions.
         NOTE: This is specifically for C2B (Customer to Business) webhook callbacks.
         For STK Push callbacks, use a different endpoint.
+        UPDATED: Changed from 'mpesa/c2b-callback/' to 'daraja/c2b-callback/'
         """
         if self.callback_url:
             return self.callback_url
 
         sub_domain = self.schema_name.replace('tenant_', '')
-        # FIX: Point to the new C2B webhook view instead of legacy STK callback
-        return f"https://{sub_domain}.netily.co.ke/api/v1/billing/mpesa/c2b-callback/"
+        # FIX: Updated to use new daraja path instead of mpesa path
+        return f"https://{sub_domain}.netily.co.ke/api/v1/billing/daraja/c2b-callback/"
+    
+    def get_validation_url(self, request=None):
+        """
+        C2B Validation URL for M-Pesa transactions.
+        This endpoint receives validation requests from Safaricom before a transaction is completed.
+        The validation URL is separate from the callback URL and is used to validate
+        transactions before they are processed.
+        """
+        if self.callback_url:
+            # If a custom callback URL is set, append /validate/ to it for validation
+            # This assumes the custom URL base can be used for both callback and validation
+            return self.callback_url.rstrip('/') + '/validate/'
+        
+        sub_domain = self.schema_name.replace('tenant_', '')
+        # Return the validation endpoint URL matching the new daraja validation route
+        return f"https://{sub_domain}.netily.co.ke/api/v1/billing/daraja/c2b-validation/"
     
     def get_timeout_url(self, request=None):
         if self.timeout_url:

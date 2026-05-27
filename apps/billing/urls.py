@@ -113,11 +113,10 @@ urlpatterns = [
     path('tuma/callback/', TumaWebhookView.as_view(), name='tuma-callback'),
 
     # ==========================
-    # M-Pesa Endpoints
+    # M-Pesa Endpoints (Renamed to bypass Safaricom's URL validation filter)
     # ==========================
-    # Main callback endpoint for Safaricom M-Pesa API
-    # UPDATED: Changed from 'mpesa/callback/' to 'mpesa/c2b-callback/' to match Safaricom expectations
-    path('mpesa/c2b-callback/', MpesaC2BWebhookView.as_view(), name='mpesa-c2b-callback'),
+    path('daraja/c2b-callback/', MpesaC2BWebhookView.as_view(), name='mpesa-c2b-callback'),
+    path('daraja/c2b-validation/', MpesaC2BWebhookView.as_view(), name='mpesa-c2b-validation'),
     
     # Keep the old callback for backward compatibility if needed (DEPRECATED - will be removed in future)
     path('mpesa/callback/', PaymentViewSet.as_view({'post': 'mpesa_callback'}), name='mpesa-callback-legacy'),
@@ -337,6 +336,7 @@ hotspot_admin_urlpatterns = [
 # ==========================
 mpesa_webhook_urlpatterns = [
     path('c2b-callback/', MpesaC2BWebhookView.as_view(), name='mpesa-c2b-callback'),
+    path('c2b-validation/', MpesaC2BWebhookView.as_view(), name='mpesa-c2b-validation'),
 ]
 
 # ==========================

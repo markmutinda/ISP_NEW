@@ -355,14 +355,22 @@ class MpesaSTKPush:
                 if not confirmation_url:
                     confirmation_url = self.config.get_callback_url()
                 if not validation_url:
-                    validation_url = self.config.get_callback_url()
+                    # FIX: Use the dedicated validation URL method instead of reusing callback URL
+                    validation_url = self.config.get_validation_url()
             else:
                 business_shortcode = self.config.get('business_shortcode')
                 is_sandbox = self.config.get('environment') == 'sandbox'
                 if not confirmation_url:
                     confirmation_url = self.config.get('callback_url')
                 if not validation_url:
-                    validation_url = self.config.get('callback_url')
+                    # For dict config, we need to construct validation URL from callback URL
+                    # This assumes the dict has a callback_url field
+                    base_url = self.config.get('callback_url')
+                    if base_url:
+                        # Try to create validation URL by replacing /c2b-callback/ with /c2b-validation/
+                        validation_url = base_url.replace('/c2b-callback/', '/c2b-validation/')
+                    else:
+                        validation_url = self.config.get('callback_url')
             
             # Ensure URLs end with trailing slash
             if not confirmation_url.endswith('/'):
