@@ -235,9 +235,25 @@ class CustomerListSerializer(serializers.ModelSerializer):
         ]
     
     def get_services(self, obj):
-        """Get customer services with nested plan data"""
+        """
+        OPTIMIZED: Get customer services with nested plan data.
+        Uses pre-fetched 'active_services_list' from queryset to avoid N+1 queries.
+        """
         from apps.customers.serializers.service_serializers import ServiceConnectionSerializer
-        services = obj.services.select_related('plan').all()[:5]  # Limit to 5 for list view
+        
+        # Use pre-fetched list from optimized queryset if available
+        services = getattr(obj, 'active_services_list', None)
+        
+        if services is None:
+            # Fallback: Only fetch active/pending services, limit to 1
+            services = obj.services.select_related('plan').filter(
+                status__in=['ACTIVE', 'PENDING']
+            ).order_by('-activation_date', '-created_at')[:1]
+        else:
+            # active_services_list is already a list from Prefetch
+            # Make sure it's a queryset-like object we can iterate
+            pass
+        
         return ServiceConnectionSerializer(services, many=True).data
     
     def get_radius_credentials(self, obj):

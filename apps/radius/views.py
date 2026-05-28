@@ -133,6 +133,25 @@ class RadiusActiveSessionsView(APIView):
     FIX: Removed synthetic sessions for hotspot users with active DB subscription
     but no open radacct row. Now only users with an open radacct row
     (genuinely online) appear in the list.
+    
+    Query Parameters:
+        - nas: Filter by NAS IP address
+        - username: Filter by username (contains match)
+        - limit: Max records to return (default=200, max=500)
+        - page: Page number for pagination
+        - page_size: Records per page (default=50, max=200)
+    
+    Returns:
+        {
+            "count": number of sessions in current page,
+            "total": total number of active sessions,
+            "total_sessions": alias for total,
+            "radacct_count": total number of active radacct rows,
+            "pending_accounting_count": 0,
+            "sessions": [...],
+            "next": URL for next page (if pagination),
+            "previous": URL for previous page (if pagination)
+        }
     """
     permission_classes = [IsAuthenticated, HasCompanyAccess]
 
@@ -145,6 +164,7 @@ class RadiusActiveSessionsView(APIView):
             .order_by('-acctstarttime')
         )
 
+        # Apply filters
         nas_ip = request.query_params.get('nas')
         if nas_ip:
             radacct_qs = radacct_qs.filter(nasipaddress=nas_ip)
@@ -153,13 +173,65 @@ class RadiusActiveSessionsView(APIView):
         if username_filter:
             radacct_qs = radacct_qs.filter(username__icontains=username_filter)
 
-        radacct_data = OnlineUserSerializer(radacct_qs[:200], many=True).data
+        # Get total count before pagination
+        total_count = radacct_qs.count()
 
+        # Handle pagination parameters
+        page = int(request.query_params.get('page', 1))
+        page_size = int(request.query_params.get('page_size', 50))
+        
+        # Cap page_size to reasonable limits (min 1, max 200)
+        page_size = max(1, min(page_size, 200))
+        
+        # Also support legacy 'limit' parameter
+        limit_param = request.query_params.get('limit')
+        if limit_param is not None and 'page' not in request.query_params:
+            # Legacy mode: use limit without pagination
+            limit = min(int(limit_param), 500)
+            radacct_data = OnlineUserSerializer(radacct_qs[:limit], many=True).data
+            
+            return Response({
+                "count": len(radacct_data),
+                "total": total_count,
+                "total_sessions": total_count,
+                "radacct_count": total_count,
+                "pending_accounting_count": 0,
+                "sessions": radacct_data,
+            })
+        
+        # Paginated mode
+        start = (page - 1) * page_size
+        end = start + page_size
+        
+        paginated_sessions = radacct_qs[start:end]
+        radacct_data = OnlineUserSerializer(paginated_sessions, many=True).data
+        
+        # Build pagination URLs
+        base_url = request.build_absolute_uri('/api/v1/radius/sessions/active/')
+        query_params = request.GET.copy()
+        
+        next_url = None
+        previous_url = None
+        
+        if end < total_count:
+            query_params['page'] = page + 1
+            query_params['page_size'] = page_size
+            next_url = f"{base_url}?{query_params.urlencode()}"
+        
+        if page > 1:
+            query_params['page'] = page - 1
+            query_params['page_size'] = page_size
+            previous_url = f"{base_url}?{query_params.urlencode()}"
+        
         return Response({
             "count": len(radacct_data),
-            "radacct_count": radacct_qs.count(),
+            "total": total_count,
+            "total_sessions": total_count,
+            "radacct_count": total_count,
             "pending_accounting_count": 0,
             "sessions": radacct_data,
+            "next": next_url,
+            "previous": previous_url,
         })
 
 

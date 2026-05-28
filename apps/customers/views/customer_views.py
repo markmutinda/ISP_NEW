@@ -5,7 +5,7 @@ from rest_framework.permissions import IsAuthenticated
 from django_filters.rest_framework import DjangoFilterBackend
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
-from django.db.models import Q
+from django.db.models import Q, Prefetch
 from apps.billing.models import Plan
 
 from apps.customers.models import (
@@ -49,10 +49,21 @@ def _sync_service_to_plan(service, plan):
 
 class CustomerViewSet(viewsets.ModelViewSet):
     """ViewSet for managing customers"""
+    # OPTIMIZED: Only fetch necessary related data with depth limits
+    # - select_related: direct foreign keys (1:1 or belongs-to)
+    # - prefetch_related with limit: only fetch the most recent active service, not all services
     queryset = Customer.objects.select_related(
-        'user', 'created_by', 'updated_by', 'next_of_kin', 'radius_credentials'
+        'user',                    # needed for name/phone/email
+        'radius_credentials',      # needed for PPPoE username/expiry
     ).prefetch_related(
-        'addresses', 'documents', 'services', 'services__plan'
+        # Only fetch the first active service — NOT ALL services
+        Prefetch(
+            'services',
+            queryset=ServiceConnection.objects.select_related('plan').filter(
+                status__in=['ACTIVE', 'PENDING']
+            ).order_by('-activation_date', '-created_at')[:1],
+            to_attr='active_services_list'
+        )
     ).all()
     
     permission_classes = [IsAuthenticated, CanManageCustomers]
@@ -137,14 +148,21 @@ class CustomerViewSet(viewsets.ModelViewSet):
         return queryset.distinct()
 
     def _get_target_service(self, customer, service_id=None):
-        services = customer.services.select_related('plan').order_by('-activation_date', '-created_at')
+        """Get the target service, either by ID or the most recent active one."""
+        # Use the prefetched active_services_list if available
+        if hasattr(customer, 'active_services_list') and customer.active_services_list:
+            services = customer.active_services_list
+        else:
+            # Fallback to normal query if prefetch not available
+            services = list(customer.services.select_related('plan').filter(
+                status__in=['ACTIVE', 'PENDING']
+            ).order_by('-activation_date', '-created_at')[:1])
+        
         if service_id:
-            return get_object_or_404(services, id=service_id)
-        return (
-            services.filter(status='ACTIVE').first()
-            or services.exclude(status='TERMINATED').first()
-            or services.first()
-        )
+            # If specific ID requested, we need to fetch it (could be not in prefetched list)
+            return get_object_or_404(customer.services.select_related('plan'), id=service_id)
+        
+        return services[0] if services else None
     
     def perform_create(self, serializer):
         """Create customer - tenant scoping handled by django-tenants"""
@@ -161,12 +179,17 @@ class CustomerViewSet(viewsets.ModelViewSet):
         """Get customer dashboard data"""
         customer = self.get_object()
         
+        # Use optimized count queries instead of loading all services
+        total_services = customer.services.count()
+        active_services = customer.services.filter(status='ACTIVE').count()
+        pending_services = customer.services.filter(status='PENDING').count()
+        
         data = {
             'customer_info': CustomerDetailSerializer(customer).data,
             'stats': {
-                'total_services': customer.services.count(),
-                'active_services': customer.services.filter(status='ACTIVE').count(),
-                'pending_services': customer.services.filter(status='PENDING').count(),
+                'total_services': total_services,
+                'active_services': active_services,
+                'pending_services': pending_services,
                 'total_invoices': 0,  # Will be added in billing module
                 'pending_invoices': 0,
                 'total_tickets': 0,  # Will be added in support module
