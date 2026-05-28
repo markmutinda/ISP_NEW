@@ -50,9 +50,10 @@ class MpesaC2BWebhookView(APIView):
     permission_classes = [AllowAny]
     authentication_classes = []
 
-    def _calculate_renewal_expiry(self, service, amount, current_expiry=None):
+    def _calculate_renewal_expiry(self, service, amount, current_expiry=None, customer=None):
         """
-        Calculate new expiry date based on payment amount vs plan price.
+        Calculate new expiry date based on payment amount vs plan price, 
+        with prepaid credit accumulation for partial payments.
         
         Returns: (quantity, new_expiry_datetime) or (0, None) if insufficient amount.
         """
@@ -68,18 +69,31 @@ class MpesaC2BWebhookView(APIView):
             return 0, None
 
         amount = Decimal(str(amount))
-        if amount < plan_price:
+        
+        # Combine incoming payment with any existing credit
+        existing_credit = Decimal(str(customer.prepaid_credit or 0)) if customer else Decimal('0')
+        total_available = amount + existing_credit
+        
+        if total_available < plan_price:
+            # Still not enough — accumulate credit, don't activate
+            if customer:
+                customer.prepaid_credit = total_available
+                customer.save(update_fields=['prepaid_credit'])
             logger.info(
-                f"Payment {amount} < plan price {plan_price} — "
-                f"insufficient for activation of {service.id}"
+                f"Partial payment: {amount} + credit {existing_credit} = {total_available} "
+                f"(need {plan_price}). Credit accumulated."
             )
             return 0, None
 
-        # Calculate how many full plan periods the amount covers
-        quantity = int(amount / plan_price)
-        if quantity < 1:
-            return 0, None
-
+        # Calculate full periods from total available
+        quantity = int(total_available / plan_price)
+        remainder = total_available - (plan_price * quantity)
+        
+        # Store remainder as credit, clear if negligible
+        if customer:
+            customer.prepaid_credit = remainder if remainder >= Decimal('0.50') else Decimal('0')
+            customer.save(update_fields=['prepaid_credit'])
+        
         # Start from: current expiry (if active) or now
         now = timezone.now()
         if current_expiry and current_expiry > now:
@@ -97,8 +111,9 @@ class MpesaC2BWebhookView(APIView):
             new_expiry = start + (validity_delta * quantity)
 
         logger.info(
-            f"Plan renewal: amount={amount}, price={plan_price}, "
-            f"quantity={quantity}, start={start}, new_expiry={new_expiry}"
+            f"Renewal: total_available={total_available}, price={plan_price}, "
+            f"quantity={quantity}, remainder_credit={customer.prepaid_credit if customer else 0}, "
+            f"new_expiry={new_expiry}"
         )
         return quantity, new_expiry
 
@@ -518,8 +533,9 @@ class MpesaC2BWebhookView(APIView):
                     # Get current expiry from RADIUS credentials
                     current_expiry = radius_cred.expiration_date if radius_cred else None
 
+                    # UPDATED: Pass customer to the method for prepaid credit handling
                     quantity, new_expiry = self._calculate_renewal_expiry(
-                        service, amount, current_expiry
+                        service, amount, current_expiry, customer=customer  # ADDED customer=customer
                     )
 
                     if quantity >= 1:
@@ -564,16 +580,18 @@ class MpesaC2BWebhookView(APIView):
 
                     else:
                         # Partial payment — recorded but service not activated
+                        # (credit already accumulated in _calculate_renewal_expiry)
                         logger.info(
                             f"PARTIAL PAYMENT: customer={customer.customer_code} "
                             f"account={bill_ref} amount={amount} — "
-                            f"requires {service.plan.base_price if service.plan else 'N/A'} for activation"
+                            f"requires {service.plan.base_price if service.plan else 'N/A'} for activation. "
+                            f"Accumulated credit: {customer.prepaid_credit}"
                         )
 
                     logger.info(
                         f"C2B payment processed: {trans_id} | "
                         f"Customer: {customer.customer_code} | Amount: KES {amount} | "
-                        f"Quantity: {quantity} period(s)"
+                        f"Quantity: {quantity} period(s) | Credit balance: {customer.prepaid_credit}"
                     )
 
             except Exception as e:

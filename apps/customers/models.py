@@ -8,6 +8,7 @@ from django.core.exceptions import ValidationError
 from django.utils import timezone
 from django.utils.translation import gettext_lazy as _
 from django.conf import settings
+from decimal import Decimal
 import random
 import string
 
@@ -178,6 +179,14 @@ class Customer(models.Model):
         max_length=255,
         blank=True,
         help_text="Customer's physical location or area (e.g., Westlands, Nairobi)"
+    )
+    
+    # Prepaid Credit (for partial/overpayments)
+    prepaid_credit = models.DecimalField(
+        max_digits=10,
+        decimal_places=2,
+        default=Decimal('0.00'),
+        help_text="Unallocated credit from partial or overpayments"
     )
     
     # Customer Details

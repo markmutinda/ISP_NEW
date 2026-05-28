@@ -4,6 +4,7 @@ Serializers for Customer model
 from rest_framework import serializers
 from django.contrib.auth import get_user_model
 from django.utils import timezone
+from decimal import Decimal
 
 from apps.customers.models import Customer
 from utils.helpers import validate_phone_number
@@ -219,7 +220,7 @@ class CustomerListSerializer(serializers.ModelSerializer):
     last_name = serializers.CharField(source='user.last_name', read_only=True)
     phone = serializers.CharField(source='user.phone_number', read_only=True)
     customer_number = serializers.CharField(source='customer_code', read_only=True)
-    balance = serializers.CharField(source='outstanding_balance', read_only=True)
+    balance = serializers.SerializerMethodField()  # Changed from CharField to SerializerMethodField
     services = serializers.SerializerMethodField()
     radius_credentials = serializers.SerializerMethodField()
     
@@ -256,6 +257,19 @@ class CustomerListSerializer(serializers.ModelSerializer):
         except Exception:
             pass
         return None
+    
+    def get_balance(self, obj):
+        """
+        Calculate net balance:
+        Positive = credit (customer has prepaid, they've paid ahead)
+        Negative = debt (customer owes money)
+        
+        Formula: prepaid_credit - outstanding_balance
+        """
+        credit = getattr(obj, 'prepaid_credit', None) or Decimal('0')
+        debt = getattr(obj, 'outstanding_balance', None) or Decimal('0')
+        net_balance = Decimal(str(credit)) - Decimal(str(debt))
+        return str(net_balance)
 
 
 class CustomerDetailSerializer(serializers.ModelSerializer):
