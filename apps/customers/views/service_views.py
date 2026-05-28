@@ -610,14 +610,14 @@ class ServiceConnectionViewSet(viewsets.ModelViewSet):
     @action(detail=True, methods=['post'])
     def extend(self, request, customer_pk=None, pk=None):
         """
-        P3: Extend a service subscription by adding time, with optional plan change.
+        Extend a service subscription OR set exact expiry date (with optional plan change).
         
-        POST /customers/{customer_pk}/services/{pk}/extend/
-        Body: {
-            "duration_amount": 10,
-            "duration_unit": "DAYS",       // MINUTES, HOURS, DAYS
-            "plan_id": 2                   // optional — change plan at the same time
-        }
+        Two modes:
+        1. Duration mode: Add time to subscription
+           Body: { "duration_amount": 10, "duration_unit": "DAYS", "plan_id": 2 (optional) }
+        
+        2. Direct expiry mode: Set exact expiry date
+           Body: { "expiry_date": "2025-12-31T23:59:59", "plan_id": 2 (optional) }
         """
         from apps.billing.models import Plan
         from apps.radius.signals_auto_sync import (
@@ -626,32 +626,17 @@ class ServiceConnectionViewSet(viewsets.ModelViewSet):
             generate_password
         )
         from apps.radius.models import CustomerRadiusCredentials
+        from django.utils.dateparse import parse_datetime
         
         service = self.get_object()
         customer = service.customer
         
-        duration_amount = request.data.get('duration_amount')
-        duration_unit = request.data.get('duration_unit', 'DAYS').upper()
+        # Handle optional plan change (common to both modes)
         plan_id = request.data.get('plan_id')
-        
-        if not duration_amount or int(duration_amount) <= 0:
-            return Response(
-                {'error': 'duration_amount must be a positive integer.'},
-                status=status.HTTP_400_BAD_REQUEST
-            )
-        
-        duration_amount = int(duration_amount)
-        
-        if duration_unit not in ('MINUTES', 'HOURS', 'DAYS'):
-            return Response(
-                {'error': 'duration_unit must be MINUTES, HOURS, or DAYS.'},
-                status=status.HTTP_400_BAD_REQUEST
-            )
-        
-        # Handle optional plan change
         plan_changed = False
         new_plan = None
         old_plan_name = None
+        
         if plan_id:
             try:
                 new_plan = Plan.objects.get(id=plan_id, is_active=True)
@@ -673,6 +658,138 @@ class ServiceConnectionViewSet(viewsets.ModelViewSet):
                     f"{old_plan_name} → {new_plan.name}"
                 )
         
+        # ── NEW: Direct expiry date mode (date-picker) ──────────────────
+        expiry_date_str = request.data.get('expiry_date')
+        if expiry_date_str:
+            try:
+                new_expiration = parse_datetime(expiry_date_str)
+                if new_expiration is None:
+                    return Response(
+                        {'error': 'Invalid expiry_date format. Use ISO 8601.'},
+                        status=status.HTTP_400_BAD_REQUEST
+                    )
+                if timezone.is_naive(new_expiration):
+                    new_expiration = timezone.make_aware(new_expiration)
+            except Exception:
+                return Response(
+                    {'error': 'Invalid expiry_date format.'},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+            
+            # Ensure RADIUS credentials exist
+            if not hasattr(customer, 'radius_credentials'):
+                if service.auth_connection_type in ('PPPOE', 'HOTSPOT', 'STATIC'):
+                    username = generate_pppoe_username(customer)
+                    password = generate_password()
+                    profile = _get_or_create_bandwidth_profile(service)
+                    
+                    credentials_data = {
+                        'customer': customer,
+                        'username': username,
+                        'password': password,
+                        'connection_type': service.auth_connection_type,
+                        'bandwidth_profile': profile,
+                        'is_enabled': True,
+                    }
+                    
+                    if service.ip_address and service.auth_connection_type == 'STATIC':
+                        credentials_data['framed_ip_address'] = service.ip_address
+                    
+                    credentials = CustomerRadiusCredentials.objects.create(**credentials_data)
+                    customer.refresh_from_db()
+                    logger.info(f"Auto-created RADIUS credentials for direct expiry: {username}")
+                else:
+                    return Response(
+                        {'error': 'This service type does not use RADIUS credentials.'},
+                        status=status.HTTP_400_BAD_REQUEST
+                    )
+            
+            credentials = customer.radius_credentials
+            credentials.expiration_date = new_expiration  # SET directly, no stacking
+            credentials.is_enabled = True
+            credentials.disabled_reason = ''
+            
+            if plan_changed and new_plan:
+                profile = _get_or_create_bandwidth_profile(service)
+                if profile:
+                    credentials.bandwidth_profile = profile
+            
+            credentials.save()
+            
+            # Sync with RADIUS server
+            try:
+                from apps.radius.services.radius_sync_service import RadiusSyncService
+                RadiusSyncService().set_user_expiration(credentials.username, new_expiration)
+            except Exception as e:
+                logger.warning(f"Direct RADIUS expiration sync failed: {e}")
+            
+            # Reactivate service if needed
+            if service.status in ('SUSPENDED', 'TERMINATED', 'PENDING'):
+                service.status = 'ACTIVE'
+                service.activation_date = service.activation_date or timezone.now()
+                service.save(update_fields=['status', 'activation_date'])
+            
+            # Send notification SMS
+            try:
+                from apps.messaging.services.notification_sender import SMSNotifier
+                SMSNotifier.pppoe_renewal(
+                    customer=customer,
+                    plan_name=new_plan.name if new_plan else (service.plan.name if service.plan else ""),
+                    expires_at=credentials.expiration_date,
+                )
+                logger.info(f"Expiry date set SMS sent to customer {customer.id}")
+            except Exception as e:
+                logger.warning(f"Expiry date set SMS failed: {e}")
+            
+            # Send plan change SMS if applicable
+            if plan_changed and new_plan:
+                try:
+                    from apps.messaging.services.notification_sender import SMSNotifier
+                    SMSNotifier.pppoe_plan_changed(
+                        customer=customer,
+                        old_plan=old_plan_name,
+                        new_plan=new_plan.name,
+                    )
+                    logger.info(f"Plan change SMS sent to customer {customer.id}: {old_plan_name} → {new_plan.name}")
+                except Exception as e:
+                    logger.warning(f"Plan change SMS failed: {e}")
+            
+            logger.info(
+                f"Direct expiry set for service {service.id} for {customer.customer_code}: "
+                f"Expiry = {new_expiration.isoformat()}"
+                f"{f' Plan: {new_plan.name}' if plan_changed else ''}"
+            )
+            
+            return Response({
+                'status': 'success',
+                'message': f'Expiry set to {new_expiration.strftime("%d %b %Y %H:%M")}' + 
+                          (f'. Plan changed to {new_plan.name}' if plan_changed else ''),
+                'username': credentials.username,
+                'new_expiration': new_expiration.isoformat(),
+                'is_enabled': credentials.is_enabled,
+                'plan_changed': plan_changed,
+                'plan_name': new_plan.name if new_plan else (service.plan.name if service.plan else None),
+            })
+        # ── END direct expiry date mode ─────────────────────────────────
+        
+        # ── DURATION-BASED EXTENSION (existing logic) ──
+        duration_amount = request.data.get('duration_amount')
+        duration_unit = request.data.get('duration_unit', 'DAYS').upper()
+        
+        if not duration_amount or int(duration_amount) <= 0:
+            return Response(
+                {'error': 'duration_amount must be a positive integer (or use expiry_date for exact date).'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        duration_amount = int(duration_amount)
+        
+        if duration_unit not in ('MINUTES', 'HOURS', 'DAYS'):
+            return Response(
+                {'error': 'duration_unit must be MINUTES, HOURDS, or DAYS.'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
         # Calculate the delta
         if duration_unit == 'MINUTES':
             delta = timedelta(minutes=duration_amount)
@@ -684,6 +801,7 @@ class ServiceConnectionViewSet(viewsets.ModelViewSet):
             delta = timedelta(days=duration_amount)
             human_label = f"{duration_amount} day{'s' if duration_amount != 1 else ''}"
         
+        # Ensure RADIUS credentials exist
         if not hasattr(customer, 'radius_credentials'):
             if service.auth_connection_type in ('PPPOE', 'HOTSPOT', 'STATIC'):
                 username = generate_pppoe_username(customer)
