@@ -43,6 +43,7 @@ class MpesaC2BWebhookView(APIView):
     - Exact plan amount → 1 period of the plan
     - 2× plan amount → 2 periods (stacked/queued)
     - Partial amount → recorded but service NOT activated (requires full plan amount)
+    - Unrecognized account → recorded for manual reconciliation
     
     POST /api/v1/webhooks/mpesa/c2b-callback/
     """
@@ -146,8 +147,10 @@ class MpesaC2BWebhookView(APIView):
                 status=status.HTTP_200_OK
             )
 
-        # 1. FIND THE TENANT
+        # 1. FIND THE TENANT (UPDATED: shortcode match alone is sufficient)
         target_tenant_schema = None
+        fallback_tenant_schema = None  # Track tenant with shortcode-only match
+        
         if connection.schema_name == 'public':
             for tenant in Tenant.objects.exclude(schema_name='public'):
                 with schema_context(tenant.schema_name):
@@ -155,7 +158,7 @@ class MpesaC2BWebhookView(APIView):
                         if MpesaConfiguration.objects.filter(
                             business_shortcode=shortcode, is_active=True
                         ).exists():
-                            # 🧠 Check home subscription accounts first
+                            # Prefer tenant where the account reference matches a ServiceConnection
                             if ServiceConnection.objects.filter(
                                 models.Q(billing_account_number__iexact=bill_ref) |
                                 models.Q(mpesa_account_number__iexact=bill_ref)
@@ -164,23 +167,38 @@ class MpesaC2BWebhookView(APIView):
                                 logger.info(f"Found matching tenant via ServiceConnection: {tenant.schema_name}")
                                 break
                             
-                            # 🧠 Fallback: Check if this reference belongs to a temporary Hotspot Session
+                            # Check HotspotSession
                             from apps.billing.models.hotspot_models import HotspotSession
                             if HotspotSession.objects.filter(session_id__icontains=bill_ref).exists():
                                 target_tenant_schema = tenant.schema_name
                                 logger.info(f"Found matching tenant via HotspotSession reference: {tenant.schema_name}")
                                 break
+                            
+                            # Shortcode matches but no account match — store as fallback candidate
+                            if not fallback_tenant_schema:
+                                fallback_tenant_schema = tenant.schema_name
+                                logger.info(
+                                    f"Shortcode {shortcode} matched tenant {tenant.schema_name} "
+                                    f"(no account match for '{bill_ref}', will record as unmatched if no other match found)"
+                                )
                     except Exception as e:
                         logger.debug(f"Error checking tenant {tenant.schema_name}: {e}")
                         continue
+            
+            # If no perfect match found but we have a fallback, use it
+            if not target_tenant_schema and fallback_tenant_schema:
+                target_tenant_schema = fallback_tenant_schema
+                logger.info(f"Using fallback tenant {target_tenant_schema} for unmatched payment")
         else:
             target_tenant_schema = connection.schema_name
 
         if not target_tenant_schema:
             logger.warning(
                 f"UNMATCHED PAYMENT: ID={trans_id}, Account={bill_ref}, SC={shortcode}. "
-                "No tenant matched. Manual reconciliation required."
+                "No tenant matched (no active M-Pesa config found). Manual reconciliation required."
             )
+            # Still record the payment at public schema level as completely unmatched?
+            # For now, just return as before
             return Response(
                 {"ResultCode": 0, "ResultDesc": "Account Not Found"},
                 status=status.HTTP_200_OK
@@ -300,13 +318,97 @@ class MpesaC2BWebhookView(APIView):
                                 status=status.HTTP_200_OK
                             )
 
+                    # --- If no service AND no hotspot session found, record as UNMATCHED for manual reconciliation ---
                     if not service:
-                        logger.warning(f"Service not found for account {bill_ref} in {target_tenant_schema}")
+                        logger.warning(
+                            f"UNMATCHED ACCOUNT: ID={trans_id}, Account={bill_ref}, SC={shortcode}, "
+                            f"tenant={target_tenant_schema}. Recording for manual reconciliation."
+                        )
+                        
+                        config = MpesaConfiguration.objects.filter(
+                            business_shortcode=shortcode, is_active=True
+                        ).first()
+
+                        if not config:
+                            logger.error(f"No active M-Pesa config for shortcode {shortcode}")
+                            return Response(
+                                {"ResultCode": 1, "ResultDesc": "Configuration Error"},
+                                status=status.HTTP_200_OK
+                            )
+
+                        # --- Record transaction (unmatched) ---
+                        try:
+                            mpesa_txn = MpesaTransaction.objects.create(
+                                configuration=config,
+                                transaction_id=trans_id,
+                                merchant_request_id=f"C2B-{trans_id}",
+                                checkout_request_id=f"C2B-{trans_id}",
+                                transaction_type='C2B',
+                                amount=amount,
+                                phone_number=msisdn,
+                                account_reference=bill_ref,
+                                status='COMPLETED',
+                                callback_data=data,
+                                callback_received_at=timezone.now(),
+                                schema_name=target_tenant_schema
+                            )
+                        except IntegrityError:
+                            logger.info(f"Duplicate unmatched C2B callback ignored: {trans_id}")
+                            return Response(
+                                {"ResultCode": 0, "ResultDesc": "Duplicate"},
+                                status=status.HTTP_200_OK
+                            )
+
+                        # --- Find or create payment method ---
+                        method, _ = InvoiceItemPayment.objects.get_or_create(
+                            method_type='MPESA_PAYBILL',
+                            schema_name=target_tenant_schema,
+                            defaults={
+                                'name': 'M-Pesa Paybill',
+                                'code': f'MPESA_PAYBILL_{target_tenant_schema[:10]}',
+                                'is_active': True,
+                            }
+                        )
+
+                        # Extract names safely from the C2B data
+                        first_name = data.get('FirstName', '')
+                        last_name = data.get('LastName', '')
+                        payer_full_name = f"{first_name} {last_name}".strip()
+
+                        # --- Record unmatched payment with clear notes for ISP ---
+                        payment = Payment.objects.create(
+                            customer=None,
+                            amount=amount,
+                            payment_method=method,
+                            status='COMPLETED',
+                            transaction_id=trans_id,
+                            mpesa_receipt=trans_id,
+                            mpesa_phone=msisdn,
+                            payer_phone='',
+                            payer_name=payer_full_name or "M-Pesa User",
+                            mpesa_transaction=mpesa_txn,
+                            payment_date=timezone.now(),
+                            schema_name=target_tenant_schema,
+                            notes=(
+                                f"UNMATCHED ACCOUNT: Customer entered '{bill_ref}' which does not match "
+                                f"any registered billing account or pending hotspot session. "
+                                f"Manual activation required. TransID: {trans_id}, Phone: {msisdn}"
+                            )
+                        )
+                        mpesa_txn.payment = payment
+                        mpesa_txn.save(update_fields=['payment'])
+
+                        logger.info(
+                            f"Unmatched payment recorded for reconciliation: {trans_id} | "
+                            f"Account: {bill_ref} | Amount: KES {amount} | Tenant: {target_tenant_schema}"
+                        )
+                        
                         return Response(
-                            {"ResultCode": 0, "ResultDesc": "Account Missing"},
+                            {"ResultCode": 0, "ResultDesc": "Success - Recorded for Manual Reconciliation"},
                             status=status.HTTP_200_OK
                         )
 
+                    # --- Continue with normal matched service payment flow ---
                     config = MpesaConfiguration.objects.filter(
                         business_shortcode=shortcode, is_active=True
                     ).first()

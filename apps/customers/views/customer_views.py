@@ -70,7 +70,8 @@ class CustomerViewSet(viewsets.ModelViewSet):
         'alternative_phone', 'services__plan__name', 'services__plan__code',
         'services__billing_account_number', 'services__mpesa_account_number',
         'services__paybill_account_number', 'services__ip_address',
-        'services__mac_address', 'radius_credentials__username'
+        'services__mac_address', 'radius_credentials__username',
+        'location'  # ADDED
     ]
     ordering_fields = ['created_at', 'customer_code', 'user__last_name']
     ordering = ['-created_at']
@@ -130,6 +131,7 @@ class CustomerViewSet(viewsets.ModelViewSet):
                 | Q(services__ip_address__icontains=search_term)
                 | Q(services__mac_address__icontains=search_term)
                 | Q(radius_credentials__username__icontains=search_term)
+                | Q(location__icontains=search_term)  # ADDED
             )
 
         return queryset.distinct()

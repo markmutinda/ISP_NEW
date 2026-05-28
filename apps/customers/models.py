@@ -173,6 +173,13 @@ class Customer(models.Model):
     # Contact Information
     alternative_phone = models.CharField(max_length=20, blank=True)
     
+    # Physical Location
+    location = models.CharField(
+        max_length=255,
+        blank=True,
+        help_text="Customer's physical location or area (e.g., Westlands, Nairobi)"
+    )
+    
     # Customer Details
     marital_status = models.CharField(
         max_length=20, 
@@ -262,6 +269,7 @@ class Customer(models.Model):
             models.Index(fields=['id_number']),
             models.Index(fields=['status']),
             models.Index(fields=['customer_type']),
+            models.Index(fields=['location']),  # Added index for location field
         ]
     
     def __str__(self):

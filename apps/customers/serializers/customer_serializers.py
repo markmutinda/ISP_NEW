@@ -164,7 +164,7 @@ class CustomerUpdateSerializer(serializers.ModelSerializer):
             'customer_type', 'status', 'category',
             'billing_cycle', 'credit_limit', 'outstanding_balance',
             'receive_sms', 'receive_email', 'receive_promotions',
-            'notes'
+            'notes', 'location'
         ]
         read_only_fields = ['id_number', 'outstanding_balance']
     
@@ -230,7 +230,7 @@ class CustomerListSerializer(serializers.ModelSerializer):
             'full_name', 'email', 'phone', 'phone_number',
             'customer_type', 'status', 'category', 'activation_date',
             'outstanding_balance', 'balance', 'services', 'radius_credentials',
-            'created_at', 'updated_at'
+            'location', 'created_at', 'updated_at'
         ]
     
     def get_services(self, obj):
@@ -280,7 +280,7 @@ class CustomerDetailSerializer(serializers.ModelSerializer):
             'deactivation_date', 'referral_source', 'billing_cycle',
             'credit_limit', 'outstanding_balance', 'receive_sms',
             'receive_email', 'receive_promotions', 'notes',
-            'addresses_count', 'documents_count', 'services_count',
+            'location', 'addresses_count', 'documents_count', 'services_count',
             'active_services_count', 'created_at', 'updated_at'
         ]
     
