@@ -12,8 +12,8 @@ from .views.cloud_portal_views import (
     HotspotReturnTripView,
     HotspotDeviceAuthView,
     HotspotDeviceAuthStatusView,
-    GenerateTVCodeView,      # ADDED: TV code generation
-    VerifyTVCodeView,        # ADDED: TV code verification
+    GenerateTVCodeView,
+    VerifyTVCodeView,
 )
 from .views.hotspot_admin_views import (
     HotspotPlanViewSet,
@@ -22,13 +22,13 @@ from .views.hotspot_admin_views import (
     HotspotDashboardView,
     GlobalHotspotPlanListView,
     HotspotClientViewSet,
-    ActiveSubscriptionsView,  # <--- ADDED: Active Subscriptions View
-    RouterIncomeView,         # <--- ADDED: Router Income View
+    ActiveSubscriptionsView,
+    RouterIncomeView,
 )
-from .views.hotspot_voucher_admin_views import (  # ADDED: Hotspot Voucher Admin Views
+from .views.hotspot_voucher_admin_views import (
     HotspotVoucherGenerateView,
     HotspotVoucherListView,
-    HotspotVoucherDetailView,  # ADD THIS
+    HotspotVoucherDetailView,
 )
 from .views.customer_payment_views import (
     InitiateCustomerPaymentView,
@@ -38,10 +38,7 @@ from .views.customer_payment_views import (
     PaymentMethodToggleActiveView,
 )
 from .views.webhook_views import (
-    # REMOVED: PayHeroSubscriptionWebhookView,
-    # REMOVED: PayHeroHotspotWebhookView,
-    # REMOVED: PayHeroBillingWebhookView,
-    MpesaC2BWebhookView,  # KEPT: M-Pesa C2B webhook view
+    MpesaC2BWebhookView,
 )
 
 # ==========================
@@ -61,12 +58,12 @@ from .views.tuma_webhook_views import TumaWebhookView
 from .views.hotspot_ad_views import (
     HotspotAdServeView,
     HotspotAdGrantView,
-    HotspotAdMediaView,      # ADDED: Media serving with range support
+    HotspotAdMediaView,
     HotspotAdAdminViewSet,
 )
 
 # ==========================
-# Hotspot Loyalty URLs (ADDED)
+# Hotspot Loyalty URLs
 # ==========================
 from .views.hotspot_loyalty_views import (
     HotspotLoyaltyInfoView,
@@ -88,10 +85,6 @@ router.register(r'payments', PaymentViewSet, basename='payment')
 router.register(r'mpesa-config', MpesaConfigurationViewSet, basename='mpesa-config')
 router.register(r'mpesa-transactions', MpesaTransactionViewSet, basename='mpesa-transaction')
 
-# Tuma Configuration URLs (NEW)
-# Note: Tuma uses function-based or APIView endpoints, not ViewSets initially
-# router.register(r'tuma-config', TumaConfigurationViewSet, basename='tuma-config')  # Add when ViewSet is created
-
 # Voucher URLs
 router.register(r'voucher-batches', VoucherBatchViewSet, basename='voucher-batch')
 router.register(r'vouchers', VoucherViewSet, basename='voucher')
@@ -100,72 +93,51 @@ urlpatterns = [
     path('', include(router.urls)),
 
     # ==========================
-    # Tuma Endpoints (NEW - Phase 5)
+    # Tuma Endpoints
     # ==========================
-    # Frontend setup calls
     path('tuma/banks/', TumaBanksView.as_view(), name='tuma-banks'),
     path('tuma/child-business/', TumaCreateChildBusinessView.as_view(), name='tuma-child-business'),
     path('tuma/mode/', TumaTenantModeView.as_view(), name='tuma-mode'),
-    
-    # Payment initiation
     path('tuma/initiate/', TumaInitiatePaymentView.as_view(), name='tuma-initiate'),
-    
-    # Tuma Webhook (receives callbacks from Tuma gateway)
     path('tuma/callback/', TumaWebhookView.as_view(), name='tuma-callback'),
 
     # ==========================
-    # M-Pesa Endpoints (Renamed to bypass Safaricom's URL validation filter)
+    # M-Pesa Endpoints
     # ==========================
     path('daraja/c2b-callback/', MpesaC2BWebhookView.as_view(), name='mpesa-c2b-callback'),
     path('daraja/c2b-validation/', MpesaC2BWebhookView.as_view(), name='mpesa-c2b-validation'),
-    
-    # Keep the old callback for backward compatibility if needed (DEPRECATED - will be removed in future)
     path('mpesa/callback/', PaymentViewSet.as_view({'post': 'mpesa_callback'}), name='mpesa-callback-legacy'),
     
-    # M-Pesa configuration test endpoint
     path('mpesa-config/<int:pk>/test/', 
          MpesaConfigurationViewSet.as_view({'post': 'test_connection'}), 
          name='mpesa-config-test'),
-    # Legacy/guide-compatible alias
     path('mpesa-config/<int:pk>/test_connection/', 
          MpesaConfigurationViewSet.as_view({'post': 'test_connection'}), 
          name='mpesa-config-test-connection'),
-    
-    # M-Pesa configuration management endpoints
     path('mpesa-config/<int:pk>/set-default/', 
          MpesaConfigurationViewSet.as_view({'post': 'set_default'}), 
          name='mpesa-config-set-default'),
-    # Legacy/guide-compatible alias
     path('mpesa-config/<int:pk>/set_default/', 
          MpesaConfigurationViewSet.as_view({'post': 'set_default'}), 
          name='mpesa-config-set-default-legacy'),
     path('mpesa-config/<int:pk>/toggle-active/', 
          MpesaConfigurationViewSet.as_view({'post': 'toggle_active'}), 
          name='mpesa-config-toggle-active'),
-    
-    # NEW: Daraja Gateway Activation/Deactivation endpoints
     path('mpesa-config/<int:pk>/activate-as-primary/',
          MpesaConfigurationViewSet.as_view({'post': 'activate_as_primary'}),
          name='mpesa-config-activate-primary'),
     path('mpesa-config/<int:pk>/deactivate-daraja/',
          MpesaConfigurationViewSet.as_view({'post': 'deactivate_daraja'}),
          name='mpesa-config-deactivate-daraja'),
-    
     path('mpesa-config/active/', 
          MpesaConfigurationViewSet.as_view({'get': 'active'}), 
          name='mpesa-config-active'),
     path('mpesa-config/default/', 
          MpesaConfigurationViewSet.as_view({'get': 'default'}), 
          name='mpesa-config-default'),
-    
-    # M-Pesa transaction endpoints
     path('mpesa-transactions/<int:pk>/status/', 
          MpesaTransactionViewSet.as_view({'get': 'status'}), 
          name='mpesa-transaction-status'),
-
-    # ==========================
-    # REMOVED: PayHero Endpoints (DEPRECATED - fully removed)
-    # ==========================
 
     # ==========================
     # Dashboard Endpoints
@@ -184,7 +156,7 @@ urlpatterns = [
     path('vouchers/validate/', VoucherViewSet.as_view({'post': 'validate_code'}), name='voucher-validate'),
     
     # ==========================
-    # Customer Payment Initiation (payments to Netily → ISP)
+    # Customer Payment Initiation
     # ==========================
     path('payments/initiate/', InitiateCustomerPaymentView.as_view(), name='initiate-payment'),
     path('payments/<int:payment_id>/status/', CustomerPaymentStatusView.as_view(), name='payment-status'),
@@ -195,15 +167,12 @@ urlpatterns = [
 
 # ==========================
 # Hotspot URLs (PUBLIC - no auth)
-# These are accessed from captive portal
 # ==========================
 hotspot_urlpatterns = [
     path('captive-portal/', CaptivePortalView.as_view(), name='hotspot-captive-portal'),
     path('routers/<int:router_id>/plans/', HotspotPlansView.as_view(), name='hotspot-plans'),
     path('purchase/', HotspotPurchaseView.as_view(), name='hotspot-purchase'),
     path('purchase/<str:session_id>/status/', HotspotPurchaseStatusView.as_view(), name='hotspot-status'),
-    
-    # ── Cloud Controller Portal Endpoints ──
     path('login-page/<int:router_id>/', HotspotLoginPageView.as_view(), name='hotspot-login-page'),
     path('auto-login/', HotspotAutoLoginView.as_view(), name='hotspot-auto-login'),
     path('return-trip/<str:session_id>/', HotspotReturnTripView.as_view(), name='hotspot-return-trip'),
@@ -211,37 +180,24 @@ hotspot_urlpatterns = [
     path('device-auth/authorize/', HotspotDeviceAuthView.as_view(), name='hotspot-device-auth-authorize'),
     path('device-auth/status/', HotspotDeviceAuthStatusView.as_view(), name='hotspot-device-auth-status'),
     path('voucher-redeem/', HotspotVoucherRedeemView.as_view(), name='hotspot-voucher-redeem'),
-    
-    # ── Smart TV Pairing Endpoints (ADDED) ──
-    # TV generates a code to display
     path('tv/generate-code/', GenerateTVCodeView.as_view(), name='hotspot-tv-generate-code'),
-    # User verifies the code on their phone
     path('tv/verify-code/', VerifyTVCodeView.as_view(), name='hotspot-tv-verify-code'),
-    
-    # ── Ad-Sponsored Free Access Endpoints ──
     path('ads/serve/', HotspotAdServeView.as_view(), name='hotspot-ad-serve'),
     path('ads/grant-access/', HotspotAdGrantView.as_view(), name='hotspot-ad-grant'),
-    path('ads/media/<int:pk>/', HotspotAdMediaView.as_view(), name='hotspot-ad-media'),  # ADDED: Media serving with range support
-    
-    # ── Loyalty Program (Public — captive portal) ──
+    path('ads/media/<int:pk>/', HotspotAdMediaView.as_view(), name='hotspot-ad-media'),
     path('loyalty-info/', HotspotLoyaltyInfoView.as_view(), name='hotspot-loyalty-info'),
     path('loyalty-redeem/', HotspotLoyaltyRedeemView.as_view(), name='hotspot-loyalty-redeem'),
 ]
 
 # ==========================
-# Hotspot Admin URLs (AUTHENTICATED - admin/staff only)
-# These are used by the hotspot management admin page
+# Hotspot Admin URLs (AUTHENTICATED)
 # ==========================
 hotspot_admin_urlpatterns = [
     # Dashboard
     path('dashboard/', HotspotDashboardView.as_view(), name='hotspot-dashboard'),
-    
-    # Global Plans (ADDED for Vouchers Dropdown)
     path('admin/plans/', GlobalHotspotPlanListView.as_view(), name='hotspot-admin-all-plans'),
     
-    # ============================================================
-    # HOTSPOT CLIENTS (ADDED)
-    # ============================================================
+    # HOTSPOT CLIENTS
     path('admin/clients/', 
          HotspotClientViewSet.as_view({'get': 'list'}), 
          name='hotspot-admin-clients'),
@@ -249,21 +205,17 @@ hotspot_admin_urlpatterns = [
          HotspotClientViewSet.as_view({'get': 'retrieve'}), 
          name='hotspot-admin-client-detail'),
     
-    # ============================================================
-    # ACTIVE SUBSCRIPTIONS (ADDED - Single endpoint for PPPoE + Hotspot)
-    # ============================================================
+    # ACTIVE SUBSCRIPTIONS
     path('admin/active-subscriptions/', 
          ActiveSubscriptionsView.as_view(), 
          name='hotspot-active-subscriptions'),
     
-    # ============================================================
-    # ROUTER INCOME (ADDED - Total income per router)
-    # ============================================================
+    # ROUTER INCOME
     path('admin/routers/<int:router_id>/income/',
          RouterIncomeView.as_view(),
          name='hotspot-router-income'),
     
-    # Plans CRUD (per-router) — prefixed with "admin/" to avoid collision with public plans endpoint
+    # Plans CRUD (per-router)
     path('admin/routers/<int:router_id>/plans/', 
          HotspotPlanViewSet.as_view({'get': 'list', 'post': 'create'}), 
          name='hotspot-admin-plans'),
@@ -277,7 +229,7 @@ hotspot_admin_urlpatterns = [
          HotspotPlanViewSet.as_view({'post': 'toggle_active'}), 
          name='hotspot-admin-plan-toggle'),
     
-    # Sessions (per-router, read-only with disconnect)
+    # Sessions (per-router)
     path('admin/routers/<int:router_id>/sessions/', 
          HotspotSessionViewSet.as_view({'get': 'list'}), 
          name='hotspot-admin-sessions'),
@@ -297,28 +249,25 @@ hotspot_admin_urlpatterns = [
          name='hotspot-admin-branding'),
     
     # ============================================================
-    # HOTSPOT VOUCHER ADMIN ROUTES (ADDED)
+    # HOTSPOT VOUCHER ADMIN ROUTES - ORDER MATTERS!
+    # DETAIL ROUTE MUST COME BEFORE LIST ROUTE
     # ============================================================
-    # Generate vouchers for a specific hotspot plan
-    path('admin/vouchers/generate/', 
-         HotspotVoucherGenerateView.as_view(), 
-         name='hotspot-admin-voucher-generate'),
-    
-    # List vouchers with filtering by plan, status, etc.
-    path('admin/vouchers/', 
-         HotspotVoucherListView.as_view(), 
-         name='hotspot-admin-voucher-list'),
-    
-    # ============================================================
-    # HOTSPOT VOUCHER DETAIL ROUTE (ADDED - for edit/delete)
-    # ============================================================
+    # Detail route (for edit/delete) - MORE SPECIFIC
     path('admin/vouchers/<str:pk>/',
          HotspotVoucherDetailView.as_view(),
          name='hotspot-admin-voucher-detail'),
     
-    # ============================================================
-    # AD MANAGEMENT (ADDED)
-    # ============================================================
+    # Generate vouchers
+    path('admin/vouchers/generate/', 
+         HotspotVoucherGenerateView.as_view(), 
+         name='hotspot-admin-voucher-generate'),
+    
+    # List vouchers - LESS SPECIFIC (must come LAST)
+    path('admin/vouchers/', 
+         HotspotVoucherListView.as_view(), 
+         name='hotspot-admin-voucher-list'),
+    
+    # AD MANAGEMENT
     path('admin/ads/',
          HotspotAdAdminViewSet.as_view({'get': 'list', 'post': 'create'}),
          name='hotspot-admin-ads'),
@@ -334,13 +283,7 @@ hotspot_admin_urlpatterns = [
 ]
 
 # ==========================
-# REMOVED: PayHero Webhook URLs (DEPRECATED - fully removed)
-# ==========================
-# webhook_urlpatterns = [ ... ]  # DELETED
-
-# ==========================
 # M-Pesa Webhook URLs (PUBLIC - no auth)
-# These receive callbacks from Safaricom
 # ==========================
 mpesa_webhook_urlpatterns = [
     path('c2b-callback/', MpesaC2BWebhookView.as_view(), name='mpesa-c2b-callback'),
@@ -349,16 +292,13 @@ mpesa_webhook_urlpatterns = [
 
 # ==========================
 # Tuma Webhook URLs (PUBLIC - no auth)
-# These receive callbacks from Tuma Gateway
 # ==========================
 tuma_webhook_urlpatterns = [
     path('tuma/callback/', TumaWebhookView.as_view(), name='tuma-callback'),
 ]
 
-# Combine all URL patterns for easy inclusion in main urls.py
+# Combine all URL patterns
 hotspot_all_urlpatterns = hotspot_urlpatterns + hotspot_admin_urlpatterns
-
-# Combine all webhook URL patterns (PayHero removed)
 webhook_all_urlpatterns = mpesa_webhook_urlpatterns + tuma_webhook_urlpatterns
 
 app_name = 'billing'
