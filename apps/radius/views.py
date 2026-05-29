@@ -878,6 +878,7 @@ class CustomerRadiusCredentialsViewSet(viewsets.ModelViewSet):
         POST   /api/v1/radius/credentials/{id}/sync/    - Force sync to RADIUS
         POST   /api/v1/radius/credentials/{id}/enable/  - Enable account
         POST   /api/v1/radius/credentials/{id}/disable/ - Disable account
+        GET    /api/v1/radius/credentials/expired_count/ - Fast count of expired credentials  # NEW
     """
     
     permission_classes = [IsAuthenticated, HasCompanyAccess]
@@ -903,6 +904,23 @@ class CustomerRadiusCredentialsViewSet(viewsets.ModelViewSet):
         if self.action == 'retrieve':
             return CustomerRadiusCredentialsDetailSerializer
         return CustomerRadiusCredentialsSerializer
+    
+    @action(detail=False, methods=['get'])
+    def expired_count(self, request):
+        """
+        Fast count of expired RADIUS credentials (no pagination, just count).
+        
+        GET /api/v1/radius/credentials/expired_count/
+        
+        Returns:
+            { "count": 42 }
+        """
+        now = timezone.now()
+        expired = CustomerRadiusCredentials.objects.filter(
+            expiration_date__isnull=False,
+            expiration_date__lte=now
+        ).count()
+        return Response({'count': expired})
     
     @action(detail=True, methods=['post'])
     def sync(self, request, pk=None):
