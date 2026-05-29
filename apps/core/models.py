@@ -813,6 +813,8 @@ class Lead(models.Model):
     company_name = models.CharField(max_length=200, blank=True, default="")
     lead_source = models.CharField(max_length=120, blank=True, default="")
     message = models.TextField(blank=True, default="")
+    is_contacted = models.BooleanField(default=False)
+    contacted_at = models.DateTimeField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:

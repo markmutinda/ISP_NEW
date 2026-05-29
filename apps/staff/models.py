@@ -635,3 +635,178 @@ class Payroll(models.Model):
         self.net_pay = self.gross_pay - self.total_deductions
         
         super().save(*args, **kwargs)
+
+
+class Technician(models.Model):
+    """
+    Field technicians who can be dispatched to customer locations.
+    """
+    STATUS_CHOICES = [
+        ('available', 'Available'),
+        ('busy', 'Busy'),
+        ('offline', 'Offline'),
+        ('on_leave', 'On Leave'),
+    ]
+
+    user = models.OneToOneField(
+        User,
+        on_delete=models.CASCADE,
+        related_name='technician_profile'
+    )
+    employee_id = models.CharField(max_length=50, unique=True)
+    phone = models.CharField(max_length=20)
+    skills = models.JSONField(default=list, blank=True)
+    status = models.CharField(
+        max_length=20,
+        choices=STATUS_CHOICES,
+        default='available'
+    )
+    current_location = models.CharField(max_length=255, blank=True, null=True)
+    latitude = models.DecimalField(
+        max_digits=10, decimal_places=7, null=True, blank=True
+    )
+    longitude = models.DecimalField(
+        max_digits=10, decimal_places=7, null=True, blank=True
+    )
+    total_jobs_completed = models.PositiveIntegerField(default=0)
+    average_rating = models.DecimalField(
+        max_digits=3, decimal_places=2, default=0.00
+    )
+    is_active = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        app_label = 'staff'
+        ordering = ['employee_id']
+        verbose_name = "Technician"
+        verbose_name_plural = "Technicians"
+
+    def __str__(self):
+        return f"{self.user.get_full_name()} ({self.employee_id})"
+
+    @property
+    def name(self):
+        return self.user.get_full_name()
+
+    def save(self, *args, **kwargs):
+        if not self.employee_id:
+            count = Technician.objects.count() + 1
+            self.employee_id = f"TECH{count:04d}"
+        super().save(*args, **kwargs)
+
+
+class DispatchJob(models.Model):
+    """
+    A field job dispatched to a technician, optionally linked to a support ticket.
+    """
+    JOB_TYPE_CHOICES = [
+        ('installation', 'Installation'),
+        ('repair', 'Repair'),
+        ('maintenance', 'Maintenance'),
+        ('relocation', 'Relocation'),
+        ('disconnection', 'Disconnection'),
+        ('survey', 'Survey'),
+    ]
+
+    PRIORITY_CHOICES = [
+        ('low', 'Low'),
+        ('medium', 'Medium'),
+        ('high', 'High'),
+        ('urgent', 'Urgent'),
+    ]
+
+    STATUS_CHOICES = [
+        ('pending', 'Pending'),
+        ('assigned', 'Assigned'),
+        ('in_progress', 'In Progress'),
+        ('completed', 'Completed'),
+        ('cancelled', 'Cancelled'),
+    ]
+
+    job_number = models.CharField(max_length=20, unique=True, editable=False)
+    customer = models.ForeignKey(
+        'customers.Customer',
+        on_delete=models.CASCADE,
+        related_name='dispatch_jobs'
+    )
+    job_type = models.CharField(max_length=20, choices=JOB_TYPE_CHOICES)
+    description = models.TextField(blank=True, default='')
+    priority = models.CharField(
+        max_length=10,
+        choices=PRIORITY_CHOICES,
+        default='medium'
+    )
+    status = models.CharField(
+        max_length=20,
+        choices=STATUS_CHOICES,
+        default='pending'
+    )
+    assigned_to = models.ForeignKey(
+        Technician,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='jobs'
+    )
+    scheduled_date = models.DateField()
+    scheduled_time = models.TimeField(null=True, blank=True)
+    estimated_duration = models.PositiveIntegerField(
+        default=60, help_text="Estimated duration in minutes"
+    )
+    started_at = models.DateTimeField(null=True, blank=True)
+    completed_at = models.DateTimeField(null=True, blank=True)
+    notes = models.TextField(blank=True, default='')
+
+    # Optional link to support ticket
+    ticket = models.ForeignKey(
+        'support.SupportTicket',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='dispatch_jobs'
+    )
+
+    # Customer feedback
+    customer_rating = models.PositiveSmallIntegerField(null=True, blank=True)
+    customer_feedback = models.TextField(blank=True, default='')
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        app_label = 'staff'
+        ordering = ['-created_at']
+        verbose_name = "Dispatch Job"
+        verbose_name_plural = "Dispatch Jobs"
+        indexes = [
+            models.Index(fields=['status']),
+            models.Index(fields=['assigned_to']),
+            models.Index(fields=['scheduled_date']),
+        ]
+
+    def __str__(self):
+        return f"{self.job_number} - {self.get_job_type_display()} ({self.status})"
+
+    def save(self, *args, **kwargs):
+        if not self.job_number:
+            last = DispatchJob.objects.order_by('-id').first()
+            next_num = (last.id + 1) if last else 1
+            self.job_number = f"JOB-{next_num:04d}"
+        super().save(*args, **kwargs)
+
+    @property
+    def customer_name(self):
+        return self.customer.full_name if self.customer else ''
+
+    @property
+    def customer_phone(self):
+        phone = getattr(self.customer, 'phone_number', None) or getattr(self.customer, 'phone', '')
+        return phone or ''
+
+    @property
+    def customer_address(self):
+        return getattr(self.customer, 'address', '') or ''
+
+    @property
+    def technician_name(self):
+        return self.assigned_to.name if self.assigned_to else None

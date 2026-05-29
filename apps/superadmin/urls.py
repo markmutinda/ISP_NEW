@@ -88,5 +88,6 @@ urlpatterns = [
     # Leads
     path("leads/", views.LeadListView.as_view(), name="lead-list"),
     path("leads/stats/", views.LeadStatsView.as_view(), name="lead-stats"),
+    path("leads/<int:pk>/", views.LeadDetailView.as_view(), name="lead-detail"),
     path("tenant-deletion-jobs/<uuid:job_id>/", views.TenantDeletionJobDetailView.as_view(), name="tenant-deletion-job-detail"),
 ]

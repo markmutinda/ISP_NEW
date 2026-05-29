@@ -2631,6 +2631,13 @@ class LeadListView(APIView):
                 Q(phone__icontains=search)
             )
 
+        # Filter by contacted status
+        contacted = request.query_params.get("contacted")
+        if contacted == "true":
+            qs = qs.filter(is_contacted=True)
+        elif contacted == "false":
+            qs = qs.filter(is_contacted=False)
+
         total = qs.count()
         start = (page - 1) * page_size
         leads = qs[start:start + page_size]
@@ -2644,6 +2651,8 @@ class LeadListView(APIView):
                 "company_name": l.company_name,
                 "lead_source": l.lead_source,
                 "message": l.message,
+                "is_contacted": l.is_contacted,
+                "contacted_at": l.contacted_at.isoformat() if l.contacted_at else None,
                 "created_at": l.created_at.isoformat(),
             }
             for l in leads
@@ -2696,6 +2705,43 @@ class LeadStatsView(APIView):
             "this_month": this_month,
             "last_30_days": last_30,
             "last_7_days": last_7,
+            "contacted": Lead.objects.filter(is_contacted=True).count(),
+            "not_contacted": Lead.objects.filter(is_contacted=False).count(),
             "source_breakdown": source_breakdown,
             "trend": trend,
+        })
+
+
+class LeadDetailView(APIView):
+    """Update a single lead (e.g., toggle contacted status)."""
+    permission_classes = SUPERADMIN_PERMS
+
+    def patch(self, request, pk):
+        _ensure_public()
+        from apps.core.models import Lead
+
+        try:
+            lead = Lead.objects.get(pk=pk)
+        except Lead.DoesNotExist:
+            return Response({"detail": "Lead not found."}, status=404)
+
+        if "is_contacted" in request.data:
+            lead.is_contacted = bool(request.data["is_contacted"])
+            if lead.is_contacted and not lead.contacted_at:
+                lead.contacted_at = timezone.now()
+            elif not lead.is_contacted:
+                lead.contacted_at = None
+            lead.save(update_fields=["is_contacted", "contacted_at"])
+
+        return Response({
+            "id": lead.id,
+            "name": lead.name,
+            "email": lead.email,
+            "phone": lead.phone,
+            "company_name": lead.company_name,
+            "lead_source": lead.lead_source,
+            "message": lead.message,
+            "is_contacted": lead.is_contacted,
+            "contacted_at": lead.contacted_at.isoformat() if lead.contacted_at else None,
+            "created_at": lead.created_at.isoformat(),
         })
