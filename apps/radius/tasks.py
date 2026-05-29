@@ -14,6 +14,7 @@ from datetime import timedelta, datetime, timezone as dt_timezone
 from celery import shared_task
 from django.utils import timezone
 from django.db import connection
+from django.db.models import Q
 from django.conf import settings
 from django_tenants.utils import schema_context, get_tenant_model
 
@@ -442,60 +443,127 @@ def sync_all_radius_users():
 def disconnect_user_immediately(username: str, router_ip: str = None, connection_type: str = 'both'):
     """
     Immediately disconnect a specific user from the network.
+
+    Routers are tenant-scoped tables in this project.  Keep every Router
+    lookup inside the same tenant schema that owns the user's radacct rows;
+    otherwise the lazy QuerySet is evaluated later in the public schema and
+    PostgreSQL raises: relation "network_router" does not exist.
     """
     from apps.network.models import Router
     from apps.network.integrations.mikrotik_api import MikrotikAPI
-    
-    result = {'username': username, 'disconnected': False, 'routers_checked': 0, 'tenants_searched': 0, 'error': None}
-    
-    try:
-        routers = Router.objects.filter(ip_address=router_ip, is_active=True) if router_ip else Router.objects.filter(is_active=True)
-        TenantModel = get_tenant_model()
-        tenants = TenantModel.objects.exclude(schema_name='public')
 
-        for tenant in tenants:
-            tenant_start = time.perf_counter()
-            try:
-                result['tenants_searched'] += 1  # Counter added back
-                with schema_context(tenant.schema_name):
-                    with connection.cursor() as cursor:
-                        cursor.execute("SELECT acctsessionid FROM radacct WHERE username = %s AND acctstoptime IS NULL", [username])
-                        active_sessions = cursor.fetchall()
-                    if active_sessions:
-                        for session in active_sessions:
-                            session_id = session[0]
-                            with connection.cursor() as update_cursor:
-                                update_cursor.execute("UPDATE radacct SET acctstoptime = NOW(), acctterminatecause = 'Admin-Reset' WHERE acctsessionid = %s AND acctstoptime IS NULL", [session_id])
-                        result['disconnected'] = True
-            except Exception as e:
-                logger.warning(f"Error checking tenant {tenant.schema_name}: {e}")
-            finally:
-                logger.debug(
-                    "[RADIUS TASK TIMING] task=disconnect_user_immediately tenant=%s duration_ms=%d",
-                    tenant.schema_name,
-                    int((time.perf_counter() - tenant_start) * 1000)
-                )
+    result = {
+        'username': username,
+        'disconnected': False,
+        'routers_checked': 0,
+        'tenants_searched': 0,
+        'error': None,
+    }
 
-        for router in routers:
-            router_start = time.perf_counter()
-            result['routers_checked'] += 1
-            try:
-                api = MikrotikAPI(router)
-                disconnect_result = api.disconnect_user(username, connection_type)
-                if disconnect_result.get('pppoe') or disconnect_result.get('hotspot'):
-                    result['disconnected'] = True
-            except Exception as e:
-                logger.warning(f"Error on router {router.name}: {e}")
-            finally:
-                logger.debug(
-                    "[RADIUS TASK TIMING] task=disconnect_user_immediately router=%s duration_ms=%d",
-                    router.name,
-                    int((time.perf_counter() - router_start) * 1000)
-                )
-        return result
-    except Exception as e:
-        result['error'] = str(e)
-        return result
+    TenantModel = get_tenant_model()
+    tenants = TenantModel.objects.exclude(schema_name='public')
+
+    for tenant in tenants:
+        tenant_start = time.perf_counter()
+        try:
+            result['tenants_searched'] += 1
+
+            with schema_context(tenant.schema_name):
+                with connection.cursor() as cursor:
+                    cursor.execute(
+                        """
+                        SELECT DISTINCT acctsessionid, nasipaddress
+                        FROM radacct
+                        WHERE username = %s
+                          AND acctstoptime IS NULL
+                        """,
+                        [username],
+                    )
+                    active_sessions = cursor.fetchall()
+
+                if not active_sessions:
+                    continue
+
+                with connection.cursor() as update_cursor:
+                    for session_id, _nas_ip in active_sessions:
+                        update_cursor.execute(
+                            """
+                            UPDATE radacct
+                            SET acctstoptime = NOW(),
+                                acctterminatecause = 'Admin-Reset'
+                            WHERE acctsessionid = %s
+                              AND username = %s
+                              AND acctstoptime IS NULL
+                            """,
+                            [session_id, username],
+                        )
+
+                result['disconnected'] = True
+
+                nas_ips = {
+                    nas_ip
+                    for _session_id, nas_ip in active_sessions
+                    if nas_ip
+                }
+
+                routers = Router.objects.filter(is_active=True)
+
+                if router_ip:
+                    routers = routers.filter(
+                        Q(ip_address=router_ip) | Q(vpn_ip_address=router_ip)
+                    )
+                elif nas_ips:
+                    routers = routers.filter(
+                        Q(ip_address__in=nas_ips) | Q(vpn_ip_address__in=nas_ips)
+                    )
+
+                for router in routers:
+                    router_start = time.perf_counter()
+                    result['routers_checked'] += 1
+
+                    try:
+                        api = MikrotikAPI(router)
+                        disconnect_result = api.disconnect_user(username, connection_type)
+
+                        if disconnect_result.get('pppoe') or disconnect_result.get('hotspot'):
+                            result['disconnected'] = True
+
+                    except Exception as e:
+                        logger.warning(
+                            "Error disconnecting user %s on router %s in tenant %s: %s",
+                            username,
+                            router.name,
+                            tenant.schema_name,
+                            e,
+                        )
+
+                    finally:
+                        logger.debug(
+                            "[RADIUS TASK TIMING] task=disconnect_user_immediately "
+                            "tenant=%s router=%s duration_ms=%d",
+                            tenant.schema_name,
+                            router.name,
+                            int((time.perf_counter() - router_start) * 1000),
+                        )
+
+        except Exception as e:
+            result['error'] = str(e)
+
+            logger.warning(
+                "Error disconnecting user %s in tenant %s: %s",
+                username,
+                tenant.schema_name,
+                e,
+            )
+
+        finally:
+            logger.debug(
+                "[RADIUS TASK TIMING] task=disconnect_user_immediately tenant=%s duration_ms=%d",
+                tenant.schema_name,
+                int((time.perf_counter() - tenant_start) * 1000),
+            )
+
+    return result
 
 
 @shared_task
