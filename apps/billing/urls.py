@@ -28,6 +28,7 @@ from .views.hotspot_admin_views import (
 from .views.hotspot_voucher_admin_views import (  # ADDED: Hotspot Voucher Admin Views
     HotspotVoucherGenerateView,
     HotspotVoucherListView,
+    HotspotVoucherDetailView,  # ADD THIS
 )
 from .views.customer_payment_views import (
     InitiateCustomerPaymentView,
@@ -307,6 +308,13 @@ hotspot_admin_urlpatterns = [
     path('admin/vouchers/', 
          HotspotVoucherListView.as_view(), 
          name='hotspot-admin-voucher-list'),
+    
+    # ============================================================
+    # HOTSPOT VOUCHER DETAIL ROUTE (ADDED - for edit/delete)
+    # ============================================================
+    path('admin/vouchers/<str:pk>/',
+         HotspotVoucherDetailView.as_view(),
+         name='hotspot-admin-voucher-detail'),
     
     # ============================================================
     # AD MANAGEMENT (ADDED)

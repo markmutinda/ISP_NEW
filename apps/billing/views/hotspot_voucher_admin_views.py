@@ -4,6 +4,7 @@ import uuid
 from django.core.exceptions import ValidationError
 from django.db.models import Count, Q
 from django.utils import timezone
+from django.utils.dateparse import parse_datetime
 from rest_framework import permissions, status
 from rest_framework.response import Response
 from rest_framework.views import APIView
@@ -47,6 +48,13 @@ class HotspotVoucherGenerateView(APIView):
         if quantity <= 0:
             return Response(
                 {'error': 'quantity must be greater than 0'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        # ADDED: Max 50 vouchers per generation
+        if quantity > 50:
+            return Response(
+                {'error': 'Maximum 50 vouchers can be generated per request'},
                 status=status.HTTP_400_BAD_REQUEST
             )
 
@@ -217,3 +225,60 @@ class HotspotVoucherListView(APIView):
             'count': len(data),
             'results': data,
         })
+
+
+# ADD THIS NEW VIEW CLASS
+class HotspotVoucherDetailView(APIView):
+    """
+    PATCH /api/v1/hotspot/admin/vouchers/{id}/  — edit expiry date
+    DELETE /api/v1/hotspot/admin/vouchers/{id}/ — delete voucher
+    """
+    permission_classes = [permissions.IsAuthenticated, IsCompanyStaff]
+
+    def get_object(self, pk):
+        try:
+            return Voucher.objects.select_related('batch').get(
+                pk=pk, batch__hotspot_plan__isnull=False
+            )
+        except Voucher.DoesNotExist:
+            return None
+
+    def patch(self, request, pk):
+        voucher = self.get_object(pk)
+        if not voucher:
+            return Response({'error': 'Voucher not found'}, status=status.HTTP_404_NOT_FOUND)
+
+        expires_at = request.data.get('expires_at')
+        if not expires_at:
+            return Response({'error': 'expires_at is required'}, status=status.HTTP_400_BAD_REQUEST)
+
+        parsed = parse_datetime(expires_at)
+        if not parsed:
+            return Response({'error': 'Invalid date format'}, status=status.HTTP_400_BAD_REQUEST)
+
+        voucher.valid_to = parsed
+        # Re-evaluate status based on new date
+        if parsed > timezone.now() and voucher.status == 'EXPIRED':
+            voucher.status = 'ACTIVE'
+        voucher.save(update_fields=['valid_to', 'status', 'updated_at'])
+
+        return Response({
+            'id': voucher.id,
+            'code': voucher.code,
+            'expires_at': voucher.valid_to,
+            'status': voucher.status,
+        })
+
+    def delete(self, request, pk):
+        voucher = self.get_object(pk)
+        if not voucher:
+            return Response({'error': 'Voucher not found'}, status=status.HTTP_404_NOT_FOUND)
+
+        if voucher.status == 'USED':
+            return Response(
+                {'error': 'Cannot delete a used voucher'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        voucher.delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)
