@@ -250,22 +250,23 @@ hotspot_admin_urlpatterns = [
     
     # ============================================================
     # HOTSPOT VOUCHER ADMIN ROUTES - ORDER MATTERS!
-    # DETAIL ROUTE MUST COME BEFORE LIST ROUTE
+    # Generate (POST) and List (GET) must come BEFORE detail route
     # ============================================================
-    # Detail route (for edit/delete) - MORE SPECIFIC
-    path('admin/vouchers/<str:pk>/',
-         HotspotVoucherDetailView.as_view(),
-         name='hotspot-admin-voucher-detail'),
-    
-    # Generate vouchers
+    # 1. Generate vouchers - MUST COME FIRST (exact match)
     path('admin/vouchers/generate/', 
          HotspotVoucherGenerateView.as_view(), 
          name='hotspot-admin-voucher-generate'),
     
-    # List vouchers - LESS SPECIFIC (must come LAST)
+    # 2. List vouchers - exact match
     path('admin/vouchers/', 
          HotspotVoucherListView.as_view(), 
          name='hotspot-admin-voucher-list'),
+    
+    # 3. Detail route (for edit/delete) - uses int:pk, comes LAST
+    # Note: Voucher IDs are integers (AutoField)
+    path('admin/vouchers/<int:pk>/',
+         HotspotVoucherDetailView.as_view(),
+         name='hotspot-admin-voucher-detail'),
     
     # AD MANAGEMENT
     path('admin/ads/',
