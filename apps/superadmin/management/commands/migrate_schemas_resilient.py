@@ -14,6 +14,8 @@ command.
 
 from django.core.management import call_command
 from django.core.management.base import BaseCommand
+from django.db import ProgrammingError
+from django.db.migrations.operations.fields import AddField
 from django.db.migrations.operations.models import RenameIndex
 from django.db.migrations.state import ProjectState
 
@@ -29,6 +31,7 @@ class Command(BaseCommand):
 
     def handle(self, *args, **options):
         original_remove_field = ProjectState.remove_field
+        original_add_field_forwards = AddField.database_forwards
         original_rename_index_forwards = RenameIndex.database_forwards
         original_rename_index_backwards = RenameIndex.database_backwards
 
@@ -77,6 +80,41 @@ class Command(BaseCommand):
                 )
                 return None
 
+        def _column_exists(table_name, column_name, schema_editor):
+            with schema_editor.connection.cursor() as cursor:
+                description = schema_editor.connection.introspection.get_table_description(cursor, table_name)
+            return any(col.name == column_name for col in description)
+
+        def resilient_add_field_forwards(operation, app_label, schema_editor, from_state, to_state):
+            try:
+                return original_add_field_forwards(
+                    operation,
+                    app_label,
+                    schema_editor,
+                    from_state,
+                    to_state,
+                )
+            except ProgrammingError as exc:
+                if 'already exists' not in str(exc):
+                    raise
+
+                model_state = to_state.models.get((app_label, operation.model_name_lower))
+                if model_state is None:
+                    raise
+
+                table_name = model_state.options.get("db_table") or f"{app_label}_{model_state.name_lower}"
+                field = model_state.get_field(operation.name)
+                if not _column_exists(table_name, field.column, schema_editor):
+                    raise
+
+                self.stdout.write(
+                    self.style.WARNING(
+                        f"Skipping legacy AddField for {app_label}.{model_state.name}.{operation.name}: "
+                        f"column {field.column} already exists on {table_name}"
+                    )
+                )
+                return None
+
         def resilient_rename_index_backwards(operation, app_label, schema_editor, from_state, to_state):
             try:
                 return original_rename_index_backwards(
@@ -103,6 +141,7 @@ class Command(BaseCommand):
                 return None
 
         ProjectState.remove_field = resilient_remove_field
+        AddField.database_forwards = resilient_add_field_forwards
         RenameIndex.database_forwards = resilient_rename_index_forwards
         RenameIndex.database_backwards = resilient_rename_index_backwards
         try:
@@ -115,5 +154,6 @@ class Command(BaseCommand):
             )
         finally:
             ProjectState.remove_field = original_remove_field
+            AddField.database_forwards = original_add_field_forwards
             RenameIndex.database_forwards = original_rename_index_forwards
             RenameIndex.database_backwards = original_rename_index_backwards
