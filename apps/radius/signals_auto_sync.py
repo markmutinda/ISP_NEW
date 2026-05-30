@@ -657,20 +657,7 @@ def handle_invoice_status_radius(sender, instance, **kwargs):
 
 @receiver(post_save, sender='core.Tenant')
 def configure_radius_for_new_tenant(sender, instance, created, **kwargs):
-    if not created:
-        return
-    try:
-        from .services.tenant_radius_service import tenant_radius_service
-        
-        schema_name = instance.schema_name
-        if schema_name == 'public':
-            return
-        
-        result = tenant_radius_service.configure_tenant_radius(
-            schema_name=schema_name,
-            tenant_name=getattr(instance, 'name', None) or schema_name
-        )
-        logger.info(f"Auto-configured RADIUS for tenant: {schema_name}")
-        
-    except Exception as e:
-        logger.error(f"Failed to configure RADIUS for tenant {instance.schema_name}: {e}")
+    # Tenant RADIUS onboarding now happens explicitly after successful tenant
+    # schema migration. Avoid post_save provisioning to prevent schema-race
+    # errors during registration.
+    return

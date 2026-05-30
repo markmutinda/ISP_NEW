@@ -285,6 +285,12 @@ class TenantCreateView(APIView):
             with connection.cursor() as cur:
                 cur.execute(f'CREATE SCHEMA "{tenant.schema_name}"')
             call_command("migrate_schemas_resilient", schema=tenant.schema_name)
+            from apps.radius.services.tenant_radius_service import tenant_radius_service
+
+            tenant_radius_service.configure_tenant_radius(
+                schema_name=tenant.schema_name,
+                tenant_name=company.name,
+            )
         except Exception:
             with connection.cursor() as cur:
                 cur.execute('SET search_path TO "public"')

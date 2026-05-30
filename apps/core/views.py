@@ -1179,6 +1179,19 @@ class CompanyRegisterView(generics.CreateAPIView):
                 f"STDOUT: {result.stdout}\nSTDERR: {result.stderr}"
             )
 
+        try:
+            from apps.radius.services.tenant_radius_service import tenant_radius_service
+
+            tenant_radius_service.configure_tenant_radius(
+                schema_name=tenant.schema_name,
+                tenant_name=company.name,
+            )
+        except Exception:
+            logger.exception(
+                "RADIUS provisioning failed after successful tenant migration for %s",
+                tenant.schema_name,
+            )
+
         # Switch to tenant schema
         connection.set_tenant(tenant)
     

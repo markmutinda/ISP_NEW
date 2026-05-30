@@ -67,6 +67,12 @@ class Command(BaseCommand):
             with connection.cursor() as cursor:
                 cursor.execute('CREATE SCHEMA "demo"')
             call_command('migrate_schemas_resilient', schema='demo')
+            from apps.radius.services.tenant_radius_service import tenant_radius_service
+
+            tenant_radius_service.configure_tenant_radius(
+                schema_name='demo',
+                tenant_name=company.name,
+            )
             self.stdout.write(self.style.SUCCESS('  Tenant: CREATED — schema=demo'))
 
         # ── 3. Domain ───────────────────────────────────────────────────
