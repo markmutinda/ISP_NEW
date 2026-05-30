@@ -15,6 +15,7 @@ This creates (idempotently):
 from datetime import date, timedelta
 from decimal import Decimal
 
+from django.core.management import call_command
 from django.core.management.base import BaseCommand
 from django.db import connection
 from django.utils import timezone
@@ -62,7 +63,10 @@ class Command(BaseCommand):
                 max_customers=1000,
                 next_billing_date=date.today() + timedelta(days=30),
             )
-            tenant.save()  # creates schema + runs tenant migrations
+            tenant.save()
+            with connection.cursor() as cursor:
+                cursor.execute('CREATE SCHEMA "demo"')
+            call_command('migrate_schemas_resilient', schema='demo')
             self.stdout.write(self.style.SUCCESS('  Tenant: CREATED — schema=demo'))
 
         # ── 3. Domain ───────────────────────────────────────────────────

@@ -12,6 +12,7 @@ from datetime import timedelta
 from decimal import Decimal
 
 from django.conf import settings
+from django.core.management import call_command
 from django.db import connection, transaction
 from django.db.models import Sum, Count, Q, F
 from django.http import HttpResponse
@@ -263,10 +264,15 @@ class TenantCreateView(APIView):
             county=d.get("county", ""),
         )
 
-        # 2. Create Tenant (triggers schema creation via django-tenants)
+        schema_name = f"tenant_{d['subdomain'].replace('-', '_')}"
+        if Tenant.objects.filter(schema_name=schema_name).exists():
+            return Response({"detail": f"Schema {schema_name} already exists."}, status=400)
+
+        # 2. Create Tenant
         tenant = Tenant(
             company=company,
             subdomain=d["subdomain"],
+            schema_name=schema_name,
             database_name=d["subdomain"],
             status=d["status"],
             max_users=d["max_users"],
@@ -274,7 +280,18 @@ class TenantCreateView(APIView):
             billing_cycle=d["billing_cycle"],
             monthly_rate=d["monthly_rate"],
         )
-        tenant.save()  # schema_name auto-set from subdomain
+        tenant.save()
+        try:
+            with connection.cursor() as cur:
+                cur.execute(f'CREATE SCHEMA "{tenant.schema_name}"')
+            call_command("migrate_schemas_resilient", schema=tenant.schema_name)
+        except Exception:
+            with connection.cursor() as cur:
+                cur.execute('SET search_path TO "public"')
+                cur.execute(f'DROP SCHEMA IF EXISTS "{tenant.schema_name}" CASCADE')
+            tenant.delete()
+            company.delete()
+            raise
 
         # 3. Create Domain (use TENANT_BASE_DOMAIN from settings)
         from django.conf import settings as conf

@@ -299,6 +299,8 @@ class Company(BaseModel):
 class Tenant(BaseModel, TenantMixin):
     """Tenant model for SaaS multi-tenancy - ONLY model inheriting from TenantMixin"""
 
+    auto_create_schema = False
+
     STATUS_CHOICES = (
         ('trial', 'Trial'),
         ('active', 'Active'),

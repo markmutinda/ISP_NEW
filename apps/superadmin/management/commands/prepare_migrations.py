@@ -46,15 +46,18 @@ class Command(BaseCommand):
 
         total_deleted = 0
         total_faked = 0
+        total_unapplied = 0
         for schema in schemas:
             total_deleted += self._clean_schema(schema, disk_migrations, dry_run=dry_run)
+            total_unapplied += self._unheal_false_applied_migrations(schema, dry_run=dry_run)
             total_faked += self._heal_preapplied_migrations(schema, dry_run=dry_run)
             total_faked += self._heal_missing_dependencies(schema, disk_migrations, dry_run=dry_run)
 
         if dry_run:
             self.stdout.write(
                 self.style.WARNING(
-                    f"\nDry run complete. {total_deleted} stale migration record(s) would be removed and "
+                    f"\nDry run complete. {total_deleted} stale migration record(s) would be removed, "
+                    f"{total_unapplied} false-applied migration record(s) would be removed, and "
                     f"{total_faked} migration record(s) would be faked."
                 )
             )
@@ -62,8 +65,9 @@ class Command(BaseCommand):
 
         self.stdout.write(
             self.style.SUCCESS(
-                f"\nRemoved {total_deleted} stale migration record(s) and faked {total_faked} "
-                f"migration record(s). Repairing any remaining inconsistencies..."
+                f"\nRemoved {total_deleted} stale migration record(s), removed {total_unapplied} "
+                f"false-applied migration record(s), and faked {total_faked} migration record(s). "
+                f"Repairing any remaining inconsistencies..."
             )
         )
         call_command("repair_migrations", all_schemas=True)
@@ -277,6 +281,51 @@ class Command(BaseCommand):
 
         return healed
 
+    def _unheal_false_applied_migrations(self, schema: str, *, dry_run: bool) -> int:
+        removed = 0
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT EXISTS (
+                    SELECT 1
+                    FROM information_schema.tables
+                    WHERE table_schema = %s
+                      AND table_name = 'django_migrations'
+                )
+                """,
+                [schema],
+            )
+            if not cursor.fetchone()[0]:
+                return 0
+
+            cursor.execute(f'SET search_path TO "{schema}"')
+            cursor.execute("SELECT app, name FROM django_migrations")
+            applied = {(app, name) for app, name in cursor.fetchall()}
+
+            candidates: list[tuple[str, str]] = []
+
+            core_0014 = ("core", "0014_lead_contacted_fields")
+            if core_0014 in applied and not self._schema_matches_core_0014(cursor, schema):
+                candidates.append(core_0014)
+
+            if candidates:
+                names = ", ".join(f"{app}.{name}" for app, name in candidates)
+                self.stdout.write(self.style.WARNING(f"{schema}: false-applied migration record(s): {names}"))
+
+            if not dry_run:
+                for app, name in candidates:
+                    cursor.execute(
+                        "DELETE FROM django_migrations WHERE app = %s AND name = %s",
+                        [app, name],
+                    )
+                    removed += cursor.rowcount
+            else:
+                removed += len(candidates)
+
+            cursor.execute('SET search_path TO "public"')
+
+        return removed
+
     def _schema_matches_inventory_0002(self, cursor, schema: str) -> bool:
         required_columns = {
             "inventory_assignment": {"created_at", "updated_at"},
@@ -326,6 +375,17 @@ class Command(BaseCommand):
             {
                 "network_rou_winbox__43f123_idx",
                 "network_rou_api_rem_1c08dd_idx",
+            },
+        )
+
+    def _schema_matches_core_0014(self, cursor, schema: str) -> bool:
+        return self._table_has_columns(
+            cursor,
+            schema,
+            "core_lead",
+            {
+                "is_contacted",
+                "contacted_at",
             },
         )
 

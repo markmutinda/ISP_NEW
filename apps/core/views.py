@@ -1057,6 +1057,11 @@ class CompanyRegisterView(generics.CreateAPIView):
                 data.get('company_name', '')
             )
             if slug:
+                schema_name = f"tenant_{slug.replace('-', '_')}"
+                try:
+                    self._drop_schema_if_exists(schema_name)
+                except Exception:
+                    pass
                 # Delete in dependency order
                 try:
                     _Domain.objects.filter(tenant__subdomain=slug).delete()
@@ -1111,10 +1116,17 @@ class CompanyRegisterView(generics.CreateAPIView):
         
         # Create Tenant in public schema
         trial_end = timezone.now() + timedelta(days=14)
+        schema_name = f"tenant_{company.slug.replace('-', '_')}"
+        if self._schema_exists(schema_name):
+            raise RuntimeError(
+                f"Registration cannot continue because schema '{schema_name}' already exists. "
+                "Clean up the orphaned tenant schema first."
+            )
+
         tenant = Tenant.objects.create(
             company=company,
             subdomain=company.slug,
-            schema_name=f"tenant_{company.slug.replace('-', '_')}",
+            schema_name=schema_name,
             database_name=f"isp_{company.slug.replace('-', '_')}",
             status='trial',
             max_users=10,
@@ -1143,28 +1155,28 @@ class CompanyRegisterView(generics.CreateAPIView):
             is_primary=True
         )
         
-        # Create schema and run migrations.
-        # Run in a subprocess so an OOM kill of the child process does NOT
-        # kill the gunicorn worker and reset the client connection.
+        self._create_schema(tenant.schema_name)
+
+        # Run tenant migrations in a subprocess so an OOM kill of the child
+        # process does not kill the gunicorn worker and reset the client connection.
         import subprocess, sys, os as _os
         migrate_env = _os.environ.copy()
         migrate_env['DJANGO_SETTINGS_MODULE'] = 'config.settings.production'
         result = subprocess.run(
-            [sys.executable, 'manage.py', 'migrate_schemas',
-             '--schema', tenant.schema_name, '--noinput'],
+            [sys.executable, 'manage.py', 'migrate_schemas_resilient',
+             '--schema', tenant.schema_name],
             cwd=settings.BASE_DIR,
             env=migrate_env,
-            stdout=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
             timeout=240,   # hard cap — gunicorn timeout is 300s
         )
         if result.returncode != 0:
-            # Log but don't crash — schema may still be usable
-            import logging as _logging
-            _logging.getLogger(__name__).error(
-                "migrate_schemas failed for %s:\nSTDOUT: %s\nSTDERR: %s",
-                tenant.schema_name, result.stdout, result.stderr
+            self._drop_schema_if_exists(tenant.schema_name)
+            raise RuntimeError(
+                f"Tenant schema migration failed for {tenant.schema_name}.\n"
+                f"STDOUT: {result.stdout}\nSTDERR: {result.stderr}"
             )
 
         # Switch to tenant schema
@@ -1245,6 +1257,35 @@ class CompanyRegisterView(generics.CreateAPIView):
         )
 
         return Response(response_payload, status=status.HTTP_201_CREATED)
+
+    def _schema_exists(self, schema_name):
+        from django.db import connection
+
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT EXISTS (
+                    SELECT 1
+                    FROM information_schema.schemata
+                    WHERE schema_name = %s
+                )
+                """,
+                [schema_name],
+            )
+            return cursor.fetchone()[0]
+
+    def _create_schema(self, schema_name):
+        from django.db import connection
+
+        with connection.cursor() as cursor:
+            cursor.execute(f'CREATE SCHEMA "{schema_name}"')
+
+    def _drop_schema_if_exists(self, schema_name):
+        from django.db import connection
+
+        with connection.cursor() as cursor:
+            cursor.execute('SET search_path TO "public"')
+            cursor.execute(f'DROP SCHEMA IF EXISTS "{schema_name}" CASCADE')
 
     def send_welcome_email(self, user, tenant, domain_name, password):
         """Send welcome email with subdomain and credentials"""
