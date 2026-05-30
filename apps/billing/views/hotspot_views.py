@@ -1591,66 +1591,67 @@ class HotspotPhoneReconnectView(APIView):
                 Q(canonical_phone=phone_short)
             ).first()
 
-            # If still not found, search via HotspotSession phone_number
+            # ── NEW: Also search sessions directly by phone_number if client not found ──
             if not client:
-                session_via_phone = HotspotSession.objects.filter(
+                # Try to find active sessions directly by phone number variants
+                direct_session = HotspotSession.objects.filter(
                     Q(phone_number=phone_canonical) |
                     Q(phone_number=phone_local) |
                     Q(phone_number=phone_short),
-                    status__in=('active', 'paid'),
+                    status='active',
                     expires_at__gt=now,
-                ).select_related('hotspot_client').order_by('-created_at').first()
-
-                if session_via_phone and session_via_phone.hotspot_client:
-                    client = session_via_phone.hotspot_client
-                elif session_via_phone:
-                    # Session exists but no client linked — respond directly
-                    session = session_via_phone
-                    plan = session.plan
-                    plan_device_limit = getattr(plan, 'simultaneous_devices', 1) or 1
-
-                    if plan_device_limit <= 1:
-                        return Response(
-                            {
-                                'error': 'Your plan supports only 1 device. '
-                                         'To connect a different device, disconnect the current one first.',
-                                'single_device_plan': True,
-                            },
-                            status=status.HTTP_403_FORBIDDEN
+                ).select_related('hotspot_client', 'plan', 'router').order_by('-created_at').first()
+                
+                if direct_session:
+                    # Use this session's client if it has one, or work with session directly
+                    client = direct_session.hotspot_client
+                    
+                    if not client:
+                        # Session exists but no client — handle directly
+                        plan = direct_session.plan
+                        plan_device_limit = getattr(plan, 'simultaneous_devices', 1) or 1
+                        
+                        if plan_device_limit <= 1:
+                            return Response(
+                                {
+                                    'error': 'Your plan supports only 1 device. '
+                                             'To connect a different device, disconnect the current one first.',
+                                    'single_device_plan': True,
+                                },
+                                status=status.HTTP_403_FORBIDDEN
+                            )
+                        
+                        access_code = direct_session.access_code
+                        try:
+                            from apps.billing.services.hotspot_radius_service import HotspotRadiusService
+                            HotspotRadiusService().create_hotspot_credentials(
+                                username=access_code,
+                                password=access_code,
+                                router=router,
+                                plan=plan,
+                                expires_at=direct_session.expires_at,
+                                mac_address=mac_address,
+                            )
+                        except Exception as e:
+                            logger.error(f"Phone reconnect (direct session path) RADIUS failed: {e}")
+                            return Response(
+                                {'error': 'Failed to restore connection. Please try again.'},
+                                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+                            )
+                        
+                        remaining_minutes = max(
+                            0, int((direct_session.expires_at - now).total_seconds() / 60)
                         )
-
-                    # Reseed RADIUS for this device
-                    access_code = session.access_code
-                    try:
-                        from apps.billing.services.hotspot_radius_service import HotspotRadiusService
-                        HotspotRadiusService().create_hotspot_credentials(
-                            username=access_code,
-                            password=access_code,
-                            router=router,
-                            plan=plan,
-                            expires_at=session.expires_at,
-                            mac_address=mac_address,
-                        )
-                    except Exception as e:
-                        logger.error(f"Phone reconnect (no-client path) RADIUS failed: {e}")
-                        return Response(
-                            {'error': 'Failed to restore connection. Please try again.'},
-                            status=status.HTTP_500_INTERNAL_SERVER_ERROR
-                        )
-
-                    remaining_minutes = max(
-                        0, int((session.expires_at - now).total_seconds() / 60)
-                    )
-                    return Response({
-                        'status': 'reconnected',
-                        'message': 'Connection restored!',
-                        'access_code': access_code,
-                        'expires_at': session.expires_at.isoformat(),
-                        'remaining_minutes': remaining_minutes,
-                        'plan_name': plan.name,
-                        'device_slot': 'existing',
-                        'credentials': {'username': access_code, 'password': access_code},
-                    })
+                        return Response({
+                            'status': 'reconnected',
+                            'message': 'Connection restored!',
+                            'access_code': access_code,
+                            'expires_at': direct_session.expires_at.isoformat(),
+                            'remaining_minutes': remaining_minutes,
+                            'plan_name': plan.name,
+                            'device_slot': 'existing',
+                            'credentials': {'username': access_code, 'password': access_code},
+                        })
 
             if not client:
                 return Response(
@@ -1663,7 +1664,7 @@ class HotspotPhoneReconnectView(APIView):
                 )
 
             # ── Find the most recent active session for this client ─
-            # ADD LOGGING BEFORE THE QUERY
+            # FIXED: Also search by phone_number directly to catch sessions without client link
             logger.info(
                 f"Phone reconnect lookup: raw={raw_phone} canonical={phone_canonical} "
                 f"client_id={client.id} client_phone={client.canonical_phone} "
@@ -1671,12 +1672,14 @@ class HotspotPhoneReconnectView(APIView):
             )
 
             active_sessions = HotspotSession.objects.filter(
-                hotspot_client=client,
+                Q(hotspot_client=client) |
+                Q(phone_number=phone_canonical) |
+                Q(phone_number=phone_local) |
+                Q(phone_number=phone_short),
                 status='active',
                 expires_at__gt=now,
-            ).select_related('plan', 'router').order_by('-activated_at')
+            ).select_related('plan', 'router').order_by('-activated_at').distinct()
 
-            # ADD LOGGING AFTER THE QUERY
             logger.info(
                 f"Active sessions found: {active_sessions.count()} "
                 f"for client {client.canonical_username}"
@@ -1685,18 +1688,39 @@ class HotspotPhoneReconnectView(APIView):
             if not active_sessions.exists():
                 # Check if there is a 'paid' session (activation pending)
                 paid_session = HotspotSession.objects.filter(
-                    hotspot_client=client,
+                    Q(hotspot_client=client) |
+                    Q(phone_number=phone_canonical) |
+                    Q(phone_number=phone_local) |
+                    Q(phone_number=phone_short),
                     status='paid',
                 ).order_by('-created_at').first()
 
                 if paid_session:
-                    # Activate it now
+                    # Activate it now AND create RADIUS credentials
                     paid_session.activate(paid_session.access_code or HotspotSession.generate_access_code())
+                    
+                    # Create RADIUS credentials for the newly activated session
+                    try:
+                        from apps.billing.services.hotspot_radius_service import HotspotRadiusService
+                        HotspotRadiusService().create_hotspot_credentials(
+                            username=paid_session.access_code,
+                            password=paid_session.access_code,
+                            router=paid_session.router,
+                            plan=paid_session.plan,
+                            expires_at=paid_session.expires_at,
+                            mac_address=mac_address,
+                        )
+                    except Exception as e:
+                        logger.error(f"Phone reconnect paid->active RADIUS failed: {e}")
+                    
                     active_sessions = HotspotSession.objects.filter(
-                        hotspot_client=client,
+                        Q(hotspot_client=client) |
+                        Q(phone_number=phone_canonical) |
+                        Q(phone_number=phone_local) |
+                        Q(phone_number=phone_short),
                         status='active',
                         expires_at__gt=now,
-                    ).select_related('plan', 'router').order_by('-activated_at')
+                    ).select_related('plan', 'router').order_by('-activated_at').distinct()
 
             if not active_sessions.exists():
                 return Response(
