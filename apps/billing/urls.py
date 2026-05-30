@@ -92,87 +92,6 @@ router.register(r'mpesa-transactions', MpesaTransactionViewSet, basename='mpesa-
 router.register(r'voucher-batches', VoucherBatchViewSet, basename='voucher-batch')
 router.register(r'vouchers', VoucherViewSet, basename='voucher')
 
-urlpatterns = [
-    path('', include(router.urls)),
-
-    # ==========================
-    # Tuma Endpoints
-    # ==========================
-    path('tuma/banks/', TumaBanksView.as_view(), name='tuma-banks'),
-    path('tuma/child-business/', TumaCreateChildBusinessView.as_view(), name='tuma-child-business'),
-    path('tuma/mode/', TumaTenantModeView.as_view(), name='tuma-mode'),
-    path('tuma/initiate/', TumaInitiatePaymentView.as_view(), name='tuma-initiate'),
-    path('tuma/callback/', TumaWebhookView.as_view(), name='tuma-callback'),
-
-    # ==========================
-    # M-Pesa Endpoints
-    # ==========================
-    path('daraja/c2b-callback/', MpesaC2BWebhookView.as_view(), name='mpesa-c2b-callback'),
-    path('daraja/c2b-validation/', MpesaC2BWebhookView.as_view(), name='mpesa-c2b-validation'),
-    path('mpesa/callback/', PaymentViewSet.as_view({'post': 'mpesa_callback'}), name='mpesa-callback-legacy'),
-    
-    path('mpesa-config/<int:pk>/test/', 
-         MpesaConfigurationViewSet.as_view({'post': 'test_connection'}), 
-         name='mpesa-config-test'),
-    path('mpesa-config/<int:pk>/test_connection/', 
-         MpesaConfigurationViewSet.as_view({'post': 'test_connection'}), 
-         name='mpesa-config-test-connection'),
-    path('mpesa-config/<int:pk>/set-default/', 
-         MpesaConfigurationViewSet.as_view({'post': 'set_default'}), 
-         name='mpesa-config-set-default'),
-    path('mpesa-config/<int:pk>/set_default/', 
-         MpesaConfigurationViewSet.as_view({'post': 'set_default'}), 
-         name='mpesa-config-set-default-legacy'),
-    path('mpesa-config/<int:pk>/toggle-active/', 
-         MpesaConfigurationViewSet.as_view({'post': 'toggle_active'}), 
-         name='mpesa-config-toggle-active'),
-    path('mpesa-config/<int:pk>/activate-as-primary/',
-         MpesaConfigurationViewSet.as_view({'post': 'activate_as_primary'}),
-         name='mpesa-config-activate-primary'),
-    path('mpesa-config/<int:pk>/deactivate-daraja/',
-         MpesaConfigurationViewSet.as_view({'post': 'deactivate_daraja'}),
-         name='mpesa-config-deactivate-daraja'),
-    path('mpesa-config/active/', 
-         MpesaConfigurationViewSet.as_view({'get': 'active'}), 
-         name='mpesa-config-active'),
-    path('mpesa-config/default/', 
-         MpesaConfigurationViewSet.as_view({'get': 'default'}), 
-         name='mpesa-config-default'),
-    path('mpesa-transactions/<int:pk>/status/', 
-         MpesaTransactionViewSet.as_view({'get': 'status'}), 
-         name='mpesa-transaction-status'),
-
-    # ==========================
-    # Dashboard Endpoints
-    # ==========================
-    path('dashboard/invoice-stats/', InvoiceViewSet.as_view({'get': 'dashboard_stats'}), name='invoice-dashboard-stats'),
-    path('dashboard/payment-stats/', PaymentViewSet.as_view({'get': 'dashboard_stats'}), name='payment-dashboard-stats'),
-
-    # ==========================
-    # Customer Endpoints
-    # ==========================
-    path('customer/outstanding/', InvoiceViewSet.as_view({'get': 'customer_outstanding'}), name='customer-outstanding'),
-
-    # ==========================
-    # Utility Endpoints
-    # ==========================
-    path('vouchers/validate/', VoucherViewSet.as_view({'post': 'validate_code'}), name='voucher-validate'),
-    
-    # ==========================
-    # Customer Payment Initiation
-    # ==========================
-    path('payments/initiate/', InitiateCustomerPaymentView.as_view(), name='initiate-payment'),
-    path('payments/<int:payment_id>/status/', CustomerPaymentStatusView.as_view(), name='payment-status'),
-    path('payment-methods/', CustomerPaymentMethodsView.as_view(), name='payment-methods'),
-    path('payment-methods/<int:pk>/', PaymentMethodDetailView.as_view(), name='payment-method-detail'),
-    path('payment-methods/<int:pk>/toggle_active/', PaymentMethodToggleActiveView.as_view(), name='payment-method-toggle-active'),
-
-    # ==========================
-    # Hotspot Public URLs
-    # ==========================
-    path('hotspot/', include(hotspot_urlpatterns)),
-]
-
 # ==========================
 # Hotspot URLs (PUBLIC - no auth)
 # ==========================
@@ -307,7 +226,91 @@ tuma_webhook_urlpatterns = [
     path('tuma/callback/', TumaWebhookView.as_view(), name='tuma-callback'),
 ]
 
-# Combine all URL patterns
+# ==========================
+# MAIN URL PATTERNS (must be at the bottom)
+# ==========================
+urlpatterns = [
+    path('', include(router.urls)),
+
+    # ==========================
+    # Tuma Endpoints
+    # ==========================
+    path('tuma/banks/', TumaBanksView.as_view(), name='tuma-banks'),
+    path('tuma/child-business/', TumaCreateChildBusinessView.as_view(), name='tuma-child-business'),
+    path('tuma/mode/', TumaTenantModeView.as_view(), name='tuma-mode'),
+    path('tuma/initiate/', TumaInitiatePaymentView.as_view(), name='tuma-initiate'),
+    path('tuma/callback/', TumaWebhookView.as_view(), name='tuma-callback'),
+
+    # ==========================
+    # M-Pesa Endpoints
+    # ==========================
+    path('daraja/c2b-callback/', MpesaC2BWebhookView.as_view(), name='mpesa-c2b-callback'),
+    path('daraja/c2b-validation/', MpesaC2BWebhookView.as_view(), name='mpesa-c2b-validation'),
+    path('mpesa/callback/', PaymentViewSet.as_view({'post': 'mpesa_callback'}), name='mpesa-callback-legacy'),
+    
+    path('mpesa-config/<int:pk>/test/', 
+         MpesaConfigurationViewSet.as_view({'post': 'test_connection'}), 
+         name='mpesa-config-test'),
+    path('mpesa-config/<int:pk>/test_connection/', 
+         MpesaConfigurationViewSet.as_view({'post': 'test_connection'}), 
+         name='mpesa-config-test-connection'),
+    path('mpesa-config/<int:pk>/set-default/', 
+         MpesaConfigurationViewSet.as_view({'post': 'set_default'}), 
+         name='mpesa-config-set-default'),
+    path('mpesa-config/<int:pk>/set_default/', 
+         MpesaConfigurationViewSet.as_view({'post': 'set_default'}), 
+         name='mpesa-config-set-default-legacy'),
+    path('mpesa-config/<int:pk>/toggle-active/', 
+         MpesaConfigurationViewSet.as_view({'post': 'toggle_active'}), 
+         name='mpesa-config-toggle-active'),
+    path('mpesa-config/<int:pk>/activate-as-primary/',
+         MpesaConfigurationViewSet.as_view({'post': 'activate_as_primary'}),
+         name='mpesa-config-activate-primary'),
+    path('mpesa-config/<int:pk>/deactivate-daraja/',
+         MpesaConfigurationViewSet.as_view({'post': 'deactivate_daraja'}),
+         name='mpesa-config-deactivate-daraja'),
+    path('mpesa-config/active/', 
+         MpesaConfigurationViewSet.as_view({'get': 'active'}), 
+         name='mpesa-config-active'),
+    path('mpesa-config/default/', 
+         MpesaConfigurationViewSet.as_view({'get': 'default'}), 
+         name='mpesa-config-default'),
+    path('mpesa-transactions/<int:pk>/status/', 
+         MpesaTransactionViewSet.as_view({'get': 'status'}), 
+         name='mpesa-transaction-status'),
+
+    # ==========================
+    # Dashboard Endpoints
+    # ==========================
+    path('dashboard/invoice-stats/', InvoiceViewSet.as_view({'get': 'dashboard_stats'}), name='invoice-dashboard-stats'),
+    path('dashboard/payment-stats/', PaymentViewSet.as_view({'get': 'dashboard_stats'}), name='payment-dashboard-stats'),
+
+    # ==========================
+    # Customer Endpoints
+    # ==========================
+    path('customer/outstanding/', InvoiceViewSet.as_view({'get': 'customer_outstanding'}), name='customer-outstanding'),
+
+    # ==========================
+    # Utility Endpoints
+    # ==========================
+    path('vouchers/validate/', VoucherViewSet.as_view({'post': 'validate_code'}), name='voucher-validate'),
+    
+    # ==========================
+    # Customer Payment Initiation
+    # ==========================
+    path('payments/initiate/', InitiateCustomerPaymentView.as_view(), name='initiate-payment'),
+    path('payments/<int:payment_id>/status/', CustomerPaymentStatusView.as_view(), name='payment-status'),
+    path('payment-methods/', CustomerPaymentMethodsView.as_view(), name='payment-methods'),
+    path('payment-methods/<int:pk>/', PaymentMethodDetailView.as_view(), name='payment-method-detail'),
+    path('payment-methods/<int:pk>/toggle_active/', PaymentMethodToggleActiveView.as_view(), name='payment-method-toggle-active'),
+
+    # ==========================
+    # Hotspot Public URLs (mounted under /hotspot/)
+    # ==========================
+    path('hotspot/', include(hotspot_urlpatterns)),
+]
+
+# Combine all URL patterns for convenience (optional)
 hotspot_all_urlpatterns = hotspot_urlpatterns + hotspot_admin_urlpatterns
 webhook_all_urlpatterns = mpesa_webhook_urlpatterns + tuma_webhook_urlpatterns
 
