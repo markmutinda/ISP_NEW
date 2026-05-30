@@ -85,7 +85,7 @@ echo -e "\n${YELLOW}[4/7] Building and starting containers...${NC}"
 echo -e "  This will take 3-8 minutes on first run..."
 cd docker
 $DC $ENV_FLAG down --remove-orphans 2>/dev/null || true
-$DC $ENV_FLAG up -d --build
+$DC $ENV_FLAG build --no-cache web celery-worker celery-beat
 
 echo -e "\n${YELLOW}  Waiting for database to be ready...${NC}"
 sleep 15  # Give postgres time to initialise
@@ -97,16 +97,17 @@ echo ""
 
 # ── Step 5: Collect static files ──────────────────────────────
 echo -e "\n${YELLOW}[5/7] Collecting static files...${NC}"
-$DC $ENV_FLAG exec -T web python manage.py collectstatic --noinput || true
+$DC $ENV_FLAG run --rm web python manage.py collectstatic --noinput || true
 echo -e "${GREEN}  ✓ Static files collected${NC}"
 
 # ── Step 6: Run migrations ────────────────────────────────────
 echo -e "\n${YELLOW}[6/7] Preparing and running multi-tenant migrations...${NC}"
-$DC $ENV_FLAG exec -T web python manage.py prepare_migrations
-$DC $ENV_FLAG exec -T web python manage.py migrate_schemas_resilient --shared
+$DC $ENV_FLAG run --rm web python manage.py prepare_migrations
+$DC $ENV_FLAG run --rm web python manage.py migrate_schemas_resilient --shared
 echo -e "${GREEN}  ✓ Shared schema migrated${NC}"
-$DC $ENV_FLAG exec -T web python manage.py migrate_schemas_resilient --tenant
+$DC $ENV_FLAG run --rm web python manage.py migrate_schemas_resilient --tenant
 echo -e "${GREEN}  ✓ Tenant schemas migrated${NC}"
+$DC $ENV_FLAG up -d web celery-worker celery-beat nginx
 
 # ── Step 7: Summary ───────────────────────────────────────────
 cd ..

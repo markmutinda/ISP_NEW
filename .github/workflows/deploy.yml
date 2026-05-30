@@ -38,9 +38,17 @@ jobs:
 
             echo "==> Rebuilding Django services..."
             cd docker
-            docker compose build web celery-worker celery-beat
+            docker compose down --remove-orphans || true
+            docker compose build --no-cache web celery-worker celery-beat
 
-            echo "==> Restarting Django services..."
+            echo "==> Preparing migration history..."
+            docker compose run --rm web python manage.py prepare_migrations
+
+            echo "==> Running database migrations..."
+            docker compose run --rm web python manage.py migrate_schemas_resilient --shared
+            docker compose run --rm web python manage.py migrate_schemas_resilient --tenant
+
+            echo "==> Starting Django services..."
             docker compose up -d web celery-worker celery-beat
 
             echo "==> Restarting nginx (re-resolve container IPs)..."
@@ -48,13 +56,6 @@ jobs:
 
             echo "==> Waiting for web container to be ready..."
             sleep 5
-
-            echo "==> Preparing migration history..."
-            docker compose exec web python manage.py prepare_migrations
-
-            echo "==> Running database migrations..."
-            docker compose exec web python manage.py migrate_schemas_resilient --shared
-            docker compose exec web python manage.py migrate_schemas_resilient --tenant
 
             echo "==> Ensuring superadmin account exists (non-fatal)..."
             docker compose exec web python manage.py ensure_superadmin || echo "WARN: ensure_superadmin skipped (set SUPERADMIN_EMAIL/PASSWORD env vars)"
