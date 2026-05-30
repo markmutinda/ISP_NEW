@@ -28,6 +28,10 @@ RUN pip install --upgrade pip && \
 # Copy project files
 COPY . .
 
+# Defensive cleanup in case stale bytecode ever slips into the build context.
+RUN find /app -type d -name __pycache__ -prune -exec rm -rf {} + && \
+    find /app -type f \( -name "*.pyc" -o -name "*.pyo" \) -delete
+
 # Create static directory and collect static files
 RUN mkdir -p /app/staticfiles && \
     python manage.py collectstatic --noinput || true

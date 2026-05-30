@@ -1032,10 +1032,6 @@ class CompanyRegisterView(generics.CreateAPIView):
         serializer.is_valid(raise_exception=True)
         data = serializer.validated_data
 
-        # Track created objects for cleanup on failure
-        company = None
-        tenant = None
-
         try:
             return self._create_company(request, data, _log)
         except Exception as exc:
@@ -1050,31 +1046,10 @@ class CompanyRegisterView(generics.CreateAPIView):
                 _conn.set_schema_to_public()
             except Exception:
                 pass
-            from apps.core.models import Company as _Company, Domain as _Domain
-            from django_tenants.utils import get_tenant_model as _gtm
-            _Tenant = _gtm()
-            slug = __import__('django.utils.text', fromlist=['slugify']).slugify(
-                data.get('company_name', '')
+            self._cleanup_registration_artifacts(
+                company_name=data.get("company_name"),
+                admin_email=data.get("admin_email"),
             )
-            if slug:
-                schema_name = f"tenant_{slug.replace('-', '_')}"
-                try:
-                    self._drop_schema_if_exists(schema_name)
-                except Exception:
-                    pass
-                # Delete in dependency order
-                try:
-                    _Domain.objects.filter(tenant__subdomain=slug).delete()
-                except Exception:
-                    pass
-                try:
-                    _Tenant.objects.filter(subdomain=slug).delete()
-                except Exception:
-                    pass
-                try:
-                    _Company.objects.filter(slug=slug).delete()
-                except Exception:
-                    pass
             return Response(
                 {'error': 'Registration failed', 'detail': str(exc)},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -1085,6 +1060,8 @@ class CompanyRegisterView(generics.CreateAPIView):
         from django.db import connection
         connection.set_schema_to_public()
         request_id = request.headers.get("X-Request-ID", "")
+        company = None
+        tenant = None
         
         # 1. Generate Slug BEFORE creating the object
         from django.utils.text import slugify
@@ -1098,130 +1075,141 @@ class CompanyRegisterView(generics.CreateAPIView):
             counter += 1
 
         # 3. Create company in public schema (With the slug!)
-        company = Company.objects.create(
-            name=data['company_name'],
-            slug=slug,  # Use the generated unique slug
-            email=data['company_email'],
-            phone_number=data.get('company_phone', ''),
-            address=data.get('company_address', ''),
-            city=data.get('company_city', ''),
-            county=data.get('company_county', ''),
-            registration_number=data.get('company_registration_number', ''),
-            tax_pin=data.get('company_tax_pin', ''),
-            website=data.get('company_website', ''),
-            company_type='isp',
-            subscription_plan='basic',
-            is_active=True
-        )
-        
-        # Create Tenant in public schema
-        trial_end = timezone.now() + timedelta(days=14)
-        schema_name = f"tenant_{company.slug.replace('-', '_')}"
-        if self._schema_exists(schema_name):
-            raise RuntimeError(
-                f"Registration cannot continue because schema '{schema_name}' already exists. "
-                "Clean up the orphaned tenant schema first."
-            )
-
-        tenant = Tenant.objects.create(
-            company=company,
-            subdomain=company.slug,
-            schema_name=schema_name,
-            database_name=f"isp_{company.slug.replace('-', '_')}",
-            status='trial',
-            max_users=10,
-            max_customers=100,
-            features={},
-            billing_cycle='monthly',
-            monthly_rate=0.00,
-            next_billing_date=trial_end.date(),
-            subscription_expiry=trial_end.date()
-        )
-        
-        # 4. Create Domain in public schema
-        # In production use the real base domain (e.g. acme.netily.co.ke),
-        # in local dev fall back to subdomain.localhost:8000
-        base_domain = getattr(settings, 'TENANT_BASE_DOMAIN', None)
-        if base_domain:
-            domain_name = f"{tenant.subdomain}.{base_domain}"
-            domain_protocol = 'https'
-        else:
-            domain_name = f"{tenant.subdomain}.localhost:8000" if settings.DEBUG else f"{tenant.subdomain}.localhost"
-            domain_protocol = 'http'
-
-        Domain.objects.create(
-            domain=domain_name,
-            tenant=tenant,
-            is_primary=True
-        )
-        
-        self._create_schema(tenant.schema_name)
-
-        # Run tenant migrations in a subprocess so an OOM kill of the child
-        # process does not kill the gunicorn worker and reset the client connection.
-        import subprocess, sys, os as _os
-        migrate_env = _os.environ.copy()
-        migrate_env['DJANGO_SETTINGS_MODULE'] = 'config.settings.production'
-        result = subprocess.run(
-            [sys.executable, 'manage.py', 'migrate_schemas_resilient',
-             '--schema', tenant.schema_name],
-            cwd=settings.BASE_DIR,
-            env=migrate_env,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            timeout=240,   # hard cap — gunicorn timeout is 300s
-        )
-        if result.returncode != 0:
-            self._drop_schema_if_exists(tenant.schema_name)
-            raise RuntimeError(
-                f"Tenant schema migration failed for {tenant.schema_name}.\n"
-                f"STDOUT: {result.stdout}\nSTDERR: {result.stderr}"
-            )
-
         try:
-            from apps.radius.services.tenant_radius_service import tenant_radius_service
+            company = Company.objects.create(
+                name=data['company_name'],
+                slug=slug,  # Use the generated unique slug
+                email=data['company_email'],
+                phone_number=data.get('company_phone', ''),
+                address=data.get('company_address', ''),
+                city=data.get('company_city', ''),
+                county=data.get('company_county', ''),
+                registration_number=data.get('company_registration_number', ''),
+                tax_pin=data.get('company_tax_pin', ''),
+                website=data.get('company_website', ''),
+                company_type='isp',
+                subscription_plan='basic',
+                is_active=True
+            )
+            
+            # Create Tenant in public schema
+            trial_end = timezone.now() + timedelta(days=14)
+            schema_name = f"tenant_{company.slug.replace('-', '_')}"
+            if self._schema_exists(schema_name):
+                raise RuntimeError(
+                    f"Registration cannot continue because schema '{schema_name}' already exists. "
+                    "Clean up the orphaned tenant schema first."
+                )
 
-            tenant_radius_service.configure_tenant_radius(
-                schema_name=tenant.schema_name,
-                tenant_name=company.name,
+            tenant = Tenant.objects.create(
+                company=company,
+                subdomain=company.slug,
+                schema_name=schema_name,
+                database_name=f"isp_{company.slug.replace('-', '_')}",
+                status='trial',
+                max_users=10,
+                max_customers=100,
+                features={},
+                billing_cycle='monthly',
+                monthly_rate=0.00,
+                next_billing_date=trial_end.date(),
+                subscription_expiry=trial_end.date()
+            )
+            
+            # 4. Create Domain in public schema
+            # In production use the real base domain (e.g. acme.netily.co.ke),
+            # in local dev fall back to subdomain.localhost:8000
+            base_domain = getattr(settings, 'TENANT_BASE_DOMAIN', None)
+            if base_domain:
+                domain_name = f"{tenant.subdomain}.{base_domain}"
+                domain_protocol = 'https'
+            else:
+                domain_name = f"{tenant.subdomain}.localhost:8000" if settings.DEBUG else f"{tenant.subdomain}.localhost"
+                domain_protocol = 'http'
+
+            Domain.objects.create(
+                domain=domain_name,
+                tenant=tenant,
+                is_primary=True
+            )
+
+            self._create_schema(tenant.schema_name)
+
+            # Run tenant migrations in a subprocess so an OOM kill of the child
+            # process does not kill the gunicorn worker and reset the client connection.
+            import subprocess, sys, os as _os
+            migrate_env = _os.environ.copy()
+            migrate_env['DJANGO_SETTINGS_MODULE'] = 'config.settings.production'
+            result = subprocess.run(
+                [sys.executable, 'manage.py', 'migrate_schemas_resilient',
+                 '--schema', tenant.schema_name],
+                cwd=settings.BASE_DIR,
+                env=migrate_env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                timeout=240,   # hard cap — gunicorn timeout is 300s
+            )
+            if result.returncode != 0:
+                self._drop_schema_if_exists(tenant.schema_name)
+                raise RuntimeError(
+                    f"Tenant schema migration failed for {tenant.schema_name}.\n"
+                    f"STDOUT: {result.stdout}\nSTDERR: {result.stderr}"
+                )
+
+            try:
+                from apps.radius.services.tenant_radius_service import tenant_radius_service
+
+                tenant_radius_service.configure_tenant_radius(
+                    schema_name=tenant.schema_name,
+                    tenant_name=company.name,
+                )
+            except Exception:
+                logger.exception(
+                    "RADIUS provisioning failed after successful tenant migration for %s",
+                    tenant.schema_name,
+                )
+
+            # Switch to tenant schema
+            connection.set_tenant(tenant)
+        
+            # Create user with all necessary information
+            user = User.objects.create(
+               email=data['admin_email'],
+               first_name=data['admin_first_name'],
+               last_name=data['admin_last_name'],
+               phone_number=data['admin_phone'],
+               role='admin',
+               # Foreign keys remain None (can't reference public schema from tenant schema)
+               company=None,
+               tenant=None,
+                # Store denormalized info
+                company_name=company.name,
+                tenant_subdomain=tenant.subdomain,
+                is_active=True,
+                is_staff=True,
+                is_superuser=True,
+                is_verified=True
+            )
+            user.set_password(data['admin_password'])
+            user.save()
+
+            email_result = self.send_welcome_email(
+                user=user,
+                tenant=tenant,
+                domain_name=domain_name,
+                password=data['admin_password'],
             )
         except Exception:
-            logger.exception(
-                "RADIUS provisioning failed after successful tenant migration for %s",
-                tenant.schema_name,
+            connection.set_schema_to_public()
+            self._cleanup_registration_artifacts(
+                company_name=data.get("company_name"),
+                admin_email=data.get("admin_email"),
+                company_id=getattr(company, "id", None),
+                tenant_id=getattr(tenant, "id", None),
+                schema_name=getattr(tenant, "schema_name", None),
             )
-
-        # Switch to tenant schema
-        connection.set_tenant(tenant)
-    
-        # Create user with all necessary information
-        user = User.objects.create(
-           email=data['admin_email'],
-           first_name=data['admin_first_name'],
-           last_name=data['admin_last_name'],
-           phone_number=data['admin_phone'],
-           role='admin',
-           # Foreign keys remain None (can't reference public schema from tenant schema)
-           company=None,
-           tenant=None,
-            # Store denormalized info
-            company_name=company.name,
-            tenant_subdomain=tenant.subdomain,
-            is_active=True,
-            is_staff=True,
-            is_superuser=True,
-            is_verified=True
-        )
-        user.set_password(data['admin_password'])
-        user.save()
-
-        email_result = self.send_welcome_email(
-            user=user,
-            tenant=tenant,
-            domain_name=domain_name,
-            password=data['admin_password'],
-        )
+            raise
     
         # Removed sensitive debug print line
         
@@ -1270,6 +1258,57 @@ class CompanyRegisterView(generics.CreateAPIView):
         )
 
         return Response(response_payload, status=status.HTTP_201_CREATED)
+
+    def _cleanup_registration_artifacts(
+        self,
+        *,
+        company_name=None,
+        admin_email=None,
+        company_id=None,
+        tenant_id=None,
+        schema_name=None,
+    ):
+        from django.utils.text import slugify
+
+        connection.set_schema_to_public()
+
+        derived_schema = schema_name
+        if not derived_schema and company_name:
+            derived_schema = f"tenant_{slugify(company_name).replace('-', '_')}"
+
+        if derived_schema:
+            try:
+                self._drop_schema_if_exists(derived_schema)
+            except Exception:
+                logger.exception("Failed dropping schema during registration cleanup: %s", derived_schema)
+
+        if tenant_id:
+            try:
+                Tenant.objects.filter(pk=tenant_id).delete()
+            except Exception:
+                logger.exception("Failed deleting tenant id=%s during registration cleanup", tenant_id)
+        elif derived_schema:
+            try:
+                Tenant.objects.filter(schema_name=derived_schema).delete()
+            except Exception:
+                logger.exception("Failed deleting tenant schema=%s during registration cleanup", derived_schema)
+
+        if company_id:
+            try:
+                Company.objects.filter(pk=company_id).delete()
+            except Exception:
+                logger.exception("Failed deleting company id=%s during registration cleanup", company_id)
+        elif company_name:
+            try:
+                Company.objects.filter(name__iexact=company_name).delete()
+            except Exception:
+                logger.exception("Failed deleting company name=%s during registration cleanup", company_name)
+
+        if admin_email:
+            try:
+                User.objects.filter(email=admin_email).delete()
+            except Exception:
+                logger.exception("Failed deleting user email=%s during registration cleanup", admin_email)
 
     def _schema_exists(self, schema_name):
         from django.db import connection
