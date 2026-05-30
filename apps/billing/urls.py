@@ -6,7 +6,7 @@ from .views.VoucherViews import VoucherBatchViewSet, VoucherViewSet
 
 from .views.hotspot_views import (
     CaptivePortalView, HotspotPlansView, HotspotPurchaseView, HotspotPurchaseStatusView,
-    HotspotVoucherRedeemView, HotspotPhoneReconnectView   # ← ADDED
+    HotspotVoucherRedeemView, HotspotPhoneReconnectView
 )
 
 from .views.cloud_portal_views import (
@@ -166,6 +166,11 @@ urlpatterns = [
     path('payment-methods/', CustomerPaymentMethodsView.as_view(), name='payment-methods'),
     path('payment-methods/<int:pk>/', PaymentMethodDetailView.as_view(), name='payment-method-detail'),
     path('payment-methods/<int:pk>/toggle_active/', PaymentMethodToggleActiveView.as_view(), name='payment-method-toggle-active'),
+
+    # ==========================
+    # Hotspot Public URLs
+    # ==========================
+    path('hotspot/', include(hotspot_urlpatterns)),
 ]
 
 # ==========================
@@ -183,7 +188,7 @@ hotspot_urlpatterns = [
     path('device-auth/authorize/', HotspotDeviceAuthView.as_view(), name='hotspot-device-auth-authorize'),
     path('device-auth/status/', HotspotDeviceAuthStatusView.as_view(), name='hotspot-device-auth-status'),
     path('voucher-redeem/', HotspotVoucherRedeemView.as_view(), name='hotspot-voucher-redeem'),
-    path('phone-reconnect/', HotspotPhoneReconnectView.as_view(), name='hotspot-phone-reconnect'),  # ← ADDED
+    path('phone-reconnect/', HotspotPhoneReconnectView.as_view(), name='hotspot-phone-reconnect'),
     path('tv/generate-code/', GenerateTVCodeView.as_view(), name='hotspot-tv-generate-code'),
     path('tv/verify-code/', VerifyTVCodeView.as_view(), name='hotspot-tv-verify-code'),
     path('ads/serve/', HotspotAdServeView.as_view(), name='hotspot-ad-serve'),
