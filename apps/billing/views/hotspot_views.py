@@ -1663,12 +1663,24 @@ class HotspotPhoneReconnectView(APIView):
                 )
 
             # ── Find the most recent active session for this client ─
-            # We look at sessions on ANY router (roaming support) but prefer this router
+            # ADD LOGGING BEFORE THE QUERY
+            logger.info(
+                f"Phone reconnect lookup: raw={raw_phone} canonical={phone_canonical} "
+                f"client_id={client.id} client_phone={client.canonical_phone} "
+                f"client_username={client.canonical_username}"
+            )
+
             active_sessions = HotspotSession.objects.filter(
                 hotspot_client=client,
                 status='active',
                 expires_at__gt=now,
             ).select_related('plan', 'router').order_by('-activated_at')
+
+            # ADD LOGGING AFTER THE QUERY
+            logger.info(
+                f"Active sessions found: {active_sessions.count()} "
+                f"for client {client.canonical_username}"
+            )
 
             if not active_sessions.exists():
                 # Check if there is a 'paid' session (activation pending)
