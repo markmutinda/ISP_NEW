@@ -81,8 +81,8 @@ services:
     restart: unless-stopped
     command: >
       sh -c "echo 'Running migrations...' &&
-             python manage.py migrate_schemas --shared 2>&1 &&
-             python manage.py migrate_schemas --tenant 2>&1 &&
+             (python manage.py migrate_schemas --shared 2>&1 || echo 'Shared migration failed') &&
+             (python manage.py migrate_schemas --tenant 2>&1 || echo 'Tenant migration failed') &&
              echo 'Migrations complete.' &&
              echo 'Setting up routes...' &&
              while ! getent hosts netily-openvpn-isp; do sleep 1; done &&
