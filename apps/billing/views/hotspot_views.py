@@ -18,7 +18,7 @@ from django.db import transaction, ProgrammingError
 from django.db.models import Q
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
-from django.core.cache import cache  # ADDED: For TV code support
+from django.core.cache import cache
 
 from rest_framework import status
 from rest_framework.permissions import AllowAny
@@ -27,7 +27,10 @@ from rest_framework.views import APIView
 
 from django_tenants.utils import schema_context, get_public_schema_name
 
-from apps.billing.models.hotspot_models import HotspotPlan, HotspotSession, HotspotBranding
+from apps.billing.models.hotspot_models import (
+    HotspotPlan, HotspotSession, HotspotBranding,
+    HotspotClient, HotspotClientDevice          # ← ADDED for phone re‑connect
+)
 from apps.billing.models.billing_models import Plan
 from apps.billing.models.payment_models import Payment, TenantTumaConfig, InvoiceItemPayment
 from apps.billing.models.voucher_models import Voucher
@@ -1463,4 +1466,335 @@ class HotspotVoucherRedeemView(APIView):
                 'expires_at': session.expires_at,
                 'plan_name': plan.name,
                 'remaining_voucher_value': str(voucher.remaining_value) if voucher.remaining_value is not None else None,
+            })
+
+
+# ============================================================
+# NEW: Phone number based reconnect / multi‑device management
+# ============================================================
+
+class HotspotPhoneReconnectView(APIView):
+    """
+    Reconnect / add a new device using the phone number that paid.
+    
+    POST /api/v1/hotspot/phone-reconnect/
+    {
+        "phone_number": "0712345678",
+        "router_id": "...",
+        "mac_address": "AA:BB:CC:DD:EE:FF",
+        "tenant": "myisp"
+    }
+    
+    Logic:
+    - Find the HotspotClient for this phone
+    - Find their most recent active session on this router
+    - If this MAC already has a slot → reconnect (reseed RADIUS)
+    - If new MAC and slots remaining under plan.simultaneous_devices → create new slot
+    - If slots full → deny
+    """
+    permission_classes = [AllowAny]
+    authentication_classes = []
+
+    # Rate limit: max 5 attempts per phone per 10 minutes (anti-abuse)
+    _RATE_LIMIT_TTL = 600   # 10 minutes in seconds
+    _RATE_LIMIT_MAX = 5
+
+    def _check_rate_limit(self, tenant_schema: str, phone: str) -> bool:
+        """Returns True if request is allowed, False if rate-limited."""
+        cache_key = f"phone_reconnect_attempts:{tenant_schema}:{phone}"
+        attempts = cache.get(cache_key, 0)
+        if attempts >= self._RATE_LIMIT_MAX:
+            return False
+        cache.set(cache_key, attempts + 1, timeout=self._RATE_LIMIT_TTL)
+        return True
+
+    def _canonicalize_phone(self, phone: str) -> str:
+        """Normalize phone to 2547XXXXXXXX format."""
+        digits = ''.join(c for c in phone if c.isdigit())
+        if digits.startswith('0') and len(digits) == 10:
+            return '254' + digits[1:]
+        if digits.startswith('254') and len(digits) == 12:
+            return digits
+        if digits.startswith('7') and len(digits) == 9:
+            return '254' + digits
+        if digits.startswith('1') and len(digits) == 9:
+            return '254' + digits
+        return digits
+
+    @transaction.atomic
+    def post(self, request):
+        tenant_subdomain = request.data.get('tenant') or request.query_params.get('tenant')
+        raw_phone = (request.data.get('phone_number') or '').strip()
+        router_id = request.data.get('router_id')
+        mac_address = _normalize_mac(request.data.get('mac_address', ''))
+
+        # ── Basic validation ──────────────────────────────────────
+        if not tenant_subdomain:
+            return Response({'error': 'Tenant is required'}, status=status.HTTP_400_BAD_REQUEST)
+        if not raw_phone:
+            return Response({'error': 'Phone number is required'}, status=status.HTTP_400_BAD_REQUEST)
+        if not router_id:
+            return Response({'error': 'Router ID is required'}, status=status.HTTP_400_BAD_REQUEST)
+
+        phone_canonical = self._canonicalize_phone(raw_phone)
+
+        # Basic format check — must be 12 digits starting with 254
+        if not (len(phone_canonical) == 12 and phone_canonical.startswith('254')):
+            return Response(
+                {'error': 'Enter a valid Kenyan phone number (07XX or 01XX format)'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        # ── Resolve tenant ────────────────────────────────────────
+        try:
+            from apps.core.models import Tenant
+            with schema_context(get_public_schema_name()):
+                tenant = Tenant.objects.get(
+                    Q(subdomain=tenant_subdomain) | Q(schema_name=tenant_subdomain),
+                    is_active=True
+                )
+        except Exception:
+            return Response({'error': 'Invalid tenant'}, status=status.HTTP_400_BAD_REQUEST)
+
+        # ── Rate limit (per tenant + phone) ──────────────────────
+        if not self._check_rate_limit(tenant.schema_name, phone_canonical):
+            return Response(
+                {
+                    'error': 'Too many attempts. Please wait 10 minutes before trying again.',
+                    'rate_limited': True,
+                },
+                status=status.HTTP_429_TOO_MANY_REQUESTS
+            )
+
+        with schema_context(tenant.schema_name):
+            now = timezone.now()
+
+            # ── Find router ───────────────────────────────────────
+            try:
+                router = Router.objects.get(id=router_id, is_active=True)
+            except (Router.DoesNotExist, ValueError):
+                try:
+                    router = Router.objects.get(name=router_id, is_active=True)
+                except Router.DoesNotExist:
+                    return Response({'error': 'Router not found'}, status=status.HTTP_404_NOT_FOUND)
+
+            # ── Find the HotspotClient for this phone ─────────────
+            # Try canonical phone first, then the raw 07XX version stored as-is
+            client = HotspotClient.objects.filter(
+                canonical_phone=phone_canonical
+            ).first()
+
+            # Fallback: stored with leading 0
+            if not client:
+                alt_phone = '0' + phone_canonical[3:] if phone_canonical.startswith('254') else None
+                if alt_phone:
+                    client = HotspotClient.objects.filter(canonical_phone=alt_phone).first()
+
+            if not client:
+                return Response(
+                    {
+                        'error': 'No subscription found for this number. '
+                                 'Please purchase a plan first.',
+                        'no_subscription': True,
+                    },
+                    status=status.HTTP_404_NOT_FOUND
+                )
+
+            # ── Find the most recent active session for this client ─
+            # We look at sessions on ANY router (roaming support) but prefer this router
+            active_sessions = HotspotSession.objects.filter(
+                hotspot_client=client,
+                status='active',
+                expires_at__gt=now,
+            ).select_related('plan', 'router').order_by('-activated_at')
+
+            if not active_sessions.exists():
+                # Check if there is a 'paid' session (activation pending)
+                paid_session = HotspotSession.objects.filter(
+                    hotspot_client=client,
+                    status='paid',
+                ).order_by('-created_at').first()
+
+                if paid_session:
+                    # Activate it now
+                    paid_session.activate(paid_session.access_code or HotspotSession.generate_access_code())
+                    active_sessions = HotspotSession.objects.filter(
+                        hotspot_client=client,
+                        status='active',
+                        expires_at__gt=now,
+                    ).select_related('plan', 'router').order_by('-activated_at')
+
+            if not active_sessions.exists():
+                return Response(
+                    {
+                        'error': 'No active subscription found for this number. '
+                                 'Your plan may have expired.',
+                        'expired': True,
+                    },
+                    status=status.HTTP_404_NOT_FOUND
+                )
+
+            # ── Use the canonical (first-device) session as the reference ─
+            # The "base" session holds the plan and expiry that all devices share
+            base_session = active_sessions.filter(
+                access_code=client.canonical_username
+            ).first() or active_sessions.first()
+
+            plan = base_session.plan
+            plan_device_limit = getattr(plan, 'simultaneous_devices', 1) or 1
+
+            # ── ANTI-ABUSE: single-device plans cannot use this feature ──
+            if plan_device_limit <= 1:
+                return Response(
+                    {
+                        'error': 'Your plan supports only 1 device. '
+                                 'To connect a different device, disconnect the current one first.',
+                        'single_device_plan': True,
+                    },
+                    status=status.HTTP_403_FORBIDDEN
+                )
+
+            # ── Check if this MAC already has an active session (reconnect) ──
+            existing_session_for_mac = active_sessions.filter(
+                mac_address=mac_address
+            ).first()
+
+            if existing_session_for_mac:
+                # This MAC already has a slot — just reseed RADIUS credentials
+                access_code = existing_session_for_mac.access_code
+                try:
+                    from apps.billing.services.hotspot_radius_service import HotspotRadiusService
+                    HotspotRadiusService().create_hotspot_credentials(
+                        username=access_code,
+                        password=access_code,
+                        router=router,
+                        plan=plan,
+                        expires_at=existing_session_for_mac.expires_at,
+                        mac_address=mac_address,
+                    )
+                except Exception as e:
+                    logger.error(f"Phone reconnect RADIUS reseed failed: {e}")
+                    return Response(
+                        {'error': 'Failed to restore connection. Please try again.'},
+                        status=status.HTTP_500_INTERNAL_SERVER_ERROR
+                    )
+
+                remaining_minutes = max(
+                    0, int((existing_session_for_mac.expires_at - now).total_seconds() / 60)
+                )
+                logger.info(
+                    f"Phone reconnect (existing MAC): phone={phone_canonical} "
+                    f"mac={mac_address} access_code={access_code}"
+                )
+                return Response({
+                    'status': 'reconnected',
+                    'message': 'Welcome back! Your connection has been restored.',
+                    'access_code': access_code,
+                    'expires_at': existing_session_for_mac.expires_at.isoformat(),
+                    'remaining_minutes': remaining_minutes,
+                    'plan_name': plan.name,
+                    'device_slot': 'existing',
+                    'credentials': {'username': access_code, 'password': access_code},
+                })
+
+            # ── New MAC — check if device slots are available ─────
+            # Count distinct active sessions for this client
+            # Each session with a unique access_code counts as one device slot
+            occupied_slots = active_sessions.values('access_code').distinct().count()
+
+            if occupied_slots >= plan_device_limit:
+                # Build a helpful message listing how many devices are connected
+                return Response(
+                    {
+                        'error': (
+                            f'Your plan supports {plan_device_limit} device'
+                            f'{"s" if plan_device_limit > 1 else ""}. '
+                            f'All slots are in use. '
+                            f'Disconnect one of your other devices to connect this one.'
+                        ),
+                        'slots_full': True,
+                        'device_limit': plan_device_limit,
+                        'occupied_slots': occupied_slots,
+                    },
+                    status=status.HTTP_403_FORBIDDEN
+                )
+
+            # ── Create a new device slot ──────────────────────────
+            # Device slot number: canonical = 1, next = 2, 3, ...
+            device_slot = occupied_slots + 1
+
+            if device_slot == 1 and client.canonical_username:
+                new_access_code = client.canonical_username
+            else:
+                base_username = client.canonical_username or base_session.access_code
+                new_access_code = f"{base_username}-{device_slot}"
+                # Collision guard
+                attempt = device_slot
+                while HotspotSession.objects.filter(
+                    access_code=new_access_code,
+                    status='active',
+                    expires_at__gt=now,
+                ).exists():
+                    attempt += 1
+                    new_access_code = f"{base_username}-{attempt}"
+
+            # ── Register the new device ───────────────────────────
+            HotspotClientDevice.record_device(client=client, mac_address=mac_address)
+
+            # Create a new session record for this device
+            new_session = HotspotSession.objects.create(
+                session_id=HotspotSession.generate_session_id(),
+                router=router,
+                plan=plan,
+                phone_number=phone_canonical,
+                mac_address=mac_address,
+                amount=Decimal('0'),   # Already paid — no additional charge
+                status='active',
+                access_code=new_access_code,
+                radius_username=new_access_code,
+                activated_at=now,
+                expires_at=base_session.expires_at,   # Same expiry as original purchase
+                hotspot_client=client,
+            )
+
+            # ── Seed RADIUS for the new device ────────────────────
+            try:
+                from apps.billing.services.hotspot_radius_service import HotspotRadiusService
+                HotspotRadiusService().create_hotspot_credentials(
+                    username=new_access_code,
+                    password=new_access_code,
+                    router=router,
+                    plan=plan,
+                    expires_at=base_session.expires_at,
+                    mac_address=mac_address,
+                )
+            except Exception as e:
+                # Roll back the session we just created
+                new_session.delete()
+                logger.error(f"Phone reconnect new-device RADIUS failed: {e}")
+                return Response(
+                    {'error': 'Failed to connect new device. Please try again.'},
+                    status=status.HTTP_500_INTERNAL_SERVER_ERROR
+                )
+
+            remaining_minutes = max(
+                0, int((base_session.expires_at - now).total_seconds() / 60)
+            )
+
+            logger.info(
+                f"Phone reconnect (new device slot {device_slot}): "
+                f"phone={phone_canonical} mac={mac_address} "
+                f"access_code={new_access_code} plan_limit={plan_device_limit}"
+            )
+
+            return Response({
+                'status': 'new_device_connected',
+                'message': f'Device {device_slot} of {plan_device_limit} connected successfully!',
+                'access_code': new_access_code,
+                'expires_at': base_session.expires_at.isoformat(),
+                'remaining_minutes': remaining_minutes,
+                'plan_name': plan.name,
+                'device_slot': device_slot,
+                'device_limit': plan_device_limit,
+                'credentials': {'username': new_access_code, 'password': new_access_code},
             })
