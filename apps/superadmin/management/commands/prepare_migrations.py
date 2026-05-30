@@ -55,15 +55,15 @@ class Command(BaseCommand):
             self.stdout.write(
                 self.style.WARNING(
                     f"\nDry run complete. {total_deleted} stale migration record(s) would be removed and "
-                    f"{total_faked} missing dependency record(s) would be faked."
+                    f"{total_faked} migration record(s) would be faked."
                 )
             )
             return
 
         self.stdout.write(
             self.style.SUCCESS(
-                f"\nRemoved {total_deleted} stale migration record(s) and faked {total_faked} missing "
-                f"dependency record(s). Repairing any remaining inconsistencies..."
+                f"\nRemoved {total_deleted} stale migration record(s) and faked {total_faked} "
+                f"migration record(s). Repairing any remaining inconsistencies..."
             )
         )
         call_command("repair_migrations", all_schemas=True)
@@ -254,6 +254,10 @@ class Command(BaseCommand):
             if inventory_0002 not in applied and self._schema_matches_inventory_0002(cursor, schema):
                 candidates.append(inventory_0002)
 
+            network_0014 = ("network", "0014_router_api_remote_port_router_winbox_remote_port_and_more")
+            if network_0014 not in applied and self._schema_matches_network_0014(cursor, schema):
+                candidates.append(network_0014)
+
             if candidates:
                 names = ", ".join(f"{app}.{name}" for app, name in candidates)
                 self.stdout.write(self.style.WARNING(f"{schema}: pre-applied migration record(s): {names}"))
@@ -300,3 +304,53 @@ class Command(BaseCommand):
                 return False
 
         return True
+
+    def _schema_matches_network_0014(self, cursor, schema: str) -> bool:
+        if not self._table_has_columns(
+            cursor,
+            schema,
+            "network_router",
+            {
+                "api_remote_port",
+                "winbox_remote_port",
+                "wireguard_private_key",
+                "wireguard_public_key",
+            },
+        ):
+            return False
+
+        return self._table_has_indexes(
+            cursor,
+            schema,
+            "network_router",
+            {
+                "network_rou_winbox__43f123_idx",
+                "network_rou_api_rem_1c08dd_idx",
+            },
+        )
+
+    def _table_has_columns(self, cursor, schema: str, table_name: str, expected_columns: set[str]) -> bool:
+        cursor.execute(
+            """
+            SELECT column_name
+            FROM information_schema.columns
+            WHERE table_schema = %s
+              AND table_name = %s
+            """,
+            [schema, table_name],
+        )
+        columns = {row[0] for row in cursor.fetchall()}
+        return expected_columns.issubset(columns)
+
+    def _table_has_indexes(self, cursor, schema: str, table_name: str, expected_indexes: set[str]) -> bool:
+        cursor.execute(
+            """
+            SELECT indexname
+            FROM pg_indexes
+            WHERE schemaname = %s
+              AND tablename = %s
+            """,
+            [schema, table_name],
+        )
+        indexes = {row[0] for row in cursor.fetchall()}
+        return expected_indexes.issubset(indexes)
