@@ -80,6 +80,7 @@ class Command(BaseCommand):
     def _prune_orphan_tenant_records(self, existing_schemas: set[str], *, dry_run: bool) -> int:
         Tenant = django_apps.get_model("core", "Tenant")
         Domain = django_apps.get_model("core", "Domain")
+        connection.set_schema_to_public()
 
         orphaned = list(
             Tenant.objects.exclude(schema_name="public").exclude(schema_name__in=existing_schemas)
@@ -100,8 +101,17 @@ class Command(BaseCommand):
 
         pruned = 0
         for tenant in orphaned:
-            Domain.objects.filter(tenant=tenant).delete()
-            deleted, _ = Tenant.objects.filter(pk=tenant.pk).delete()
+            with connection.cursor() as cursor:
+                cursor.execute('SET search_path TO "public"')
+                cursor.execute(
+                    f'DELETE FROM "{Domain._meta.db_table}" WHERE tenant_id = %s',
+                    [tenant.pk],
+                )
+                cursor.execute(
+                    f'DELETE FROM "{Tenant._meta.db_table}" WHERE id = %s',
+                    [tenant.pk],
+                )
+                deleted = cursor.rowcount
             pruned += deleted
             self.stdout.write(
                 self.style.WARNING(

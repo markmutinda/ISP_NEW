@@ -50,21 +50,29 @@ class Command(BaseCommand):
         )
 
     def handle(self, *args, **options):
-        from apps.core.models import Tenant
-
         dry_run = options["dry_run"]
         all_schemas = options["all_schemas"]
         schema = options["schema"]
 
         if all_schemas:
-            schemas = ["public"] + list(
-                Tenant.objects.values_list("schema_name", flat=True)
-            )
+            schemas = sorted(self._get_existing_schemas())
         else:
             schemas = [schema]
 
         for s in schemas:
             self._repair_schema(s, dry_run)
+
+    def _get_existing_schemas(self):
+        with connection.cursor() as cur:
+            cur.execute(
+                """
+                SELECT schema_name
+                FROM information_schema.schemata
+                WHERE schema_name NOT IN ('information_schema', 'pg_catalog', 'pg_toast')
+                ORDER BY schema_name
+                """
+            )
+            return [row[0] for row in cur.fetchall()]
 
     def _repair_schema(self, schema, dry_run):
         from django.apps import apps as django_apps
@@ -75,6 +83,24 @@ class Command(BaseCommand):
         # -- 1. Set the correct search_path so queries go to the right schema --
         with connection.cursor() as cur:
             cur.execute(f'SET search_path TO "{schema}"')
+
+        with connection.cursor() as cur:
+            cur.execute(
+                """
+                SELECT EXISTS (
+                    SELECT 1
+                    FROM information_schema.tables
+                    WHERE table_schema = %s
+                      AND table_name = 'django_migrations'
+                )
+                """,
+                [schema],
+            )
+            if not cur.fetchone()[0]:
+                self.stdout.write(
+                    self.style.WARNING(f"  No django_migrations table in schema '{schema}'. Skipping.")
+                )
+                return
 
         # -- 2. Load applied migrations DIRECTLY from the DB (bypasses consistency check) --
         with connection.cursor() as cur:
