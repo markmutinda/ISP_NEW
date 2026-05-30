@@ -43,10 +43,12 @@ class Command(BaseCommand):
         dry_run = options["dry_run"]
         disk_migrations = self._get_disk_migrations()
         schemas = self._get_existing_schemas()
+        existing_schema_set = set(schemas)
 
         total_deleted = 0
         total_faked = 0
         total_unapplied = 0
+        total_pruned = self._prune_orphan_tenant_records(existing_schema_set, dry_run=dry_run)
         for schema in schemas:
             total_deleted += self._clean_schema(schema, disk_migrations, dry_run=dry_run)
             total_unapplied += self._unheal_false_applied_migrations(schema, dry_run=dry_run)
@@ -56,7 +58,8 @@ class Command(BaseCommand):
         if dry_run:
             self.stdout.write(
                 self.style.WARNING(
-                    f"\nDry run complete. {total_deleted} stale migration record(s) would be removed, "
+                    f"\nDry run complete. {total_pruned} orphan tenant record(s) would be removed, "
+                    f"{total_deleted} stale migration record(s) would be removed, "
                     f"{total_unapplied} false-applied migration record(s) would be removed, and "
                     f"{total_faked} migration record(s) would be faked."
                 )
@@ -65,13 +68,48 @@ class Command(BaseCommand):
 
         self.stdout.write(
             self.style.SUCCESS(
-                f"\nRemoved {total_deleted} stale migration record(s), removed {total_unapplied} "
+                f"\nRemoved {total_pruned} orphan tenant record(s), removed {total_deleted} stale migration "
+                f"record(s), removed {total_unapplied} "
                 f"false-applied migration record(s), and faked {total_faked} migration record(s). "
                 f"Repairing any remaining inconsistencies..."
             )
         )
         call_command("repair_migrations", all_schemas=True)
         self.stdout.write(self.style.SUCCESS("Migration preparation complete."))
+
+    def _prune_orphan_tenant_records(self, existing_schemas: set[str], *, dry_run: bool) -> int:
+        Tenant = django_apps.get_model("core", "Tenant")
+        Domain = django_apps.get_model("core", "Domain")
+
+        orphaned = list(
+            Tenant.objects.exclude(schema_name="public").exclude(schema_name__in=existing_schemas)
+        )
+        if not orphaned:
+            self.stdout.write(self.style.SUCCESS("No orphan tenant records found"))
+            return 0
+
+        self.stdout.write(
+            self.style.WARNING(
+                "Found orphan tenant record(s) with missing schema: "
+                + ", ".join(f"{tenant.subdomain} ({tenant.schema_name})" for tenant in orphaned)
+            )
+        )
+
+        if dry_run:
+            return len(orphaned)
+
+        pruned = 0
+        for tenant in orphaned:
+            Domain.objects.filter(tenant=tenant).delete()
+            deleted, _ = Tenant.objects.filter(pk=tenant.pk).delete()
+            pruned += deleted
+            self.stdout.write(
+                self.style.WARNING(
+                    f"Pruned orphan tenant '{tenant.subdomain}' with missing schema '{tenant.schema_name}'"
+                )
+            )
+
+        return pruned
 
     def _get_disk_migrations(self) -> dict[tuple[str, str], object]:
         disk_migrations: dict[tuple[str, str], object] = {}

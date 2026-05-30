@@ -15,6 +15,8 @@ command.
 from django.core.management import call_command
 from django.core.management.base import BaseCommand
 from django.db import ProgrammingError
+from django.apps import apps as django_apps
+from django.db import connection
 from django.db.migrations.operations.fields import AddField
 from django.db.migrations.operations.models import RenameIndex
 from django.db.migrations.state import ProjectState
@@ -151,15 +153,62 @@ class Command(BaseCommand):
         RenameIndex.database_forwards = resilient_rename_index_forwards
         RenameIndex.database_backwards = resilient_rename_index_backwards
         try:
-            call_command(
-                "migrate_schemas",
-                shared=options.get("shared", False),
-                tenant=options.get("tenant", False),
-                schema_name=options.get("schema"),
-                fake=options.get("fake", False),
-            )
+            self._run_migrations(options)
         finally:
             ProjectState.remove_field = original_remove_field
             AddField.database_forwards = original_add_field_forwards
             RenameIndex.database_forwards = original_rename_index_forwards
             RenameIndex.database_backwards = original_rename_index_backwards
+
+    def _run_migrations(self, options):
+        schema_name = options.get("schema")
+        fake = options.get("fake", False)
+        shared = options.get("shared", False)
+        tenant = options.get("tenant", False)
+
+        if schema_name:
+            call_command(
+                "migrate_schemas",
+                schema_name=schema_name,
+                fake=fake,
+            )
+            return
+
+        if shared:
+            call_command("migrate_schemas", shared=True, fake=fake)
+
+        if tenant:
+            self._run_tenant_migrations(fake=fake)
+
+        if not shared and not tenant:
+            call_command("migrate_schemas", fake=fake)
+
+    def _run_tenant_migrations(self, *, fake: bool):
+        Tenant = django_apps.get_model("core", "Tenant")
+        existing_schemas = self._get_existing_schemas()
+
+        for tenant in Tenant.objects.exclude(schema_name="public").order_by("schema_name"):
+            if tenant.schema_name not in existing_schemas:
+                self.stdout.write(
+                    self.style.WARNING(
+                        f"Skipping tenant '{tenant.subdomain}' because schema '{tenant.schema_name}' does not exist"
+                    )
+                )
+                continue
+
+            call_command(
+                "migrate_schemas",
+                schema_name=tenant.schema_name,
+                fake=fake,
+            )
+
+    def _get_existing_schemas(self) -> set[str]:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT schema_name
+                FROM information_schema.schemata
+                WHERE schema_name NOT IN ('information_schema', 'pg_catalog', 'pg_toast')
+                """
+            )
+            return {row[0] for row in cursor.fetchall()}
