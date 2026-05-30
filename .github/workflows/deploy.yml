@@ -31,6 +31,11 @@ jobs:
             git fetch origin prod-backend
             git reset --hard origin/prod-backend
 
+            echo "==> Cleaning stale migration artifacts..."
+            git clean -fd apps/*/migrations 2>/dev/null || true
+            find apps -type d -name __pycache__ -prune -exec rm -rf {} + 2>/dev/null || true
+            find apps -type f \( -name '*.pyc' -o -name '*.pyo' \) -delete 2>/dev/null || true
+
             echo "==> Rebuilding Django services..."
             cd docker
             docker compose build web celery-worker celery-beat

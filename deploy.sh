@@ -69,6 +69,12 @@ echo -e "\n${YELLOW}[2/7] Updating system packages...${NC}"
 apt-get update -qq && apt-get install -y -qq git curl > /dev/null
 echo -e "${GREEN}  ✓ System updated${NC}"
 
+echo -e "\n${YELLOW}[2.5/7] Cleaning stale migration artifacts...${NC}"
+git clean -fd apps/*/migrations 2>/dev/null || true
+find apps -type d -name __pycache__ -prune -exec rm -rf {} + 2>/dev/null || true
+find apps -type f \( -name "*.pyc" -o -name "*.pyo" \) -delete 2>/dev/null || true
+echo -e "${GREEN}  ✓ Migration folders cleaned${NC}"
+
 # ── Step 3: Ensure Docker socket permissions ──────────────────
 echo -e "\n${YELLOW}[3/7] Checking Docker socket...${NC}"
 chmod 666 /var/run/docker.sock 2>/dev/null || true
