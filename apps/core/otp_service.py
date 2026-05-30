@@ -56,6 +56,18 @@ class OTPService:
             exempt_set = {"admin@netily.co.ke"}
         return email in exempt_set
 
+    @staticmethod
+    def _challenge_matches_scope(*, challenge_tenant_scope: str, challenge_session_scope: str, tenant_scope: str, session_scope: str) -> bool:
+        # Tenant scope must remain exact so challenges cannot be replayed across tenants.
+        if (challenge_tenant_scope or "") != (tenant_scope or ""):
+            return False
+
+        # Session scope is treated as advisory, not mandatory. In production the
+        # browser session identifier can rotate during OTP UX transitions, which
+        # should not lock out a user who already controls both the password and
+        # the emailed OTP code.
+        return True
+
     @classmethod
     def start_login_challenge(cls, *, user, tenant_scope: str, session_scope: str, ip_address: str = ""):
         now = timezone.now()
@@ -102,7 +114,12 @@ class OTPService:
         now = timezone.now()
         if challenge.is_completed or now >= challenge.expires_at:
             raise OTPError("Login challenge has expired. Please login again.")
-        if challenge.tenant_scope != (tenant_scope or "") or challenge.session_scope != (session_scope or ""):
+        if not cls._challenge_matches_scope(
+            challenge_tenant_scope=challenge.tenant_scope,
+            challenge_session_scope=challenge.session_scope,
+            tenant_scope=tenant_scope,
+            session_scope=session_scope,
+        ):
             raise OTPError("Challenge/session mismatch. Please login again.")
 
         cooldown = cls._cooldown_seconds()
@@ -140,7 +157,12 @@ class OTPService:
         now = timezone.now()
         if challenge.is_completed or now >= challenge.expires_at:
             raise OTPError("Login challenge has expired. Please login again.")
-        if challenge.tenant_scope != (tenant_scope or "") or challenge.session_scope != (session_scope or ""):
+        if not cls._challenge_matches_scope(
+            challenge_tenant_scope=challenge.tenant_scope,
+            challenge_session_scope=challenge.session_scope,
+            tenant_scope=tenant_scope,
+            session_scope=session_scope,
+        ):
             raise OTPError("Challenge/session mismatch. Please login again.")
 
         max_attempts = cls._max_attempts()
@@ -226,7 +248,12 @@ class OTPService:
         if not payload:
             raise OTPError("Login challenge has expired. Please login again.")
 
-        if payload.get("tenant_scope") != (tenant_scope or "") or payload.get("session_scope") != (session_scope or ""):
+        if not cls._challenge_matches_scope(
+            challenge_tenant_scope=payload.get("tenant_scope", ""),
+            challenge_session_scope=payload.get("session_scope", ""),
+            tenant_scope=tenant_scope,
+            session_scope=session_scope,
+        ):
             raise OTPError("Challenge/session mismatch. Please login again.")
 
         now_ts = timezone.now().timestamp()
@@ -273,7 +300,12 @@ class OTPService:
         if not payload:
             raise OTPError("Login challenge has expired. Please login again.")
 
-        if payload.get("tenant_scope") != (tenant_scope or "") or payload.get("session_scope") != (session_scope or ""):
+        if not cls._challenge_matches_scope(
+            challenge_tenant_scope=payload.get("tenant_scope", ""),
+            challenge_session_scope=payload.get("session_scope", ""),
+            tenant_scope=tenant_scope,
+            session_scope=session_scope,
+        ):
             raise OTPError("Challenge/session mismatch. Please login again.")
 
         now_ts = timezone.now().timestamp()

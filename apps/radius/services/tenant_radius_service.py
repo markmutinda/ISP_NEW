@@ -8,6 +8,7 @@ Zero Docker commands executed from Python.
 
 import logging
 from typing import Dict, Any
+from django_tenants.utils import schema_context, get_public_schema_name
 
 logger = logging.getLogger(__name__)
 
@@ -30,13 +31,14 @@ class TenantRadiusConfigService:
         
         # Register tenant in the public schema config registry
         from ..models import RadiusTenantConfig
-        RadiusTenantConfig.objects.update_or_create(
-            schema_name=schema_name,
-            defaults={
-                'tenant_name': tenant_name,
-                'is_active': True,
-            }
-        )
+        with schema_context(get_public_schema_name()):
+            RadiusTenantConfig.objects.update_or_create(
+                schema_name=schema_name,
+                defaults={
+                    'tenant_name': tenant_name,
+                    'is_active': True,
+                }
+            )
         
         logger.info(f"✅ RADIUS database records initialized for tenant: {schema_name}")
         return {'schema_name': schema_name, 'status': 'ready'}

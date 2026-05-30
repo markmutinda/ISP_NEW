@@ -36,10 +36,10 @@ jobs:
             find apps -type d -name __pycache__ -prune -exec rm -rf {} + 2>/dev/null || true
             find apps -type f \( -name '*.pyc' -o -name '*.pyo' \) -delete 2>/dev/null || true
 
-            echo "==> Rebuilding Django services..."
+            echo "==> Rebuilding application services..."
             cd docker
             docker compose down --remove-orphans || true
-            docker compose build --no-cache web celery-worker celery-beat
+            docker compose build --no-cache web celery-worker celery-beat frontend
 
             echo "==> Preparing migration history..."
             docker compose run --rm web python manage.py prepare_migrations
@@ -48,8 +48,8 @@ jobs:
             docker compose run --rm web python manage.py migrate_schemas_resilient --shared
             docker compose run --rm web python manage.py migrate_schemas_resilient --tenant
 
-            echo "==> Starting Django services..."
-            docker compose up -d web celery-worker celery-beat
+            echo "==> Starting application services..."
+            docker compose up -d web celery-worker celery-beat frontend nginx
 
             echo "==> Restarting nginx (re-resolve container IPs)..."
             docker compose restart nginx
@@ -63,17 +63,19 @@ jobs:
             echo "==> Collecting static files..."
             docker compose exec web python manage.py collectstatic --noinput || true
 
-            echo "==> Verifying web container is healthy..."
+            echo "==> Verifying web and frontend containers are healthy..."
             for i in 1 2 3 4 5; do
               STATUS=$(docker compose ps web --format '{{.Status}}' 2>/dev/null)
-              echo "  Attempt $i: web status = $STATUS"
-              if echo "$STATUS" | grep -q "Up"; then
-                echo "  ✅ Web container is running!"
+              FRONTEND_STATUS=$(docker compose ps frontend --format '{{.Status}}' 2>/dev/null)
+              NGINX_STATUS=$(docker compose ps nginx --format '{{.Status}}' 2>/dev/null)
+              echo "  Attempt $i: web status = $STATUS | frontend status = $FRONTEND_STATUS | nginx status = $NGINX_STATUS"
+              if echo "$STATUS" | grep -q "Up" && echo "$FRONTEND_STATUS" | grep -q "Up" && echo "$NGINX_STATUS" | grep -q "Up"; then
+                echo "  ✅ Web, frontend, and nginx containers are running!"
                 break
               fi
               if [ "$i" = "5" ]; then
-                echo "  ❌ Web container failed to start. Dumping logs:"
-                docker compose logs --tail=50 web
+                echo "  ❌ One or more serving containers failed to start. Dumping logs:"
+                docker compose logs --tail=50 web frontend nginx
                 exit 1
               fi
               sleep 3
