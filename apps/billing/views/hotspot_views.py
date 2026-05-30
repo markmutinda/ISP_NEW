@@ -29,7 +29,7 @@ from django_tenants.utils import schema_context, get_public_schema_name
 
 from apps.billing.models.hotspot_models import (
     HotspotPlan, HotspotSession, HotspotBranding,
-    HotspotClient, HotspotClientDevice          # ← ADDED for phone re‑connect
+    HotspotClient, HotspotClientDevice
 )
 from apps.billing.models.billing_models import Plan
 from apps.billing.models.payment_models import Payment, TenantTumaConfig, InvoiceItemPayment
@@ -43,7 +43,7 @@ from apps.subscriptions.models import CommissionLedger
 logger = logging.getLogger(__name__)
 
 
-# ── At the top of the file, add this constant after the imports ──
+# ── Constant for M-Pesa capable methods ──
 MPESA_CAPABLE_METHOD_TYPES = [
     'MPESA_STK', 'MPESA_PAYBILL', 'MPESA_TILL', 'MOBILE_MONEY', 'MPESA',
 ]
@@ -1578,17 +1578,79 @@ class HotspotPhoneReconnectView(APIView):
                 except Router.DoesNotExist:
                     return Response({'error': 'Router not found'}, status=status.HTTP_404_NOT_FOUND)
 
-            # ── Find the HotspotClient for this phone ─────────────
-            # Try canonical phone first, then the raw 07XX version stored as-is
+            # ============================================================
+            # IMPROVED PHONE LOOKUP: multiple formats + session fallback
+            # ============================================================
+            phone_canonical = self._canonicalize_phone(raw_phone)  # 254111325479
+            phone_local = '0' + phone_canonical[3:]                # 0111325479
+            phone_short = phone_canonical[3:]                       # 111325479
+
             client = HotspotClient.objects.filter(
-                canonical_phone=phone_canonical
+                Q(canonical_phone=phone_canonical) |
+                Q(canonical_phone=phone_local) |
+                Q(canonical_phone=phone_short)
             ).first()
 
-            # Fallback: stored with leading 0
+            # If still not found, search via HotspotSession phone_number
             if not client:
-                alt_phone = '0' + phone_canonical[3:] if phone_canonical.startswith('254') else None
-                if alt_phone:
-                    client = HotspotClient.objects.filter(canonical_phone=alt_phone).first()
+                session_via_phone = HotspotSession.objects.filter(
+                    Q(phone_number=phone_canonical) |
+                    Q(phone_number=phone_local) |
+                    Q(phone_number=phone_short),
+                    status__in=('active', 'paid'),
+                    expires_at__gt=now,
+                ).select_related('hotspot_client').order_by('-created_at').first()
+
+                if session_via_phone and session_via_phone.hotspot_client:
+                    client = session_via_phone.hotspot_client
+                elif session_via_phone:
+                    # Session exists but no client linked — respond directly
+                    session = session_via_phone
+                    plan = session.plan
+                    plan_device_limit = getattr(plan, 'simultaneous_devices', 1) or 1
+
+                    if plan_device_limit <= 1:
+                        return Response(
+                            {
+                                'error': 'Your plan supports only 1 device. '
+                                         'To connect a different device, disconnect the current one first.',
+                                'single_device_plan': True,
+                            },
+                            status=status.HTTP_403_FORBIDDEN
+                        )
+
+                    # Reseed RADIUS for this device
+                    access_code = session.access_code
+                    try:
+                        from apps.billing.services.hotspot_radius_service import HotspotRadiusService
+                        HotspotRadiusService().create_hotspot_credentials(
+                            username=access_code,
+                            password=access_code,
+                            router=router,
+                            plan=plan,
+                            expires_at=session.expires_at,
+                            mac_address=mac_address,
+                        )
+                    except Exception as e:
+                        logger.error(f"Phone reconnect (no-client path) RADIUS failed: {e}")
+                        return Response(
+                            {'error': 'Failed to restore connection. Please try again.'},
+                            status=status.HTTP_500_INTERNAL_SERVER_ERROR
+                        )
+
+                    remaining_minutes = max(
+                        0, int((session.expires_at - now).total_seconds() / 60)
+                    )
+                    return Response({
+                        'status': 'reconnected',
+                        'message': 'Connection restored!',
+                        'access_code': access_code,
+                        'expires_at': session.expires_at.isoformat(),
+                        'remaining_minutes': remaining_minutes,
+                        'plan_name': plan.name,
+                        'device_slot': 'existing',
+                        'credentials': {'username': access_code, 'password': access_code},
+                    })
 
             if not client:
                 return Response(
