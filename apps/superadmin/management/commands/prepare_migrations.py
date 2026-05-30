@@ -48,6 +48,7 @@ class Command(BaseCommand):
         total_faked = 0
         for schema in schemas:
             total_deleted += self._clean_schema(schema, disk_migrations, dry_run=dry_run)
+            total_faked += self._heal_preapplied_migrations(schema, dry_run=dry_run)
             total_faked += self._heal_missing_dependencies(schema, disk_migrations, dry_run=dry_run)
 
         if dry_run:
@@ -225,3 +226,77 @@ class Command(BaseCommand):
             cursor.execute('SET search_path TO "public"')
 
         return healed
+
+    def _heal_preapplied_migrations(self, schema: str, *, dry_run: bool) -> int:
+        healed = 0
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT EXISTS (
+                    SELECT 1
+                    FROM information_schema.tables
+                    WHERE table_schema = %s
+                      AND table_name = 'django_migrations'
+                )
+                """,
+                [schema],
+            )
+            if not cursor.fetchone()[0]:
+                return 0
+
+            cursor.execute(f'SET search_path TO "{schema}"')
+            cursor.execute("SELECT app, name FROM django_migrations")
+            applied = {(app, name) for app, name in cursor.fetchall()}
+
+            candidates: list[tuple[str, str]] = []
+
+            inventory_0002 = ("inventory", "0002_alter_equipmentitem_options_and_more")
+            if inventory_0002 not in applied and self._schema_matches_inventory_0002(cursor, schema):
+                candidates.append(inventory_0002)
+
+            if candidates:
+                names = ", ".join(f"{app}.{name}" for app, name in candidates)
+                self.stdout.write(self.style.WARNING(f"{schema}: pre-applied migration record(s): {names}"))
+
+            if not dry_run:
+                for app, name in candidates:
+                    cursor.execute(
+                        "INSERT INTO django_migrations (app, name, applied) VALUES (%s, %s, NOW()) "
+                        "ON CONFLICT DO NOTHING",
+                        [app, name],
+                    )
+                    healed += cursor.rowcount
+            else:
+                healed += len(candidates)
+
+            cursor.execute('SET search_path TO "public"')
+
+        return healed
+
+    def _schema_matches_inventory_0002(self, cursor, schema: str) -> bool:
+        required_columns = {
+            "inventory_assignment": {"created_at", "updated_at"},
+            "inventory_equipmentitem": {"assigned_to_customer_id", "created_at", "updated_at"},
+            "inventory_equipmenttype": {"code", "created_at", "is_active", "min_stock_level", "updated_at"},
+            "inventory_maintenancerecord": {"created_at", "updated_at"},
+            "inventory_purchaseorder": {"created_at", "updated_at"},
+            "inventory_purchaseorderitem": {"created_at", "updated_at"},
+            "inventory_stockalert": {"created_at", "updated_at"},
+            "inventory_supplier": {"contact_name"},
+        }
+
+        for table_name, expected_columns in required_columns.items():
+            cursor.execute(
+                """
+                SELECT column_name
+                FROM information_schema.columns
+                WHERE table_schema = %s
+                  AND table_name = %s
+                """,
+                [schema, table_name],
+            )
+            columns = {row[0] for row in cursor.fetchall()}
+            if not expected_columns.issubset(columns):
+                return False
+
+        return True
