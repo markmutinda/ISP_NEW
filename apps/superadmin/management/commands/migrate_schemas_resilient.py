@@ -1,17 +1,20 @@
 """
-Run django-tenants migrations with a defensive patch for historical graph drift.
+Run django-tenants migrations with defensive patches for historical graph drift.
 
 This command exists because some production databases contain old migration
 history from earlier branches. During Django's project-state rebuild, certain
-historical RemoveField operations can raise KeyError if the field is already
-absent from state even though the live schema is fine.
+historical operations can fail even though the live schema is already usable:
 
-We patch ProjectState.remove_field to behave defensively for these legacy cases,
-then delegate to the normal migrate_schemas command.
+- RemoveField can raise KeyError if the field is already absent from state.
+- RenameIndex can raise ValueError if the old historical index name is missing.
+
+We patch those legacy cases, then delegate to the normal migrate_schemas
+command.
 """
 
 from django.core.management import call_command
 from django.core.management.base import BaseCommand
+from django.db.migrations.operations.models import RenameIndex
 from django.db.migrations.state import ProjectState
 
 
@@ -26,6 +29,8 @@ class Command(BaseCommand):
 
     def handle(self, *args, **options):
         original_remove_field = ProjectState.remove_field
+        original_rename_index_forwards = RenameIndex.database_forwards
+        original_rename_index_backwards = RenameIndex.database_backwards
 
         def resilient_remove_field(state, app_label, model_name, name):
             model_state = state.models.get((app_label, model_name))
@@ -35,7 +40,71 @@ class Command(BaseCommand):
                 return None
             return original_remove_field(state, app_label, model_name, name)
 
+        def _skip_missing_legacy_index(app_label, operation, model_state, schema_editor):
+            table_name = model_state.options.get("db_table") or f"{app_label}_{model_state.name_lower}"
+            constraints = schema_editor.connection.introspection.get_constraints(
+                schema_editor.connection.cursor(),
+                table_name,
+            )
+            if operation.new_name in constraints:
+                return True
+            if operation.old_name not in constraints:
+                return True
+            return False
+
+        def resilient_rename_index_forwards(operation, app_label, schema_editor, from_state, to_state):
+            try:
+                return original_rename_index_forwards(
+                    operation,
+                    app_label,
+                    schema_editor,
+                    from_state,
+                    to_state,
+                )
+            except ValueError as exc:
+                if "No index named" not in str(exc):
+                    raise
+
+                model_state = from_state.models.get((app_label, operation.model_name_lower))
+                if model_state is None or not _skip_missing_legacy_index(app_label, operation, model_state, schema_editor):
+                    raise
+
+                self.stdout.write(
+                    self.style.WARNING(
+                        f"Skipping legacy RenameIndex for {app_label}.{model_state.name}: "
+                        f"{operation.old_name} -> {operation.new_name}"
+                    )
+                )
+                return None
+
+        def resilient_rename_index_backwards(operation, app_label, schema_editor, from_state, to_state):
+            try:
+                return original_rename_index_backwards(
+                    operation,
+                    app_label,
+                    schema_editor,
+                    from_state,
+                    to_state,
+                )
+            except ValueError as exc:
+                if "No index named" not in str(exc):
+                    raise
+
+                model_state = to_state.models.get((app_label, operation.model_name_lower))
+                if model_state is None or not _skip_missing_legacy_index(app_label, operation, model_state, schema_editor):
+                    raise
+
+                self.stdout.write(
+                    self.style.WARNING(
+                        f"Skipping legacy reverse RenameIndex for {app_label}.{model_state.name}: "
+                        f"{operation.new_name} -> {operation.old_name}"
+                    )
+                )
+                return None
+
         ProjectState.remove_field = resilient_remove_field
+        RenameIndex.database_forwards = resilient_rename_index_forwards
+        RenameIndex.database_backwards = resilient_rename_index_backwards
         try:
             call_command(
                 "migrate_schemas",
@@ -46,3 +115,5 @@ class Command(BaseCommand):
             )
         finally:
             ProjectState.remove_field = original_remove_field
+            RenameIndex.database_forwards = original_rename_index_forwards
+            RenameIndex.database_backwards = original_rename_index_backwards
