@@ -81,8 +81,8 @@ services:
       sh -c "echo 'Preparing migration history...' &&
              python manage.py prepare_migrations &&
              echo 'Running migrations...' &&
-             python manage.py migrate_schemas --shared &&
-             python manage.py migrate_schemas --tenant &&
+             python manage.py migrate_schemas_resilient --shared &&
+             python manage.py migrate_schemas_resilient --tenant &&
              echo 'Migrations complete.' &&
              echo 'Setting up routes...' &&
              while ! getent hosts netily-openvpn-isp; do sleep 1; done &&

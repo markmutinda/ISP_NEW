@@ -48,8 +48,8 @@ jobs:
             docker compose exec web python manage.py prepare_migrations
 
             echo "==> Running database migrations..."
-            docker compose exec web python manage.py migrate_schemas --shared
-            docker compose exec web python manage.py migrate_schemas --tenant
+            docker compose exec web python manage.py migrate_schemas_resilient --shared
+            docker compose exec web python manage.py migrate_schemas_resilient --tenant
 
             echo "==> Ensuring superadmin account exists (non-fatal)..."
             docker compose exec web python manage.py ensure_superadmin || echo "WARN: ensure_superadmin skipped (set SUPERADMIN_EMAIL/PASSWORD env vars)"

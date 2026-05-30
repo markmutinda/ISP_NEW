@@ -97,9 +97,9 @@ echo -e "${GREEN}  ✓ Static files collected${NC}"
 # ── Step 6: Run migrations ────────────────────────────────────
 echo -e "\n${YELLOW}[6/7] Preparing and running multi-tenant migrations...${NC}"
 $DC $ENV_FLAG exec -T web python manage.py prepare_migrations
-$DC $ENV_FLAG exec -T web python manage.py migrate_schemas --shared
+$DC $ENV_FLAG exec -T web python manage.py migrate_schemas_resilient --shared
 echo -e "${GREEN}  ✓ Shared schema migrated${NC}"
-$DC $ENV_FLAG exec -T web python manage.py migrate_schemas --tenant
+$DC $ENV_FLAG exec -T web python manage.py migrate_schemas_resilient --tenant
 echo -e "${GREEN}  ✓ Tenant schemas migrated${NC}"
 
 # ── Step 7: Summary ───────────────────────────────────────────

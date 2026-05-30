@@ -45,39 +45,48 @@ class Command(BaseCommand):
         schemas = self._get_existing_schemas()
 
         total_deleted = 0
+        total_faked = 0
         for schema in schemas:
             total_deleted += self._clean_schema(schema, disk_migrations, dry_run=dry_run)
+            total_faked += self._heal_missing_dependencies(schema, disk_migrations, dry_run=dry_run)
 
         if dry_run:
             self.stdout.write(
                 self.style.WARNING(
-                    f"\nDry run complete. {total_deleted} stale migration record(s) would be removed."
+                    f"\nDry run complete. {total_deleted} stale migration record(s) would be removed and "
+                    f"{total_faked} missing dependency record(s) would be faked."
                 )
             )
             return
 
         self.stdout.write(
             self.style.SUCCESS(
-                f"\nRemoved {total_deleted} stale migration record(s). Repairing missing dependencies..."
+                f"\nRemoved {total_deleted} stale migration record(s) and faked {total_faked} missing "
+                f"dependency record(s). Repairing any remaining inconsistencies..."
             )
         )
         call_command("repair_migrations", all_schemas=True)
         self.stdout.write(self.style.SUCCESS("Migration preparation complete."))
 
-    def _get_disk_migrations(self) -> set[tuple[str, str]]:
-        disk_migrations: set[tuple[str, str]] = set()
+    def _get_disk_migrations(self) -> dict[tuple[str, str], object]:
+        disk_migrations: dict[tuple[str, str], object] = {}
 
         for app_config in django_apps.get_app_configs():
             try:
                 migrations_module_name = f"{app_config.name}.migrations"
-                migrations_module = importlib.import_module(migrations_module_name)
-                migrations_path = os.path.dirname(migrations_module.__file__)
+                migrations_pkg = importlib.import_module(migrations_module_name)
+                migrations_path = os.path.dirname(migrations_pkg.__file__)
             except (ImportError, AttributeError, TypeError):
                 continue
 
             for filename in os.listdir(migrations_path):
                 if filename.endswith(".py") and not filename.startswith("_"):
-                    disk_migrations.add((app_config.label, filename[:-3]))
+                    name = filename[:-3]
+                    try:
+                        mod = importlib.import_module(f"{migrations_module_name}.{name}")
+                    except Exception:
+                        continue
+                    disk_migrations[(app_config.label, name)] = mod
 
         return disk_migrations
 
@@ -96,7 +105,7 @@ class Command(BaseCommand):
     def _clean_schema(
         self,
         schema: str,
-        disk_migrations: set[tuple[str, str]],
+        disk_migrations: dict[tuple[str, str], object],
         *,
         dry_run: bool,
     ) -> int:
@@ -148,3 +157,71 @@ class Command(BaseCommand):
             cursor.execute('SET search_path TO "public"')
 
         return deleted
+
+    def _heal_missing_dependencies(
+        self,
+        schema: str,
+        disk_migrations: dict[tuple[str, str], object],
+        *,
+        dry_run: bool,
+    ) -> int:
+        def get_dependencies(migration_module):
+            migration_cls = getattr(migration_module, "Migration", None)
+            if migration_cls is None:
+                return []
+            return getattr(migration_cls, "dependencies", [])
+
+        healed = 0
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT EXISTS (
+                    SELECT 1
+                    FROM information_schema.tables
+                    WHERE table_schema = %s
+                      AND table_name = 'django_migrations'
+                )
+                """,
+                [schema],
+            )
+            if not cursor.fetchone()[0]:
+                return 0
+
+            cursor.execute(f'SET search_path TO "{schema}"')
+            cursor.execute("SELECT app, name FROM django_migrations")
+            applied = {(app, name) for app, name in cursor.fetchall()}
+
+            to_fake: set[tuple[str, str]] = set()
+            changed = True
+            while changed:
+                changed = False
+                for migration_key in list(applied) + list(to_fake):
+                    mod = disk_migrations.get(migration_key)
+                    if mod is None:
+                        continue
+                    for dep_app, dep_name in get_dependencies(mod):
+                        dep_key = (dep_app, dep_name)
+                        if dep_key in applied or dep_key in to_fake:
+                            continue
+                        if dep_key in disk_migrations:
+                            to_fake.add(dep_key)
+                            changed = True
+
+            if to_fake:
+                names = ", ".join(f"{app}.{name}" for app, name in sorted(to_fake))
+                self.stdout.write(self.style.WARNING(f"{schema}: missing dependency record(s): {names}"))
+
+            if not dry_run:
+                for app, name in sorted(to_fake):
+                    cursor.execute(
+                        "INSERT INTO django_migrations (app, name, applied) VALUES (%s, %s, NOW()) "
+                        "ON CONFLICT DO NOTHING",
+                        [app, name],
+                    )
+                    healed += cursor.rowcount
+            else:
+                healed += len(to_fake)
+
+            cursor.execute('SET search_path TO "public"')
+
+        return healed
