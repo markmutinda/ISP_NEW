@@ -85,6 +85,11 @@ class Command(BaseCommand):
                 description = schema_editor.connection.introspection.get_table_description(cursor, table_name)
             return any(col.name == column_name for col in description)
 
+        def _resolve_field_column(field, field_name):
+            clone = field.clone()
+            clone.set_attributes_from_name(field_name)
+            return clone.db_column or clone.get_attname_column()[1]
+
         def resilient_add_field_forwards(operation, app_label, schema_editor, from_state, to_state):
             try:
                 return original_add_field_forwards(
@@ -104,13 +109,14 @@ class Command(BaseCommand):
 
                 table_name = model_state.options.get("db_table") or f"{app_label}_{model_state.name_lower}"
                 field = model_state.get_field(operation.name)
-                if not _column_exists(table_name, field.column, schema_editor):
+                column_name = _resolve_field_column(field, operation.name)
+                if not _column_exists(table_name, column_name, schema_editor):
                     raise
 
                 self.stdout.write(
                     self.style.WARNING(
                         f"Skipping legacy AddField for {app_label}.{model_state.name}.{operation.name}: "
-                        f"column {field.column} already exists on {table_name}"
+                        f"column {column_name} already exists on {table_name}"
                     )
                 )
                 return None
