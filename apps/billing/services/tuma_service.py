@@ -456,6 +456,9 @@ def _resolve_bank_for_method(method, banks_list):
             if ref:
                 return str(ref['id']), till, f"M-Pesa STK (Till): {till}"
 
+    # ═════════════════════════════════════════════════════════════════
+    # 1. FRONTEND FORM MATCH: MPESA PAYBILL
+    # ═════════════════════════════════════════════════════════════════
     elif mtype == 'MPESA_PAYBILL':
         paybill = _get('paybill_number', 'paybill_number')
         if paybill:
@@ -467,6 +470,9 @@ def _resolve_bank_for_method(method, banks_list):
             if ref:
                 return str(ref['id']), paybill, f"M-Pesa Paybill: {paybill}"
 
+    # ═════════════════════════════════════════════════════════════════
+    # 2. FRONTEND FORM MATCH: MPESA TILL (BUY GOODS)
+    # ═════════════════════════════════════════════════════════════════
     elif mtype == 'MPESA_TILL':
         till = _get('till_number', 'till_number')
         if till:
@@ -479,29 +485,34 @@ def _resolve_bank_for_method(method, banks_list):
             if ref:
                 return str(ref['id']), till, f"M-Pesa Till: {till}"
 
-    elif mtype == 'BANK_TRANSFER':
+    # ═════════════════════════════════════════════════════════════════
+    # 3. FRONTEND FORM MATCH: DIRECT BANK TRANSFERS (I&M, EQUITY, KCB)
+    # ═════════════════════════════════════════════════════════════════
+    elif mtype == 'BANK_TRANSFER' or mtype == 'BANK':
         bank_name = _get('bank_name', 'bank_name')
         account = _get('account_number', 'account_number')
         
         if bank_name and account:
-            # Defensive normalization helper function
+            # Smart Normalizer: Strips out non-alphanumeric garbage and aligns special strings cleanly
             def normalize(text):
-                return text.lower().replace("-", "").replace(" ", "").replace("bank", "")
+                t = text.lower().replace("bank", "").replace("-", "").replace(" ", "")
+                if "i&m" in t or "iandm" in t or "im" in t:
+                    return "im"
+                if "kcb" in t or "kenyacommercial" in t:
+                    return "kenyacommercial"
+                return "".join(c for c in t if c.isalnum())
 
             clean_input = normalize(bank_name)
-            
-            # Special acronym exception checks for manual configurations
-            if "kcb" in bank_name.lower():
-                clean_input = "kenyacommercial"
 
             ref = next(
                 (b for b in banks_list
-                 if clean_input in normalize(b.get('name', ''))
-                 or normalize(b.get('name', '')) in clean_input),
+                 if clean_input == normalize(b.get('name', ''))
+                 or clean_input == normalize(b.get('code', ''))
+                 or clean_input in normalize(b.get('name', ''))),
                 None,
             )
             if ref:
-                return str(ref['id']), account, f"{bank_name}: {account}"
+                return str(ref['id']), account, f"Bank Settlement ({ref.get('name')}): {account}"
 
     # PAYMENT_LINK or unmappable — not a direct Tuma settlement channel
     logger.debug(
