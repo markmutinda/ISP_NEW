@@ -494,6 +494,30 @@ class Router(AuditMixin):
         super().save(*args, **kwargs)
 
         # ────────────────────────────────────────────────────────────────
+        # 🟢 FIX: AUTO-ALLOCATE UNIQUE REMOTE ACCESS PORTS ON ROUTER SAVE
+        # ────────────────────────────────────────────────────────────────
+        if not self.winbox_remote_port or not self.api_remote_port:
+            from apps.network.services.haproxy_manager import get_router_winbox_port, get_router_api_port
+            
+            self.winbox_remote_port = get_router_winbox_port(self.id)
+            self.api_remote_port = get_router_api_port(self.id)
+            
+            # Execute an isolated atomic update to prevent recursive save signal loops
+            Router.objects.filter(id=self.id).update(
+                winbox_remote_port=self.winbox_remote_port,
+                api_remote_port=self.api_remote_port
+            )
+            logger.info(f"[HAPROXY] Allocated ports for {self.name}: Winbox={self.winbox_remote_port}, API={self.api_remote_port}")
+
+        # Automatically rebuild HAProxy config files if the tunnel interface is active
+        if self.vpn_ip_address:
+            try:
+                from apps.network.services.haproxy_manager import sync_haproxy_config
+                sync_haproxy_config()
+            except Exception as h_err:
+                logger.error(f"[HAPROXY] Dynamic configuration build failed: {h_err}")
+
+        # ────────────────────────────────────────────────────────────────
         # 8. Trigger WireGuard Provisioning if not already done
         # ────────────────────────────────────────────────────────────────
         if self.enable_openvpn and not self.vpn_provisioned:
@@ -513,9 +537,25 @@ class Router(AuditMixin):
             logger.debug(f"[GLOBAL MAP] Skipping sync for {self.name} - No VPN IP yet")
 
     # ────────────────────────────────────────────────────────────────
+    # 🟢 ADD THESE PROPERTIES TO GENERATE FRONTEND ACCESS LINKS
+    # ────────────────────────────────────────────────────────────────
+    @property
+    def remote_winbox_endpoint(self):
+        """Returns the public address for Winbox access (e.g. vpn.netily.co.ke:40001)"""
+        if self.winbox_remote_port:
+            return f"{self.openvpn_server}:{self.winbox_remote_port}"
+        return None
+
+    @property
+    def remote_api_endpoint(self):
+        """Returns the public address for API/Dashboard interaction (e.g. vpn.netily.co.ke:50001)"""
+        if self.api_remote_port:
+            return f"{self.openvpn_server}:{self.api_remote_port}"
+        return None
+
+    # ────────────────────────────────────────────────────────────────
     # SMART PROPERTIES (The "Brains" for the Script Generator)
     # ────────────────────────────────────────────────────────────────
-
     @property
     def gateway_ip(self):
         """Extracts the base IP from the new IPAM fields"""
