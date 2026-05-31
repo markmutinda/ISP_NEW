@@ -494,20 +494,38 @@ class Router(AuditMixin):
         super().save(*args, **kwargs)
 
         # ────────────────────────────────────────────────────────────────
-        # 🟢 FIX: AUTO-ALLOCATE UNIQUE REMOTE ACCESS PORTS ON ROUTER SAVE
+        # 🟢 FIX: SCANS ALL TENANTS TO PREVENT PUBLIC PORT COLLISIONS
         # ────────────────────────────────────────────────────────────────
         if not self.winbox_remote_port or not self.api_remote_port:
-            from apps.network.services.haproxy_manager import get_router_winbox_port, get_router_api_port
+            from django_tenants.utils import get_tenant_model, schema_context
+            from django.db.models import Max
             
-            self.winbox_remote_port = get_router_winbox_port(self.id)
-            self.api_remote_port = get_router_api_port(self.id)
+            TenantModel = get_tenant_model()
+            highest_winbox = 40000
+            highest_api = 50000
             
-            # Execute an isolated atomic update to prevent recursive save signal loops
+            # Scan every single tenant schema to find the maximum port in use
+            for tenant in TenantModel.objects.exclude(schema_name='public'):
+                with schema_context(tenant.schema_name):
+                    res = Router.objects.aggregate(
+                        max_w=Max('winbox_remote_port'),
+                        max_a=Max('api_remote_port')
+                    )
+                    if res['max_w'] and res['max_w'] > highest_winbox:
+                        highest_winbox = res['max_w']
+                    if res['max_a'] and res['max_a'] > highest_api:
+                        highest_api = res['max_a']
+            
+            # Assign the next globally unique incremental integers
+            self.winbox_remote_port = highest_winbox + 1
+            self.api_remote_port = highest_api + 1
+            
+            # Perform a silent update to avoid recursive save signal loops
             Router.objects.filter(id=self.id).update(
                 winbox_remote_port=self.winbox_remote_port,
                 api_remote_port=self.api_remote_port
             )
-            logger.info(f"[HAPROXY] Allocated ports for {self.name}: Winbox={self.winbox_remote_port}, API={self.api_remote_port}")
+            logger.info(f"[HAPROXY] Globally unique ports allocated for {self.name}: Winbox={self.winbox_remote_port}, API={self.api_remote_port}")
 
         # Automatically rebuild HAProxy config files if the tunnel interface is active
         if self.vpn_ip_address:
