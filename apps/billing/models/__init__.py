@@ -29,6 +29,8 @@ from .ad_models import (
     HotspotAdGrant,
 )
 
+from .subscription_models import Subscription   # <-- new import
+
 __all__ = [
     # Billing
     'Plan',
@@ -49,4 +51,6 @@ __all__ = [
     # Ad Models
     'HotspotAd',
     'HotspotAdGrant',
+    # Subscription
+    'Subscription',                              # <-- added to __all__
 ]

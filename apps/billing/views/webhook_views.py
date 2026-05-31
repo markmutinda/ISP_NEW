@@ -52,70 +52,69 @@ class MpesaC2BWebhookView(APIView):
 
     def _calculate_renewal_expiry(self, service, amount, current_expiry=None, customer=None):
         """
-        Calculate new expiry date based on payment amount vs plan price, 
-        with prepaid credit accumulation for partial payments.
+        Calculates subscription parameters based on incoming payments.
+        Supports seamless pre‑expiry day stacking and smart upgrade detection.
         
-        Returns: (quantity, new_expiry_datetime) or (0, None) if insufficient amount.
+        Returns: (matched_plan, quantity, new_expiry)
         """
         from decimal import Decimal
         from django.utils import timezone
-
-        plan = service.plan
-        if not plan:
-            return 0, None
-
-        plan_price = Decimal(str(plan.base_price or 0))
-        if plan_price <= 0:
-            return 0, None
-
-        amount = Decimal(str(amount))
+        from apps.billing.models.billing_models import Plan
         
-        # Combine incoming payment with any existing credit
+        now = timezone.now()
+        amount = Decimal(str(amount))
         existing_credit = Decimal(str(customer.prepaid_credit or 0)) if customer else Decimal('0')
         total_available = amount + existing_credit
-        
-        if total_available < plan_price:
-            # Still not enough — accumulate credit, don't activate
+
+        if not service.plan:
+            return None, 0, None
+
+        current_plan = service.plan
+        current_plan_price = Decimal(str(current_plan.base_price or 0))
+        current_plan_type = current_plan.plan_type
+        matched_plan = None
+
+        # 1. Intent Detection: Did they pay for a completely different high‑tier plan?
+        if current_plan_price > 0:
+            remainder = total_available % current_plan_price
+            if remainder >= Decimal('0.50'):  # Not a direct renewal multiple
+                matched_plan = Plan.objects.filter(
+                    is_active=True,
+                    plan_type=current_plan_type,
+                    base_price=total_available
+                ).first()
+
+        # 2. Check for multi‑month clean renewals of their existing plan
+        if not matched_plan and current_plan_price > 0:
+            remainder = total_available % current_plan_price
+            if remainder < Decimal('0.50') and total_available >= current_plan_price:
+                matched_plan = current_plan
+
+        # 3. Fallback to current plan if minimum threshold is met
+        if not matched_plan and total_available >= current_plan_price:
+            matched_plan = current_plan
+
+        if not matched_plan:
             if customer:
                 customer.prepaid_credit = total_available
                 customer.save(update_fields=['prepaid_credit'])
-            logger.info(
-                f"Partial payment: {amount} + credit {existing_credit} = {total_available} "
-                f"(need {plan_price}). Credit accumulated."
-            )
-            return 0, None
+            logger.info(f"Partial payment saved as prepaid credit: KES {total_available}")
+            return None, 0, None
 
-        # Calculate full periods from total available
+        plan_price = matched_plan.base_price
         quantity = int(total_available / plan_price)
         remainder = total_available - (plan_price * quantity)
-        
-        # Store remainder as credit, clear if negligible
+
         if customer:
             customer.prepaid_credit = remainder if remainder >= Decimal('0.50') else Decimal('0')
             customer.save(update_fields=['prepaid_credit'])
-        
-        # Start from: current expiry (if active) or now
-        now = timezone.now()
-        if current_expiry and current_expiry > now:
-            # Stack onto existing subscription
-            start = current_expiry
-        else:
-            start = now
 
-        # Get plan validity as timedelta
-        validity_delta = plan.get_validity_timedelta()
-        if not validity_delta:
-            # Unlimited plan — just activate
-            new_expiry = None
-        else:
-            new_expiry = start + (validity_delta * quantity)
+        # Time Stacking Logic: Accumulate days if current plan line is still active
+        start_time = current_expiry if (current_expiry and current_expiry > now) else now
+        validity_delta = matched_plan.get_validity_timedelta()
+        new_expiry = start_time + (validity_delta * quantity) if validity_delta else None
 
-        logger.info(
-            f"Renewal: total_available={total_available}, price={plan_price}, "
-            f"quantity={quantity}, remainder_credit={customer.prepaid_credit if customer else 0}, "
-            f"new_expiry={new_expiry}"
-        )
-        return quantity, new_expiry
+        return matched_plan, quantity, new_expiry
 
     def trigger_mikrotik_reactivation(self, service):
         """Force MikroTik to reconnect the user immediately with updated RADIUS."""
@@ -523,70 +522,98 @@ class MpesaC2BWebhookView(APIView):
                     )
                     customer.save(update_fields=['outstanding_balance'])
 
-                    # --- PLAN-BASED QUANTITY RENEWAL ---
+                    # --- PLAN-BASED QUANTITY RENEWAL (Claude Snapshot Fix) ---
                     from apps.radius.models import CustomerRadiusCredentials
-
-                    radius_cred = CustomerRadiusCredentials.objects.filter(
-                        customer=customer
-                    ).first()
-
-                    # Get current expiry from RADIUS credentials
+                    radius_cred = CustomerRadiusCredentials.objects.filter(customer=customer).first()
                     current_expiry = radius_cred.expiration_date if radius_cred else None
+                    original_plan_id = service.plan_id  
 
-                    # UPDATED: Pass customer to the method for prepaid credit handling
-                    quantity, new_expiry = self._calculate_renewal_expiry(
-                        service, amount, current_expiry, customer=customer  # ADDED customer=customer
+                    matched_plan, quantity, new_expiry = self._calculate_renewal_expiry(
+                        service, amount, current_expiry, customer=customer
                     )
-
+                    
                     if quantity >= 1:
-                        # Activate/renew the service
+                        from apps.billing.models.subscription_models import Subscription
+                        from django.db import connection as db_conn
+                        
+                        # Compute plan change flag accurately
+                        plan_changed = (matched_plan.id != original_plan_id) if matched_plan else False
+
+                        # --- (a) Expire any currently active logging rows ---
+                        Subscription.objects.filter(customer=customer, status='ACTIVE').update(status='EXPIRED')
+
+                        # --- (b) Build fresh core Subscription record ---
+                        new_subscription = Subscription.objects.create(
+                            customer=customer,
+                            service_connection=service,
+                            plan=matched_plan,
+                            payment=payment,
+                            amount_paid=amount,
+                            status='ACTIVE',
+                            started_at=timezone.now(),
+                            expires_at=new_expiry,
+                            schema_name=db_conn.schema_name,
+                        )
+
+                        # --- (c) Activate core service metrics ---
                         service.status = 'ACTIVE'
                         service.save(update_fields=['status'])
-
-                        # Update customer status if needed
                         if customer.status in ('SUSPENDED', 'INACTIVE', 'PENDING'):
                             customer.status = 'ACTIVE'
                             customer.save(update_fields=['status'])
 
+                        # --- (d) Synchronize RADIUS provisioning profiles ---
                         if radius_cred:
                             radius_cred.is_enabled = True
                             radius_cred.disabled_reason = ''
                             radius_cred.subscription_activated_at = timezone.now()
                             if new_expiry:
                                 radius_cred.expiration_date = new_expiry
+                            
+                            if plan_changed:
+                                try:
+                                    from apps.radius.signals_auto_sync import _get_or_create_bandwidth_profile
+                                    service.plan = matched_plan
+                                    new_profile = _get_or_create_bandwidth_profile(service)
+                                    if new_profile:
+                                        radius_cred.bandwidth_profile = new_profile
+                                except Exception as bp_err:
+                                    logger.warning(f"Bandwidth profile allocation failed: {bp_err}")
+                            
                             radius_cred.save()
-
-                            # Sync to RADIUS tables
+                            
                             try:
                                 radius_cred.sync_to_radius()
                             except Exception as e:
-                                logger.error(f"RADIUS sync failed: {e}")
+                                logger.error(f"FreeRADIUS cluster sync failed: {e}")
 
-                        logger.info(
-                            f"RENEWAL SUCCESS: customer={customer.customer_code} "
-                            f"account={bill_ref} amount={amount} "
-                            f"quantity={quantity} new_expiry={new_expiry}"
-                        )
+                            # --- (e) Deliver CoA Session Drop targeting explicit Router Gateway IP ---
+                            try:
+                                from apps.radius.services.coa_service import CoAService
+                                coa = CoAService()
+                                router_ip = radius_cred.router.vpn_ip_address or radius_cred.router.ip_address if radius_cred.router else None
+                                if router_ip:
+                                    coa.disconnect_user(username=radius_cred.username, nas_ip_address=router_ip)
+                                    logger.info(f"CoA session reset sent via NAS IP: {router_ip}")
+                            except Exception as coa_err:
+                                logger.warning(f"CoA disconnection bypassed (non-fatal): {coa_err}")
 
-                        # Force MikroTik reconnect
+                        # If they upgraded or changed tiers, synchronize core connection fields
+                        if plan_changed:
+                            service.plan = matched_plan
+                            service.monthly_price = matched_plan.base_price
+                            service.download_speed = matched_plan.download_speed or service.download_speed
+                            service.upload_speed = matched_plan.upload_speed or service.upload_speed
+                            service.save(update_fields=['plan', 'monthly_price', 'download_speed', 'upload_speed'])
+
                         self.trigger_mikrotik_reactivation(service)
-
-                        # Send confirmation SMS
+                        
                         try:
-                            # Build a simple renewal confirmation
                             _send_renewal_sms(customer, amount, quantity, new_expiry, msisdn)
                         except Exception as e:
-                            logger.warning(f"Renewal SMS failed: {e}")
-
+                            logger.warning(f"SMS notice skipped: {e}")
                     else:
-                        # Partial payment — recorded but service not activated
-                        # (credit already accumulated in _calculate_renewal_expiry)
-                        logger.info(
-                            f"PARTIAL PAYMENT: customer={customer.customer_code} "
-                            f"account={bill_ref} amount={amount} — "
-                            f"requires {service.plan.base_price if service.plan else 'N/A'} for activation. "
-                            f"Accumulated credit: {customer.prepaid_credit}"
-                        )
+                        logger.info(f"Partial payment processed for customer: {customer.customer_code}")
 
                     logger.info(
                         f"C2B payment processed: {trans_id} | "

@@ -317,6 +317,44 @@ class ServiceConnectionViewSet(viewsets.ModelViewSet):
                         logger.warning(f"Resumed SMS failed for customer {customer.id}: {e}")
                 # ────────────────────────────────────────────────────────────
                 
+                # ────────────────────────────────────────────────────────────
+                # MANUAL ADMIN ACTIVATION: SYNCHRONISE SUBSCRIPTION MODEL
+                # ────────────────────────────────────────────────────────────
+                try:
+                    from apps.billing.models.subscription_models import Subscription
+                    from django.db import connection as db_conn
+                    
+                    # Deactivate old historical tracking entries
+                    Subscription.objects.filter(customer=customer, status='ACTIVE').update(status='EXPIRED')
+                    
+                    expiry_for_sub = None
+                    if service.plan:
+                        expiry_for_sub = service.plan.calculate_expiration(start_time=timezone.now())
+                        # Also update RADIUS credentials to be absolutely certain
+                        if creds_obj:
+                            creds_obj.expiration_date = expiry_for_sub
+                            creds_obj.save(update_fields=['expiration_date'])
+                            try:
+                                creds_obj.sync_to_radius()
+                            except Exception as sync_err:
+                                logger.warning(f"RADIUS sync after subscription creation failed: {sync_err}")
+                    
+                    Subscription.objects.create(
+                        customer=customer,
+                        service_connection=service,
+                        plan=service.plan,
+                        payment=None,  # Manual admin action override flag
+                        amount_paid=service.monthly_price or 0,
+                        status='ACTIVE',
+                        started_at=timezone.now(),
+                        expires_at=expiry_for_sub,
+                        schema_name=db_conn.schema_name,
+                    )
+                    logger.info(f"Subscription record created for manual activation of {customer.customer_code}")
+                except Exception as sub_err:
+                    logger.error(f"Manual backfill subscription logging failed for {customer.customer_code}: {sub_err}")
+                # ────────────────────────────────────────────────────────────
+                
             except Exception as radius_err:
                 logger.error(
                     f"RADIUS setup failed for service {service.id} "
