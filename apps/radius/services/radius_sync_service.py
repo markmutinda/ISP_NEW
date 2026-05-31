@@ -485,3 +485,32 @@ class RadiusSyncService:
         # Simplified for brevity - reuse the logic from your original sync_customer
         # just know that it calls create_radius_user which is now safe!
         return self.sync_service_connection(subscription.service_connection)
+
+    # ═════════════════════════════════════════════════════════════════
+    # 🟢 ADD THIS METHOD TO FIX THE CRON ERROR
+    # ═════════════════════════════════════════════════════════════════
+    def sync_all_customers(self) -> Dict[str, Any]:
+        """
+        Loops through all ServiceConnections inside the active tenant schema
+        and ensures their check/reply profile configurations match the database state.
+        """
+        from apps.customers.models import ServiceConnection
+        
+        connections = ServiceConnection.objects.select_related('customer', 'plan').all()
+        total_synced = 0
+        
+        for conn in connections:
+            try:
+                if conn.status == 'ACTIVE' and conn.plan:
+                    self.sync_service_connection(conn)
+                else:
+                    # Isolate username definitions defensively matching core schemas
+                    base_user = conn.username or (conn.customer.phone_number if conn.customer else "")
+                    if base_user:
+                        radius_username = self._generate_unique_username(base_user)
+                        self.disable_radius_user(radius_username, f"Auto-disabled due to state: {conn.status}")
+                total_synced += 1
+            except Exception as e:
+                logger.error(f"[BULK RADIUS SYNC ERROR] Failed on connection ID {conn.id}: {e}")
+                
+        return {'total': total_synced}
