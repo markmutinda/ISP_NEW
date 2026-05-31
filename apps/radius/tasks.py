@@ -678,12 +678,11 @@ def process_expired_subscriptions():
 @shared_task
 def notify_expiring_soon(hours_before: int = 24):
     """
-    FIXED: Now loops through all tenants to send expiration warnings.
+    Loops through all tenants to send automated expiration warnings.
+    Swapped from NotificationManager to your production SMSNotifier library.
     """
     from apps.radius.models import CustomerRadiusCredentials
-    # 🚨 FIXED: Import NotificationManager and instantiate it
-    from apps.notifications.services.notification_manager import NotificationManager
-    notification_service = NotificationManager()
+    from apps.messaging.services.notification_sender import SMSNotifier
     
     TenantModel = get_tenant_model()
     now = timezone.now()
@@ -701,7 +700,7 @@ def notify_expiring_soon(hours_before: int = 24):
                     expiration_date__isnull=False, 
                     expiration_date__gt=now, 
                     expiration_date__lte=expiry_window
-                ).select_related('customer__user')
+                ).select_related('customer__user', 'bandwidth_profile')
                 
                 stats['checked'] += expiring_soon.count()
                 
@@ -709,14 +708,19 @@ def notify_expiring_soon(hours_before: int = 24):
                     try:
                         customer = credentials.customer
                         time_remaining = credentials.expiration_date - now
-                        hours_left = int(time_remaining.total_seconds() // 3600)
-                        notification_service.send_expiry_warning(
-                            customer=customer, 
-                            hours_remaining=hours_left, 
-                            username=credentials.username
+                        
+                        # Convert to days remaining for the standard template alignment
+                        days_left = max(1, int(time_remaining.total_seconds() / 86400))
+                        plan_name = credentials.bandwidth_profile.name if credentials.bandwidth_profile else "Internet Plan"
+                        
+                        # Trigger the working template framework
+                        SMSNotifier.pppoe_expiry_reminder(
+                            customer=customer,
+                            days_left=days_left,
+                            plan_name=plan_name,
                         )
                         stats['notified'] += 1
-                        logger.info(f"[EXPIRY NOTICE] Sent notification to {customer.customer_code}: {hours_left} hours remaining")
+                        logger.info(f"[EXPIRY NOTICE] Sent SMS notification to {customer.customer_code}")
                     except Exception as e:
                         logger.error(f"Error notifying {credentials.username} in tenant {tenant.schema_name}: {e}")
                         stats['errors'] += 1
