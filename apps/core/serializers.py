@@ -159,7 +159,8 @@ class UserUpdateSerializer(serializers.ModelSerializer):
         fields = [
             'id', 'email', 'first_name', 'last_name',
             'phone_number', 'profile_picture', 'gender',
-            'date_of_birth', 'current_password', 'new_password'
+            'date_of_birth', 'current_password', 'new_password',
+            'is_active'  # 🟢 FIX: Added is_active to allow deactivation/reactivation
         ]
         read_only_fields = ['id', 'email']
     
