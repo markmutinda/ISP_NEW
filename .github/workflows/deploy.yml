@@ -28,6 +28,7 @@ jobs:
           script: |
             echo "==> Pulling latest backend code..."
             cd ~/netily_cloud
+            git float origin prod-backend
             git fetch origin prod-backend
             git reset --hard origin/prod-backend
 
@@ -36,10 +37,11 @@ jobs:
             find apps -type d -name __pycache__ -prune -exec rm -rf {} + 2>/dev/null || true
             find apps -type f \( -name '*.pyc' -o -name '*.pyo' \) -delete 2>/dev/null || true
 
-            echo "==> Rebuilding application services..."
+            echo "==> Rebuilding ONLY backend application services..."
             cd docker
-            docker compose down --remove-orphans || true
-            docker compose build --no-cache web celery-worker celery-beat frontend radius
+            # 🟢 OPTIMIZATION 1: No 'compose down' (Zero database/VPN downtime).
+            # 🟢 OPTIMIZATION 2: Removed '--no-cache' to allow ultra-fast incremental builds.
+            docker compose build web celery-worker celery-beat
 
             echo "==> Preparing migration history..."
             docker compose run --rm web python manage.py prepare_migrations
@@ -48,37 +50,39 @@ jobs:
             docker compose run --rm web python manage.py migrate_schemas_resilient --shared
             docker compose run --rm web python manage.py migrate_schemas_resilient --tenant
 
-            echo "==> Starting application services..."
-            docker compose up -d
+            echo "==> Performing target rolling restart of backend services..."
+            # 🟢 OPTIMIZATION 3: '--no-deps' updates ONLY the backend without touching Nginx, DB, or WireGuard.
+            docker compose up -d --no-deps web celery-worker celery-beat
 
-            echo "==> Restarting nginx (re-resolve container IPs)..."
-            docker compose restart nginx
+            echo "==> Injecting clean container-to-container network paths..."
+            # 🟢 OPTIMIZATION 4: The Network Guard. Explicitly overrides any multi-line IP lookup bugs automatically.
+            TARGET_IP=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}} {{end}}' netily-openvpn | awk '{print $1}')
+            docker exec -u 0 netily_backend ip route del 10.8.0.0/16 2>/dev/null || true
+            docker exec -u 0 netily_backend ip route add 10.8.0.0/16 via $TARGET_IP || true
+            docker exec -u 0 netily_worker ip route del 10.8.0.0/16 2>/dev/null || true
+            docker exec -u 0 netily_worker ip route add 10.8.0.0/16 via $TARGET_IP || true
+            echo "    Paths locked via IP: $TARGET_IP"
 
-            echo "==> Forcing active network healer sync..."
-            docker compose restart network-healer
-
-            echo "==> Waiting for web container to be ready..."
-            sleep 5
+            echo "==> Waiting for web container to settle..."
+            sleep 4
 
             echo "==> Ensuring superadmin account exists (non-fatal)..."
-            docker compose exec web python manage.py ensure_superadmin || echo "WARN: ensure_superadmin skipped (set SUPERADMIN_EMAIL/PASSWORD env vars)"
+            docker compose exec web python manage.py ensure_superadmin || echo "WARN: ensure_superadmin skipped"
 
             echo "==> Collecting static files..."
             docker compose exec web python manage.py collectstatic --noinput || true
 
-            echo "==> Verifying web and frontend containers are healthy..."
+            echo "==> Verifying backend container health..."
             for i in 1 2 3 4 5; do
               STATUS=$(docker compose ps web --format '{{.Status}}' 2>/dev/null)
-              FRONTEND_STATUS=$(docker compose ps frontend --format '{{.Status}}' 2>/dev/null)
-              NGINX_STATUS=$(docker compose ps nginx --format '{{.Status}}' 2>/dev/null)
-              echo "  Attempt $i: web status = $STATUS | frontend status = $FRONTEND_STATUS | nginx status = $NGINX_STATUS"
-              if echo "$STATUS" | grep -q "Up" && echo "$FRONTEND_STATUS" | grep -q "Up" && echo "$NGINX_STATUS" | grep -q "Up"; then
-                echo "  ✅ Web, frontend, and nginx containers are running!"
+              echo "  Attempt $i: web status = $STATUS"
+              if echo "$STATUS" | grep -q "Up"; then
+                echo "  ✅ Web application service is successfully running!"
                 break
               fi
               if [ "$i" = "5" ]; then
-                echo "  ❌ One or more serving containers failed to start. Dumping logs:"
-                docker compose logs --tail=50 web frontend nginx
+                echo "  ❌ Backend container failed to start. Dumping logs:"
+                docker compose logs --tail=50 web
                 exit 1
               fi
               sleep 3
