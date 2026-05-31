@@ -85,7 +85,7 @@ echo -e "\n${YELLOW}[4/7] Building application containers...${NC}"
 echo -e "  This will take 3-8 minutes on first run..."
 cd docker
 $DC $ENV_FLAG down --remove-orphans 2>/dev/null || true
-$DC $ENV_FLAG build --no-cache web celery-worker celery-beat frontend
+$DC $ENV_FLAG build --no-cache web celery-worker celery-beat frontend radius
 
 echo -e "\n${YELLOW}  Waiting for database to be ready...${NC}"
 sleep 15  # Give postgres time to initialise
@@ -107,7 +107,9 @@ $DC $ENV_FLAG run --rm web python manage.py migrate_schemas_resilient --shared
 echo -e "${GREEN}  ✓ Shared schema migrated${NC}"
 $DC $ENV_FLAG run --rm web python manage.py migrate_schemas_resilient --tenant
 echo -e "${GREEN}  ✓ Tenant schemas migrated${NC}"
-$DC $ENV_FLAG up -d web celery-worker celery-beat frontend nginx
+$DC $ENV_FLAG up -d
+$DC $ENV_FLAG restart nginx
+$DC $ENV_FLAG restart network-healer
 
 # ── Step 7: Summary ───────────────────────────────────────────
 cd ..

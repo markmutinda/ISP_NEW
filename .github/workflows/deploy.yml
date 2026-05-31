@@ -39,7 +39,7 @@ jobs:
             echo "==> Rebuilding application services..."
             cd docker
             docker compose down --remove-orphans || true
-            docker compose build --no-cache web celery-worker celery-beat frontend
+            docker compose build --no-cache web celery-worker celery-beat frontend radius
 
             echo "==> Preparing migration history..."
             docker compose run --rm web python manage.py prepare_migrations
@@ -49,10 +49,13 @@ jobs:
             docker compose run --rm web python manage.py migrate_schemas_resilient --tenant
 
             echo "==> Starting application services..."
-            docker compose up -d web celery-worker celery-beat frontend nginx
+            docker compose up -d
 
             echo "==> Restarting nginx (re-resolve container IPs)..."
             docker compose restart nginx
+
+            echo "==> Forcing active network healer sync..."
+            docker compose restart network-healer
 
             echo "==> Waiting for web container to be ready..."
             sleep 5
