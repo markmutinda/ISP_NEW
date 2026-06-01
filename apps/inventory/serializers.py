@@ -1,3 +1,4 @@
+from django.utils.text import slugify
 from rest_framework import serializers
 from django.contrib.auth import get_user_model
 from .models import (
@@ -45,6 +46,7 @@ class EquipmentTypeSerializer(serializers.ModelSerializer):
 
 class EquipmentItemSerializer(serializers.ModelSerializer):
     equipment_type_name = serializers.CharField(source='equipment_type.name', read_only=True)
+    equipment_type_text = serializers.CharField(write_only=True, required=False, allow_blank=True)
     supplier_name = serializers.CharField(source='supplier.name', read_only=True)
     assigned_to_name = serializers.SerializerMethodField()
     assigned_to_customer_name = serializers.SerializerMethodField()
@@ -54,7 +56,7 @@ class EquipmentItemSerializer(serializers.ModelSerializer):
     class Meta:
         model = EquipmentItem
         fields = [
-            'id', 'equipment_type', 'equipment_type_name',
+            'id', 'equipment_type', 'equipment_type_name', 'equipment_type_text',
             'name', 'model', 'serial_number', 'asset_tag', 'mac_address',
             'supplier', 'supplier_name',
             'purchase_date', 'purchase_price', 'warranty_expiry',
@@ -66,6 +68,50 @@ class EquipmentItemSerializer(serializers.ModelSerializer):
             'created_at', 'updated_at',
         ]
         read_only_fields = ['asset_tag', 'created_at', 'updated_at']
+        extra_kwargs = {
+            'equipment_type': {'required': False},
+        }
+
+    def _next_type_code(self, name):
+        base = slugify(name).replace('-', '').upper()[:12] or 'EQP'
+        code = base
+        suffix = 1
+        while EquipmentType.objects.filter(code=code).exists():
+            suffix += 1
+            code = f"{base[: max(1, 12 - len(str(suffix)))]}{suffix}"
+        return code
+
+    def validate(self, attrs):
+        attrs = super().validate(attrs)
+        if not attrs.get('equipment_type') and not attrs.get('equipment_type_text'):
+            raise serializers.ValidationError({
+                'equipment_type_text': 'Equipment type is required.'
+            })
+        return attrs
+
+    def create(self, validated_data):
+        type_text = (validated_data.pop('equipment_type_text', '') or '').strip()
+        if type_text and not validated_data.get('equipment_type'):
+            equipment_type = EquipmentType.objects.filter(name__iexact=type_text, is_active=True).first()
+            if not equipment_type:
+                equipment_type = EquipmentType.objects.create(
+                    name=type_text,
+                    code=self._next_type_code(type_text),
+                )
+            validated_data['equipment_type'] = equipment_type
+        return super().create(validated_data)
+
+    def update(self, instance, validated_data):
+        type_text = (validated_data.pop('equipment_type_text', '') or '').strip()
+        if type_text:
+            equipment_type = EquipmentType.objects.filter(name__iexact=type_text, is_active=True).first()
+            if not equipment_type:
+                equipment_type = EquipmentType.objects.create(
+                    name=type_text,
+                    code=self._next_type_code(type_text),
+                )
+            validated_data['equipment_type'] = equipment_type
+        return super().update(instance, validated_data)
 
     def get_assigned_to_name(self, obj):
         if obj.assigned_to:

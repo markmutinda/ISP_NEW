@@ -6,6 +6,7 @@ from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
 from django.utils import timezone
+from django.core.mail import send_mail
 
 from .models import Technician, DispatchJob
 from .serializers_dispatch import (
@@ -14,6 +15,7 @@ from .serializers_dispatch import (
     DispatchJobSerializer,
     AssignJobSerializer,
     UpdateStatusSerializer,
+    NotifyTechnicianSerializer,
 )
 
 
@@ -32,6 +34,15 @@ class TechnicianViewSet(viewsets.ModelViewSet):
         if self.action == 'create':
             return TechnicianCreateSerializer
         return TechnicianSerializer
+
+    def create(self, request, *args, **kwargs):
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        technician = serializer.save()
+        return Response(
+            TechnicianSerializer(technician, context={'request': request}).data,
+            status=status.HTTP_201_CREATED,
+        )
 
     def perform_destroy(self, instance):
         # Soft delete
@@ -146,3 +157,76 @@ class DispatchJobViewSet(viewsets.ModelViewSet):
 
         job.save()
         return Response(DispatchJobSerializer(job).data)
+
+    @action(detail=True, methods=['post'], url_path='notify-technician')
+    def notify_technician(self, request, pk=None):
+        """Send the prepared job assignment message to the assigned technician."""
+        job = self.get_object()
+        if not job.assigned_to:
+            return Response(
+                {'detail': 'Assign a technician before sending a notification.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        serializer = NotifyTechnicianSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        channels = serializer.validated_data.get('channels') or ['sms']
+        technician = job.assigned_to
+        tech_user = technician.user
+
+        default_sms = (
+            f"Hi {technician.name}, you have been assigned {job.job_number}: "
+            f"{job.get_job_type_display()} for {job.customer_name} on "
+            f"{job.scheduled_date} at {job.scheduled_time or 'TBA'}. "
+            f"Phone: {job.customer_phone or 'N/A'}."
+        )
+        sms_message = serializer.validated_data.get('sms_message') or default_sms
+        email_subject = serializer.validated_data.get('email_subject') or f"Dispatch assignment {job.job_number}"
+        email_body = serializer.validated_data.get('email_body') or (
+            f"Hi {technician.name},\n\n"
+            f"You have been assigned {job.job_number}.\n\n"
+            f"Customer: {job.customer_name}\n"
+            f"Phone: {job.customer_phone or 'N/A'}\n"
+            f"Address: {job.customer_address or 'N/A'}\n"
+            f"Scheduled: {job.scheduled_date} at {job.scheduled_time or 'TBA'}\n"
+            f"Priority: {job.get_priority_display()}\n\n"
+            f"Description:\n{job.description or 'No description provided.'}\n"
+        )
+
+        result = {'sms': None, 'email': None}
+
+        if 'sms' in channels:
+            try:
+                from apps.messaging.services.notification_sender import _dispatch, _log_sms
+                sms_sent = _dispatch(technician.phone, sms_message)
+                _log_sms(
+                    technician.phone,
+                    sms_message,
+                    status='sent' if sms_sent else 'failed',
+                    msg_type='dispatch',
+                    recipient_name=technician.name,
+                )
+                result['sms'] = sms_sent
+            except Exception as exc:
+                result['sms'] = False
+                result['sms_error'] = str(exc)
+
+        if 'email' in channels:
+            if not tech_user.email:
+                result['email'] = False
+                result['email_error'] = 'Technician has no email address.'
+            else:
+                try:
+                    sent = send_mail(
+                        email_subject,
+                        email_body,
+                        None,
+                        [tech_user.email],
+                        fail_silently=False,
+                    )
+                    result['email'] = sent > 0
+                except Exception as exc:
+                    result['email'] = False
+                    result['email_error'] = str(exc)
+
+        return Response(result)

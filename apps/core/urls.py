@@ -51,7 +51,10 @@ urlpatterns = [
     path('auth/otp/send/', views.SendOTPView.as_view(), name='send-otp'),
     path('auth/otp/verify/', views.VerifyOTPView.as_view(), name='verify-otp'),
     
-    # Lead capture (public)
+    # Tenant lead management and public lead capture
+    path('leads/', views.TenantLeadListView.as_view(), name='tenant-leads'),
+    path('leads/stats/', views.TenantLeadStatsView.as_view(), name='tenant-lead-stats'),
+    path('leads/<int:pk>/', views.TenantLeadDetailView.as_view(), name='tenant-lead-detail'),
     path('leads/submit/', views.SubmitLeadView.as_view(), name='submit-lead'),
     
     # Include router URLs

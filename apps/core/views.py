@@ -1644,3 +1644,140 @@ class SubmitLeadView(APIView):
             "message": "Thank you! We'll be in touch shortly.",
         }, status=status.HTTP_201_CREATED)
 
+
+def _serialize_lead(lead):
+    derived_status = "converted" if lead.is_contacted else "not_yet"
+    return {
+        "id": lead.id,
+        "name": lead.name,
+        "email": lead.email,
+        "phone": lead.phone,
+        "company_name": lead.company_name,
+        "lead_source": lead.lead_source,
+        "message": lead.message,
+        "status": derived_status,
+        "is_contacted": lead.is_contacted,
+        "contacted_at": lead.contacted_at.isoformat() if lead.contacted_at else None,
+        "created_at": lead.created_at.isoformat(),
+    }
+
+
+def _truthy(value):
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() in {"1", "true", "yes", "converted"}
+
+
+class TenantLeadListView(APIView):
+    """Tenant-local lead list and manual lead capture for ISP admins."""
+    permission_classes = [IsAuthenticated, IsAdminOrStaff]
+
+    def get(self, request):
+        from django.db.models import Q
+        from .models import Lead
+
+        page = max(1, int(request.query_params.get("page", 1)))
+        page_size = min(100, max(1, int(request.query_params.get("page_size", 20))))
+        search = request.query_params.get("search", "").strip()
+        status_filter = request.query_params.get("status", "").strip()
+
+        qs = Lead.objects.all().order_by("-created_at")
+        if search:
+            qs = qs.filter(
+                Q(name__icontains=search) |
+                Q(email__icontains=search) |
+                Q(phone__icontains=search) |
+                Q(company_name__icontains=search) |
+                Q(lead_source__icontains=search) |
+                Q(message__icontains=search)
+            )
+        if status_filter == "converted":
+            qs = qs.filter(is_contacted=True)
+        elif status_filter in {"not_yet", "new"}:
+            qs = qs.filter(is_contacted=False)
+
+        total = qs.count()
+        start = (page - 1) * page_size
+        results = [_serialize_lead(lead) for lead in qs[start:start + page_size]]
+        return Response({
+            "count": total,
+            "next": None if start + page_size >= total else f"?page={page + 1}",
+            "previous": None if page <= 1 else f"?page={page - 1}",
+            "results": results,
+        })
+
+    def post(self, request):
+        from .models import Lead
+
+        name = (request.data.get("name") or "").strip()
+        email = (request.data.get("email") or "").strip()
+        phone = (request.data.get("phone") or "").strip()
+        company_name = (request.data.get("company_name") or "").strip()
+        lead_source = (request.data.get("lead_source") or "").strip()
+        message = (request.data.get("message") or "").strip()
+        status_value = (request.data.get("status") or "not_yet").strip()
+
+        if not name:
+            return Response({"name": ["Lead name is required."]}, status=status.HTTP_400_BAD_REQUEST)
+        if not phone and not email:
+            return Response({"contact": ["Provide at least a phone number or email."]}, status=status.HTTP_400_BAD_REQUEST)
+
+        converted = status_value == "converted" or _truthy(request.data.get("is_contacted"))
+        lead = Lead.objects.create(
+            name=name,
+            email=email,
+            phone=phone,
+            company_name=company_name,
+            lead_source=lead_source,
+            message=message,
+            is_contacted=converted,
+            contacted_at=timezone.now() if converted else None,
+        )
+        return Response(_serialize_lead(lead), status=status.HTTP_201_CREATED)
+
+
+class TenantLeadStatsView(APIView):
+    permission_classes = [IsAuthenticated, IsAdminOrStaff]
+
+    def get(self, request):
+        from .models import Lead
+
+        total = Lead.objects.count()
+        converted = Lead.objects.filter(is_contacted=True).count()
+        not_yet = max(0, total - converted)
+        return Response({
+            "total": total,
+            "converted": converted,
+            "not_yet": not_yet,
+            "conversion_rate": round((converted / total) * 100) if total else 0,
+            "recent": Lead.objects.filter(created_at__gte=timezone.now() - timedelta(days=7)).count(),
+        })
+
+
+class TenantLeadDetailView(APIView):
+    permission_classes = [IsAuthenticated, IsAdminOrStaff]
+
+    def patch(self, request, pk):
+        from .models import Lead
+
+        lead = get_object_or_404(Lead, pk=pk)
+        for field in ("name", "email", "phone", "company_name", "lead_source", "message"):
+            if field in request.data:
+                setattr(lead, field, (request.data.get(field) or "").strip())
+
+        if "status" in request.data or "is_contacted" in request.data:
+            status_value = (request.data.get("status") or "").strip()
+            converted = status_value == "converted" or _truthy(request.data.get("is_contacted"))
+            lead.is_contacted = converted
+            lead.contacted_at = timezone.now() if converted else None
+
+        lead.save()
+        return Response(_serialize_lead(lead))
+
+    def delete(self, request, pk):
+        from .models import Lead
+
+        lead = get_object_or_404(Lead, pk=pk)
+        lead.delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)
+

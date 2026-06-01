@@ -24,6 +24,15 @@ def batched(iterable, n):
     while batch := tuple(islice(it, n)):
         yield batch
 
+
+def _trial_duration_days(subscription) -> int:
+    started_at = getattr(subscription, 'trial_started_at', None)
+    ends_at = getattr(subscription, 'trial_ends_at', None)
+    if started_at and ends_at:
+        seconds = max(0, (ends_at - started_at).total_seconds())
+        return max(1, int((seconds + 86399) // 86400))
+    return int(getattr(subscription, 'TRIAL_DURATION_DAYS', 0) or 0)
+
 @shared_task
 def generate_metered_invoices():
     now = timezone.now()
@@ -337,7 +346,7 @@ def check_trial_lifecycle():
                     template='emails/billing/trial_expired.html',
                     subject='Action Required: Your Netily Trial Has Expired',
                     context={
-                        'trial_duration_days': sub.TRIAL_DURATION_DAYS,
+                        'trial_duration_days': _trial_duration_days(sub),
                         'base_fee': sub.plan.base_license_fee,
                     }
                 )
@@ -539,15 +548,16 @@ def send_trial_welcome_email(self, company_id):
             return
 
         sub = company.subscription
+        trial_duration_days = _trial_duration_days(sub)
         context = {
             'trial_ends_at': sub.trial_ends_at,
-            'trial_duration_days': sub.TRIAL_DURATION_DAYS,
+            'trial_duration_days': trial_duration_days,
             'base_fee': str(sub.plan.base_license_fee) if sub.plan else '500',
         }
         _send_lifecycle_email(
             tenant,
             'emails/billing/trial_welcome.html',
-            f'Welcome to Netily! Your {sub.TRIAL_DURATION_DAYS}-Day Free Trial Starts Now',
+            f'Welcome to Netily! Your {trial_duration_days}-Day Free Trial Starts Now',
             context,
         )
     except Company.DoesNotExist:
