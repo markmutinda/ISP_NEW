@@ -700,11 +700,11 @@ def sync_active_method_to_tuma(schema_name, method):
     if not mobile:
         mobile = "254700000000"
 
+    # ✅ FIX: Removed "is_active": True (Tuma PUT does not support active status)
     update_payload = {
         "name": name,
         "email": email,
         "mobile": mobile,
-        "is_active": True,
     }
 
     sync_details = {
@@ -783,10 +783,13 @@ def deactivate_tuma_collections(schema_name):
     client = TumaClient()
     master_token = client.get_master_token()
 
+    # ✅ FIX: Tuma API does NOT support is_active via PUT — skip remote call but keep local tracking
     try:
-        res = client.update_business(master_token, cfg.tuma_business_id, {"is_active": False})
-        if not res.get("success"):
-            raise TumaError(res.get("message", "Failed to deactivate Tuma business"))
+        # Skipped upstream update: Tuma API does not support an is_active parameter via PUT
+        res = {"success": True}
+        # res = client.update_business(master_token, cfg.tuma_business_id, {"is_active": False})
+        # if not res.get("success"):
+        #     raise TumaError(res.get("message", "Failed to deactivate Tuma business"))
     except TumaNotFound:
         logger.warning(f"Tuma business gone for {schema_name} during deactivate, clearing local config")
         _clear_tuma_config(cfg)
