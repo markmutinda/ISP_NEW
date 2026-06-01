@@ -39,7 +39,7 @@ DEFAULTS = [
      'Hi {name}, your {plan_name} subscription has been renewed. New expiry: {expiry_date}. Stay connected!',
      ['{name}', '{plan_name}', '{expiry_date}']),
 
-    ('pppoe_expiry',             'PPPoE — Expiry Reminder',
+    ('pppoe_expiry_reminder',    'PPPoE — Expiry Reminder',       # WAS 'pppoe_expiry'
      'Hi {name}, your internet subscription ({plan_name}) expires in {days} day(s). Please renew to avoid interruption.',
      ['{name}', '{plan_name}', '{days}']),
 

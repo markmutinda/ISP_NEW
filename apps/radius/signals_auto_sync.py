@@ -2,7 +2,7 @@
 RADIUS Auto-Sync Signals - Complete Customer → RADIUS Integration
 
 This module provides AUTOMATIC synchronization between Django and RADIUS:
-1. When Customer is created → Auto-create RADIUS credentials (if PPPoE/Hotspot)
+1. When Customer is created → Auto-create RADIUS credentials (if PPPoE/Hotspot/Static)
 2. When CustomerRadiusCredentials is saved → Sync to RadCheck/RadReply
 3. When ServiceConnection changes → Update RADIUS status
 4. When Plan is updated → Update bandwidth for all users on that plan
@@ -149,9 +149,9 @@ def auto_create_radius_for_service(sender, instance, created, **kwargs):
     try:
         instance._is_processing_radius = True
         
-        # Only process PPPoE or Hotspot connections
+        # ✅ FIX: Process PPPoE, Hotspot, AND Static connections
         auth_type = (instance.auth_connection_type or '').upper()
-        if auth_type not in ['PPPOE', 'HOTSPOT']:
+        if auth_type not in ['PPPOE', 'HOTSPOT', 'STATIC']:
             return
         
         customer = instance.customer
@@ -309,7 +309,14 @@ def auto_create_radius_for_service(sender, instance, created, **kwargs):
         else:
             logger.info(f"Using explicit RADIUS password for: {username}")
         
-        conn_type = 'PPPOE' if auth_type == 'PPPOE' else 'HOTSPOT'
+        # ✅ FIX: Set connection type for STATIC as well
+        if auth_type == 'PPPOE':
+            conn_type = 'PPPOE'
+        elif auth_type == 'HOTSPOT':
+            conn_type = 'HOTSPOT'
+        else:
+            conn_type = 'STATIC'
+        
         profile = _get_or_create_bandwidth_profile(instance) if instance.plan else None
         
         # 🎯 Calculate Expiration Date based on Plan

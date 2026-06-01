@@ -139,7 +139,7 @@ def send_payment_confirmation_sms(self, customer_id, amount, reference='', schem
 def send_welcome_sms(self, customer_id, schema_name=None):
     """
     Triggered when a new customer is created.
-    Uses dynamic template from DB with event_type='pppoe_welcome'
+    Uses SMSNotifier which respects the PPPoE welcome toggle.
     
     Args:
         customer_id: ID of the customer
@@ -154,47 +154,18 @@ def send_welcome_sms(self, customer_id, schema_name=None):
     with schema_context(schema_name):
         try:
             from apps.customers.models import Customer
+            from apps.messaging.services.notification_sender import SMSNotifier
             customer = Customer.objects.select_related('user').get(id=customer_id)
-            phone = customer.user.phone_number
-            if not phone:
-                return
-
-            name = customer.user.first_name or 'Customer'
-
-            # FIX: Fetch actual RADIUS credentials for welcome message
+            # Delegate entirely to SMSNotifier which checks the new toggle
             username = ''
             password = ''
-            plan_name = ''
             try:
                 creds = customer.radius_credentials
-                if creds:
-                    username = creds.username or ''
-                    password = creds.password or ''
-                # Also fetch plan name if available
-                service = customer.services.filter(
-                    status='ACTIVE', plan__isnull=False
-                ).order_by('-activation_date').first()
-                if service and service.plan:
-                    plan_name = service.plan.name or ''
+                username = creds.username or ''
+                password = creds.password or ''
             except Exception:
                 pass
-
-            default_msg = (
-                f"Welcome {name}! Your internet service is now active. "
-                f"Username: {username} / Password: {password}. "
-                f"Contact support if you need help."
-            )
-            
-            msg = _get_rendered_message(
-                event_type='pppoe_welcome',
-                default_msg=default_msg,
-                name=name,
-                username=username,
-                password=password,
-                plan_name=plan_name,
-            )
-            
-            _send_auto_sms(phone, msg, 'auto_welcome_message')
+            SMSNotifier.pppoe_welcome(customer=customer, username=username, password=password)
         except Exception as e:
             logger.error(f"welcome_sms error: {e}")
             raise self.retry(exc=e)
@@ -273,7 +244,7 @@ def send_expiry_reminder_sms(self, customer_id, days_left=2, schema_name=None):
 def send_service_suspension_sms(self, customer_id, reason='', schema_name=None):
     """
     Triggered when a customer's service is suspended.
-    Uses dynamic template from DB with event_type='pppoe_suspended'
+    Uses SMSNotifier which respects the PPPoE suspension toggle.
     
     Args:
         customer_id: ID of the customer
@@ -289,41 +260,10 @@ def send_service_suspension_sms(self, customer_id, reason='', schema_name=None):
     with schema_context(schema_name):
         try:
             from apps.customers.models import Customer
+            from apps.messaging.services.notification_sender import SMSNotifier
             customer = Customer.objects.select_related('user').get(id=customer_id)
-            phone = customer.user.phone_number
-            if not phone:
-                return
-
-            name = customer.user.first_name or 'Customer'
-
-            # Fetch plan name for context (optional)
-            plan_name = ''
-            try:
-                service = customer.services.filter(
-                    status='ACTIVE', plan__isnull=False
-                ).order_by('-activation_date').first()
-                if service and service.plan:
-                    plan_name = service.plan.name or ''
-            except Exception:
-                pass
-
-            default_msg = (
-                f"Hi {name}, your internet service has been suspended. "
-                f"Reason: {reason} Please contact support or make a payment to restore service."
-                if reason else
-                f"Hi {name}, your internet service has been suspended. "
-                f"Please contact support or make a payment to restore service."
-            )
-            
-            msg = _get_rendered_message(
-                event_type='pppoe_suspended',
-                default_msg=default_msg,
-                name=name,
-                reason=reason,
-                plan_name=plan_name,
-            )
-            
-            _send_auto_sms(phone, msg, 'auto_service_suspension')
+            # Delegate to SMSNotifier which checks the new pppoe_service_suspended toggle
+            SMSNotifier.pppoe_suspended(customer=customer, reason=reason)
         except Exception as e:
             logger.error(f"service_suspension_sms error: {e}")
             raise self.retry(exc=e)

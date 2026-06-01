@@ -97,29 +97,8 @@ def _dispatch(phone: str, message: str) -> bool:
         return False
     try:
         from apps.messaging.services.gateway_dispatcher import GatewayDispatcher
-        from apps.messaging.models import SMSNotificationSettings
 
         dispatcher = GatewayDispatcher()
-
-        # Determine if inbuilt system is active from EITHER the gateway config
-        # OR the notification settings (they should be in sync, but check both
-        # to handle the case where they drift apart).
-        notif_settings = SMSNotificationSettings.get_settings()
-        is_inbuilt = dispatcher.use_inbuilt or notif_settings.use_inbuilt_system
-
-        if is_inbuilt:
-            from apps.messaging.services.credit_billing_service import CreditBillingService
-            from django.db import transaction
-            try:
-                with transaction.atomic():
-                    CreditBillingService.debit_for_sms(
-                        message_text=message,
-                        # No sms_message object yet — ledger entry links to None
-                    )
-            except Exception as e:
-                logger.warning(f"Automated SMS skipped — insufficient credits: {e}")
-                return False
-
         result = dispatcher.send_sms(to=phone, message=message)
         if result.get("success"):
             logger.info(f"SMS sent to {phone[:6]}***")
@@ -201,9 +180,7 @@ class SMSNotifier:
             plan_name=plan.name if plan else '',
             access_code=session.access_code or '',
         )
-        result = _send_once(f"hs_new:{session.session_id}", phone, msg, ttl=3600)
-        _log_sms(phone, msg, msg_type='automated', recipient_name=session.phone_number)
-        return result
+        return _send_once(f"hs_new:{session.session_id}", phone, msg, ttl=3600)
 
     @staticmethod
     def hotspot_welcome(session) -> bool:
@@ -235,9 +212,7 @@ class SMSNotifier:
             expires=expires or '',
             speed=plan.speed_display if hasattr(plan, 'speed_display') else '',
         )
-        result = _send_once(f"hs_welcome:{session.session_id}", phone, msg, ttl=3600)
-        _log_sms(phone, msg, msg_type='automated', recipient_name=session.phone_number)
-        return result
+        return _send_once(f"hs_welcome:{session.session_id}", phone, msg, ttl=3600)
 
     @staticmethod
     def hotspot_expiry_warning(session) -> bool:
@@ -262,9 +237,7 @@ class SMSNotifier:
             minutes_left=mins,
             access_code=session.access_code or '',
         )
-        result = _send_once(f"hotspot_expiry:{session.session_id}", phone, msg, ttl=600)
-        _log_sms(phone, msg, msg_type='automated', recipient_name=session.phone_number)
-        return result
+        return _send_once(f"hotspot_expiry:{session.session_id}", phone, msg, ttl=600)
 
     @staticmethod
     def hotspot_session_expired(session) -> bool:
@@ -281,9 +254,7 @@ class SMSNotifier:
             default_msg=default_msg,
             plan_name=session.plan.name if session.plan else '',
         )
-        result = _send_once(f"hs_expired:{session.session_id}", phone, msg, ttl=3600)
-        _log_sms(phone, msg, msg_type='automated', recipient_name=session.phone_number)
-        return result
+        return _send_once(f"hs_expired:{session.session_id}", phone, msg, ttl=3600)
 
     @staticmethod
     def hotspot_payment_failed(session, reason: str = "") -> bool:
@@ -301,9 +272,7 @@ class SMSNotifier:
             plan_name=session.plan.name if session.plan else '',
             reason=reason or '',
         )
-        result = _send_once(f"hs_payfail:{session.session_id}", phone, msg, ttl=3600)
-        _log_sms(phone, msg, msg_type='automated', recipient_name=session.phone_number)
-        return result
+        return _send_once(f"hs_payfail:{session.session_id}", phone, msg, ttl=3600)
 
     # ─────────────────────────────────────────────────────────────────
     # PPPOE / STATIC
@@ -327,12 +296,11 @@ class SMSNotifier:
             event_type='pppoe_welcome',
             default_msg=default_msg,
             customer_name=name,
+            name=name,          # alias for {name}
             username=username,
             password=password,
         )
-        result = _send_once(f"pppoe_welcome:{customer.id}", phone, msg, ttl=3600)
-        _log_sms(phone, msg, msg_type='automated', recipient_name=name, customer_id=customer.id)
-        return result
+        return _send_once(f"pppoe_welcome:{customer.id}", phone, msg, ttl=3600)
 
     @staticmethod
     def pppoe_new_subscription(customer, plan_name: str, amount: float,
@@ -364,15 +332,15 @@ class SMSNotifier:
             event_type='pppoe_new_subscription',
             default_msg=default_msg,
             customer_name=name,
+            name=name,                     # alias for {name}
             plan_name=plan_name,
             username=username,
             password=password,
             expires_at=expiry_str,
+            expiry_date=expiry_str,        # alias for {expiry_date}
             amount=f"{float(amount):,.0f}",
         )
-        result = _send_once(f"pppoe_new:{customer.id}", phone, msg, ttl=3600)
-        _log_sms(phone, msg, msg_type='automated', recipient_name=name, customer_id=customer.id)
-        return result
+        return _send_once(f"pppoe_new:{customer.id}", phone, msg, ttl=3600)
 
     @staticmethod
     def pppoe_payment(customer, amount: float, reference: str = "") -> bool:
@@ -402,13 +370,12 @@ class SMSNotifier:
             event_type='pppoe_payment',
             default_msg=default_msg,
             customer_name=name,
+            name=name,                     # alias for {name}
             amount=f"{float(amount):,.0f}",
             reference=reference or '',
             plan_name=plan_name,
         )
-        result = _send_once(f"pppoe_pay:{customer.id}:{reference}", phone, msg, ttl=3600)
-        _log_sms(phone, msg, msg_type='automated', recipient_name=name, customer_id=customer.id)
-        return result
+        return _send_once(f"pppoe_pay:{customer.id}:{reference}", phone, msg, ttl=3600)
 
     @staticmethod
     def pppoe_renewal(customer, plan_name: str, expires_at=None) -> bool:
@@ -429,12 +396,12 @@ class SMSNotifier:
             event_type='pppoe_renewal',
             default_msg=default_msg,
             customer_name=name,
+            name=name,                     # alias for {name}
             plan_name=plan_name,
             expires_at=expiry_str,
+            expiry_date=expiry_str,        # alias for {expiry_date}
         )
-        result = _send_once(f"pppoe_renew:{customer.id}:{expiry_str}", phone, msg, ttl=3600)
-        _log_sms(phone, msg, msg_type='automated', recipient_name=name, customer_id=customer.id)
-        return result
+        return _send_once(f"pppoe_renew:{customer.id}:{expiry_str}", phone, msg, ttl=3600)
 
     @staticmethod
     def pppoe_expiry_reminder(customer, days_left: int, plan_name: str = "") -> bool:
@@ -466,15 +433,15 @@ class SMSNotifier:
             event_type='pppoe_expiry_reminder',
             default_msg=default_msg,
             customer_name=name,
+            name=name,                     # alias for {name}
             plan_name=plan_name,
             days_left=days_left,
+            days=days_left,                # alias for {days}
             expiry_date=expiry_date,
             amount_due=amount_due,
         )
         # Dedup per customer per day (86400s)
-        result = _send_once(f"pppoe_expiry:{customer.id}:{days_left}", phone, msg, ttl=86400)
-        _log_sms(phone, msg, msg_type='automated', recipient_name=name, customer_id=customer.id)
-        return result
+        return _send_once(f"pppoe_expiry:{customer.id}:{days_left}", phone, msg, ttl=86400)
 
     @staticmethod
     def pppoe_suspended(customer, reason: str = "") -> bool:
@@ -494,11 +461,10 @@ class SMSNotifier:
             event_type='pppoe_suspended',
             default_msg=default_msg,
             customer_name=name,
+            name=name,                     # alias for {name}
             reason=reason or 'subscription expired',
         )
-        result = _send_once(f"pppoe_suspend:{customer.id}", phone, msg, ttl=3600)
-        _log_sms(phone, msg, msg_type='automated', recipient_name=name, customer_id=customer.id)
-        return result
+        return _send_once(f"pppoe_suspend:{customer.id}", phone, msg, ttl=3600)
 
     @staticmethod
     def pppoe_resumed(customer) -> bool:
@@ -522,11 +488,10 @@ class SMSNotifier:
             event_type='pppoe_resumed',
             default_msg=default_msg,
             customer_name=name,
+            name=name,                     # alias for {name}
             plan_name=plan_name,
         )
-        result = _send_once(f"pppoe_resume:{customer.id}", phone, msg, ttl=3600)
-        _log_sms(phone, msg, msg_type='automated', recipient_name=name, customer_id=customer.id)
-        return result
+        return _send_once(f"pppoe_resume:{customer.id}", phone, msg, ttl=3600)
 
     @staticmethod
     def pppoe_plan_changed(customer, old_plan: str, new_plan: str) -> bool:
@@ -546,12 +511,11 @@ class SMSNotifier:
             event_type='pppoe_plan_changed',
             default_msg=default_msg,
             customer_name=name,
+            name=name,                     # alias for {name}
             old_plan=old_plan,
             new_plan=new_plan,
         )
-        result = _send_once(f"pppoe_plan:{customer.id}:{new_plan}", phone, msg, ttl=3600)
-        _log_sms(phone, msg, msg_type='automated', recipient_name=name, customer_id=customer.id)
-        return result
+        return _send_once(f"pppoe_plan:{customer.id}:{new_plan}", phone, msg, ttl=3600)
 
     @staticmethod
     def pppoe_invoice_issued(customer, invoice) -> bool:
@@ -571,13 +535,12 @@ class SMSNotifier:
             event_type='pppoe_invoice_issued',
             default_msg=default_msg,
             customer_name=name,
+            name=name,                     # alias for {name}
             invoice_number=invoice.invoice_number or str(invoice.id),
             amount=f"{float(invoice.total_amount):,.0f}",
             due_date=invoice.due_date.strftime('%d %b %Y') if invoice.due_date else 'N/A',
         )
-        result = _send_once(f"invoice:{invoice.id}", phone, msg, ttl=3600)
-        _log_sms(phone, msg, msg_type='automated', recipient_name=name, customer_id=customer.id)
-        return result
+        return _send_once(f"invoice:{invoice.id}", phone, msg, ttl=3600)
 
     @staticmethod
     def hotspot_voucher_sold(voucher) -> bool:
@@ -603,9 +566,7 @@ class SMSNotifier:
                 plan_name=plan.name if plan else 'Hotspot',
                 face_value=f"{float(voucher.face_value):,.0f}",
             )
-            result = _send_once(f"voucher_sold:{voucher.id}", phone, msg, ttl=3600)
-            _log_sms(phone, msg, msg_type='automated', recipient_name=customer.full_name, customer_id=customer.id)
-            return result
+            return _send_once(f"voucher_sold:{voucher.id}", phone, msg, ttl=3600)
         except Exception as exc:
             logger.warning("hotspot_voucher_sold SMS failed: %s", exc)
             return False
@@ -631,9 +592,7 @@ class SMSNotifier:
                 pin=voucher.pin or '',
                 face_value=f"{float(voucher.face_value):,.0f}",
             )
-            result = _send_once(f"voucher:{voucher.id}", phone, msg, ttl=3600)
-            _log_sms(phone, msg, msg_type='automated', recipient_name=customer.full_name, customer_id=customer.id)
-            return result
+            return _send_once(f"voucher:{voucher.id}", phone, msg, ttl=3600)
         except Exception as exc:
             logger.warning("voucher_sold SMS failed: %s", exc)
             return False

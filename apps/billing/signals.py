@@ -32,60 +32,93 @@ def calculate_invoice_totals(sender, instance, **kwargs):
         instance.balance = instance.total_amount - instance.amount_paid
 
 
+@receiver(pre_save, sender=Payment)
+def track_payment_status_change(sender, instance, **kwargs):
+    """Track if payment status changed to COMPLETED"""
+    if instance.pk:
+        try:
+            old = sender.objects.get(pk=instance.pk)
+            instance._status_changed = (old.status != instance.status)
+        except sender.DoesNotExist:
+            instance._status_changed = True
+    else:
+        instance._status_changed = True  # new object
+
+
 @receiver(post_save, sender=Payment)
 def handle_payment_completion(sender, instance, created, **kwargs):
     """Handle actions when payment is completed"""
-    if not created and instance.status == 'COMPLETED':
-        # Update customer balance
-        customer = instance.customer
-        if customer:
-            from decimal import Decimal
-            customer.outstanding_balance = max(
-                Decimal('0'),
-                (customer.outstanding_balance or Decimal('0')) - instance.amount
-            )
-            customer.save(update_fields=['outstanding_balance', 'updated_at'])
+    # FIX: send SMS for both newly created completed payments AND status changes to COMPLETED
+    is_completed = instance.status == 'COMPLETED'
+    status_just_set = created or getattr(instance, '_status_changed', False)
+    
+    if not is_completed:
+        return
+
+    if not status_just_set:
+        return
+
+    customer = instance.customer
+    if customer:
+        from decimal import Decimal
+        customer.outstanding_balance = max(
+            Decimal('0'),
+            (customer.outstanding_balance or Decimal('0')) - instance.amount
+        )
+        customer.save(update_fields=['outstanding_balance', 'updated_at'])
+    
+    if instance.invoice:
+        invoice = instance.invoice
+        invoice.amount_paid += instance.amount
+        invoice.balance = invoice.total_amount - invoice.amount_paid
         
-        # Update invoice if exists
-        if instance.invoice:
-            invoice = instance.invoice
-            invoice.amount_paid += instance.amount
-            invoice.balance = invoice.total_amount - invoice.amount_paid
-            
-            if invoice.balance <= 0:
-                invoice.status = 'PAID'
-                invoice.paid_at = timezone.now()
-                invoice.paid_by = instance.created_by
-            
-            invoice.save()
+        # Track whether invoice just became PAID
+        was_paid = (invoice.status == 'PAID')
+        if invoice.balance <= 0 and not was_paid:
+            invoice.status = 'PAID'
+            invoice.paid_at = timezone.now()
+            invoice.paid_by = instance.created_by
+        
+        invoice.save()
 
-        # ── SMS: payment confirmation with deduplication ──
-        if customer:
+        # If invoice status became PAID due to this payment, restore credentials and send resume SMS
+        if invoice.status == 'PAID' and not was_paid and customer:
             try:
-                from apps.messaging.services.notification_sender import SMSNotifier
-                SMSNotifier.pppoe_payment(
-                    customer=customer,
-                    amount=float(instance.amount),
-                    reference=instance.payment_reference or instance.mpesa_receipt or '',
-                )
-                logger.info(f"Payment confirmation SMS sent to customer {customer.id} for payment {instance.id}")
+                if hasattr(customer, 'radius_credentials'):
+                    creds = customer.radius_credentials
+                    if not creds.is_enabled:
+                        creds.is_enabled = True
+                        creds.disabled_reason = ''
+                        creds.save()
+                        from apps.messaging.services.notification_sender import SMSNotifier
+                        SMSNotifier.pppoe_resumed(customer)
             except Exception as e:
-                logger.warning(f"Payment confirmation SMS failed: {e}")
+                logger.warning(f"Resume SMS after invoice paid failed: {e}")
 
-        # Email confirmation (async)
-        if customer:
-            try:
-                from django.db import connection
-                from apps.billing.tasks import send_payment_confirmation_email
-                send_payment_confirmation_email.delay(
-                    customer_id=customer.id,
-                    amount=float(instance.amount),
-                    reference=instance.payment_reference or '',
-                    payment_method=str(instance.payment_method) if instance.payment_method else '',
-                    tenant_schema=connection.schema_name,
-                )
-            except Exception as e:
-                logger.warning(f"Payment email task failed: {e}")
+    if customer:
+        try:
+            from apps.messaging.services.notification_sender import SMSNotifier
+            SMSNotifier.pppoe_payment(
+                customer=customer,
+                amount=float(instance.amount),
+                reference=instance.payment_reference or instance.mpesa_receipt or '',
+            )
+        except Exception as e:
+            logger.warning(f"Payment confirmation SMS failed: {e}")
+
+    if customer:
+        try:
+            from django.db import connection
+            from apps.billing.tasks import send_payment_confirmation_email
+            send_payment_confirmation_email.delay(
+                customer_id=customer.id,
+                amount=float(instance.amount),
+                reference=instance.payment_reference or '',
+                payment_method=str(instance.payment_method) if instance.payment_method else '',
+                tenant_schema=connection.schema_name,
+            )
+        except Exception as e:
+            logger.warning(f"Payment email task failed: {e}")
 
 
 @receiver(post_save, sender=Voucher)
