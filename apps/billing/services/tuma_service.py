@@ -289,10 +289,8 @@ class TumaClient:
             timeout=20,
         )
 
-        # 6. Handle non-200 responses — raise TumaError (not HTTPError) so
-        #    callers that catch TumaError get a descriptive gateway error
-        #    instead of a raw 500.
-        if response.status_code != 200:
+        # 6. 🟢 FIX: Allow both 200 (OK) and 201 (Created) success codes from Tuma
+        if response.status_code not in (200, 201):
             body = response.text[:500]
             logger.error("TUMA STK-PUSH ERROR (%s): %s", response.status_code, body)
             # Try to parse a human-readable message from the response
