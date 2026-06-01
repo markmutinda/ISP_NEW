@@ -7,11 +7,11 @@
 <div class="wrapper">
   <div class="header">
     <h1>🎉 Welcome to Netily!</h1>
-    <p>Your 14-Day Free Trial Starts Now</p>
+    <p>Your {{ trial_duration_days }}-Day Free Trial Starts Now</p>
   </div>
   <div class="body">
     <p>Hi {{ company_name }},</p>
-    <p>Congratulations! Your ISP management account has been created and your <strong>14-day free trial</strong> is now active.</p>
+    <p>Congratulations! Your ISP management account has been created and your <strong>{{ trial_duration_days }}-day free trial</strong> is now active.</p>
 
     <div class="highlight success">
       <strong>What you can do right now:</strong>
@@ -34,7 +34,7 @@
       <div class="info-row"><span class="info-label">After Trial</span><span class="info-value">KES {{ base_fee }} base fee to continue</span></div>
     </div>
 
-    <p>No credit card required during the trial. You'll only be charged after the 14 days if you choose to continue.</p>
+    <p>No credit card required during the trial. You'll only be charged after the {{ trial_duration_days }} day{{ trial_duration_days|pluralize }} if you choose to continue.</p>
   </div>
   <div class="footer">
     <p>Netily — ISP Management, Simplified</p>

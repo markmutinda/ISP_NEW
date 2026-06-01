@@ -337,6 +337,7 @@ def check_trial_lifecycle():
                     template='emails/billing/trial_expired.html',
                     subject='Action Required: Your Netily Trial Has Expired',
                     context={
+                        'trial_duration_days': sub.TRIAL_DURATION_DAYS,
                         'base_fee': sub.plan.base_license_fee,
                     }
                 )
@@ -539,13 +540,14 @@ def send_trial_welcome_email(self, company_id):
 
         sub = company.subscription
         context = {
-            'trial_end_date': sub.trial_ends_at,
-            'activation_fee': '500',
+            'trial_ends_at': sub.trial_ends_at,
+            'trial_duration_days': sub.TRIAL_DURATION_DAYS,
+            'base_fee': str(sub.plan.base_license_fee) if sub.plan else '500',
         }
         _send_lifecycle_email(
             tenant,
             'emails/billing/trial_welcome.html',
-            'Welcome to Netily! Your 14-Day Free Trial Starts Now',
+            f'Welcome to Netily! Your {sub.TRIAL_DURATION_DAYS}-Day Free Trial Starts Now',
             context,
         )
     except Company.DoesNotExist:
