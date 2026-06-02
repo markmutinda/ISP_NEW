@@ -184,7 +184,15 @@ class CustomerLoginView(APIView):
                     user = User.objects.get(phone_number=phone.lstrip('+'))
                 except User.DoesNotExist:
                     pass
-        
+
+        # NEW: Try portal username (stored as "username@portal.local")
+        if not user and phone_number and '@' not in phone_number:
+            raw = phone_number.strip()
+            try:
+                user = User.objects.get(email=f"{raw}@portal.local")
+            except User.DoesNotExist:
+                pass
+
         # Try to find user by email if not found by phone
         if not user and email:
             try:
