@@ -159,15 +159,10 @@ class CustomerUpdateSerializer(serializers.ModelSerializer):
     last_name = serializers.CharField(source='user.last_name', required=False, allow_blank=True)
     phone_number = serializers.CharField(source='user.phone_number', required=False, allow_blank=True)
     
-    # ADDED: Portal credential fields (write-only, not stored directly on Customer)
-    portal_username = serializers.CharField(required=False, allow_blank=True, write_only=True)
-    portal_password = serializers.CharField(required=False, allow_blank=True, write_only=True)
-    
     class Meta:
         model = Customer
         fields = [
             'email', 'first_name', 'last_name', 'phone_number',
-            'portal_username', 'portal_password',   # ADDED
             'date_of_birth', 'gender', 'id_type', 'id_number',
             'marital_status', 'occupation', 'employer',
             'customer_type', 'status', 'category',
@@ -193,10 +188,6 @@ class CustomerUpdateSerializer(serializers.ModelSerializer):
         return None
     
     def update(self, instance, validated_data):
-        # Extract portal credential fields (not stored on Customer model)
-        portal_username = validated_data.pop('portal_username', None)
-        portal_password = validated_data.pop('portal_password', None)
-        
         # Update user fields if provided
         user_data = validated_data.pop('user', {})
         
@@ -213,25 +204,6 @@ class CustomerUpdateSerializer(serializers.ModelSerializer):
             user = instance.user
             for attr, value in user_data.items():
                 setattr(user, attr, value)
-            user.save()
-        
-        # Handle portal username: store as email if it looks like an email,
-        # otherwise create a synthetic email for login compatibility.
-        if portal_username and portal_username.strip():
-            user = instance.user
-            clean_username = portal_username.strip()
-            # If it's not an email, create a placeholder email so login works
-            if '@' not in clean_username:
-                # e.g., "712345678" becomes "712345678@portal.local"
-                user.email = f"{clean_username}@portal.local"
-            else:
-                user.email = clean_username
-            user.save()
-        
-        # Handle portal password
-        if portal_password and portal_password.strip():
-            user = instance.user
-            user.set_password(portal_password.strip())
             user.save()
         
         # Update customer fields
