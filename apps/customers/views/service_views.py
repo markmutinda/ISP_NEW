@@ -459,13 +459,9 @@ class ServiceConnectionViewSet(viewsets.ModelViewSet):
                 schema_name=db_conn.schema_name,
             )
             
-            # Reduce outstanding balance
-            if customer.outstanding_balance is not None:
-                customer.outstanding_balance = max(
-                    Decimal('0'),
-                    customer.outstanding_balance - payment_amount
-                )
-                customer.save(update_fields=['outstanding_balance'])
+            # REMOVED: manual outstanding_balance reduction here
+            # The payment post_save signal in billing/signals.py handles this automatically
+            # to avoid double-reducing the balance.
             
             logger.info(
                 f"Payment {payment_obj.payment_number} recorded for "

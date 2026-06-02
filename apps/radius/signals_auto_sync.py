@@ -650,7 +650,13 @@ def handle_invoice_status_radius(sender, instance, **kwargs):
                 credentials.save()
                 logger.info(f"Restored RADIUS after payment: {instance.id}")
                 
-                # NOTE: pppoe_resumed SMS is sent from service_views.activate, not here
+                # Send resumed SMS - respects the pppoe_service_resumed toggle
+                try:
+                    from apps.messaging.services.notification_sender import SMSNotifier
+                    SMSNotifier.pppoe_resumed(customer)
+                    logger.info(f"Resumed SMS sent to customer {customer.id} after invoice paid")
+                except Exception as e:
+                    logger.warning(f"Resumed SMS after invoice paid failed: {e}")
                 
     except Exception as e:
         logger.error(f"Failed to handle invoice status for RADIUS: {e}")

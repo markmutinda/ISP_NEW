@@ -73,7 +73,7 @@ def _get_rendered_message(event_type: str, default_msg: str, **context) -> str:
 def send_payment_confirmation_sms(self, customer_id, amount, reference='', schema_name=None):
     """
     Triggered after a payment is marked COMPLETED.
-    Uses dynamic template from DB with event_type='pppoe_payment'
+    Delegates to SMSNotifier which respects the PPPoE payment toggle.
     
     Args:
         customer_id: ID of the customer
@@ -90,46 +90,13 @@ def send_payment_confirmation_sms(self, customer_id, amount, reference='', schem
     with schema_context(schema_name):
         try:
             from apps.customers.models import Customer
+            from apps.messaging.services.notification_sender import SMSNotifier
             customer = Customer.objects.select_related('user').get(id=customer_id)
-            phone = customer.user.phone_number
-            if not phone:
-                return
-
-            name = customer.user.first_name or 'Customer'
-
-            # FIX: fetch plan name and expiry info since templates may use {plan_name} and {expiry_date}
-            plan_name = ''
-            expiry_date = ''
-            try:
-                service = customer.services.filter(
-                    status='ACTIVE', plan__isnull=False
-                ).order_by('-activation_date').first()
-                if service and service.plan:
-                    plan_name = service.plan.name or ''
-                    # Get expiry from RADIUS credentials
-                    if hasattr(customer, 'radius_credentials') and customer.radius_credentials:
-                        creds = customer.radius_credentials
-                        if creds.expiration_date:
-                            expiry_date = creds.expiration_date.strftime('%d %b %Y')
-            except Exception:
-                pass
-
-            default_msg = (
-                f"Hi {name}, your payment of KES {amount:,.2f} has been received. "
-                f"Ref: {reference}. Thank you!"
+            SMSNotifier.pppoe_payment(
+                customer=customer,
+                amount=float(amount),
+                reference=reference or '',
             )
-            
-            msg = _get_rendered_message(
-                event_type='pppoe_payment',
-                default_msg=default_msg,
-                name=name,
-                amount=f"{amount:,.2f}",
-                reference=reference,
-                plan_name=plan_name,
-                expiry_date=expiry_date,
-            )
-            
-            _send_auto_sms(phone, msg, 'auto_payment_confirmation')
         except Exception as e:
             logger.error(f"payment_confirmation_sms error: {e}")
             raise self.retry(exc=e)
@@ -175,7 +142,7 @@ def send_welcome_sms(self, customer_id, schema_name=None):
 def send_expiry_reminder_sms(self, customer_id, days_left=2, schema_name=None):
     """
     Triggered before a subscription/plan expires.
-    Uses dynamic template from DB with event_type='pppoe_expiry'
+    Delegates to SMSNotifier which respects the PPPoE expiry reminder toggle.
     
     Args:
         customer_id: ID of the customer
@@ -191,50 +158,20 @@ def send_expiry_reminder_sms(self, customer_id, days_left=2, schema_name=None):
     with schema_context(schema_name):
         try:
             from apps.customers.models import Customer
+            from apps.messaging.services.notification_sender import SMSNotifier
             customer = Customer.objects.select_related('user').get(id=customer_id)
-            phone = customer.user.phone_number
-            if not phone:
-                return
-
-            name = customer.user.first_name or 'Customer'
-
-            # FIX: fetch plan, expiry, and amount due info
             plan_name = ''
-            expiry_date = ''
-            amount_due = ''
-            username = ''
             try:
-                creds = customer.radius_credentials
-                if creds:
-                    if creds.expiration_date:
-                        expiry_date = creds.expiration_date.strftime('%d %b %Y')
-                    username = creds.username or ''
-                service = customer.services.filter(
-                    status='ACTIVE', plan__isnull=False
-                ).order_by('-activation_date').first()
+                service = customer.services.filter(status='ACTIVE', plan__isnull=False).first()
                 if service and service.plan:
                     plan_name = service.plan.name or ''
-                    amount_due = f"{float(service.plan.base_price):,.0f}"
             except Exception:
                 pass
-
-            default_msg = (
-                f"Hi {name}, your internet plan expires in {days_left} day(s). "
-                f"Please renew to avoid service interruption."
-            )
-            
-            msg = _get_rendered_message(
-                event_type='pppoe_expiry',
-                default_msg=default_msg,
-                name=name,
+            SMSNotifier.pppoe_expiry_reminder(
+                customer=customer,
                 days_left=days_left,
                 plan_name=plan_name,
-                expiry_date=expiry_date,
-                amount_due=amount_due,
-                username=username,
             )
-            
-            _send_auto_sms(phone, msg, 'auto_expiry_reminder')
         except Exception as e:
             logger.error(f"expiry_reminder_sms error: {e}")
             raise self.retry(exc=e)

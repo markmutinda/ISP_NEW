@@ -119,16 +119,19 @@ class CustomerCreateSerializer(serializers.ModelSerializer):
             **validated_data
         )
 
-        # Auto SMS: welcome message with tenant context
-        try:
-            from apps.messaging.tasks import send_welcome_sms
-            from django.db import connection
-            send_welcome_sms.delay(
-                customer_id=customer.id,
-                schema_name=connection.schema_name,
-            )
-        except Exception:
-            pass
+        # REMOVED: Auto SMS welcome message – welcome SMS is now sent only after service activation.
+        # The welcome SMS was firing before RADIUS credentials existed, causing missing credentials in the message.
+        # The proper welcome SMS (with username/password) is triggered in service_views.activate().
+        #
+        # try:
+        #     from apps.messaging.tasks import send_welcome_sms
+        #     from django.db import connection
+        #     send_welcome_sms.delay(
+        #         customer_id=customer.id,
+        #         schema_name=connection.schema_name,
+        #     )
+        # except Exception:
+        #     pass
         
         return customer
     
