@@ -1611,7 +1611,15 @@ class HotspotPhoneReconnectView(APIView):
                         plan = direct_session.plan
                         plan_device_limit = getattr(plan, 'simultaneous_devices', 1) or 1
                         
-                        if plan_device_limit <= 1:
+                        # Only block if this is a NEW device trying to join a single-device plan.
+                        # If this MAC already matches the session's MAC, it's a reconnect — always allow.
+                        is_same_device = (
+                            mac_address and 
+                            direct_session.mac_address and 
+                            mac_address.upper() == direct_session.mac_address.upper()
+                        )
+                        
+                        if plan_device_limit <= 1 and not is_same_device:
                             return Response(
                                 {
                                     'error': 'Your plan supports only 1 device. '
@@ -1741,8 +1749,11 @@ class HotspotPhoneReconnectView(APIView):
             plan = base_session.plan
             plan_device_limit = getattr(plan, 'simultaneous_devices', 1) or 1
 
-            # ── ANTI-ABUSE: single-device plans cannot use this feature ──
-            if plan_device_limit <= 1:
+            # ── ANTI-ABUSE: single-device plans cannot add NEW devices ──
+            # But always allow reconnect if this MAC already has an active session.
+            existing_mac_session = active_sessions.filter(mac_address=mac_address).first()
+
+            if plan_device_limit <= 1 and not existing_mac_session:
                 return Response(
                     {
                         'error': 'Your plan supports only 1 device. '

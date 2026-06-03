@@ -193,12 +193,13 @@ class SMSNotifier:
             return False
         plan = session.plan
         expires = ""
+        expiry_time = "N/A"
         if session.expires_at:
             from django.utils import timezone
-            expires = session.expires_at.astimezone(
-                timezone.get_current_timezone()
-            ).strftime("%H:%M")
+            local_tz = timezone.get_current_timezone()
+            expires = session.expires_at.astimezone(local_tz).strftime("%H:%M")
             expires = f" Expires at {expires}"
+            expiry_time = session.expires_at.astimezone(local_tz).strftime("%d %b %Y %H:%M")
         default_msg = (
             f"WiFi Active! Code: {session.access_code or ''}. Plan: {plan.name if plan else ''} ({plan.duration_display if hasattr(plan, 'duration_display') else ''}){expires}. "
             f"Speed: {plan.speed_display if hasattr(plan, 'speed_display') else ''}. Enjoy!"
@@ -210,6 +211,7 @@ class SMSNotifier:
             plan_name=plan.name if plan else '',
             duration=plan.duration_display if hasattr(plan, 'duration_display') else '',
             expires=expires or '',
+            expiry_time=expiry_time,   # ← NEW: full datetime for templates
             speed=plan.speed_display if hasattr(plan, 'speed_display') else '',
         )
         return _send_once(f"hs_welcome:{session.session_id}", phone, msg, ttl=3600)
