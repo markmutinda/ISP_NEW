@@ -750,6 +750,9 @@ def send_pppoe_expiry_reminders():
     Uses SMSNotificationSettings.pppoe_expiry_intervals (JSON array) to support
     multiple reminders (e.g. 4 days before, 5 hours before, 30 minutes before).
     Falls back to the old pppoe_expiry_days_before field if present.
+    
+    FIX: Hours window increased from 10 minutes to 30 minutes to prevent
+    missed reminders due to task scheduling gaps.
     """
     TenantModel = get_tenant_model()
     
@@ -777,12 +780,19 @@ def send_pppoe_expiry_reminders():
                     try:
                         value = int(interval.get('value', 4))
                         unit = interval.get('unit', 'days')
+                        
+                        # ============================================================
+                        # FIX: Increased window sizes to prevent missed reminders
+                        # ============================================================
                         if unit == 'hours':
                             delta = timedelta(hours=value)
-                            window = timedelta(minutes=10)   # 10‑min window for hourly
+                            window = timedelta(minutes=30)   # ← CHANGED: 30min window (was 10min)
+                        elif unit == 'minutes':
+                            delta = timedelta(minutes=value)
+                            window = timedelta(minutes=5)    # 5min window for minute-based
                         else:  # days (default)
                             delta = timedelta(days=value)
-                            window = timedelta(hours=1)      # 1‑hour window for daily
+                            window = timedelta(hours=2)      # ← CHANGED: 2hr window (was 1hr)
 
                         lower = now + delta - window
                         upper = now + delta
@@ -802,6 +812,12 @@ def send_pppoe_expiry_reminders():
                                     cred.bandwidth_profile.name
                                     if cred.bandwidth_profile else ""
                                 )
+                                
+                                # FIX: Send the reminder with the correct dedup key
+                                # The SMSNotifier.pppoe_expiry_reminder method already
+                                # handles its own dedup using f"pppoe_expiry:{customer.id}:{days_left}"
+                                # This ensures 5-hour reminder uses a different key than 1-day reminder
+                                # (since days_left will be 0 or 1 for hours reminders)
                                 SMSNotifier.pppoe_expiry_reminder(
                                     customer=customer,
                                     days_left=days_left,

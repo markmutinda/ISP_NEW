@@ -28,27 +28,38 @@ def _get_notif_settings():
         return None
 
 
+# ============================================================
+# FIXED _log_sms - removed invalid 'message_type' field
+# ============================================================
 def _log_sms(phone: str, message: str, status: str = 'sent',
               msg_type: str = 'automated', recipient_name: str = '',
               customer_id=None, provider_id: str = ''):
     """
     Persist every outbound SMS to SMSMessage so the History tab shows ALL messages
     (manual, automated, campaign).  Never raises – logging must not break sends.
+    
+    FIX: Removed 'message_type' field which does not exist on the SMSMessage model.
+    The model uses 'type' field for the message type (single/bulk/automated/campaign).
     """
     try:
         from apps.messaging.models import SMSMessage
         from django.utils import timezone as tz
+        
+        # Ensure we have a valid datetime for sent_at
+        sent_at = tz.now() if status == 'sent' else None
+        
         SMSMessage.objects.create(
             recipient=phone,
             recipient_name=recipient_name or '',
             message=message,
             status=status,
-            type=msg_type,           # frontend reads 'type'
-            message_type=msg_type,   # keep both
+            type=msg_type,           # FIX: Use 'type' not 'message_type'
             provider='system',
             provider_message_id=provider_id or '',
-            sent_at=tz.now(),
+            sent_at=sent_at,
+            customer_id=customer_id if customer_id else None,
         )
+        logger.debug(f"SMS logged: {status} to {phone[:6]}***")
     except Exception as exc:
         logger.warning("[SMS Log] could not persist message: %s", exc)
 
@@ -407,7 +418,12 @@ class SMSNotifier:
 
     @staticmethod
     def pppoe_expiry_reminder(customer, days_left: int, plan_name: str = "") -> bool:
-        """Called X days before PPPoE expiry."""
+        """Called X days before PPPoE expiry.
+        
+        FIX: Added hour_bucket to dedup key so that multiple reminders
+        (e.g., 5 hours before and 1 day before) don't collide with each other.
+        The hour_bucket changes every hour, allowing different intervals.
+        """
         s = _get_notif_settings()
         if s and not s.pppoe_expiry_reminder:
             return False
@@ -442,8 +458,22 @@ class SMSNotifier:
             expiry_date=expiry_date,
             amount_due=amount_due,
         )
-        # Dedup per customer per day (86400s)
-        return _send_once(f"pppoe_expiry:{customer.id}:{days_left}", phone, msg, ttl=86400)
+        
+        # ============================================================
+        # FIX: Add hour_bucket to dedup key to prevent collisions
+        # between different intervals (e.g., 5 hours vs 1 day)
+        # The hour_bucket changes every hour, so multiple reminders
+        # within the same hour will be deduped, but reminders from
+        # different intervals (different days_left values) won't collide.
+        # ============================================================
+        from django.utils import timezone as _tz
+        hour_bucket = _tz.now().strftime('%Y%m%d%H')  # unique per hour
+        
+        # Dedup with both days_left AND hour_bucket to separate intervals
+        return _send_once(
+            f"pppoe_expiry:{customer.id}:{days_left}:{hour_bucket}",
+            phone, msg, ttl=86400
+        )
 
     @staticmethod
     def pppoe_suspended(customer, reason: str = "") -> bool:

@@ -151,15 +151,51 @@ class SMSStatsSerializer(serializers.Serializer):
     messages_this_week = serializers.IntegerField()
 
 
+# ============================================================
+# FIXED SMSBalanceSerializer - handles None, dict, and large numbers
+# ============================================================
 class SMSBalanceSerializer(serializers.Serializer):
     """Response serializer for /sms/balance/"""
-
-    balance = serializers.FloatField()
+    
+    # FIX: Changed from FloatField to DecimalField with allow_null=True
+    # This handles None values and large numbers without precision loss
+    balance = serializers.DecimalField(
+        max_digits=20, 
+        decimal_places=4, 
+        allow_null=True, 
+        default=0
+    )
     currency = serializers.CharField(default='KES')
-    unit_cost = serializers.DecimalField(max_digits=5, decimal_places=2)
-    units_remaining = serializers.IntegerField()
-    provider = serializers.CharField(default='africastalking')
-    last_updated = serializers.DateTimeField()
+    unit_cost = serializers.DecimalField(max_digits=10, decimal_places=4, default=0.50)
+    units_remaining = serializers.IntegerField(default=0)
+    provider = serializers.CharField(default='unknown')
+    last_updated = serializers.DateTimeField(required=False, allow_null=True)
+
+    def to_representation(self, instance):
+        """
+        Override to ensure balance is always a number, not a dict,
+        and handle None values gracefully.
+        """
+        # Create a copy to avoid mutating the original
+        data = super().to_representation(instance)
+        
+        # Handle case where balance might be a dict from some providers
+        balance_value = instance.get('balance') if isinstance(instance, dict) else data.get('balance')
+        
+        if isinstance(balance_value, dict):
+            # Extract balance from dict if needed
+            data['balance'] = balance_value.get('balance', 0)
+        elif balance_value is None:
+            data['balance'] = 0
+        elif isinstance(balance_value, (int, float)):
+            # Convert to Decimal-friendly format
+            data['balance'] = float(balance_value)
+        
+        # Ensure units_remaining is an integer
+        if data.get('units_remaining') is None:
+            data['units_remaining'] = 0
+        
+        return data
 
 
 class SMSRetrySerializer(serializers.Serializer):

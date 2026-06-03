@@ -425,6 +425,9 @@ class SMSCampaignViewSet(viewsets.ModelViewSet):
 class SMSStatsView(APIView):
     """
     GET /api/v1/messaging/sms/stats/
+    
+    FIX: Stats now correctly count 'sent' + 'delivered' as successful deliveries
+    because automated SMS messages are logged with status='sent', not 'delivered'.
     """
     permission_classes = [IsAuthenticated, IsAdminOrStaff]
 
@@ -434,9 +437,13 @@ class SMSStatsView(APIView):
 
         qs = SMSMessage.objects.all()
 
+        # ============================================================
+        # FIX: Count both 'sent' and 'delivered' as successful
+        # Automated messages use 'sent', manual messages may use 'delivered'
+        # ============================================================
         agg = qs.aggregate(
             total_sent=Count('id'),
-            delivered=Count('id', filter=Q(status='delivered')),
+            delivered=Count('id', filter=Q(status__in=['delivered', 'sent'])),  # ← FIX: include 'sent'
             pending=Count('id', filter=Q(status='pending')),
             failed=Count('id', filter=Q(status='failed')),
             total_cost=Sum('cost'),
@@ -444,13 +451,21 @@ class SMSStatsView(APIView):
             week_count=Count('id', filter=Q(created_at__gte=week_start)),
         )
 
-        delivered = agg['delivered'] or 0
+        # ============================================================
+        # FIX: Delivery rate should be based on successful deliveries
+        # vs total sent, NOT just 'delivered' status
+        # ============================================================
         total = agg['total_sent'] or 0
-        delivery_rate = round((delivered / total * 100) if total > 0 else 0, 1)
+        failed = agg['failed'] or 0
+        successful = agg['delivered'] or 0  # This now includes both 'sent' and 'delivered'
+        
+        # Delivery rate = (total - failed) / total * 100
+        # This counts all non-failed messages as successfully sent
+        delivery_rate = round(((total - failed) / total * 100) if total > 0 else 0, 1)
 
         data = {
             'total_sent': agg['total_sent'] or 0,
-            'delivered': delivered,
+            'delivered': successful,  # 'delivered' field now shows successful sends
             'pending': agg['pending'] or 0,
             'failed': agg['failed'] or 0,
             'delivery_rate': delivery_rate,
@@ -469,6 +484,7 @@ class SMSBalanceView(APIView):
     """
     permission_classes = [IsAuthenticated, IsAdminOrStaff]
 
+    # FIX 4c: Updated get() method for proper balance handling
     def get(self, request):
         try:
             dispatcher = GatewayDispatcher()
@@ -482,6 +498,16 @@ class SMSBalanceView(APIView):
         unit_cost = balance_info.get('unit_cost', 0.50) or 0.50
         balance_info['units_remaining'] = int(bal / unit_cost) if unit_cost else 0
         balance_info['last_updated'] = timezone.now().isoformat()
+
+        # For inbuilt system, balance IS the sms_units (not money)
+        # unit_cost is meaningless, set units_remaining = balance
+        if balance_info.get('currency') == 'SMS_UNITS':
+            balance_info['units_remaining'] = int(bal)
+            balance_info['unit_cost'] = 1.0
+
+        # Ensure balance is a number (not a dict) for the serializer
+        if isinstance(balance_info.get('balance'), dict):
+            balance_info['balance'] = balance_info['balance'].get('balance', 0)
 
         return Response(SMSBalanceSerializer(balance_info).data)
 
@@ -537,7 +563,12 @@ class SMSGatewayConfigViewSet(viewsets.ModelViewSet):
                 extra_config=config.extra_config,
             )
             bal = backend.get_balance()
-            return Response({"success": True, "balance": bal})
+            # FIX 4b: Ensure balance is a number, not a dict
+            if isinstance(bal, dict):
+                balance_value = bal.get('balance', 0)
+            else:
+                balance_value = bal
+            return Response({"success": True, "balance": balance_value})
         except Exception as e:
             return Response({"success": False, "error": str(e)}, status=400)
 
