@@ -261,7 +261,7 @@ class SMSNotificationSettingsSerializer(serializers.ModelSerializer):
             'hotspot_payment_failed', 'hotspot_session_expired',
             # pppoe
             'pppoe_welcome', 'pppoe_payment_confirmation',
-            'pppoe_expiry_reminder', 'pppoe_expiry_days_before',
+            'pppoe_expiry_reminder', 'pppoe_expiry_intervals',   # ← REPLACED
             'pppoe_service_suspended', 'pppoe_service_resumed',
             'pppoe_plan_changed', 'pppoe_renewal_confirmation',
             'pppoe_new_subscription',

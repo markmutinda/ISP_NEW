@@ -319,8 +319,14 @@ class SMSNotificationSettings(models.Model):
         help_text="SMS confirmation after a PPPoE payment is received")
     pppoe_expiry_reminder = models.BooleanField(default=False,
         help_text="Remind PPPoE customer before subscription expires")
-    pppoe_expiry_days_before = models.PositiveIntegerField(default=4,
-        help_text="How many days before expiry to send the PPPoE reminder")
+    
+    # REPLACED: pppoe_expiry_days_before with flexible JSON intervals
+    pppoe_expiry_intervals = models.JSONField(
+        default=list,
+        blank=True,
+        help_text='List of {"value": 4, "unit": "days"} objects, e.g. [{"value":4,"unit":"days"},{"value":5,"unit":"hours"}]'
+    )
+    
     pppoe_service_suspended = models.BooleanField(default=False,
         help_text="Notify when PPPoE service is suspended")
     pppoe_service_resumed = models.BooleanField(default=False,
