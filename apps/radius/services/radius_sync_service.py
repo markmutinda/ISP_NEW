@@ -334,10 +334,20 @@ class RadiusSyncService:
         customer = connection.customer
         plan = connection.plan
         
-        radius_username = self._generate_unique_username(
-            connection.username or customer.phone_number
-        )
-        password = connection.password or customer.phone_number
+        # Safely resolve username from billing account or radius credentials tables
+        creds = getattr(customer, 'radius_credentials', None) if customer else None
+        base_user = getattr(connection, 'billing_account_number', None)
+        if not base_user and creds:
+            base_user = getattr(creds, 'username', None)
+        if not base_user:
+            base_user = customer.phone_number if customer else ""
+            
+        radius_username = self._generate_unique_username(base_user)
+        
+        # Safely resolve password from radius credentials profiles
+        password = getattr(creds, 'password', None) if creds else None
+        if not password:
+            password = customer.phone_number if customer else "12345678"
         
         check_attrs = {}
         reply_attrs = {}
@@ -487,12 +497,13 @@ class RadiusSyncService:
         return self.sync_service_connection(subscription.service_connection)
 
     # ═════════════════════════════════════════════════════════════════
-    # 🟢 ADD THIS METHOD TO FIX THE CRON ERROR
+    # 🟢 FIXED METHOD WITH DEFENSIVE NETWORK BLOCKS
     # ═════════════════════════════════════════════════════════════════
     def sync_all_customers(self) -> Dict[str, Any]:
         """
         Loops through all ServiceConnections inside the active tenant schema
         and ensures their check/reply profile configurations match the database state.
+        Implements guardrails: if is_enabled is False, user is disabled.
         """
         from apps.customers.models import ServiceConnection
         
@@ -501,14 +512,22 @@ class RadiusSyncService:
         
         for conn in connections:
             try:
-                if conn.status == 'ACTIVE' and conn.plan:
+                # Fetch radius credentials safely to inspect active network allowance profiles
+                creds = getattr(conn.customer, 'radius_credentials', None) if conn.customer else None
+                is_network_enabled = getattr(creds, 'is_enabled', True) if creds else True
+
+                # Guardrail: Only sync as live if connection is active AND not flagged as disabled
+                if conn.status == 'ACTIVE' and conn.plan and is_network_enabled:
                     self.sync_service_connection(conn)
                 else:
-                    # Isolate username definitions defensively matching core schemas
-                    base_user = conn.username or (conn.customer.phone_number if conn.customer else "")
+                    # Resolve username definitions defensively matching core schemas
+                    base_user = getattr(creds, 'username', None) if creds else getattr(conn, 'billing_account_number', None)
+                    if not base_user and conn.customer:
+                        base_user = conn.customer.phone_number
+                        
                     if base_user:
                         radius_username = self._generate_unique_username(base_user)
-                        self.disable_radius_user(radius_username, f"Auto-disabled due to state: {conn.status}")
+                        self.disable_radius_user(radius_username, f"Auto-disabled due to state: {conn.status} (Network Enabled: {is_network_enabled})")
                 total_synced += 1
             except Exception as e:
                 logger.error(f"[BULK RADIUS SYNC ERROR] Failed on connection ID {conn.id}: {e}")
