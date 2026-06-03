@@ -334,17 +334,12 @@ class RadiusSyncService:
         customer = connection.customer
         plan = connection.plan
         
-        # Safely resolve username from billing account or radius credentials tables
-        creds = getattr(customer, 'radius_credentials', None) if customer else None
-        base_user = getattr(connection, 'billing_account_number', None)
-        if not base_user and creds:
-            base_user = getattr(creds, 'username', None)
-        if not base_user:
-            base_user = customer.phone_number if customer else ""
-            
+        # 🔧 FIX 2: Safely resolve username from billing account number attributes
+        base_user = getattr(connection, 'billing_account_number', None) or getattr(connection, 'username', None) or (customer.phone_number if customer else "")
         radius_username = self._generate_unique_username(base_user)
         
         # Safely resolve password from radius credentials profiles
+        creds = getattr(customer, 'radius_credentials', None) if customer else None
         password = getattr(creds, 'password', None) if creds else None
         if not password:
             password = customer.phone_number if customer else "12345678"
@@ -381,7 +376,13 @@ class RadiusSyncService:
             reply_attrs[self.ATTR_RATE_LIMIT] = rate_limit
         
         expiration_datetime = None
-        start = connection.start_date if connection.start_date else timezone.now()
+        # 🔧 FIX 1: Safely fall back onto activation_date or created_at timestamps
+        start = getattr(connection, 'activation_date', None) or getattr(connection, 'created_at', None) or timezone.now()
+        
+        # Normalize pure date objects to full datetimes so time-deltas don't crash
+        if isinstance(start, datetime.date) and not isinstance(start, datetime.datetime):
+            start = timezone.make_aware(datetime.datetime.combine(start, datetime.time.min))
+        
         validity_type = getattr(plan, 'validity_type', 'DAYS')
         
         if validity_type == 'UNLIMITED':
