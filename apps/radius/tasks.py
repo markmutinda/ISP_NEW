@@ -748,6 +748,8 @@ def send_pppoe_expiry_reminders():
     """
     Send SMS reminders to PPPoE customers whose subscriptions are expiring soon.
     Uses DB-level dedup via RadiusExpiryReminderLog — survives Redis restarts.
+    
+    FIX: Always log to DB regardless of sent result to prevent retry spam.
     """
     TenantModel = get_tenant_model()
 
@@ -830,16 +832,18 @@ def send_pppoe_expiry_reminders():
                                     plan_name=plan_name,
                                 )
 
-                                if sent:
-                                    RadiusExpiryReminderLog.objects.get_or_create(
-                                        customer_id=str(customer.id),
-                                        interval_key=interval_key,
-                                        expiration_date=cred.expiration_date,
-                                    )
-                                    logger.info(
-                                        f"[EXPIRY] Sent {interval_key} reminder to "
-                                        f"{customer.customer_code} — logged to DB"
-                                    )
+                                # FIX: Always log to DB regardless of sent result
+                                # This prevents retry spam even if SMS fails
+                                RadiusExpiryReminderLog.objects.get_or_create(
+                                    customer_id=str(customer.id),
+                                    interval_key=interval_key,
+                                    expiration_date=cred.expiration_date,
+                                    defaults={'username': cred.username}
+                                )
+                                logger.info(
+                                    f"[EXPIRY] Logged {interval_key} reminder for "
+                                    f"{customer.customer_code} sent={sent}"
+                                )
 
                             except Exception as e:
                                 logger.warning(
