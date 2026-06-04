@@ -90,6 +90,17 @@ class MpesaConfiguration(AuditMixin):
     )
     validation_error = models.TextField(blank=True, help_text="Error message from last validation")
     
+    # C2B URL Registration Status
+    c2b_urls_registered = models.BooleanField(
+        default=False,
+        help_text="Whether C2B callback URLs have been registered with Safaricom"
+    )
+    c2b_urls_registered_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text="When C2B URLs were last registered"
+    )
+    
     # Usage limits
     daily_transaction_limit = models.DecimalField(
         max_digits=12, 
@@ -118,6 +129,7 @@ class MpesaConfiguration(AuditMixin):
             models.Index(fields=['schema_name', 'is_active']),
             models.Index(fields=['schema_name', 'is_default']),
             models.Index(fields=['business_shortcode', 'shortcode_type']),
+            models.Index(fields=['c2b_urls_registered']),  # Added index for URL registration status
         ]
         unique_together = [
             ['schema_name', 'business_shortcode', 'shortcode_type'],
@@ -127,7 +139,8 @@ class MpesaConfiguration(AuditMixin):
         env = "Sandbox" if self.is_sandbox else "Production"
         status = "✓" if self.is_active else "✗"
         default = " (Default)" if self.is_default else ""
-        return f"{self.shortcode_type}: {self.business_shortcode} [{env}]{default} {status}"
+        registered = " [C2B Registered]" if self.c2b_urls_registered else ""
+        return f"{self.shortcode_type}: {self.business_shortcode} [{env}]{default}{registered} {status}"
     
     def clean(self):
         if self.min_transaction_amount < Decimal('0.01'):
@@ -217,6 +230,18 @@ class MpesaConfiguration(AuditMixin):
         
         sub_domain = self.schema_name.replace('tenant_', '').replace('_', '-')
         return f"https://{sub_domain}.netily.co.ke/api/v1/billing/mpesa/timeout/"
+    
+    def mark_urls_registered(self):
+        """Mark that C2B URLs have been successfully registered with Safaricom"""
+        self.c2b_urls_registered = True
+        self.c2b_urls_registered_at = timezone.now()
+        self.save(update_fields=['c2b_urls_registered', 'c2b_urls_registered_at'])
+    
+    def mark_urls_unregistered(self):
+        """Mark that C2B URLs are no longer registered (e.g., for cleanup)"""
+        self.c2b_urls_registered = False
+        self.c2b_urls_registered_at = None
+        self.save(update_fields=['c2b_urls_registered', 'c2b_urls_registered_at'])
 
 
 class MpesaTransaction(models.Model):

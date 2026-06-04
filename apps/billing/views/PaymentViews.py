@@ -43,9 +43,9 @@ class MpesaConfigurationViewSet(viewsets.ModelViewSet):
     """
     permission_classes = [IsAuthenticated, IsCompanyAdmin]
     filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
-    filterset_fields = ['is_active', 'is_default', 'is_sandbox', 'shortcode_type']
+    filterset_fields = ['is_active', 'is_default', 'is_sandbox', 'shortcode_type', 'c2b_urls_registered']
     search_fields = ['business_shortcode', 'shortcode_type']
-    ordering_fields = ['created_at', 'updated_at']
+    ordering_fields = ['created_at', 'updated_at', 'c2b_urls_registered_at']
 
     def get_queryset(self):
         """Return only configurations for the current tenant with stable ordering for pagination."""
@@ -179,12 +179,19 @@ class MpesaConfigurationViewSet(viewsets.ModelViewSet):
             )
             
             # Check if registration was successful
-            if result.get('success', False):
+            response_data = result.get('data', result)
+            if result.get('success', False) or response_data.get('ResponseCode') == '0' or response_data.get('errorCode') == '500.003.1001':
                 # Update configuration with successful registration
                 config.last_validated_at = timezone.now()
                 config.validation_status = 'VALID'
                 config.validation_error = ''
-                config.save(update_fields=['last_validated_at', 'validation_status', 'validation_error'])
+                # NEW: Mark URLs as registered
+                config.c2b_urls_registered = True
+                config.c2b_urls_registered_at = timezone.now()
+                config.save(update_fields=[
+                    'last_validated_at', 'validation_status', 'validation_error',
+                    'c2b_urls_registered', 'c2b_urls_registered_at'
+                ])
                 
                 return Response({
                     "status": "success",
@@ -195,6 +202,7 @@ class MpesaConfigurationViewSet(viewsets.ModelViewSet):
                 # Update configuration with failed registration
                 config.validation_status = 'INVALID'
                 config.validation_error = result.get('message', 'URL registration failed')
+                # Don't mark URLs as registered on failure
                 config.save(update_fields=['validation_status', 'validation_error'])
                 
                 return Response({
@@ -303,15 +311,24 @@ class MpesaConfigurationViewSet(viewsets.ModelViewSet):
         - Deactivates all Tuma configs
         - Links this config to the active InvoiceItemPayment
         - Enforces single active gateway
+        - NOTE: Does NOT clear c2b_urls_registered from other configs
         """
         from ..models.payment_models import MpesaConfiguration, InvoiceItemPayment
         
         config = self.get_object()
 
-        # 1. Deactivate all other MpesaConfigurations
+        # 1. Deactivate all other MpesaConfigurations for STK only
+        #    Preserve C2B registration awareness because Safaricom still has
+        #    those URLs registered and will send C2B callbacks to them
         MpesaConfiguration.objects.filter(
             schema_name=connection.schema_name
-        ).exclude(pk=config.pk).update(is_active=False, is_default=False)
+        ).exclude(pk=config.pk).update(
+            is_active=False,
+            is_default=False
+            # NOTE: c2b_urls_registered is intentionally NOT cleared here
+            # because Safaricom still has those URLs registered and will
+            # send C2B callbacks to them
+        )
 
         config.is_active = True
         config.is_default = True
@@ -356,9 +373,16 @@ class MpesaConfigurationViewSet(viewsets.ModelViewSet):
             'is_active', 'is_default', 'updated_at',
         ])
 
+        # Check if other configs still have registered URLs (they'll still receive C2B)
+        other_registered = MpesaConfiguration.objects.filter(
+            schema_name=connection.schema_name,
+            c2b_urls_registered=True,
+        ).exclude(pk=config.pk).exists()
+
         logger.info(
             f"[{connection.schema_name}] Daraja activated as primary: "
-            f"shortcode={config.business_shortcode}, method={method.code}"
+            f"shortcode={config.business_shortcode}, method={method.code}, "
+            f"c2b_others_registered={other_registered}"
         )
 
         return Response({
@@ -366,6 +390,8 @@ class MpesaConfigurationViewSet(viewsets.ModelViewSet):
             'message': 'Daraja activated. Tuma gateway has been deactivated.',
             'payment_method_id': method.id,
             'gateway': 'daraja',
+            'c2b_still_active': other_registered,
+            'c2b_note': 'Other Daraja configurations still have active C2B URL registrations at Safaricom.' if other_registered else None,
         })
 
     @action(detail=True, methods=['post'])
@@ -405,11 +431,19 @@ class MpesaConfigurationViewSet(viewsets.ModelViewSet):
             ).update(is_active=True)
             tuma_restored = True
 
+        # Check if other configs still have registered URLs (they'll still receive C2B)
+        other_registered = MpesaConfiguration.objects.filter(
+            schema_name=connection.schema_name,
+            c2b_urls_registered=True,
+        ).exclude(pk=config.pk).exists()
+
         return Response({
             'status': 'success',
             'message': 'Daraja deactivated.' + (' Tuma gateway restored.' if tuma_restored else ' No Tuma config found — configure Tuma in the Netily tab.'),
             'tuma_restored': tuma_restored,
             'gateway': 'tuma' if tuma_restored else 'none',
+            'c2b_still_active': other_registered,
+            'c2b_note': 'PPPoE customers can still pay via previously registered Paybill numbers.' if other_registered else None,
         })
 
 

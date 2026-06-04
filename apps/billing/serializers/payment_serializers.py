@@ -26,6 +26,7 @@ class MpesaConfigurationSerializer(serializers.ModelSerializer):
             'is_sandbox', 'is_active', 'is_default', 'test_mode',
             'last_validated_at', 'validation_status', 'validation_error',
             'daily_transaction_limit', 'min_transaction_amount', 'max_transaction_amount',
+            'c2b_urls_registered', 'c2b_urls_registered_at',  # ADDED: Track URL registration status
             'created_at', 'updated_at'
         ]
         # Make secrets write-only so they don't get exposed in API responses
@@ -37,6 +38,7 @@ class MpesaConfigurationSerializer(serializers.ModelSerializer):
         }
         read_only_fields = [
             'id', 'last_validated_at', 'validation_status', 'validation_error',
+            'c2b_urls_registered_at',  # ADDED: Registration timestamp is read-only
             'created_at', 'updated_at'
         ]
 

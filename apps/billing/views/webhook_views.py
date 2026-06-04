@@ -161,7 +161,10 @@ class MpesaC2BWebhookView(APIView):
                 status=status.HTTP_200_OK
             )
 
-        # 1. FIND THE TENANT (UPDATED: shortcode match alone is sufficient)
+        # 1. FIND THE TENANT
+        # FIX: Match on shortcode regardless of is_active, as long as URLs were registered
+        # This ensures C2B webhooks still work for previously registered configs even if
+        # they are no longer the primary active gateway
         target_tenant_schema = None
         fallback_tenant_schema = None  # Track tenant with shortcode-only match
         
@@ -169,8 +172,11 @@ class MpesaC2BWebhookView(APIView):
             for tenant in Tenant.objects.exclude(schema_name='public'):
                 with schema_context(tenant.schema_name):
                     try:
+                        # UPDATED: Match configs that are EITHER active OR have registered URLs
                         if MpesaConfiguration.objects.filter(
-                            business_shortcode=shortcode, is_active=True
+                            business_shortcode=shortcode
+                        ).filter(
+                            Q(is_active=True) | Q(c2b_urls_registered=True)
                         ).exists():
                             # Prefer tenant where the account reference matches a ServiceConnection
                             if ServiceConnection.objects.filter(
@@ -209,7 +215,7 @@ class MpesaC2BWebhookView(APIView):
         if not target_tenant_schema:
             logger.warning(
                 f"UNMATCHED PAYMENT: ID={trans_id}, Account={bill_ref}, SC={shortcode}. "
-                "No tenant matched (no active M-Pesa config found). Manual reconciliation required."
+                "No tenant matched (no active or registered M-Pesa config found). Manual reconciliation required."
             )
             # Still record the payment at public schema level as completely unmatched?
             # For now, just return as before
@@ -247,12 +253,15 @@ class MpesaC2BWebhookView(APIView):
                             # Hotspot sessions may not have a full Customer record
                             # We'll process the payment and activate the session directly
                             
+                            # UPDATED: Find config that is EITHER active OR has registered URLs
                             config = MpesaConfiguration.objects.filter(
-                                business_shortcode=shortcode, is_active=True
+                                business_shortcode=shortcode
+                            ).filter(
+                                Q(is_active=True) | Q(c2b_urls_registered=True)
                             ).first()
 
                             if not config:
-                                logger.error(f"No active M-Pesa config for shortcode {shortcode}")
+                                logger.error(f"No M-Pesa config (active or registered) for shortcode {shortcode}")
                                 return Response(
                                     {"ResultCode": 1, "ResultDesc": "Configuration Error"},
                                     status=status.HTTP_200_OK
@@ -339,12 +348,15 @@ class MpesaC2BWebhookView(APIView):
                             f"tenant={target_tenant_schema}. Recording for manual reconciliation."
                         )
                         
+                        # UPDATED: Find config that is EITHER active OR has registered URLs
                         config = MpesaConfiguration.objects.filter(
-                            business_shortcode=shortcode, is_active=True
+                            business_shortcode=shortcode
+                        ).filter(
+                            Q(is_active=True) | Q(c2b_urls_registered=True)
                         ).first()
 
                         if not config:
-                            logger.error(f"No active M-Pesa config for shortcode {shortcode}")
+                            logger.error(f"No M-Pesa config (active or registered) for shortcode {shortcode}")
                             return Response(
                                 {"ResultCode": 1, "ResultDesc": "Configuration Error"},
                                 status=status.HTTP_200_OK
@@ -423,12 +435,15 @@ class MpesaC2BWebhookView(APIView):
                         )
 
                     # --- Continue with normal matched service payment flow ---
+                    # UPDATED: Find config that is EITHER active OR has registered URLs
                     config = MpesaConfiguration.objects.filter(
-                        business_shortcode=shortcode, is_active=True
+                        business_shortcode=shortcode
+                    ).filter(
+                        Q(is_active=True) | Q(c2b_urls_registered=True)
                     ).first()
 
                     if not config:
-                        logger.error(f"No active M-Pesa config for shortcode {shortcode}")
+                        logger.error(f"No M-Pesa config (active or registered) for shortcode {shortcode}")
                         return Response(
                             {"ResultCode": 1, "ResultDesc": "Configuration Error"},
                             status=status.HTTP_200_OK
