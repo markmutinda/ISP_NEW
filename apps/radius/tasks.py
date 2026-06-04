@@ -740,37 +740,35 @@ def notify_expiring_soon(hours_before: int = 24):
 
 
 # ════════════════════════════════════════════════════════════════════════════
-# PPPOE EXPIRY REMINDERS (SMS) — Multi‑interval support
+# PPPOE EXPIRY REMINDERS (SMS) — Multi‑interval support with DB-level dedup
 # ════════════════════════════════════════════════════════════════════════════
 
 @shared_task(name='apps.radius.tasks.send_pppoe_expiry_reminders')
 def send_pppoe_expiry_reminders():
     """
     Send SMS reminders to PPPoE customers whose subscriptions are expiring soon.
-    Uses SMSNotificationSettings.pppoe_expiry_intervals (JSON array) to support
-    multiple reminders (e.g. 4 days before, 5 hours before, 30 minutes before).
-    Falls back to the old pppoe_expiry_days_before field if present.
-    
-    FIX: Hours window increased from 10 minutes to 30 minutes to prevent
-    missed reminders due to task scheduling gaps.
+    Uses DB-level dedup via RadiusExpiryReminderLog — survives Redis restarts.
     """
     TenantModel = get_tenant_model()
-    
+
     for tenant in TenantModel.objects.exclude(schema_name='public'):
         try:
             with schema_context(tenant.schema_name):
                 from apps.messaging.models import SMSNotificationSettings
                 from apps.messaging.services.notification_sender import SMSNotifier
-                from apps.radius.models import CustomerRadiusCredentials
+                from apps.radius.models import CustomerRadiusCredentials, RadiusExpiryReminderLog
 
                 s = SMSNotificationSettings.get_settings()
                 if not s.pppoe_expiry_reminder:
                     continue
 
+                # Clean up old logs (older than 60 days) to prevent table bloat
+                cutoff = timezone.now() - timedelta(days=60)
+                RadiusExpiryReminderLog.objects.filter(sent_at__lt=cutoff).delete()
+
                 # Support both old single-value and new multi-interval format
                 intervals = getattr(s, 'pppoe_expiry_intervals', None) or []
                 if not intervals:
-                    # Fallback: if old field still exists, use it
                     old_days = getattr(s, 'pppoe_expiry_days_before', 4)
                     intervals = [{'value': old_days, 'unit': 'days'}]
 
@@ -780,19 +778,17 @@ def send_pppoe_expiry_reminders():
                     try:
                         value = int(interval.get('value', 4))
                         unit = interval.get('unit', 'days')
-                        
-                        # ============================================================
-                        # FIX: Increased window sizes to prevent missed reminders
-                        # ============================================================
+                        interval_key = f"{value}_{unit}"
+
                         if unit == 'hours':
                             delta = timedelta(hours=value)
-                            window = timedelta(minutes=30)   # ← CHANGED: 30min window (was 10min)
+                            window = timedelta(minutes=10)
                         elif unit == 'minutes':
                             delta = timedelta(minutes=value)
-                            window = timedelta(minutes=5)    # 5min window for minute-based
-                        else:  # days (default)
+                            window = timedelta(minutes=3)
+                        else:  # days
                             delta = timedelta(days=value)
-                            window = timedelta(hours=2)      # ← CHANGED: 2hr window (was 1hr)
+                            window = timedelta(minutes=10)
 
                         lower = now + delta - window
                         upper = now + delta
@@ -806,32 +802,61 @@ def send_pppoe_expiry_reminders():
                         for cred in expiring:
                             try:
                                 customer = cred.customer
+
+                                # DB-level dedup — survives Redis restarts
+                                already_sent = RadiusExpiryReminderLog.objects.filter(
+                                    customer_id=str(customer.id),
+                                    interval_key=interval_key,
+                                    expiration_date=cred.expiration_date,
+                                ).exists()
+
+                                if already_sent:
+                                    logger.debug(
+                                        f"[EXPIRY] Skipping {customer.id} "
+                                        f"interval={interval_key} — already sent"
+                                    )
+                                    continue
+
                                 secs_left = (cred.expiration_date - now).total_seconds()
                                 days_left = max(1, int(secs_left / 86400))
                                 plan_name = (
                                     cred.bandwidth_profile.name
                                     if cred.bandwidth_profile else ""
                                 )
-                                
-                                # FIX: Send the reminder with the correct dedup key
-                                # The SMSNotifier.pppoe_expiry_reminder method already
-                                # handles its own dedup using f"pppoe_expiry:{customer.id}:{days_left}"
-                                # This ensures 5-hour reminder uses a different key than 1-day reminder
-                                # (since days_left will be 0 or 1 for hours reminders)
-                                SMSNotifier.pppoe_expiry_reminder(
+
+                                sent = SMSNotifier.pppoe_expiry_reminder(
                                     customer=customer,
                                     days_left=days_left,
                                     plan_name=plan_name,
                                 )
+
+                                if sent:
+                                    RadiusExpiryReminderLog.objects.get_or_create(
+                                        customer_id=str(customer.id),
+                                        interval_key=interval_key,
+                                        expiration_date=cred.expiration_date,
+                                    )
+                                    logger.info(
+                                        f"[EXPIRY] Sent {interval_key} reminder to "
+                                        f"{customer.customer_code} — logged to DB"
+                                    )
+
                             except Exception as e:
                                 logger.warning(
-                                    f"PPPoE expiry reminder failed for "
+                                    f"[EXPIRY] Failed for "
                                     f"{getattr(cred, 'username', '?')}: {e}"
                                 )
+
                     except Exception as e:
-                        logger.warning(f"Interval {interval} error in {tenant.schema_name}: {e}")
+                        logger.warning(
+                            f"[EXPIRY] Interval {interval} error "
+                            f"in {tenant.schema_name}: {e}"
+                        )
 
         except Exception as e:
-            logger.error(f"PPPoE expiry reminders error in {tenant.schema_name}: {e}")
-    
+            logger.error(
+                f"[EXPIRY] send_pppoe_expiry_reminders error "
+                f"in {tenant.schema_name}: {e}"
+            )
+
     return {'status': 'done'}

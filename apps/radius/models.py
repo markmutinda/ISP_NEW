@@ -765,3 +765,30 @@ class CustomerRadiusCredentials(models.Model):
         
         self.synced_to_radius = False
         self.save(update_fields=['synced_to_radius'])
+
+
+# ────────────────────────────────────────────────────────────────
+# EXPIRY REMINDER LOG - Track Sent Notifications
+# ────────────────────────────────────────────────────────────────
+
+class RadiusExpiryReminderLog(models.Model):
+    """
+    Tracks expiry reminder notifications sent to customers.
+    Prevents duplicate reminders for the same interval.
+    """
+    username = models.CharField(max_length=64, db_index=True)
+    customer_id = models.CharField(max_length=100, db_index=True)
+    interval_key = models.CharField(max_length=100)  # e.g., '30_days', '7_days', '24_hours', '1_hour'
+    expiration_date = models.DateTimeField()
+    sent_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        unique_together = ['customer_id', 'interval_key', 'expiration_date']
+        indexes = [
+            models.Index(fields=['customer_id', 'expiration_date']),
+        ]
+        verbose_name = 'Expiry Reminder Log'
+        verbose_name_plural = 'Expiry Reminder Logs'
+
+    def __str__(self):
+        return f"{self.username} | {self.interval_key} | {self.expiration_date}"

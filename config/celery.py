@@ -241,6 +241,16 @@ app.conf.beat_schedule = {
         'schedule': crontab(hour=10, minute=0),  # Daily at 10:00 AM
         'options': {'queue': 'billing'}
     },
+
+    # ════════════════════════════════════════════════════════════════
+    # SMS HISTORY CLEANUP — Daily at 3 AM
+    # Deletes old SMS messages older than 90 days to prevent table bloat
+    # ════════════════════════════════════════════════════════════════
+    'cleanup-old-sms-history-daily': {
+        'task': 'apps.messaging.tasks.cleanup_old_sms_history',
+        'schedule': crontab(hour=3, minute=0),  # Daily at 3 AM
+        'options': {'queue': 'default'}
+    },
 }
 
 # ════════════════════════════════════════════════════════════════════════════

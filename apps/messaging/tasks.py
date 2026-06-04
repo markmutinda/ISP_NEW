@@ -776,3 +776,35 @@ def process_campaign_sms(self, campaign_id: int, phones: list, message: str):
             f"[CAMPAIGN {campaign_id}] Completed: Sent={sent}, Failed={failed}, "
             f"Total={len(phones)}"
         )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SMS HISTORY CLEANUP TASK
+# ─────────────────────────────────────────────────────────────────────────────
+
+@shared_task(name='apps.messaging.tasks.cleanup_old_sms_history')
+def cleanup_old_sms_history():
+    """
+    Delete SMS messages older than 90 days to prevent table bloat.
+    Runs daily — safe to delete since history is cosmetic only.
+    """
+    from apps.messaging.models import SMSMessage
+    from django_tenants.utils import get_tenant_model, schema_context
+
+    TenantModel = get_tenant_model()
+    total_deleted = 0
+
+    for tenant in TenantModel.objects.exclude(schema_name='public'):
+        try:
+            with schema_context(tenant.schema_name):
+                deleted = SMSMessage.cleanup_old_messages(days=90)
+                if deleted:
+                    logger.info(
+                        f"[SMS CLEANUP] Deleted {deleted} old messages "
+                        f"from {tenant.schema_name}"
+                    )
+                total_deleted += deleted
+        except Exception as e:
+            logger.error(f"[SMS CLEANUP] Error in {tenant.schema_name}: {e}")
+
+    return {'deleted': total_deleted}

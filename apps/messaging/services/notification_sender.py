@@ -418,11 +418,10 @@ class SMSNotifier:
 
     @staticmethod
     def pppoe_expiry_reminder(customer, days_left: int, plan_name: str = "") -> bool:
-        """Called X days before PPPoE expiry.
+        """
+        Called X days before PPPoE expiry.
         
-        FIX: Added hour_bucket to dedup key so that multiple reminders
-        (e.g., 5 hours before and 1 day before) don't collide with each other.
-        The hour_bucket changes every hour, allowing different intervals.
+        FIX: Enhanced with smart expiry display (1 hour, 6 hours, today, etc.)
         """
         s = _get_notif_settings()
         if s and not s.pppoe_expiry_reminder:
@@ -431,49 +430,72 @@ class SMSNotifier:
         if not phone:
             return False
         name = customer.user.first_name or "Customer"
-        
-        # Try to get expiry date and amount due
+
+        # Fetch expiry info
         try:
             creds = customer.radius_credentials
-            expiry_date = creds.expiration_date.strftime('%d %b %Y') \
-                if creds.expiration_date else 'N/A'
+            expiration_date = creds.expiration_date
             service = customer.services.filter(status='ACTIVE', plan__isnull=False).first()
             amount_due = f"KES {float(service.plan.base_price):,.0f}" if service and service.plan else ''
         except Exception:
-            expiry_date = 'N/A'
+            expiration_date = None
             amount_due = ''
-        
+
+        # Build smart expiry display
+        if expiration_date:
+            from django.utils import timezone as _tz
+            local_tz = _tz.get_current_timezone()
+            local_expiry = expiration_date.astimezone(local_tz)
+            expiry_time_str = local_expiry.strftime('%H:%M')
+            expiry_date_str = local_expiry.strftime('%d %b %Y')
+            expiry_full_str = local_expiry.strftime('%d %b %Y at %H:%M')
+
+            now = _tz.now()
+            hours_left = (expiration_date - now).total_seconds() / 3600
+
+            if hours_left <= 1:
+                expiry_display = f"in less than 1 hour (at {expiry_time_str})"
+            elif hours_left <= 6:
+                expiry_display = f"in {int(hours_left)} hour(s) at {expiry_time_str}"
+            elif hours_left <= 24:
+                expiry_display = f"today at {expiry_time_str}"
+            else:
+                expiry_display = f"on {expiry_date_str} at {expiry_time_str}"
+        else:
+            expiry_date_str = 'N/A'
+            expiry_full_str = 'N/A'
+            expiry_time_str = 'N/A'
+            expiry_display = 'soon'
+            amount_due = amount_due
+
         default_msg = (
-            f"Hi {name}, your {plan_name} plan expires in {days_left} day(s) "
-            f"({expiry_date}). Renew now{ ' - ' + amount_due if amount_due else ''} to avoid disconnection."
+            f"Hi {name}, your {plan_name} plan expires {expiry_display}. "
+            f"Renew now{ ' - ' + amount_due if amount_due else ''} to avoid disconnection."
         )
         msg = _get_rendered_message(
             event_type='pppoe_expiry_reminder',
             default_msg=default_msg,
             customer_name=name,
-            name=name,                     # alias for {name}
+            name=name,
             plan_name=plan_name,
             days_left=days_left,
-            days=days_left,                # alias for {days}
-            expiry_date=expiry_date,
+            days=days_left,
+            expiry_date=expiry_date_str,
+            expiry_time=expiry_time_str,
+            expiry_display=expiry_display,
+            expiry_full=expiry_full_str,
             amount_due=amount_due,
         )
-        
-        # ============================================================
-        # FIX: Add hour_bucket to dedup key to prevent collisions
-        # between different intervals (e.g., 5 hours vs 1 day)
-        # The hour_bucket changes every hour, so multiple reminders
-        # within the same hour will be deduped, but reminders from
-        # different intervals (different days_left values) won't collide.
-        # ============================================================
-        from django.utils import timezone as _tz
-        hour_bucket = _tz.now().strftime('%Y%m%d%H')  # unique per hour
-        
-        # Dedup with both days_left AND hour_bucket to separate intervals
-        return _send_once(
-            f"pppoe_expiry:{customer.id}:{days_left}:{hour_bucket}",
-            phone, msg, ttl=86400
-        )
+
+        # Plain dispatch — dedup is handled at task level via DB
+        result = _dispatch(phone, msg)
+        if result:
+            _log_sms(phone, msg, status='sent', msg_type='automated',
+                     recipient_name=name, customer_id=customer.id)
+        else:
+            _log_sms(phone, msg, status='failed', msg_type='automated',
+                     recipient_name=name, customer_id=customer.id)
+        return result
 
     @staticmethod
     def pppoe_suspended(customer, reason: str = "") -> bool:

@@ -8,7 +8,8 @@ from .models import (
     RadAcct,
     Nas,
     RadPostAuth,
-    RadiusBandwidthProfile
+    RadiusBandwidthProfile,
+    RadiusExpiryReminderLog,   # ADD THIS
 )
 
 
@@ -126,3 +127,12 @@ class RadiusBandwidthProfileAdmin(admin.ModelAdmin):
             'classes': ('collapse',)
         }),
     )
+
+
+@admin.register(RadiusExpiryReminderLog)
+class RadiusExpiryReminderLogAdmin(admin.ModelAdmin):
+    list_display = ['username', 'customer_id', 'interval_key', 'expiration_date', 'sent_at']
+    list_filter = ['interval_key', 'sent_at']
+    search_fields = ['username', 'customer_id']
+    readonly_fields = ['username', 'customer_id', 'interval_key', 'expiration_date', 'sent_at']
+    date_hierarchy = 'sent_at'

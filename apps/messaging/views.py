@@ -426,8 +426,8 @@ class SMSStatsView(APIView):
     """
     GET /api/v1/messaging/sms/stats/
     
-    FIX: Stats now correctly count 'sent' + 'delivered' as successful deliveries
-    because automated SMS messages are logged with status='sent', not 'delivered'.
+    FIX: Stats now correctly count all messages (including automated ones)
+    by using direct aggregates on the queryset instead of separate Counts.
     """
     permission_classes = [IsAuthenticated, IsAdminOrStaff]
 
@@ -437,41 +437,27 @@ class SMSStatsView(APIView):
 
         qs = SMSMessage.objects.all()
 
-        # ============================================================
-        # FIX: Count both 'sent' and 'delivered' as successful
-        # Automated messages use 'sent', manual messages may use 'delivered'
-        # ============================================================
-        agg = qs.aggregate(
-            total_sent=Count('id'),
-            delivered=Count('id', filter=Q(status__in=['delivered', 'sent'])),  # ← FIX: include 'sent'
-            pending=Count('id', filter=Q(status='pending')),
-            failed=Count('id', filter=Q(status='failed')),
-            total_cost=Sum('cost'),
-            today_count=Count('id', filter=Q(created_at__gte=today)),
-            week_count=Count('id', filter=Q(created_at__gte=week_start)),
-        )
+        # FIX: Use direct aggregates on the queryset
+        total = qs.count()
+        delivered = qs.filter(status__in=['delivered', 'sent']).count()
+        pending = qs.filter(status='pending').count()
+        failed = qs.filter(status='failed').count()
+        total_cost = qs.aggregate(total=Sum('cost'))['total'] or Decimal('0.00')
+        messages_today = qs.filter(created_at__gte=today).count()
+        messages_this_week = qs.filter(created_at__gte=week_start).count()
 
-        # ============================================================
-        # FIX: Delivery rate should be based on successful deliveries
-        # vs total sent, NOT just 'delivered' status
-        # ============================================================
-        total = agg['total_sent'] or 0
-        failed = agg['failed'] or 0
-        successful = agg['delivered'] or 0  # This now includes both 'sent' and 'delivered'
-        
         # Delivery rate = (total - failed) / total * 100
-        # This counts all non-failed messages as successfully sent
         delivery_rate = round(((total - failed) / total * 100) if total > 0 else 0, 1)
 
         data = {
-            'total_sent': agg['total_sent'] or 0,
-            'delivered': successful,  # 'delivered' field now shows successful sends
-            'pending': agg['pending'] or 0,
-            'failed': agg['failed'] or 0,
+            'total_sent': total,
+            'delivered': delivered,
+            'pending': pending,
+            'failed': failed,
             'delivery_rate': delivery_rate,
-            'total_cost': agg['total_cost'] or Decimal('0.00'),
-            'messages_today': agg['today_count'] or 0,
-            'messages_this_week': agg['week_count'] or 0,
+            'total_cost': total_cost,
+            'messages_today': messages_today,
+            'messages_this_week': messages_this_week,
         }
 
         return Response(SMSStatsSerializer(data).data)

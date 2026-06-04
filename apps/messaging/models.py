@@ -143,6 +143,13 @@ class SMSMessage(models.Model):
     def __str__(self):
         return f"{self.recipient} - {self.status}"
     
+    @classmethod
+    def cleanup_old_messages(cls, days=90):
+        """Delete SMS messages older than X days to prevent table bloat."""
+        cutoff = timezone.now() - __import__('datetime').timedelta(days=days)
+        deleted, _ = cls.objects.filter(created_at__lt=cutoff).delete()
+        return deleted
+    
     def mark_sent(self, message_id, cost):
         self.status = 'sent'
         self.provider_message_id = message_id
