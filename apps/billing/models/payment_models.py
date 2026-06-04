@@ -191,7 +191,7 @@ class MpesaConfiguration(AuditMixin):
         if self.callback_url:
             return self.callback_url
 
-        sub_domain = self.schema_name.replace('tenant_', '')
+        sub_domain = self.schema_name.replace('tenant_', '').replace('_', '-')
         # FIX: Updated to use new daraja path instead of mpesa path
         return f"https://{sub_domain}.netily.co.ke/api/v1/billing/daraja/c2b-callback/"
     
@@ -207,7 +207,7 @@ class MpesaConfiguration(AuditMixin):
             # This assumes the custom URL base can be used for both callback and validation
             return self.callback_url.rstrip('/') + '/validate/'
         
-        sub_domain = self.schema_name.replace('tenant_', '')
+        sub_domain = self.schema_name.replace('tenant_', '').replace('_', '-')
         # Return the validation endpoint URL matching the new daraja validation route
         return f"https://{sub_domain}.netily.co.ke/api/v1/billing/daraja/c2b-validation/"
     
@@ -215,7 +215,7 @@ class MpesaConfiguration(AuditMixin):
         if self.timeout_url:
             return self.timeout_url
         
-        sub_domain = self.schema_name.replace('tenant_', '')
+        sub_domain = self.schema_name.replace('tenant_', '').replace('_', '-')
         return f"https://{sub_domain}.netily.co.ke/api/v1/billing/mpesa/timeout/"
 
 
