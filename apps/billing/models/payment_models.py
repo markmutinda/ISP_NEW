@@ -250,7 +250,9 @@ class MpesaTransaction(models.Model):
     
     configuration = models.ForeignKey(
         'billing.MpesaConfiguration', 
-        on_delete=models.PROTECT,
+        on_delete=models.SET_NULL,  # CHANGED from PROTECT to SET_NULL
+        null=True,                  # Added null=True
+        blank=True,                 # Added blank=True
         related_name='transactions'
     )
     
