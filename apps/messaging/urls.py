@@ -24,11 +24,25 @@ router.register(r'campaigns', SMSCampaignViewSet, basename='sms-campaign')
 router.register(r'gateway', SMSGatewayConfigViewSet, basename='sms-gateway')
 
 urlpatterns = [
-    path('', include(router.urls)),
-
+    # ============================================================
+    # CRITICAL: Explicit paths MUST come BEFORE include(router.urls)
+    # because the router registers 'sms/' which catches ALL requests
+    # starting with 'sms/' including 'sms/stats/' and 'sms/balance/'.
+    # Django matches URLs top-to-bottom, so exact paths win.
+    # ============================================================
+    
+    # Stats & balance (live provider balance)
+    path('sms/stats/', SMSStatsView.as_view(), name='sms-stats'),
+    path('sms/balance/', SMSBalanceView.as_view(), name='sms-balance'),
+    
     # Single / bulk send
     path('sms/bulk/', SMSMessageViewSet.as_view({'post': 'bulk_send'}), name='sms-bulk-send'),
     path('sms/<int:pk>/retry/', SMSMessageViewSet.as_view({'post': 'retry'}), name='sms-retry'),
+
+    # ============================================================
+    # Router URLs (must come after the explicit paths above)
+    # ============================================================
+    path('', include(router.urls)),
 
     # Campaign control
     path('campaigns/<int:pk>/start/', SMSCampaignViewSet.as_view({'post': 'start'}), name='campaign-start'),
@@ -36,10 +50,6 @@ urlpatterns = [
 
     # NEW: send to group (pppoe / hotspot / all)
     path('campaigns/send-to-group/', CampaignSendToGroupView.as_view(), name='campaign-send-to-group'),  # ← ADDED
-
-    # Stats & balance (live provider balance)
-    path('sms/stats/', SMSStatsView.as_view(), name='sms-stats'),
-    path('sms/balance/', SMSBalanceView.as_view(), name='sms-balance'),
 
     # Gateway CRUD + test + upsert
     path('gateway/<int:pk>/activate/', SMSGatewayConfigViewSet.as_view({'post': 'activate'}), name='gateway-activate'),
