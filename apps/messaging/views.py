@@ -365,27 +365,79 @@ class SMSCampaignViewSet(viewsets.ModelViewSet):
     def send_to_group(self, request):
         """
         Send a bulk SMS to all customers of a given type.
-        Body: { "name": "May Promo", "message": "...", "group": "pppoe|hotspot|all" }
+        Body: { "name": "May Promo", "message": "...", "group": "pppoe|pppoe_active|pppoe_expired|hotspot|all" }
+        
+        IMPROVED: Codex version with proper filtering for pppoe_active and pppoe_expired
         """
-        group = request.data.get('group', 'all')
+        group = (request.data.get('group') or 'all').lower()
         message = (request.data.get('message') or '').strip()
         name = request.data.get('name') or f'Bulk {group} — {timezone.now().strftime("%d %b %Y")}'
 
         if not message:
             return Response({'error': 'message is required'}, status=status.HTTP_400_BAD_REQUEST)
-        if group not in ('pppoe', 'hotspot', 'all'):
-            return Response({'error': 'group must be pppoe, hotspot, or all'}, status=status.HTTP_400_BAD_REQUEST)
+        
+        # UPDATED: Include new group types
+        VALID_GROUPS = ('pppoe', 'pppoe_active', 'pppoe_expired', 'hotspot', 'all')
+        if group not in VALID_GROUPS:
+            return Response(
+                {'error': f'group must be one of: {", ".join(VALID_GROUPS)}'}, 
+                status=status.HTTP_400_BAD_REQUEST
+            )
 
         phones = set()
 
-        if group in ('pppoe', 'all'):
+        # ── Collect PPPoE recipients (IMPROVED with active/expired logic) ──
+        if group in ('pppoe', 'pppoe_active', 'pppoe_expired', 'all'):
             from apps.customers.models import Customer
-            for phone in Customer.objects.filter(
-                status='ACTIVE'
-            ).values_list('user__phone_number', flat=True):
+            from apps.radius.models import CustomerRadiusCredentials
+
+            now = timezone.now()
+
+            # Base queryset for credentials (only PPPoE or BOTH connection types)
+            base_creds = CustomerRadiusCredentials.objects.filter(
+                connection_type__in=['PPPOE', 'BOTH'],
+            )
+
+            if group == 'pppoe_active':
+                # Active = enabled credentials with no expiry OR expiry in the future
+                customer_ids = base_creds.filter(
+                    is_enabled=True,
+                ).filter(
+                    Q(expiration_date__isnull=True) |
+                    Q(expiration_date__gt=now)
+                ).values_list('customer_id', flat=True)
+
+                qs = Customer.objects.filter(
+                    id__in=customer_ids,
+                    status='ACTIVE',
+                )
+
+            elif group == 'pppoe_expired':
+                # Expired = credentials with expiration_date in the past
+                # Do NOT require is_enabled=True (they may already be disabled)
+                customer_ids = base_creds.filter(
+                    expiration_date__isnull=False,
+                    expiration_date__lte=now,
+                ).values_list('customer_id', flat=True)
+
+                qs = Customer.objects.filter(
+                    id__in=customer_ids,
+                ).exclude(
+                    status='TERMINATED',  # Don't spam deleted/terminated clients
+                )
+
+            else:
+                # 'pppoe' or 'all' — all active-status customers with PPPoE credentials
+                qs = Customer.objects.filter(
+                    status='ACTIVE',
+                    radius_credentials__connection_type__in=['PPPOE', 'BOTH'],
+                ).distinct()
+
+            for phone in qs.values_list('user__phone_number', flat=True):
                 if phone:
                     phones.add(phone)
 
+        # ── Collect Hotspot recipients ──────────────────────────────────────
         if group in ('hotspot', 'all'):
             from apps.billing.models.hotspot_models import HotspotClient
             for phone in HotspotClient.objects.filter(
@@ -397,6 +449,13 @@ class SMSCampaignViewSet(viewsets.ModelViewSet):
                     phones.add(phone)
 
         phones = list(phones)
+        
+        if not phones:
+            return Response(
+                {'error': f'No recipients found for group: {group}'}, 
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
         campaign = SMSCampaign.objects.create(
             name=name,
             message=message,
@@ -1082,8 +1141,10 @@ class CustomerSearchView(APIView):
 class CampaignSendToGroupView(APIView):
     """
     POST /api/v1/messaging/campaigns/send-to-group/
-    Body: { group: 'pppoe'|'hotspot'|'all', message: str, name?: str }
+    Body: { group: 'pppoe'|'pppoe_active'|'pppoe_expired'|'hotspot'|'all', message: str, name?: str }
     Sends bulk SMS and logs a campaign + each individual message.
+    
+    IMPROVED: Codex version with proper filtering for pppoe_active and pppoe_expired
     """
     permission_classes = [IsAuthenticated, IsAdminOrStaff]
 
@@ -1096,18 +1157,73 @@ class CampaignSendToGroupView(APIView):
         if not message:
             return Response({'error': 'message is required'}, status=400)
 
-        if group not in ('pppoe', 'hotspot', 'all'):
-            return Response({'error': 'group must be pppoe, hotspot, or all'}, status=400)
+        # UPDATED: Include new group types
+        VALID_GROUPS = ('pppoe', 'pppoe_active', 'pppoe_expired', 'hotspot', 'all')
+        if group not in VALID_GROUPS:
+            return Response(
+                {'error': f'group must be one of: {", ".join(VALID_GROUPS)}'}, 
+                status=400
+            )
 
         phones = []   # list of (phone, name, customer_id_or_None, first_name)
 
-        # ── Collect PPPoE recipients ────────────────────────────────────────
-        if group in ('pppoe', 'all'):
+        # ── Collect PPPoE recipients (IMPROVED with active/expired logic) ──
+        if group in ('pppoe', 'pppoe_active', 'pppoe_expired', 'all'):
             from apps.customers.models import Customer
-            for c in Customer.objects.select_related('user').filter(
-                status='ACTIVE',
-                user__phone_number__isnull=False,
-            ).exclude(user__phone_number=''):
+            from apps.radius.models import CustomerRadiusCredentials
+
+            now = timezone.now()
+
+            # Base queryset for credentials (only PPPoE or BOTH connection types)
+            base_creds = CustomerRadiusCredentials.objects.filter(
+                connection_type__in=['PPPOE', 'BOTH'],
+            )
+
+            if group == 'pppoe_active':
+                # Active = enabled credentials with no expiry OR expiry in the future
+                customer_ids = base_creds.filter(
+                    is_enabled=True,
+                ).filter(
+                    Q(expiration_date__isnull=True) |
+                    Q(expiration_date__gt=now)
+                ).values_list('customer_id', flat=True)
+
+                qs = Customer.objects.select_related('user').filter(
+                    id__in=customer_ids,
+                    status='ACTIVE',
+                    user__phone_number__isnull=False,
+                ).exclude(
+                    user__phone_number='',
+                )
+
+            elif group == 'pppoe_expired':
+                # Expired = credentials with expiration_date in the past
+                # Do NOT require is_enabled=True (they may already be disabled)
+                customer_ids = base_creds.filter(
+                    expiration_date__isnull=False,
+                    expiration_date__lte=now,
+                ).values_list('customer_id', flat=True)
+
+                qs = Customer.objects.select_related('user').filter(
+                    id__in=customer_ids,
+                    user__phone_number__isnull=False,
+                ).exclude(
+                    user__phone_number='',
+                ).exclude(
+                    status='TERMINATED',  # Don't spam deleted/terminated clients
+                )
+
+            else:
+                # 'pppoe' or 'all' — all active-status customers with PPPoE credentials
+                qs = Customer.objects.select_related('user').filter(
+                    status='ACTIVE',
+                    radius_credentials__connection_type__in=['PPPOE', 'BOTH'],
+                    user__phone_number__isnull=False,
+                ).exclude(
+                    user__phone_number='',
+                ).distinct()
+
+            for c in qs:
                 phones.append((
                     c.user.phone_number,
                     c.full_name,
