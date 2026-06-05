@@ -60,16 +60,18 @@ app.conf.beat_schedule = {
         'options': {'queue': 'radius'}
     },
     
-    # ────────────────────────────────────────────────────────────────
-    # Expiry Warning Notifications - Every hour
-    # Notifies customers 24 hours before expiration
-    # ────────────────────────────────────────────────────────────────
-    'notify-expiring-soon-hourly': {
-        'task': 'apps.radius.tasks.notify_expiring_soon',
-        'schedule': crontab(minute=30),  # Every hour at :30
-        'args': (24,),  # 24 hours before expiry
-        'options': {'queue': 'notifications'}
-    },
+    # ════════════════════════════════════════════════════════════════
+    # DISABLED — Spams every hour at :30, no proper dedup
+    # The window logic is wrong. Instead of checking "is remaining time
+    # within THIS interval's window", we need to check "which single
+    # interval bucket does this user fall into right now"
+    # ════════════════════════════════════════════════════════════════
+    # 'notify-expiring-soon-hourly': {
+    #     'task': 'apps.radius.tasks.notify_expiring_soon',
+    #     'schedule': crontab(minute=30),  # Every hour at :30
+    #     'args': (24,),  # 24 hours before expiry
+    #     'options': {'queue': 'notifications'}
+    # },
     
     # ────────────────────────────────────────────────────────────────
     # Cleanup stale RADIUS sessions - Runs every 5 minutes
@@ -133,13 +135,20 @@ app.conf.beat_schedule = {
     },
 
     # ════════════════════════════════════════════════════════════════
-    # PPPOE SMS NOTIFICATIONS (Expiry reminders - daily at 9am)
+    # PPPOE SMS NOTIFICATIONS (Expiry reminders - EVERY HOUR)
+    # Replaces old daily task to provide hour-based reminders
     # ════════════════════════════════════════════════════════════════
-    'pppoe-expiry-reminders-daily': {
+    'pppoe-expiry-reminders-hourly': {
         'task': 'apps.radius.tasks.send_pppoe_expiry_reminders',
-        'schedule': crontab(hour=9, minute=0),
+        'schedule': crontab(minute=0),  # Every hour at :00
         'options': {'queue': 'radius'},
     },
+    # REMOVED: Old daily task that ran at 9am
+    # 'pppoe-expiry-reminders-daily': {
+    #     'task': 'apps.radius.tasks.send_pppoe_expiry_reminders',
+    #     'schedule': crontab(hour=9, minute=0),
+    #     'options': {'queue': 'radius'},
+    # },
 
     # ════════════════════════════════════════════════════════════════
     # CLOUD CONTROLLER — VPN Tunnel Monitoring

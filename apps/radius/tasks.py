@@ -13,7 +13,7 @@ import time
 from datetime import timedelta, datetime, timezone as dt_timezone
 from celery import shared_task
 from django.utils import timezone
-from django.db import connection
+from django.db import connection, IntegrityError, transaction as db_transaction
 from django.db.models import Q
 from django.conf import settings
 from django_tenants.utils import schema_context, get_tenant_model
@@ -743,14 +743,59 @@ def notify_expiring_soon(hours_before: int = 24):
 # PPPOE EXPIRY REMINDERS (SMS) — Multi‑interval support with DB-level dedup
 # ════════════════════════════════════════════════════════════════════════════
 
+def _normalise_pppoe_expiry_reminders(settings_obj):
+    """Convert pppoe_expiry_intervals JSON to sorted list with hours."""
+    raw = getattr(settings_obj, 'pppoe_expiry_intervals', None) or []
+
+    if not raw:
+        # fallback to old single value
+        raw = [{'value': 4, 'unit': 'days'}]
+
+    reminders = []
+    for item in raw:
+        try:
+            value = int(item.get('value'))
+            unit = str(item.get('unit', '')).lower().strip()
+            if value <= 0:
+                continue
+            if unit in ('day', 'days'):
+                hours = value * 24
+                key = f'{value}d'
+            elif unit in ('hour', 'hours'):
+                hours = value
+                key = f'{value}h'
+            else:
+                continue
+            reminders.append({'key': key, 'hours': hours, 'value': value, 'unit': unit})
+        except Exception:
+            continue
+
+    # deduplicate by key
+    unique = {r['key']: r for r in reminders}
+    # furthest first: 4d, 3d, 5h
+    return sorted(unique.values(), key=lambda x: x['hours'], reverse=True)
+
+
+def _get_due_reminder(reminders, remaining_hours):
+    """
+    Pick exactly ONE reminder bucket for current remaining time.
+    reminders must be sorted furthest-first.
+    """
+    for index, reminder in enumerate(reminders):
+        current_hours = reminder['hours']
+        next_hours = reminders[index + 1]['hours'] if index + 1 < len(reminders) else 0
+        if next_hours < remaining_hours <= current_hours:
+            return reminder
+    return None
+
+
 @shared_task(name='apps.radius.tasks.send_pppoe_expiry_reminders')
 def send_pppoe_expiry_reminders():
     """
-    Send SMS reminders to PPPoE customers whose subscriptions are expiring soon.
-    Uses DB-level dedup via RadiusExpiryReminderLog — survives Redis restarts.
-    
-    FIX: Always log to DB regardless of sent result to prevent retry spam.
+    Send PPPoE expiry reminders with DB-level dedup.
+    Runs hourly. Each customer gets exactly one SMS per interval per subscription period.
     """
+    from django.db import IntegrityError, transaction as db_transaction
     TenantModel = get_tenant_model()
 
     for tenant in TenantModel.objects.exclude(schema_name='public'):
@@ -764,103 +809,80 @@ def send_pppoe_expiry_reminders():
                 if not s.pppoe_expiry_reminder:
                     continue
 
-                # Clean up old logs (older than 60 days) to prevent table bloat
+                # Clean up old logs (older than 60 days)
                 cutoff = timezone.now() - timedelta(days=60)
                 RadiusExpiryReminderLog.objects.filter(sent_at__lt=cutoff).delete()
 
-                # Support both old single-value and new multi-interval format
-                intervals = getattr(s, 'pppoe_expiry_intervals', None) or []
-                if not intervals:
-                    old_days = getattr(s, 'pppoe_expiry_days_before', 4)
-                    intervals = [{'value': old_days, 'unit': 'days'}]
+                reminders = _normalise_pppoe_expiry_reminders(s)
+                if not reminders:
+                    continue
 
                 now = timezone.now()
+                max_hours = reminders[0]['hours']
 
-                for interval in intervals:
+                # Only fetch users expiring within the largest threshold
+                expiring = CustomerRadiusCredentials.objects.filter(
+                    is_enabled=True,
+                    expiration_date__isnull=False,
+                    expiration_date__gt=now,
+                    expiration_date__lte=now + timedelta(hours=max_hours),
+                ).select_related('customer__user', 'bandwidth_profile')
+
+                for cred in expiring:
                     try:
-                        value = int(interval.get('value', 4))
-                        unit = interval.get('unit', 'days')
-                        interval_key = f"{value}_{unit}"
+                        remaining_hours = (cred.expiration_date - now).total_seconds() / 3600
+                        due = _get_due_reminder(reminders, remaining_hours)
 
-                        if unit == 'hours':
-                            delta = timedelta(hours=value)
-                            window = timedelta(minutes=10)
-                        elif unit == 'minutes':
-                            delta = timedelta(minutes=value)
-                            window = timedelta(minutes=3)
-                        else:  # days
-                            delta = timedelta(days=value)
-                            window = timedelta(minutes=10)
+                        if not due:
+                            continue
 
-                        lower = now + delta - window
-                        upper = now + delta
+                        customer = cred.customer
+                        reminder_key = due['key']
 
-                        expiring = CustomerRadiusCredentials.objects.filter(
-                            is_enabled=True,
-                            expiration_date__gte=lower,
-                            expiration_date__lte=upper,
-                        ).select_related('customer__user', 'bandwidth_profile')
-
-                        for cred in expiring:
-                            try:
-                                customer = cred.customer
-
-                                # DB-level dedup — survives Redis restarts
-                                already_sent = RadiusExpiryReminderLog.objects.filter(
+                        # DB-level dedup — unique constraint blocks duplicates
+                        try:
+                            with db_transaction.atomic():
+                                RadiusExpiryReminderLog.objects.create(
                                     customer_id=str(customer.id),
-                                    interval_key=interval_key,
+                                    interval_key=reminder_key,
                                     expiration_date=cred.expiration_date,
-                                ).exists()
-
-                                if already_sent:
-                                    logger.debug(
-                                        f"[EXPIRY] Skipping {customer.id} "
-                                        f"interval={interval_key} — already sent"
-                                    )
-                                    continue
-
-                                secs_left = (cred.expiration_date - now).total_seconds()
-                                days_left = max(1, int(secs_left / 86400))
-                                plan_name = (
-                                    cred.bandwidth_profile.name
-                                    if cred.bandwidth_profile else ""
+                                    username=cred.username,
                                 )
+                        except IntegrityError:
+                            # Already sent for this customer+interval+expiry
+                            logger.debug(
+                                f"[EXPIRY] Skipping {customer.id} "
+                                f"interval={reminder_key} — already sent"
+                            )
+                            continue
 
-                                sent = SMSNotifier.pppoe_expiry_reminder(
-                                    customer=customer,
-                                    days_left=days_left,
-                                    plan_name=plan_name,
-                                )
+                        # Send SMS
+                        plan_name = (
+                            cred.bandwidth_profile.name
+                            if cred.bandwidth_profile else ""
+                        )
+                        days_left = due['value'] if due['unit'] in ('day', 'days') else 0
 
-                                # FIX: Always log to DB regardless of sent result
-                                # This prevents retry spam even if SMS fails
-                                RadiusExpiryReminderLog.objects.get_or_create(
-                                    customer_id=str(customer.id),
-                                    interval_key=interval_key,
-                                    expiration_date=cred.expiration_date,
-                                    defaults={'username': cred.username}
-                                )
-                                logger.info(
-                                    f"[EXPIRY] Logged {interval_key} reminder for "
-                                    f"{customer.customer_code} sent={sent}"
-                                )
+                        sent = SMSNotifier.pppoe_expiry_reminder(
+                            customer=customer,
+                            days_left=days_left,
+                            plan_name=plan_name,
+                        )
 
-                            except Exception as e:
-                                logger.warning(
-                                    f"[EXPIRY] Failed for "
-                                    f"{getattr(cred, 'username', '?')}: {e}"
-                                )
+                        logger.info(
+                            f"[EXPIRY] {reminder_key} reminder for "
+                            f"{customer.customer_code} sent={sent}"
+                        )
 
                     except Exception as e:
                         logger.warning(
-                            f"[EXPIRY] Interval {interval} error "
-                            f"in {tenant.schema_name}: {e}"
+                            f"[EXPIRY] Failed for "
+                            f"{getattr(cred, 'username', '?')}: {e}"
                         )
 
         except Exception as e:
             logger.error(
-                f"[EXPIRY] send_pppoe_expiry_reminders error "
-                f"in {tenant.schema_name}: {e}"
+                f"[EXPIRY] Error in {tenant.schema_name}: {e}"
             )
 
     return {'status': 'done'}
