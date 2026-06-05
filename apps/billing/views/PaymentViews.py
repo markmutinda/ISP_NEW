@@ -11,7 +11,7 @@ from django.views.decorators.csrf import csrf_exempt
 from rest_framework import viewsets, status, filters
 from rest_framework.decorators import action
 from rest_framework.response import Response
-from rest_framework.permissions import IsAuthenticated
+from rest_framework.permissions import IsAuthenticated, AllowAny
 from django_filters.rest_framework import DjangoFilterBackend
 from django.db.models import Q, Sum, Count, F
 from django.db.models import ProtectedError
@@ -738,6 +738,13 @@ class PaymentViewSet(viewsets.ModelViewSet):
     ]
     ordering_fields = ['payment_date', 'amount', 'created_at']
 
+    def get_permissions(self):
+        """Override permissions for specific actions - CRITICAL for M-Pesa callback"""
+        if self.action == 'mpesa_callback':
+            # No authentication required for Safaricom callback
+            return []
+        return super().get_permissions()
+
     def get_queryset(self):
         from ..models.payment_models import Payment
         
@@ -947,7 +954,13 @@ class PaymentViewSet(viewsets.ModelViewSet):
 
     # === M-Pesa Callback Handler ===
     @csrf_exempt
-    @action(detail=False, methods=['post'], url_path='mpesa/callback')
+    @action(
+        detail=False, 
+        methods=['post'], 
+        url_path='mpesa/callback',
+        permission_classes=[AllowAny],        # ← ADDED: Allow any access for Safaricom callback
+        authentication_classes=[],             # ← ADDED: Disable authentication for this endpoint
+    )
     def mpesa_callback(self, request):
         """
         Handle M-Pesa callbacks from Safaricom
