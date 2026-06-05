@@ -738,6 +738,13 @@ class PaymentViewSet(viewsets.ModelViewSet):
     ]
     ordering_fields = ['payment_date', 'amount', 'created_at']
 
+    def get_permissions(self):
+        """Override permissions for specific actions - CRITICAL for M-Pesa callback"""
+        if self.action == 'mpesa_callback':
+            # No authentication required for Safaricom callback
+            return []
+        return super().get_permissions()
+
     def get_queryset(self):
         from ..models.payment_models import Payment
         
