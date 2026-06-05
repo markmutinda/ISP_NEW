@@ -132,6 +132,22 @@ class SubscriptionUsageSerializer(serializers.Serializer):
     # Warnings
     is_near_limit = serializers.BooleanField()
     warnings = serializers.ListField(child=serializers.CharField())
+
+    # Active metered billing cycle
+    is_metered = serializers.BooleanField(required=False)
+    billing_cycle_id = serializers.CharField(required=False, allow_null=True)
+    billing_cycle_start = serializers.DateTimeField(required=False, allow_null=True)
+    billing_cycle_end = serializers.DateTimeField(required=False, allow_null=True)
+    hotspot_revenue_accrued = serializers.DecimalField(max_digits=12, decimal_places=2, required=False)
+    hotspot_revenue_share_pct = serializers.DecimalField(max_digits=5, decimal_places=2, required=False)
+    hotspot_revenue_share_amount = serializers.DecimalField(max_digits=12, decimal_places=2, required=False)
+    hotspot_minimum_charge = serializers.DecimalField(max_digits=12, decimal_places=2, required=False)
+    hotspot_billable_charge = serializers.DecimalField(max_digits=12, decimal_places=2, required=False)
+    usage_subtotal = serializers.DecimalField(max_digits=12, decimal_places=2, required=False)
+    minimum_charge = serializers.DecimalField(max_digits=12, decimal_places=2, required=False)
+    minimum_adjustment = serializers.DecimalField(max_digits=12, decimal_places=2, required=False)
+    total_estimate = serializers.DecimalField(max_digits=12, decimal_places=2, required=False)
+    hotspot_revenue_note = serializers.CharField(required=False, allow_blank=True)
     
     # Trial status
     is_on_trial = serializers.BooleanField()

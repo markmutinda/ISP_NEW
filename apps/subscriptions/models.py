@@ -989,27 +989,75 @@ class BillingCycle(models.Model):
     def calculate_total_pppoe(self):
         """
         Billable PPPoE client count for this cycle.
-        Enforces the minimum floor (default 20 clients).
-        If the ISP only has 5 active clients, they are still billed for 20.
+        Counts every PPPoE client with a footprint in the 30-day cycle.
         """
-        actual = self.billable_clients.count()
-        return max(actual, self.snapshot_min_clients)
+        return self.billable_clients.count()
 
     def calculate_pppoe_charge(self):
         """
-        Calculate PPPoE charge: max(actual_clients, min_floor) × unit_price.
-        Example: max(5, 20) × 20 = 400 KES
+        Calculate PPPoE charge: client footprint x unit price.
         """
         billable_count = self.calculate_total_pppoe()
         return (Decimal(str(billable_count)) * self.snapshot_pppoe_price).quantize(Decimal('0.01'))
 
+    def refresh_actual_hotspot_revenue(self):
+        """
+        Reconcile and return actual hotspot revenue from paid sessions.
+        """
+        actual = self.get_actual_hotspot_revenue()
+        if self.hotspot_revenue_accumulated != actual:
+            type(self).objects.filter(pk=self.pk).update(hotspot_revenue_accumulated=actual)
+            self.hotspot_revenue_accumulated = actual
+        return actual
+
+    def calculate_hotspot_revenue_share(self, revenue=None):
+        """
+        Netily hotspot share for this cycle.
+        """
+        source_revenue = self.hotspot_revenue_accumulated if revenue is None else revenue
+        return (
+            Decimal(str(source_revenue))
+            * self.snapshot_hotspot_share_pct
+            / Decimal('100.0')
+        ).quantize(Decimal('0.01'))
+
+    def calculate_usage_subtotal(self, hotspot_revenue=None):
+        """
+        Raw metered usage before the monthly minimum is applied.
+        """
+        return (
+            self.calculate_pppoe_charge()
+            + self.calculate_hotspot_revenue_share(hotspot_revenue)
+        ).quantize(Decimal('0.01'))
+
+    def calculate_minimum_adjustment(self, hotspot_revenue=None):
+        """
+        Top-up amount needed to meet the monthly minimum charge.
+        """
+        minimum = self.snapshot_base_fee or Decimal('500.00')
+        subtotal = self.calculate_usage_subtotal(hotspot_revenue)
+        return max(minimum - subtotal, Decimal('0.00')).quantize(Decimal('0.01'))
+
+    def calculate_billable_usage_charge(self, hotspot_revenue=None):
+        """
+        Final metered invoice charge:
+        max(PPPoE footprint + hotspot revenue share, monthly minimum).
+        """
+        minimum = self.snapshot_base_fee or Decimal('500.00')
+        return max(self.calculate_usage_subtotal(hotspot_revenue), minimum).quantize(Decimal('0.01'))
+
+    def calculate_hotspot_minimum_charge(self):
+        """
+        Backwards-compatible alias retained for older callers.
+        """
+        return self.calculate_billable_usage_charge()
+
     def calculate_total_charge(self):
         """
-        Calculate the strict billing formula: 
-        Base Fee + (Active Users * 20 KES) + (Hotspot Revenue * 3%)
-        
-        EXCEPTION: The first paid cycle after trial conversion charges
-        ONLY the base license fee. Metered usage starts on the second cycle.
+        Calculate recurring usage billing.
+
+        Activation is paid once after trial. Each 30-day usage invoice is:
+        max(PPPoE footprint charge + hotspot revenue share, monthly minimum).
         """
         plan = self.subscription.plan
         
@@ -1017,18 +1065,7 @@ class BillingCycle(models.Model):
         if not plan.is_metered:
             return self.subscription.current_price
         
-        base_fee = self.snapshot_base_fee
-        
-        # First paid cycle after trial: base fee only — no metered charges
-        if self.is_first_paid_cycle:
-            return base_fee
-        
-        pppoe_charge = self.calculate_pppoe_charge()
-        
-        # Calculate Hotspot Share (e.g., Revenue * 0.03)
-        hotspot_share = (self.hotspot_revenue_accumulated * self.snapshot_hotspot_share_pct / Decimal('100.0')).quantize(Decimal('0.01'))
-        
-        return base_fee + pppoe_charge + hotspot_share
+        return self.calculate_billable_usage_charge()
 
     def get_actual_hotspot_revenue(self):
         """

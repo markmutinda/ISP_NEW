@@ -2293,7 +2293,7 @@ class TenantUserLedgerListView(APIView):
 
     def get(self, request):
         _ensure_public()
-        from apps.subscriptions.models import TenantUserLedger
+        from apps.subscriptions.models import BillingCycle, CompanySubscription, TenantUserLedger
         from apps.superadmin.serializers import TenantUserLedgerSerializer
 
         tenant_id = request.query_params.get("tenant_id")
@@ -2332,10 +2332,88 @@ class TenantUserLedgerListView(APIView):
         start = (page - 1) * page_size
         entries = qs[start:start + page_size]
 
+        metered_subscriptions = CompanySubscription.objects.filter(
+            status__in=['active', 'trialing'],
+            plan__is_metered=True,
+            company__tenant__isnull=False,
+        ).select_related("company__tenant", "plan")
+        if tenant_id:
+            metered_subscriptions = metered_subscriptions.filter(company__tenant__id=tenant_id)
+
+        for subscription in metered_subscriptions:
+            tenant = subscription.company.tenant
+            BillingCycle.objects.get_or_create(
+                tenant=tenant,
+                subscription=subscription,
+                status='active',
+                defaults={
+                    "start_date": subscription.current_period_start or timezone.now(),
+                    "end_date": subscription.current_period_end or (timezone.now() + timedelta(days=30)),
+                },
+            )
+
+        active_cycles = BillingCycle.objects.filter(status='active').select_related(
+            "tenant", "tenant__company", "subscription__plan"
+        )
+        if tenant_id:
+            active_cycles = active_cycles.filter(tenant_id=tenant_id)
+
+        hotspot_revenue_total = Decimal("0.00")
+        hotspot_share_total = Decimal("0.00")
+        hotspot_tenants = []
+
+        for cycle in active_cycles:
+            try:
+                fallback_pct = (
+                    Decimal(str(cycle.subscription.plan.hotspot_revenue_share_pct or 0))
+                    if cycle.subscription and cycle.subscription.plan
+                    else Decimal("0.00")
+                ) or Decimal("3.00")
+                if not cycle.snapshot_hotspot_share_pct:
+                    cycle.snapshot_hotspot_share_pct = fallback_pct
+                    BillingCycle.objects.filter(pk=cycle.pk).update(
+                        snapshot_hotspot_share_pct=fallback_pct
+                    )
+
+                revenue = cycle.refresh_actual_hotspot_revenue()
+                share = cycle.calculate_hotspot_revenue_share(revenue)
+            except Exception as exc:
+                logger.warning(
+                    "User ledger hotspot summary failed for %s: %s",
+                    getattr(cycle.tenant, "schema_name", cycle.tenant_id),
+                    exc,
+                )
+                revenue = cycle.hotspot_revenue_accumulated or Decimal("0.00")
+                share = Decimal("0.00")
+
+            hotspot_revenue_total += revenue
+            hotspot_share_total += share
+            if revenue or share:
+                hotspot_tenants.append({
+                    "tenant_id": str(cycle.tenant_id),
+                    "tenant_name": getattr(getattr(cycle.tenant, "company", None), "name", cycle.tenant.schema_name),
+                    "tenant_schema": cycle.tenant.schema_name,
+                    "billing_cycle_id": str(cycle.id),
+                    "hotspot_revenue": str(revenue),
+                    "hotspot_share_pct": str(cycle.snapshot_hotspot_share_pct),
+                    "hotspot_share_amount": str(share),
+                })
+
+        hotspot_tenants.sort(
+            key=lambda row: Decimal(str(row["hotspot_revenue"] or 0)),
+            reverse=True,
+        )
+
         return Response({
             "count": total,
             "page": page,
             "page_size": page_size,
+            "summary": {
+                "active_cycle_count": active_cycles.count(),
+                "hotspot_revenue_total": str(hotspot_revenue_total),
+                "hotspot_share_total": str(hotspot_share_total),
+                "hotspot_tenants": hotspot_tenants,
+            },
             "results": TenantUserLedgerSerializer(entries, many=True).data,
         })
 

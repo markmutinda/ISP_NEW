@@ -5,6 +5,7 @@ from django.urls import path, include
 from rest_framework.routers import DefaultRouter
 from rest_framework_simplejwt.views import TokenRefreshView
 from . import views
+from .views_support import SupportChatDemoView
 
 router = DefaultRouter()
 router.register(r'users', views.UserViewSet, basename='user')
@@ -46,6 +47,7 @@ urlpatterns = [
     # Community Feature Requests
     path('feature-requests/', views.CommunityFeatureRequestView.as_view(), name='feature-requests'),
     path('feature-requests/<int:pk>/toggle-upvote/', views.ToggleUpvoteView.as_view(), name='toggle-upvote'),
+    path('support-chat/', SupportChatDemoView.as_view(), name='support-chat'),
     
     # OTP endpoints
     path('auth/otp/send/', views.SendOTPView.as_view(), name='send-otp'),

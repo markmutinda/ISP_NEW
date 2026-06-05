@@ -109,6 +109,51 @@ def load_support_documents() -> list[SupportDocument]:
     return docs
 
 
+def _clean_doc_lines(text: str) -> list[str]:
+    lines = []
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        line = re.sub(r"^#+\s*", "", line)
+        line = re.sub(r"^[-*]\s*", "", line)
+        line = re.sub(r"^\d+\.\s*", "", line)
+        line = line.strip()
+        if line:
+            lines.append(line)
+    return lines
+
+
+def _organic_answer(question: str, docs: list[SupportDocument]) -> str:
+    topic = docs[0].title if docs else "that Netily workflow"
+    collected: list[str] = []
+
+    for doc in docs:
+        for line in _clean_doc_lines(doc.text):
+            if line.lower() == doc.title.lower():
+                continue
+            if line not in collected:
+                collected.append(line)
+            if len(collected) >= 5:
+                break
+        if len(collected) >= 5:
+            break
+
+    if not collected:
+        return (
+            f"I found approved guidance for {topic}, but it needs a little more detail in the "
+            "support docs before I can give a useful answer."
+        )
+
+    intro = f"Here is the Netily-approved guidance for {topic}:"
+    bullets = "\n".join(f"- {line}" for line in collected[:5])
+    follow_up = (
+        "If you want, ask me a more specific follow-up like where to click, what to check first, "
+        "or what a tenant should expect."
+    )
+    return f"{intro}\n{bullets}\n\n{follow_up}"
+
+
 def is_architecture_question(question: str) -> bool:
     normalized = question.lower()
     return any(term in normalized for term in ARCHITECTURE_BLOCKLIST)
@@ -165,18 +210,15 @@ def answer_support_question(question: str) -> dict:
         }
 
     best = ranked[:2]
-    snippets = []
+    matched_docs = []
     sources = []
     for score, doc in best:
-        body = re.sub(r"^#+\s*", "", doc.text, flags=re.MULTILINE)
-        lines = [line.strip() for line in body.splitlines() if line.strip()]
-        snippet = " ".join(lines[:8])
-        snippets.append(snippet)
+        matched_docs.append(doc)
         sources.append({"title": doc.title, "source": doc.source, "score": round(score, 2)})
 
-    answer = " ".join(snippets)
+    answer = _organic_answer(cleaned, matched_docs)
     return {
-        "answer": answer[:1200],
+        "answer": answer[:1400],
         "sources": sources,
         "confidence": round(best[0][0], 2),
         "blocked": False,

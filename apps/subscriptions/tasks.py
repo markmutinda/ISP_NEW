@@ -103,16 +103,28 @@ def generate_metered_invoices():
                         BillableClientRecord.objects.bulk_create(records_to_create, ignore_conflicts=True)
                         logger.info(f"[{tenant.name}] Created {len(records_to_create)} billable client records")
                 
-                    # ─── PHASE 3: THE EXACT MATH ───
-                    base_fee = cycle.snapshot_base_fee
+                    # ─── PHASE 3: THE EXACT USAGE MATH ───
+                    minimum_charge = cycle.snapshot_base_fee or Decimal('500.00')
+                    if not cycle.snapshot_hotspot_share_pct:
+                        fallback_pct = Decimal(str(plan.hotspot_revenue_share_pct or 0)) or Decimal('3.00')
+                        cycle.snapshot_hotspot_share_pct = fallback_pct
+                        BillingCycle.objects.filter(pk=cycle.pk).update(
+                            snapshot_hotspot_share_pct=fallback_pct
+                        )
                     pppoe_count = cycle.calculate_total_pppoe()
                     pppoe_fee = cycle.calculate_pppoe_charge()
                     
                     # Use ACTUAL hotspot revenue queried from DB, not the accumulator
                     hotspot_share = (actual_hotspot_revenue * (cycle.snapshot_hotspot_share_pct / Decimal('100.0'))).quantize(Decimal('0.01'))
-                    total_due = base_fee + pppoe_fee + hotspot_share
+                    usage_subtotal = (pppoe_fee + hotspot_share).quantize(Decimal('0.01'))
+                    minimum_adjustment = max(minimum_charge - usage_subtotal, Decimal('0.00')).quantize(Decimal('0.01'))
+                    total_due = max(usage_subtotal, minimum_charge).quantize(Decimal('0.01'))
                     
-                    logger.info(f"[{tenant.name}] Calculated charges: Base={base_fee}, PPPoE({pppoe_count})={pppoe_fee}, Hotspot={hotspot_share}, Total={total_due}")
+                    logger.info(
+                        f"[{tenant.name}] Calculated charges: PPPoE({pppoe_count})={pppoe_fee}, "
+                        f"HotspotShare={hotspot_share}, UsageSubtotal={usage_subtotal}, "
+                        f"MinimumAdjustment={minimum_adjustment}, Total={total_due}"
+                    )
                     
                     # ─── GRACE PERIOD: DO NOT LOCK IMMEDIATELY ───
                     # Set grace_ends_at to 4 days from now. The separate
@@ -146,20 +158,11 @@ def generate_metered_invoices():
                         billing_date=now.date(),
                     )
 
-                    # Create Exact Line Items (Breakdown)
-                    InvoiceItem.objects.create(
-                        invoice=new_invoice, 
-                        description='Netily Platform - Base License Fee',
-                        quantity=1, 
-                        unit_price=base_fee, 
-                        tax_rate=0, 
-                        tax_amount=0, 
-                        total=base_fee
-                    )
+                    # Create exact line items (usage breakdown).
                     if pppoe_fee > 0:
                         InvoiceItem.objects.create(
                             invoice=new_invoice, 
-                            description=f'Active PPPoE Clients ({pppoe_count} users @ KES {cycle.snapshot_pppoe_price} each)',
+                            description=f'PPPoE Client Footprint ({pppoe_count} users @ KES {cycle.snapshot_pppoe_price} each)',
                             quantity=pppoe_count,
                             unit_price=cycle.snapshot_pppoe_price, 
                             tax_rate=0, 
@@ -176,6 +179,16 @@ def generate_metered_invoices():
                             tax_rate=0, 
                             tax_amount=0, 
                             total=hotspot_share
+                        )
+                    if minimum_adjustment > 0:
+                        InvoiceItem.objects.create(
+                            invoice=new_invoice,
+                            description=f'Monthly Minimum Charge Adjustment (minimum KES {minimum_charge:,.2f})',
+                            quantity=1,
+                            unit_price=minimum_adjustment,
+                            tax_rate=0,
+                            tax_amount=0,
+                            total=minimum_adjustment
                         )
 
                 with schema_context(get_public_schema_name()):
@@ -194,7 +207,8 @@ def generate_metered_invoices():
                     
                     logger.info(
                         f"[{tenant.name}] Invoiced KES {total_due} (Invoice #{new_invoice.id}). "
-                        f"Billed {pppoe_count} PPPoE users (raw={cycle.get_raw_pppoe_count()}, min_floor={cycle.snapshot_min_clients}). "
+                        f"Billed {pppoe_count} PPPoE users, hotspot share KES {hotspot_share}, "
+                        f"minimum adjustment KES {minimum_adjustment}. "
                         f"Grace period ends: {grace_deadline.date()}"
                     )
                     
@@ -205,13 +219,18 @@ def generate_metered_invoices():
                             template='emails/billing/invoice_generated.html',
                             subject='Your Monthly Netily Invoice is Ready',
                             context={
-                                'base_fee': base_fee,
+                                'activation_fee': minimum_charge,
+                                'minimum_charge': minimum_charge,
                                 'pppoe_count': pppoe_count,
                                 'pppoe_fee': pppoe_fee,
                                 'hotspot_share': hotspot_share,
+                                'actual_hotspot_revenue': actual_hotspot_revenue,
+                                'usage_subtotal': usage_subtotal,
+                                'minimum_adjustment': minimum_adjustment,
                                 'total_due': total_due,
                                 'due_date': (now + timedelta(days=4)).date(),
                                 'grace_days': 4,
+                                'days_before_due': max(((now + timedelta(days=4)).date() - now.date()).days, 0),
                                 'cycle_start': cycle.start_date.date(),
                                 'cycle_end': cycle.end_date.date(),
                             }
@@ -622,40 +641,123 @@ def refresh_metered_billing_estimates():
     active_companies = Company.objects.filter(
         subscription__plan__is_metered=True,
         subscription__status__in=['active', 'trialing'],
-    ).select_related('subscription__plan')
+    ).select_related('subscription__plan', 'tenant')
 
     refreshed = 0
     for company in active_companies:
         try:
             plan = company.subscription.plan
-            schema = company.schema_name if hasattr(company, 'schema_name') else None
+            tenant = getattr(company, 'tenant', None)
+            schema = tenant.schema_name if tenant else None
             if not schema:
                 continue
 
             with schema_context(schema):
                 from apps.customers.models import Customer
+                from apps.billing.models.hotspot_models import HotspotSession
                 pppoe_count = Customer.objects.count()
 
-            pppoe_min = int(plan.pppoe_min_clients)
             pppoe_unit = Decimal(str(plan.pppoe_unit_price))
-            base_fee = Decimal(str(plan.base_license_fee))
-            hotspot_share_pct = Decimal(str(plan.hotspot_revenue_share_pct))
-            billable_pppoe = max(pppoe_count, pppoe_min)
+            minimum_charge = Decimal(str(plan.base_license_fee or 500))
+            hotspot_share_pct = Decimal(str(plan.hotspot_revenue_share_pct or 0)) or Decimal('3.00')
+            hotspot_revenue = Decimal('0.00')
+            cycle_id = None
+            cycle_start = None
+            cycle_end = None
+
+            with schema_context(get_public_schema_name()):
+                active_cycle = BillingCycle.objects.filter(
+                    tenant=tenant,
+                    subscription=company.subscription,
+                    status='active',
+                ).select_related('tenant').order_by('-start_date').first()
+
+                if active_cycle:
+                    updates = {}
+                    if not active_cycle.snapshot_hotspot_share_pct:
+                        active_cycle.snapshot_hotspot_share_pct = hotspot_share_pct
+                        updates['snapshot_hotspot_share_pct'] = hotspot_share_pct
+                    if not active_cycle.snapshot_base_fee:
+                        active_cycle.snapshot_base_fee = minimum_charge
+                        updates['snapshot_base_fee'] = minimum_charge
+                    if not active_cycle.snapshot_pppoe_price:
+                        active_cycle.snapshot_pppoe_price = pppoe_unit
+                        updates['snapshot_pppoe_price'] = pppoe_unit
+                    if updates:
+                        BillingCycle.objects.filter(pk=active_cycle.pk).update(**updates)
+
+                    with schema_context(schema):
+                        hotspot_revenue = HotspotSession.objects.filter(
+                            status__in=['active', 'expired'],
+                            activated_at__gte=active_cycle.start_date,
+                            activated_at__lt=active_cycle.end_date,
+                        ).aggregate(total=Sum('amount'))['total'] or Decimal('0.00')
+
+                    if active_cycle.hotspot_revenue_accumulated != hotspot_revenue:
+                        BillingCycle.objects.filter(pk=active_cycle.pk).update(
+                            hotspot_revenue_accumulated=hotspot_revenue
+                        )
+
+                    hotspot_share_pct = active_cycle.snapshot_hotspot_share_pct
+                    minimum_charge = active_cycle.snapshot_base_fee or minimum_charge
+                    pppoe_unit = active_cycle.snapshot_pppoe_price or pppoe_unit
+                    cycle_id = str(active_cycle.id)
+                    cycle_start = active_cycle.start_date.isoformat()
+                    cycle_end = active_cycle.end_date.isoformat()
+                else:
+                    active_cycle = BillingCycle.objects.create(
+                        tenant=tenant,
+                        subscription=company.subscription,
+                        start_date=company.subscription.current_period_start or timezone.now(),
+                        end_date=company.subscription.current_period_end or (timezone.now() + timedelta(days=30)),
+                        status='active',
+                    )
+                    minimum_charge = active_cycle.snapshot_base_fee or minimum_charge
+                    pppoe_unit = active_cycle.snapshot_pppoe_price or pppoe_unit
+                    hotspot_share_pct = active_cycle.snapshot_hotspot_share_pct or hotspot_share_pct
+                    cycle_id = str(active_cycle.id)
+                    cycle_start = active_cycle.start_date.isoformat()
+                    cycle_end = active_cycle.end_date.isoformat()
+                    with schema_context(schema):
+                        hotspot_revenue = HotspotSession.objects.filter(
+                            status__in=['active', 'expired'],
+                            activated_at__gte=active_cycle.start_date,
+                            activated_at__lt=active_cycle.end_date,
+                        ).aggregate(total=Sum('amount'))['total'] or Decimal('0.00')
+                    if hotspot_revenue:
+                        BillingCycle.objects.filter(pk=active_cycle.pk).update(
+                            hotspot_revenue_accumulated=hotspot_revenue
+                        )
+
+            billable_pppoe = pppoe_count
             pppoe_charge = Decimal(billable_pppoe) * pppoe_unit
-            total_estimate = base_fee + pppoe_charge
+            hotspot_share_amount = (hotspot_revenue * hotspot_share_pct / Decimal('100.0')).quantize(Decimal('0.01'))
+            usage_subtotal = (pppoe_charge + hotspot_share_amount).quantize(Decimal('0.01'))
+            minimum_adjustment = max(minimum_charge - usage_subtotal, Decimal('0.00')).quantize(Decimal('0.01'))
+            total_estimate = max(usage_subtotal, minimum_charge).quantize(Decimal('0.01'))
 
             data = {
                 'is_metered': True,
                 'plan_name': plan.name,
-                'base_fee': str(base_fee),
+                'billing_cycle_id': cycle_id,
+                'billing_cycle_start': cycle_start,
+                'billing_cycle_end': cycle_end,
+                'activation_fee': str(minimum_charge),
+                'minimum_charge': str(minimum_charge),
+                'base_fee': '0.00',
                 'pppoe_count': pppoe_count,
-                'pppoe_min_clients': pppoe_min,
+                'pppoe_min_clients': 0,
                 'pppoe_unit_price': str(pppoe_unit),
                 'billable_pppoe': billable_pppoe,
                 'pppoe_charge': str(pppoe_charge),
                 'hotspot_share_pct': str(hotspot_share_pct),
+                'hotspot_revenue_accrued': str(hotspot_revenue),
+                'hotspot_revenue_share_amount': str(hotspot_share_amount),
+                'hotspot_billable_charge': str(hotspot_share_amount),
+                'usage_subtotal': str(usage_subtotal),
+                'minimum_adjustment': str(minimum_adjustment),
                 'total_estimate': str(total_estimate),
-                'note': 'Hotspot revenue share calculated at cycle close and not included in total_estimate.',
+                'note': 'Estimate uses current PPPoE footprint plus actual hotspot revenue reconciled from the active billing cycle.',
             }
             cache_key = f'metered_estimate:{company.pk}'
             cache.set(cache_key, data, timeout=60 * 60 * 9)  # 9-hour TTL (> 8 h so never cold)
