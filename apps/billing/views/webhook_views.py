@@ -226,6 +226,21 @@ class MpesaC2BWebhookView(APIView):
 
         # 2. PROCESS INSIDE TENANT SCHEMA
         with schema_context(target_tenant_schema):
+            # ============================================================
+            # NEW: Skip if STK callback already completed this transaction
+            # ============================================================
+            existing = Payment.objects.filter(
+                schema_name=target_tenant_schema,
+                mpesa_receipt=trans_id,
+                status='COMPLETED',
+            ).first()
+            if existing:
+                logger.info(f"C2B {trans_id} already completed by STK callback, skipping")
+                return Response(
+                    {"ResultCode": 0, "ResultDesc": "Already processed"},
+                    status=status.HTTP_200_OK
+                )
+
             try:
                 with transaction.atomic():
                     # --- Find service (try ServiceConnection first, then HotspotSession) ---
