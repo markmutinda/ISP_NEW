@@ -1004,9 +1004,21 @@ class PaymentViewSet(viewsets.ModelViewSet):
                     checkout_request_id=checkout_request_id
                 )
                 
+                # ── IDEMPOTENCY CHECK ──────────────────────────────────────
+                # If already completed, return success immediately (Safaricom retries)
+                if mpesa_transaction.status == 'COMPLETED':
+                    logger.info(f"Duplicate callback ignored for {checkout_request_id}")
+                    return Response({'ResultCode': 0, 'ResultDesc': 'Already processed'})
+                # ──────────────────────────────────────────────────────────
+                
                 # 🧠 Fixed typo: changed payment_record to payment attribute
                 payment = mpesa_transaction.payment if hasattr(mpesa_transaction, 'payment') else None
                 if payment:
+                    # Check payment not already completed
+                    if payment.status == 'COMPLETED':
+                        logger.info(f"Payment already completed for {checkout_request_id}")
+                        return Response({'ResultCode': 0, 'ResultDesc': 'Already processed'})
+                    
                     transaction_data = result['transaction_data']
                     
                     # Update payment with M-Pesa details
@@ -1037,10 +1049,14 @@ class PaymentViewSet(viewsets.ModelViewSet):
                         logger.warning(f"Could not update hotspot session from Daraja callback: {hs_err}")
                     
                     # Update the MpesaTransaction
-                    mpesa_transaction.mark_completed(
-                        transaction_id=transaction_data['mpesa_receipt'],
-                        callback_data=callback_data
-                    )
+                    try:
+                        mpesa_transaction.mark_completed(
+                            transaction_id=transaction_data['mpesa_receipt'],
+                            callback_data=callback_data
+                        )
+                    except Exception as e:
+                        # Already completed by a parallel callback - ignore
+                        logger.warning(f"MpesaTransaction already completed: {e}")
                     
                     # Safely send SMS confirmation for the tenant
                     try:
