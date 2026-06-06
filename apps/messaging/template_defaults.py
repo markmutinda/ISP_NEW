@@ -14,7 +14,7 @@ DEFAULTS = [
      'Your WiFi session ({access_code}) expires in {minutes} minute(s). Buy another plan to stay connected.',
      ['{access_code}', '{minutes}']),
 
-    ('hotspot_expired',          'Hotspot — Session Expired',
+    ('hotspot_session_expired',  'Hotspot — Session Expired',    # FIXED: changed from 'hotspot_expired' to 'hotspot_session_expired'
      'Your WiFi session has ended. Visit the portal to buy a new plan and reconnect. Thank you!',
      []),
 
@@ -39,7 +39,7 @@ DEFAULTS = [
      'Hi {name}, your {plan_name} subscription has been renewed. New expiry: {expiry_date}. Stay connected!',
      ['{name}', '{plan_name}', '{expiry_date}']),
 
-    ('pppoe_expiry_reminder',    'PPPoE — Expiry Reminder',       # WAS 'pppoe_expiry'
+    ('pppoe_expiry_reminder',    'PPPoE — Expiry Reminder',
      'Hi {name}, your internet subscription ({plan_name}) expires in {days} day(s). Please renew to avoid interruption.',
      ['{name}', '{plan_name}', '{days}']),
 
