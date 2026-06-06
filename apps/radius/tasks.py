@@ -839,13 +839,18 @@ def send_pppoe_expiry_reminders():
                         customer = cred.customer
                         reminder_key = due['key']
 
+                        # ============================================================
+                        # FIX: Normalize to minute precision - microseconds cause false cache misses
+                        # ============================================================
+                        expiry_normalized = cred.expiration_date.replace(second=0, microsecond=0)
+
                         # DB-level dedup — unique constraint blocks duplicates
                         try:
                             with db_transaction.atomic():
                                 RadiusExpiryReminderLog.objects.create(
                                     customer_id=str(customer.id),
                                     interval_key=reminder_key,
-                                    expiration_date=cred.expiration_date,
+                                    expiration_date=expiry_normalized,
                                     username=cred.username,
                                 )
                         except IntegrityError:
