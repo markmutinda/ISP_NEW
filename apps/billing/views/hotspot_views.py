@@ -1611,6 +1611,63 @@ class HotspotPhoneReconnectView(APIView):
                         plan = direct_session.plan
                         plan_device_limit = getattr(plan, 'simultaneous_devices', 1) or 1
                         
+                        # FIXED: When plan supports 1 device and the user is the legitimate owner
+                        # (proven by phone number), allow reconnection by just reseeding RADIUS
+                        # credentials with the new MAC, updating the session's MAC address.
+                        if plan_device_limit <= 1 and not existing_mac_session:
+                            # MAC likely randomized — this IS their device, just with a new MAC.
+                            # Since they proved ownership via phone number, allow reconnect and
+                            # update the session MAC so future auto-logins work correctly.
+                            base_session_updated = active_sessions.first()
+                            if base_session and mac_address and mac_address != '00:00:00:00:00:00':
+                                base_session_updated = base_session
+                                # Update the stored MAC so auto-login works next time
+                                base_session_updated.mac_address = mac_address
+                                base_session_updated.save(update_fields=['mac_address'])
+                                # Also register this device under the client
+                                if base_session_updated.hotspot_client:
+                                    HotspotClientDevice.record_device(
+                                        client=base_session_updated.hotspot_client,
+                                        mac_address=mac_address
+                                    )
+                            
+                            access_code = base_session.access_code
+                            try:
+                                from apps.billing.services.hotspot_radius_service import HotspotRadiusService
+                                HotspotRadiusService().create_hotspot_credentials(
+                                    username=access_code,
+                                    password=access_code,
+                                    router=router,
+                                    plan=plan,
+                                    expires_at=base_session.expires_at,
+                                    mac_address=mac_address,
+                                )
+                            except Exception as e:
+                                logger.error(f"Phone reconnect single-device RADIUS reseed failed: {e}")
+                                return Response(
+                                    {'error': 'Failed to restore connection. Please try again.'},
+                                    status=status.HTTP_500_INTERNAL_SERVER_ERROR
+                                )
+
+                            remaining_minutes = max(
+                                0, int((base_session.expires_at - now).total_seconds() / 60)
+                            )
+                            logger.info(
+                                f"Phone reconnect (MAC rotation, same owner): phone={phone_canonical} "
+                                f"old_mac={base_session.mac_address} new_mac={mac_address} "
+                                f"access_code={access_code}"
+                            )
+                            return Response({
+                                'status': 'reconnected',
+                                'message': 'Welcome back! Your connection has been restored.',
+                                'access_code': access_code,
+                                'expires_at': base_session.expires_at.isoformat(),
+                                'remaining_minutes': remaining_minutes,
+                                'plan_name': plan.name,
+                                'device_slot': 'existing',
+                                'credentials': {'username': access_code, 'password': access_code},
+                            })
+                        
                         # Only block if this is a NEW device trying to join a single-device plan.
                         # If this MAC already matches the session's MAC, it's a reconnect — always allow.
                         is_same_device = (
@@ -1753,15 +1810,60 @@ class HotspotPhoneReconnectView(APIView):
             # But always allow reconnect if this MAC already has an active session.
             existing_mac_session = active_sessions.filter(mac_address=mac_address).first()
 
+            # FIXED: For single-device plans, allow reconnect when MAC is new but user is the owner
+            # This handles MAC randomization on phones
             if plan_device_limit <= 1 and not existing_mac_session:
-                return Response(
-                    {
-                        'error': 'Your plan supports only 1 device. '
-                                 'To connect a different device, disconnect the current one first.',
-                        'single_device_plan': True,
-                    },
-                    status=status.HTTP_403_FORBIDDEN
+                # MAC likely randomized — this IS their device, just with a new MAC.
+                # Since they proved ownership via phone number, allow reconnect and
+                # update the session MAC so future auto-logins work correctly.
+                base_session_updated = base_session
+                if mac_address and mac_address != '00:00:00:00:00:00':
+                    # Update the stored MAC so auto-login works next time
+                    base_session_updated.mac_address = mac_address
+                    base_session_updated.save(update_fields=['mac_address'])
+                    # Also register this device under the client
+                    if base_session_updated.hotspot_client:
+                        HotspotClientDevice.record_device(
+                            client=base_session_updated.hotspot_client,
+                            mac_address=mac_address
+                        )
+                
+                access_code = base_session.access_code
+                try:
+                    from apps.billing.services.hotspot_radius_service import HotspotRadiusService
+                    HotspotRadiusService().create_hotspot_credentials(
+                        username=access_code,
+                        password=access_code,
+                        router=router,
+                        plan=plan,
+                        expires_at=base_session.expires_at,
+                        mac_address=mac_address,
+                    )
+                except Exception as e:
+                    logger.error(f"Phone reconnect single-device RADIUS reseed failed: {e}")
+                    return Response(
+                        {'error': 'Failed to restore connection. Please try again.'},
+                        status=status.HTTP_500_INTERNAL_SERVER_ERROR
+                    )
+
+                remaining_minutes = max(
+                    0, int((base_session.expires_at - now).total_seconds() / 60)
                 )
+                logger.info(
+                    f"Phone reconnect (MAC rotation, same owner): phone={phone_canonical} "
+                    f"old_mac={base_session.mac_address} new_mac={mac_address} "
+                    f"access_code={access_code}"
+                )
+                return Response({
+                    'status': 'reconnected',
+                    'message': 'Welcome back! Your connection has been restored.',
+                    'access_code': access_code,
+                    'expires_at': base_session.expires_at.isoformat(),
+                    'remaining_minutes': remaining_minutes,
+                    'plan_name': plan.name,
+                    'device_slot': 'existing',
+                    'credentials': {'username': access_code, 'password': access_code},
+                })
 
             # ── Check if this MAC already has an active session (reconnect) ──
             existing_session_for_mac = active_sessions.filter(
