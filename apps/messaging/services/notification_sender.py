@@ -499,6 +499,7 @@ class SMSNotifier:
             expiry_display=expiry_display,
             expiry_full=expiry_full_str,
             amount_due=amount_due,
+            amount=amount_due,          # alias for {amount} in templates
             customer_account=customer_account,  # ← ADDED: customer billing account number
         )
 

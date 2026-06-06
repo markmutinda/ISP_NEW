@@ -28,9 +28,10 @@ class SMSTemplateCreateUpdateSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = SMSTemplate
-        fields = ['name', 'content', 'variables', 'is_active']
+        fields = ['name', 'content', 'variables', 'is_active', 'event_type']
         extra_kwargs = {
             'variables': {'required': False, 'allow_null': True},
+            'event_type': {'required': False, 'allow_blank': True},
         }
 
 
