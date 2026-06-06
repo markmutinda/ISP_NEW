@@ -972,6 +972,28 @@ class PaymentViewSet(viewsets.ModelViewSet):
         callback_handler = MpesaCallback()
         result = callback_handler.handle_stk_callback(callback_data)
         
+        # ADD THIS: Handle failed callbacks too
+        if result['status'] == 'FAILED':
+            checkout_request_id = result.get('checkout_request_id')
+            if checkout_request_id:
+                from ..models.payment_models import MpesaTransaction, Payment
+                try:
+                    mpesa_txn = MpesaTransaction.objects.filter(
+                        checkout_request_id=checkout_request_id
+                    ).first()
+                    if mpesa_txn:
+                        mpesa_txn.mark_failed(
+                            result_code=result.get('result_code', 1),
+                            result_desc=result.get('result_desc', 'Transaction failed'),
+                            callback_data=callback_data
+                        )
+                        if mpesa_txn.payment:
+                            mpesa_txn.payment.status = 'FAILED'
+                            mpesa_txn.payment.failure_reason = result.get('result_desc', 'STK Push failed or cancelled')
+                            mpesa_txn.payment.save(update_fields=['status', 'failure_reason'])
+                except Exception as e:
+                    logger.error(f"Error handling failed STK callback: {e}")
+        
         if result['status'] == 'SUCCESS':
             checkout_request_id = result['checkout_request_id']
             
