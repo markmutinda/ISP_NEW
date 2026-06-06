@@ -422,6 +422,7 @@ class SMSNotifier:
         Called X days before PPPoE expiry.
         
         FIX: Enhanced with smart expiry display (1 hour, 6 hours, today, etc.)
+        FIX: Added {customer_account} variable for billing account number.
         """
         s = _get_notif_settings()
         if s and not s.pppoe_expiry_reminder:
@@ -440,6 +441,19 @@ class SMSNotifier:
         except Exception:
             expiration_date = None
             amount_due = ''
+
+        # ============================================================
+        # FIX: Get customer's billing account number for {customer_account} variable
+        # ============================================================
+        customer_account = ''
+        try:
+            service = customer.services.filter(status='ACTIVE').first()
+            if service and service.billing_account_number:
+                customer_account = service.billing_account_number
+            elif hasattr(customer, 'billing_account_number') and customer.billing_account_number:
+                customer_account = customer.billing_account_number
+        except Exception:
+            pass
 
         # Build smart expiry display
         if expiration_date:
@@ -485,6 +499,7 @@ class SMSNotifier:
             expiry_display=expiry_display,
             expiry_full=expiry_full_str,
             amount_due=amount_due,
+            customer_account=customer_account,  # ← ADDED: customer billing account number
         )
 
         # Plain dispatch — dedup is handled at task level via DB
