@@ -79,6 +79,9 @@ docs/_build/
 docs
 docs/
 *.md 
+!rag/
+!rag/netily-support/
+!rag/netily-support/*.md
 docs/VPN_RADIUS_TESTING_GUIDE.md
 
 docs/VPN_RADIUS_TESTING_GUIDE.md

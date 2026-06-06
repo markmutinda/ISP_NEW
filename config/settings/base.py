@@ -355,6 +355,18 @@ TENANT_BASE_DOMAIN = os.getenv('TENANT_BASE_DOMAIN', 'localhost')
 # Frontend URL (Next.js app) — used for admin panel links et al
 FRONTEND_URL = os.getenv('FRONTEND_URL', 'http://localhost:3000')
 
+# Netily tenant support chatbot
+OPENAI_API_KEY = os.getenv('OPENAI_API_KEY', '')
+NETILY_SUPPORT_CHAT_KNOWLEDGE_DIR = os.getenv('NETILY_SUPPORT_CHAT_KNOWLEDGE_DIR', 'rag/netily-support')
+NETILY_SUPPORT_CHAT_USE_LLM = os.getenv('NETILY_SUPPORT_CHAT_USE_LLM', 'True').lower() in ('1', 'true', 'yes', 'on')
+NETILY_SUPPORT_CHAT_MODEL = os.getenv('NETILY_SUPPORT_CHAT_MODEL', 'gpt-4o-mini')
+NETILY_SUPPORT_CHAT_TEMPERATURE = float(os.getenv('NETILY_SUPPORT_CHAT_TEMPERATURE', '0.2'))
+NETILY_SUPPORT_CHAT_TIMEOUT = int(os.getenv('NETILY_SUPPORT_CHAT_TIMEOUT', '20'))
+NETILY_SUPPORT_CHAT_MAX_RETRIES = int(os.getenv('NETILY_SUPPORT_CHAT_MAX_RETRIES', '1'))
+NETILY_SUPPORT_CHAT_CHUNK_SIZE = int(os.getenv('NETILY_SUPPORT_CHAT_CHUNK_SIZE', '900'))
+NETILY_SUPPORT_CHAT_CHUNK_OVERLAP = int(os.getenv('NETILY_SUPPORT_CHAT_CHUNK_OVERLAP', '120'))
+NETILY_SUPPORT_CHAT_MAX_CONTEXT_CHARS = int(os.getenv('NETILY_SUPPORT_CHAT_MAX_CONTEXT_CHARS', '5000'))
+
 # ────────────────────────────────────────────────────────────────
 #  SESSION SETTINGS
 # ────────────────────────────────────────────────────────────────

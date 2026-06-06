@@ -2,7 +2,7 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from .support_knowledge import answer_support_question
+from .support_knowledge import answer_support_question, support_chat_status
 
 
 class SupportChatDemoView(APIView):
@@ -14,6 +14,9 @@ class SupportChatDemoView(APIView):
     """
 
     permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        return Response(support_chat_status())
 
     def post(self, request):
         question = request.data.get("message") or request.data.get("question") or ""

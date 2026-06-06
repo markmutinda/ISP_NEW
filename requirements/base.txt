@@ -42,6 +42,12 @@ librouteros==3.3.0
 netaddr==1.2.0
 requests==2.31.0
 
+# Support chatbot RAG
+langchain>=0.2.16,<0.3
+langchain-community>=0.2.16,<0.3
+langchain-openai>=0.1.25,<0.2
+langchain-text-splitters>=0.2.4,<0.3
+
 # VPN/Certificate Management
 cryptography==42.0.0
 
