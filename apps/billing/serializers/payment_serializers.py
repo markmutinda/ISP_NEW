@@ -340,6 +340,7 @@ class PaymentSerializer(serializers.ModelSerializer):
     """
     Serializer for Payment model - Returns strings instead of IDs for frontend compatibility.
     Enhanced to handle Hotspot payments where customer may be null.
+    FIXED: C2B paybill payments now correctly identified as PPPoE with proper customer name display.
     """
     # Custom fields for better frontend display
     customer_name = serializers.SerializerMethodField()
@@ -377,7 +378,23 @@ class PaymentSerializer(serializers.ModelSerializer):
     def get_customer_name(self, obj):
         """
         Get the customer name, handling null customers (e.g., Hotspot payments)
+        FIXED: Shows account reference for C2B unmatched payments for manual reconciliation
         """
+        # ============================================================
+        # FIX: C2B unmatched - show payer name + account ref they typed
+        # ============================================================
+        if hasattr(obj, 'mpesa_transaction') and obj.mpesa_transaction:
+            if obj.mpesa_transaction.transaction_type == 'C2B':
+                payer = obj.payer_name or ''
+                account_ref = obj.mpesa_transaction.account_reference or ''
+                if payer and account_ref:
+                    return f'{payer} (Ref: {account_ref})'
+                if account_ref:
+                    return f'Unmatched (Ref: {account_ref})'
+                if payer:
+                    return payer
+                return 'Unmatched C2B Payment'
+        
         # 1. Try the linked PPPoE customer
         if obj.customer and hasattr(obj.customer, 'full_name') and obj.customer.full_name:
             return obj.customer.full_name
@@ -400,18 +417,30 @@ class PaymentSerializer(serializers.ModelSerializer):
     def get_service_type(self, obj):
         """
         Determine if this payment was for Hotspot, PPPoE, or other service
+        FIXED: C2B paybill payments are always Fiber/DSL regardless of customer match
         """
+        # ============================================================
+        # FIX: C2B paybill payments - always Fiber/DSL (PPPoE) regardless of customer match
+        # ============================================================
+        if hasattr(obj, 'mpesa_transaction') and obj.mpesa_transaction:
+            if obj.mpesa_transaction.transaction_type == 'C2B':
+                return 'PPPoE'
+        
+        # Check notes for C2B indicator
+        if obj.notes and 'C2B' in obj.notes:
+            return 'PPPoE'
+        
         # Check if linked to hotspot session
         if hasattr(obj, 'hotspot_session') and obj.hotspot_session:
-            return "Hotspot"
+            return 'Hotspot'
         
         # Check if payment method name indicates hotspot
         if obj.payment_method and obj.payment_method.name and "Hotspot" in obj.payment_method.name:
-            return "Hotspot"
+            return 'Hotspot'
         
-        # Check if there's a customer (PPPoE usually has customer)
+        # Has a PPPoE customer
         if obj.customer:
-            return "PPPoE"
+            return 'PPPoE'
         
         # Check if it's an M-Pesa payment without customer (likely hotspot)
         if obj.payment_method and obj.payment_method.method_type and obj.payment_method.method_type.startswith('MPESA_'):
@@ -422,7 +451,8 @@ class PaymentSerializer(serializers.ModelSerializer):
         if obj.payer_name and not obj.customer:
             return "Hotspot"
         
-        return "Other"
+        # Default to PPPoE for paybill payments
+        return 'PPPoE'
 
     def get_payment_method_name(self, obj):
         """
