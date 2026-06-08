@@ -50,6 +50,52 @@ class MpesaC2BWebhookView(APIView):
     permission_classes = [AllowAny]
     authentication_classes = []
 
+    def _persist_c2b_transaction(self, *, config, trans_id, amount, msisdn, bill_ref, data, schema_name):
+        """
+        Persist the raw C2B transaction before customer activation work.
+        Intentionally runs outside transaction.atomic() so that a failed activation
+        does not delete evidence that a customer paid.
+        """
+        try:
+            mpesa_txn, created = MpesaTransaction.objects.get_or_create(
+                transaction_id=trans_id,
+                defaults={
+                    "configuration": config,
+                    "merchant_request_id": f"C2B-{trans_id}",
+                    "checkout_request_id": f"C2B-{trans_id}",
+                    "transaction_type": "C2B",
+                    "amount": amount,
+                    "phone_number": msisdn,
+                    "account_reference": bill_ref,
+                    "status": "COMPLETED",
+                    "callback_data": data,
+                    "callback_received_at": timezone.now(),
+                    "schema_name": schema_name,
+                },
+            )
+
+            if not created:
+                # Update payload fields for auditing/debugging if retried by Safaricom
+                update_fields = []
+                if not mpesa_txn.callback_data:
+                    mpesa_txn.callback_data = data
+                    update_fields.append("callback_data")
+                if not mpesa_txn.callback_received_at:
+                    mpesa_txn.callback_received_at = timezone.now()
+                    update_fields.append("callback_received_at")
+                if mpesa_txn.status != "COMPLETED":
+                    mpesa_txn.status = "COMPLETED"
+                    update_fields.append("status")
+
+                if update_fields:
+                    mpesa_txn.save(update_fields=update_fields)
+
+            return mpesa_txn, created
+
+        except IntegrityError:
+            logger.info(f"Duplicate C2B transaction ignored at raw persist stage: {trans_id}")
+            return MpesaTransaction.objects.filter(transaction_id=trans_id).first(), False
+
     def _calculate_renewal_expiry(self, service, amount, current_expiry=None, customer=None):
         """
         Calculates subscription parameters based on incoming payments.
@@ -162,23 +208,18 @@ class MpesaC2BWebhookView(APIView):
             )
 
         # 1. FIND THE TENANT
-        # FIX: Match on shortcode regardless of is_active, as long as URLs were registered
-        # This ensures C2B webhooks still work for previously registered configs even if
-        # they are no longer the primary active gateway
         target_tenant_schema = None
-        fallback_tenant_schema = None  # Track tenant with shortcode-only match
+        fallback_tenant_schema = None
         
         if connection.schema_name == 'public':
             for tenant in Tenant.objects.exclude(schema_name='public'):
                 with schema_context(tenant.schema_name):
                     try:
-                        # UPDATED: Match configs that are EITHER active OR have registered URLs
                         if MpesaConfiguration.objects.filter(
                             business_shortcode=shortcode
                         ).filter(
                             Q(is_active=True) | Q(c2b_urls_registered=True)
                         ).exists():
-                            # Prefer tenant where the account reference matches a ServiceConnection
                             if ServiceConnection.objects.filter(
                                 models.Q(billing_account_number__iexact=bill_ref) |
                                 models.Q(mpesa_account_number__iexact=bill_ref)
@@ -187,14 +228,12 @@ class MpesaC2BWebhookView(APIView):
                                 logger.info(f"Found matching tenant via ServiceConnection: {tenant.schema_name}")
                                 break
                             
-                            # Check HotspotSession
                             from apps.billing.models.hotspot_models import HotspotSession
                             if HotspotSession.objects.filter(session_id__icontains=bill_ref).exists():
                                 target_tenant_schema = tenant.schema_name
                                 logger.info(f"Found matching tenant via HotspotSession reference: {tenant.schema_name}")
                                 break
                             
-                            # Shortcode matches but no account match — store as fallback candidate
                             if not fallback_tenant_schema:
                                 fallback_tenant_schema = tenant.schema_name
                                 logger.info(
@@ -205,7 +244,6 @@ class MpesaC2BWebhookView(APIView):
                         logger.debug(f"Error checking tenant {tenant.schema_name}: {e}")
                         continue
             
-            # If no perfect match found but we have a fallback, use it
             if not target_tenant_schema and fallback_tenant_schema:
                 target_tenant_schema = fallback_tenant_schema
                 logger.info(f"Using fallback tenant {target_tenant_schema} for unmatched payment")
@@ -217,8 +255,6 @@ class MpesaC2BWebhookView(APIView):
                 f"UNMATCHED PAYMENT: ID={trans_id}, Account={bill_ref}, SC={shortcode}. "
                 "No tenant matched (no active or registered M-Pesa config found). Manual reconciliation required."
             )
-            # Still record the payment at public schema level as completely unmatched?
-            # For now, just return as before
             return Response(
                 {"ResultCode": 0, "ResultDesc": "Account Not Found"},
                 status=status.HTTP_200_OK
@@ -226,9 +262,7 @@ class MpesaC2BWebhookView(APIView):
 
         # 2. PROCESS INSIDE TENANT SCHEMA
         with schema_context(target_tenant_schema):
-            # ============================================================
-            # NEW: Skip if STK callback already completed this transaction
-            # ============================================================
+            # Check for existing completed records upfront
             existing = Payment.objects.filter(
                 schema_name=target_tenant_schema,
                 mpesa_receipt=trans_id,
@@ -241,285 +275,118 @@ class MpesaC2BWebhookView(APIView):
                     status=status.HTTP_200_OK
                 )
 
+            # Look up configurations cleanly before entering the atomic loop
+            config = MpesaConfiguration.objects.filter(
+                business_shortcode=shortcode
+            ).filter(
+                Q(is_active=True) | Q(c2b_urls_registered=True)
+            ).first()
+
+            if not config:
+                logger.error(f"No M-Pesa config (active or registered) for shortcode {shortcode}")
+                return Response(
+                    {"ResultCode": 1, "ResultDesc": "Configuration Error"},
+                    status=status.HTTP_200_OK
+                )
+
+            # 🛡️ PERSIST IMMEDIATELY (Outside the risky activation block)
+            mpesa_txn, created = self._persist_c2b_transaction(
+                config=config, trans_id=trans_id, amount=amount, msisdn=msisdn,
+                bill_ref=bill_ref, data=data, schema_name=target_tenant_schema
+            )
+
+            if not mpesa_txn:
+                logger.error(f"Could not persist raw C2B transaction: {trans_id}")
+                return Response(
+                    {"ResultCode": 1, "ResultDesc": "Could not persist transaction"},
+                    status=status.HTTP_200_OK
+                )
+
+            if getattr(mpesa_txn, 'payment_id', None):
+                logger.info(f"Duplicate C2B callback ignored: {trans_id}")
+                return Response(
+                    {"ResultCode": 0, "ResultDesc": "Duplicate"},
+                    status=status.HTTP_200_OK
+                )
+
+            # Begin customer activation block safely
             try:
                 with transaction.atomic():
-                    # --- Find service (try ServiceConnection first, then HotspotSession) ---
+                    # Find service connection structures
                     service = ServiceConnection.objects.filter(
                         models.Q(billing_account_number__iexact=bill_ref) |
                         models.Q(mpesa_account_number__iexact=bill_ref)
-                    ).select_related(
-                        'customer', 'plan',
-                        'pppoe_user', 'hotspot_user'
-                    ).first()
+                    ).select_related('customer', 'plan', 'pppoe_user', 'hotspot_user').first()
 
-                    # If no ServiceConnection found, check HotspotSession
                     hotspot_session = None
                     if not service:
                         from apps.billing.models.hotspot_models import HotspotSession
                         hotspot_session = HotspotSession.objects.filter(
-                            session_id__icontains=bill_ref,
-                            status='pending'
+                            session_id__icontains=bill_ref, status='pending'
                         ).select_related('plan', 'router').first()
                         
                         if hotspot_session:
                             logger.info(f"Found HotspotSession {hotspot_session.session_id} for payment")
-                            
-                            # For hotspot sessions, we need to find or create a customer context
-                            # Hotspot sessions may not have a full Customer record
-                            # We'll process the payment and activate the session directly
-                            
-                            # UPDATED: Find config that is EITHER active OR has registered URLs
-                            config = MpesaConfiguration.objects.filter(
-                                business_shortcode=shortcode
-                            ).filter(
-                                Q(is_active=True) | Q(c2b_urls_registered=True)
-                            ).first()
-
-                            if not config:
-                                logger.error(f"No M-Pesa config (active or registered) for shortcode {shortcode}")
-                                return Response(
-                                    {"ResultCode": 1, "ResultDesc": "Configuration Error"},
-                                    status=status.HTTP_200_OK
-                                )
-
-                            # --- Idempotency: deduplicate by TransID ---
-                            try:
-                                mpesa_txn = MpesaTransaction.objects.create(
-                                    configuration=config,
-                                    transaction_id=trans_id,
-                                    merchant_request_id=f"C2B-{trans_id}",
-                                    checkout_request_id=f"C2B-{trans_id}",
-                                    transaction_type='C2B',
-                                    amount=amount,
-                                    phone_number=msisdn,
-                                    account_reference=bill_ref,
-                                    status='COMPLETED',
-                                    callback_data=data,
-                                    callback_received_at=timezone.now(),
-                                    schema_name=target_tenant_schema
-                                )
-                            except IntegrityError:
-                                logger.info(f"Duplicate C2B callback ignored: {trans_id}")
-                                return Response(
-                                    {"ResultCode": 0, "ResultDesc": "Duplicate"},
-                                    status=status.HTTP_200_OK
-                                )
-
-                            # --- Find or create payment method ---
                             method, _ = InvoiceItemPayment.objects.get_or_create(
-                                method_type='MPESA_PAYBILL',
-                                schema_name=target_tenant_schema,
-                                defaults={
-                                    'name': 'M-Pesa Paybill',
-                                    'code': f'MPESA_PAYBILL_{target_tenant_schema[:10]}',
-                                    'is_active': True,
-                                }
+                                method_type='MPESA_PAYBILL', schema_name=target_tenant_schema,
+                                defaults={'name': 'M-Pesa Paybill', 'code': f'MPESA_PAYBILL_{target_tenant_schema[:10]}', 'is_active': True}
                             )
-
-                            # Extract names safely from the C2B data
                             first_name = data.get('FirstName', '')
                             last_name = data.get('LastName', '')
                             payer_full_name = f"{first_name} {last_name}".strip()
 
-                            # --- Record payment with improved payer name handling ---
                             payment = Payment.objects.create(
-                                amount=amount,
-                                payment_method=method,
-                                status='COMPLETED',
-                                transaction_id=trans_id,
-                                mpesa_receipt=trans_id,
-                                # Keep the hash in mpesa_phone for auditing/tracking if needed
-                                mpesa_phone=msisdn,
-                                # Clear payer_phone to prevent the UI from displaying the hash
-                                payer_phone='',
-                                # Use real names provided by Safaricom
-                                payer_name=payer_full_name if payer_full_name else "M-Pesa User",
-                                mpesa_transaction=mpesa_txn,
-                                payment_date=timezone.now(),
-                                schema_name=target_tenant_schema,
-                                hotspot_session=hotspot_session,
+                                amount=amount, payment_method=method, status='COMPLETED',
+                                transaction_id=trans_id, mpesa_receipt=trans_id, mpesa_phone=msisdn,
+                                payer_phone='', payer_name=payer_full_name if payer_full_name else "M-Pesa User",
+                                mpesa_transaction=mpesa_txn, payment_date=timezone.now(),
+                                schema_name=target_tenant_schema, hotspot_session=hotspot_session,
                                 notes=f"C2B hotspot payment via Paybill. Session: {hotspot_session.session_id}. Ref: {trans_id}"
                             )
                             mpesa_txn.payment = payment
                             mpesa_txn.save(update_fields=['payment'])
-
-                            # --- Mark hotspot session as paid and activate ---
                             hotspot_session.mark_paid(trans_id)
-                            
-                            logger.info(
-                                f"Hotspot payment processed: {trans_id} | "
-                                f"Session: {hotspot_session.session_id} | Amount: KES {amount}"
-                            )
-                            
-                            return Response(
-                                {"ResultCode": 0, "ResultDesc": "Success"},
-                                status=status.HTTP_200_OK
-                            )
+                            return Response({"ResultCode": 0, "ResultDesc": "Success"}, status=status.HTTP_200_OK)
 
-                    # --- If no service AND no hotspot session found, record as UNMATCHED for manual reconciliation ---
+                    # Unmatched account tracking
                     if not service:
-                        logger.warning(
-                            f"UNMATCHED ACCOUNT: ID={trans_id}, Account={bill_ref}, SC={shortcode}, "
-                            f"tenant={target_tenant_schema}. Recording for manual reconciliation."
-                        )
-                        
-                        # UPDATED: Find config that is EITHER active OR has registered URLs
-                        config = MpesaConfiguration.objects.filter(
-                            business_shortcode=shortcode
-                        ).filter(
-                            Q(is_active=True) | Q(c2b_urls_registered=True)
-                        ).first()
-
-                        if not config:
-                            logger.error(f"No M-Pesa config (active or registered) for shortcode {shortcode}")
-                            return Response(
-                                {"ResultCode": 1, "ResultDesc": "Configuration Error"},
-                                status=status.HTTP_200_OK
-                            )
-
-                        # --- Record transaction (unmatched) ---
-                        try:
-                            mpesa_txn = MpesaTransaction.objects.create(
-                                configuration=config,
-                                transaction_id=trans_id,
-                                merchant_request_id=f"C2B-{trans_id}",
-                                checkout_request_id=f"C2B-{trans_id}",
-                                transaction_type='C2B',
-                                amount=amount,
-                                phone_number=msisdn,
-                                account_reference=bill_ref,
-                                status='COMPLETED',
-                                callback_data=data,
-                                callback_received_at=timezone.now(),
-                                schema_name=target_tenant_schema
-                            )
-                        except IntegrityError:
-                            logger.info(f"Duplicate unmatched C2B callback ignored: {trans_id}")
-                            return Response(
-                                {"ResultCode": 0, "ResultDesc": "Duplicate"},
-                                status=status.HTTP_200_OK
-                            )
-
-                        # --- Find or create payment method ---
+                        logger.warning(f"UNMATCHED ACCOUNT: ID={trans_id}, Account={bill_ref}, SC={shortcode}. Recording for manual reconciliation.")
                         method, _ = InvoiceItemPayment.objects.get_or_create(
-                            method_type='MPESA_PAYBILL',
-                            schema_name=target_tenant_schema,
-                            defaults={
-                                'name': 'M-Pesa Paybill',
-                                'code': f'MPESA_PAYBILL_{target_tenant_schema[:10]}',
-                                'is_active': True,
-                            }
+                            method_type='MPESA_PAYBILL', schema_name=target_tenant_schema,
+                            defaults={'name': 'M-Pesa Paybill', 'code': f'MPESA_PAYBILL_{target_tenant_schema[:10]}', 'is_active': True}
                         )
-
-                        # Extract names safely from the C2B data
                         first_name = data.get('FirstName', '')
                         last_name = data.get('LastName', '')
                         payer_full_name = f"{first_name} {last_name}".strip()
 
-                        # --- Record unmatched payment with clear notes for ISP ---
                         payment = Payment.objects.create(
-                            customer=None,
-                            amount=amount,
-                            payment_method=method,
-                            status='COMPLETED',
-                            transaction_id=trans_id,
-                            mpesa_receipt=trans_id,
-                            mpesa_phone=msisdn,
-                            payer_phone='',
-                            payer_name=payer_full_name or "M-Pesa User",
-                            mpesa_transaction=mpesa_txn,
-                            payment_date=timezone.now(),
-                            schema_name=target_tenant_schema,
-                            notes=(
-                                f"UNMATCHED ACCOUNT: Customer entered '{bill_ref}' which does not match "
-                                f"any registered billing account or pending hotspot session. "
-                                f"Manual activation required. TransID: {trans_id}, Phone: {msisdn}"
-                            )
+                            customer=None, amount=amount, payment_method=method, status='COMPLETED',
+                            transaction_id=trans_id, mpesa_receipt=trans_id, mpesa_phone=msisdn, payer_phone='',
+                            payer_name=payer_full_name or "M-Pesa User", mpesa_transaction=mpesa_txn,
+                            payment_date=timezone.now(), schema_name=target_tenant_schema,
+                            notes=f"UNMATCHED ACCOUNT: Customer entered '{bill_ref}'. Manual activation required."
                         )
                         mpesa_txn.payment = payment
                         mpesa_txn.save(update_fields=['payment'])
-
-                        logger.info(
-                            f"Unmatched payment recorded for reconciliation: {trans_id} | "
-                            f"Account: {bill_ref} | Amount: KES {amount} | Tenant: {target_tenant_schema}"
-                        )
-                        
                         return Response(
                             {"ResultCode": 0, "ResultDesc": "Success - Recorded for Manual Reconciliation"},
                             status=status.HTTP_200_OK
                         )
 
-                    # --- Continue with normal matched service payment flow ---
-                    # UPDATED: Find config that is EITHER active OR has registered URLs
-                    config = MpesaConfiguration.objects.filter(
-                        business_shortcode=shortcode
-                    ).filter(
-                        Q(is_active=True) | Q(c2b_urls_registered=True)
-                    ).first()
-
-                    if not config:
-                        logger.error(f"No M-Pesa config (active or registered) for shortcode {shortcode}")
-                        return Response(
-                            {"ResultCode": 1, "ResultDesc": "Configuration Error"},
-                            status=status.HTTP_200_OK
-                        )
-
-                    # --- Idempotency: deduplicate by TransID ---
-                    try:
-                        mpesa_txn = MpesaTransaction.objects.create(
-                            configuration=config,
-                            transaction_id=trans_id,
-                            merchant_request_id=f"C2B-{trans_id}",
-                            checkout_request_id=f"C2B-{trans_id}",
-                            transaction_type='C2B',
-                            amount=amount,
-                            phone_number=msisdn,
-                            account_reference=bill_ref,
-                            status='COMPLETED',
-                            callback_data=data,
-                            callback_received_at=timezone.now(),
-                            schema_name=target_tenant_schema
-                        )
-                    except IntegrityError:
-                        logger.info(f"Duplicate C2B callback ignored: {trans_id}")
-                        return Response(
-                            {"ResultCode": 0, "ResultDesc": "Duplicate"},
-                            status=status.HTTP_200_OK
-                        )
-
-                    # --- Find or create payment method ---
+                    # Matched subscription processing sequence
                     method, _ = InvoiceItemPayment.objects.get_or_create(
-                        method_type='MPESA_PAYBILL',
-                        schema_name=target_tenant_schema,
-                        defaults={
-                            'name': 'M-Pesa Paybill',
-                            'code': f'MPESA_PAYBILL_{target_tenant_schema[:10]}',
-                            'is_active': True,
-                        }
+                        method_type='MPESA_PAYBILL', schema_name=target_tenant_schema,
+                        defaults={'name': 'M-Pesa Paybill', 'code': f'MPESA_PAYBILL_{target_tenant_schema[:10]}', 'is_active': True}
                     )
-
-                    # Extract names safely from the C2B data
                     first_name = data.get('FirstName', '')
                     last_name = data.get('LastName', '')
                     payer_full_name = f"{first_name} {last_name}".strip()
 
-                    # --- Record payment with improved payer name handling ---
                     payment = Payment.objects.create(
-                        customer=service.customer,
-                        amount=amount,
-                        payment_method=method,
-                        status='COMPLETED',
-                        transaction_id=trans_id,
-                        mpesa_receipt=trans_id,
-                        # Keep the hash in mpesa_phone for auditing/tracking if needed
-                        mpesa_phone=msisdn,
-                        # Clear payer_phone to prevent the UI from displaying the hash
-                        payer_phone='',
-                        # Use real names provided by Safaricom
-                        payer_name=payer_full_name if payer_full_name else "M-Pesa User",
-                        mpesa_transaction=mpesa_txn,
-                        payment_date=timezone.now(),
-                        schema_name=target_tenant_schema,
+                        customer=service.customer, amount=amount, payment_method=method, status='COMPLETED',
+                        transaction_id=trans_id, mpesa_receipt=trans_id, mpesa_phone=msisdn, payer_phone='',
+                        payer_name=payer_full_name if payer_full_name else "M-Pesa User", mpesa_transaction=mpesa_txn,
+                        payment_date=timezone.now(), schema_name=target_tenant_schema,
                         notes=f"C2B payment via Paybill. Account: {bill_ref}. Ref: {trans_id}"
                     )
                     mpesa_txn.payment = payment
@@ -552,7 +419,7 @@ class MpesaC2BWebhookView(APIView):
                     )
                     customer.save(update_fields=['outstanding_balance'])
 
-                    # --- PLAN-BASED QUANTITY RENEWAL (Claude Snapshot Fix) ---
+                    # --- PLAN-BASED QUANTITY RENEWAL ---
                     from apps.radius.models import CustomerRadiusCredentials
                     radius_cred = CustomerRadiusCredentials.objects.filter(customer=customer).first()
                     current_expiry = radius_cred.expiration_date if radius_cred else None
@@ -566,13 +433,10 @@ class MpesaC2BWebhookView(APIView):
                         from apps.billing.models.subscription_models import Subscription
                         from django.db import connection as db_conn
                         
-                        # Compute plan change flag accurately
                         plan_changed = (matched_plan.id != original_plan_id) if matched_plan else False
 
-                        # --- (a) Expire any currently active logging rows ---
                         Subscription.objects.filter(customer=customer, status='ACTIVE').update(status='EXPIRED')
 
-                        # --- (b) Build fresh core Subscription record ---
                         new_subscription = Subscription.objects.create(
                             customer=customer,
                             service_connection=service,
@@ -585,14 +449,12 @@ class MpesaC2BWebhookView(APIView):
                             schema_name=db_conn.schema_name,
                         )
 
-                        # --- (c) Activate core service metrics ---
                         service.status = 'ACTIVE'
                         service.save(update_fields=['status'])
                         if customer.status in ('SUSPENDED', 'INACTIVE', 'PENDING'):
                             customer.status = 'ACTIVE'
                             customer.save(update_fields=['status'])
 
-                        # --- (d) Synchronize RADIUS provisioning profiles ---
                         if radius_cred:
                             radius_cred.is_enabled = True
                             radius_cred.disabled_reason = ''
@@ -617,7 +479,6 @@ class MpesaC2BWebhookView(APIView):
                             except Exception as e:
                                 logger.error(f"FreeRADIUS cluster sync failed: {e}")
 
-                            # --- (e) Deliver CoA Session Drop targeting explicit Router Gateway IP ---
                             try:
                                 from apps.radius.services.coa_service import CoAService
                                 coa = CoAService()
@@ -628,7 +489,6 @@ class MpesaC2BWebhookView(APIView):
                             except Exception as coa_err:
                                 logger.warning(f"CoA disconnection bypassed (non-fatal): {coa_err}")
 
-                        # If they upgraded or changed tiers, synchronize core connection fields
                         if plan_changed:
                             service.plan = matched_plan
                             service.monthly_price = matched_plan.base_price
@@ -652,16 +512,23 @@ class MpesaC2BWebhookView(APIView):
                     )
 
             except Exception as e:
+                # 🛡️ CRITICAL EXCEPTION GATEKEEPER
                 logger.error(f"Internal Error in {target_tenant_schema}: {e}", exc_info=True)
+                try:
+                    MpesaTransaction.objects.filter(transaction_id=trans_id).update(
+                        status="FAILED",
+                        result_desc=f"C2B activation failed after receipt: {str(e)[:500]}",
+                        callback_received_at=timezone.now(),
+                    )
+                except Exception as log_err:
+                    logger.error(f"Could not mark C2B transaction as failed: {log_err}", exc_info=True)
+
                 return Response(
-                    {"ResultCode": 1, "ResultDesc": "Internal Error"},
+                    {"ResultCode": 0, "ResultDesc": "Payment received - activation failed, manual reconciliation required"},
                     status=status.HTTP_200_OK
                 )
 
-        return Response(
-            {"ResultCode": 0, "ResultDesc": "Success"},
-            status=status.HTTP_200_OK
-        )
+        return Response({"ResultCode": 0, "ResultDesc": "Success"}, status=status.HTTP_200_OK)
 
 
 def _send_renewal_sms(customer, amount, quantity, new_expiry, phone_override=None):
@@ -675,7 +542,6 @@ def _send_renewal_sms(customer, amount, quantity, new_expiry, phone_override=Non
         if not phone:
             return
 
-        # Format the message
         period_str = f"{quantity} month{'s' if quantity > 1 else ''}" if quantity > 1 else "1 month"
         expiry_str = new_expiry.strftime('%d %b %Y') if new_expiry else 'unlimited'
         name = customer.user.first_name or 'Customer'
