@@ -13,6 +13,8 @@ class PlanSerializer(serializers.ModelSerializer):
     validity_days = serializers.IntegerField(source='duration_days', read_only=True)
     subscriber_count = serializers.IntegerField(read_only=True)
     subscribers_count = serializers.IntegerField(source='subscriber_count', read_only=True)
+    active_subscriptions_count = serializers.IntegerField(source='subscriber_count', read_only=True)
+    subscriptions_count = serializers.IntegerField(source='subscriber_count', read_only=True)
     created_by_name = serializers.CharField(source='created_by.get_full_name', read_only=True)
     # IP Pool info
     ip_pool_name = serializers.CharField(source='ip_pool.name', read_only=True, allow_null=True, default=None)
@@ -46,6 +48,7 @@ class PlanSerializer(serializers.ModelSerializer):
             # Status & Visibility
             'is_active', 'is_public', 'is_popular',
             'features', 'subscriber_count', 'subscribers_count',
+            'active_subscriptions_count', 'subscriptions_count',
             'created_by', 'created_by_name',
             'created_at', 'updated_at'
         ]
