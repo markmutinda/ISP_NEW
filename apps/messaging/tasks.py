@@ -10,41 +10,61 @@ from decimal import Decimal
 logger = logging.getLogger(__name__)
 
 
-def _send_auto_sms(phone: str, message: str, trigger_flag: str, msg_type='automated'):
+def _send_auto_sms(phone: str, message: str, trigger_flag: str, msg_type='automated', schema_name: str = None):
     """
     Internal helper: send an SMS only if the active gateway has the trigger enabled.
     Returns True if sent, False if skipped or failed.
+    
+    Args:
+        phone: Recipient phone number
+        message: SMS content
+        trigger_flag: Name of the flag to check on SMSGatewayConfig
+        msg_type: Type of message ('automated' or other)
+        schema_name: Explicit tenant schema name (required for Celery tasks)
     """
+    from django_tenants.utils import schema_context
     from .models import SMSGatewayConfig, SMSMessage
     from .services.gateway_dispatcher import GatewayDispatcher
 
-    config = SMSGatewayConfig.objects.filter(is_active=True).first()
-    if not config:
-        logger.debug("No active SMS gateway — skipping auto SMS")
+    # Determine schema: explicit > current connection (for HTTP requests)
+    _schema = schema_name
+    if not _schema:
+        from django.db import connection
+        _schema = getattr(connection, 'schema_name', None)
+
+    if not _schema or _schema == 'public':
+        logger.warning("_send_auto_sms called without valid schema — skipping")
         return False
 
-    if not getattr(config, trigger_flag, False):
-        logger.debug(f"Trigger {trigger_flag} is disabled — skipping")
-        return False
+    with schema_context(_schema):
+        config = SMSGatewayConfig.objects.filter(is_active=True).first()
+        if not config:
+            logger.debug("No active SMS gateway — skipping auto SMS")
+            return False
 
-    try:
-        dispatcher = GatewayDispatcher()
-        result = dispatcher.send_sms(to=phone, message=message)
+        if not getattr(config, trigger_flag, False):
+            logger.debug(f"Trigger {trigger_flag} is disabled — skipping")
+            return False
 
-        SMSMessage.objects.create(
-            recipient=phone,
-            message=message,
-            status=result.get('status', 'failed'),
-            type=msg_type,
-            provider=config.provider,
-            provider_message_id=result.get('provider_id', ''),
-            cost=result.get('cost', Decimal('0.00')),
-            error_message=result.get('error', ''),
-        )
-        return result.get('success', False)
-    except Exception as e:
-        logger.error(f"Auto SMS ({trigger_flag}) failed for {phone}: {e}")
-        return False
+        try:
+            # CRITICAL: Pass schema_name explicitly to GatewayDispatcher
+            dispatcher = GatewayDispatcher(schema_name=_schema)
+            result = dispatcher.send_sms(to=phone, message=message)
+
+            SMSMessage.objects.create(
+                recipient=phone,
+                message=message,
+                status=result.get('status', 'failed'),
+                type=msg_type,
+                provider=config.provider,
+                provider_message_id=result.get('provider_id', ''),
+                cost=result.get('cost', Decimal('0.00')),
+                error_message=result.get('error', ''),
+            )
+            return result.get('success', False)
+        except Exception as e:
+            logger.error(f"Auto SMS ({trigger_flag}) failed for {phone}: {e}")
+            return False
 
 
 def _get_rendered_message(event_type: str, default_msg: str, **context) -> str:
@@ -288,88 +308,43 @@ def send_loyalty_notification_sms(self, customer_id, message_type='points_earned
                 **context
             )
 
-            # Use the generic auto-sms helper (always send loyalty SMS if gateway active)
-            from .models import SMSGatewayConfig, SMSMessage
-            from .services.gateway_dispatcher import GatewayDispatcher
-
-            config = SMSGatewayConfig.objects.filter(is_active=True).first()
-            if not config:
-                return
-
-            dispatcher = GatewayDispatcher()
-            result = dispatcher.send_sms(to=phone, message=msg)
-
-            SMSMessage.objects.create(
-                recipient=phone,
-                message=msg,
-                status=result.get('status', 'failed'),
-                type='automated',
-                provider=config.provider,
-                provider_message_id=result.get('provider_id', ''),
-                cost=result.get('cost', 0),
-                error_message=result.get('error', ''),
+            # Use the auto-sms helper with explicit schema
+            _send_auto_sms(
+                phone=phone, 
+                message=msg, 
+                trigger_flag='auto_loyalty', 
+                msg_type='automated',
+                schema_name=schema_name
             )
         except Exception as e:
             logger.error(f"loyalty_notification_sms error: {e}")
             raise self.retry(exc=e)
 
 
-@shared_task(
-    bind=True,
-    queue='notifications',
-    max_retries=3,
-    default_retry_delay=30,
-    ignore_result=True,
-)
-def send_router_offline_alert(self, router_name: str, schema_name: str = None):
-    """
-    Send SMS to configured alert numbers when a MikroTik router goes offline.
-
-    Called from Router.sync_status() on the online → offline transition.
-    Runs inside the correct tenant schema so it reads the right settings.
-    
-    Supports multiple recipient numbers via the new router_offline_numbers JSONField.
-    """
-    print(f"\n\n==================================================")
-    print(f"🚨 ROUTER OFFLINE TASK TRIGGERED")
-    print(f"Router: {router_name}")
-    print(f"Schema (Tenant): {schema_name}")
-    print(f"==================================================")
-    
-    try:
-        if schema_name:
-            from django_tenants.utils import schema_context
-            with schema_context(schema_name):
-                _dispatch_router_offline_sms(router_name)
-        else:
-            _dispatch_router_offline_sms(router_name)
-
-    except Exception as exc:
-        print(f"❌ CRITICAL ERROR IN TASK: {exc}")
-        logger.error(
-            f"[ROUTER ALERT] Failed for router '{router_name}' "
-            f"(schema={schema_name}): {exc}",
-            exc_info=True,
-        )
-        try:
-            raise self.retry(exc=exc)
-        except self.MaxRetriesExceededError:
-            print(f"❌ Max retries exceeded for '{router_name}'. Giving up.")
-            logger.error(f"[ROUTER ALERT] Max retries exceeded for '{router_name}'. Giving up.")
-
-
-def _dispatch_router_offline_sms(router_name: str):
+def _dispatch_router_offline_sms(router_name: str, schema_name: str = None):
     """
     Inner function that runs inside the correct tenant schema context.
     Reads notification settings, validates recipients, and sends SMS.
     Supports both legacy single-number and new multi-number configurations.
+    
+    Args:
+        router_name: Name of the offline router
+        schema_name: Explicit tenant schema name
     """
     from .models import SMSNotificationSettings, SMSGatewayConfig, SMSMessage
     from .services.gateway_dispatcher import GatewayDispatcher
     from decimal import Decimal
+    from django.db import connection
+
+    # Determine schema
+    _schema = schema_name or getattr(connection, 'schema_name', None)
+    
+    if not _schema or _schema == 'public':
+        logger.warning(f"[ROUTER ALERT] No valid schema for router '{router_name}'")
+        return
 
     print(f"\n->_dispatch_router_offline_sms() called for router: {router_name}")
-    print(f"-> Querying Notification Settings...")
+    print(f"-> Schema: {_schema}")
 
     try:
         settings_obj = SMSNotificationSettings.objects.first()
@@ -384,14 +359,11 @@ def _dispatch_router_offline_sms(router_name: str):
         return
 
     # FIXED: Use 'or' operator to check both possible field names
-    # If either router_offline_enabled OR system_router_offline is True, alerts are enabled
     is_enabled = getattr(settings_obj, 'router_offline_enabled', False) or getattr(settings_obj, 'system_router_offline', False)
     print(f"-> Toggle Status in Database: {is_enabled}")
-    print(f"   - router_offline_enabled: {getattr(settings_obj, 'router_offline_enabled', 'NOT FOUND')}")
-    print(f"   - system_router_offline: {getattr(settings_obj, 'system_router_offline', 'NOT FOUND')}")
 
     if not is_enabled:
-        print(f"-> 🛑 EXIT: Alerts are toggled OFF in the database. (Did the frontend actually save it?)")
+        print(f"-> 🛑 EXIT: Alerts are toggled OFF in the database.")
         logger.info(f"[ROUTER ALERT] Alerts are currently toggled OFF in settings — skipping for '{router_name}'")
         return
 
@@ -424,8 +396,6 @@ def _dispatch_router_offline_sms(router_name: str):
     # Get the active gateway
     config = SMSGatewayConfig.objects.filter(is_active=True).first()
     use_inbuilt = getattr(settings_obj, 'use_inbuilt_system', False)
-    print(f"-> Active gateway: {config.provider if config else 'None'}")
-    print(f"-> use_inbuilt_system setting: {use_inbuilt}")
 
     if not config and not use_inbuilt:
         print(f"-> 🛑 EXIT: No active SMS gateway found and Inbuilt System is OFF.")
@@ -446,20 +416,10 @@ def _dispatch_router_offline_sms(router_name: str):
         phone = phone.strip()
         print(f"-> Sending to: {phone}")
         try:
-            dispatcher = GatewayDispatcher()
+            # CRITICAL: Pass schema_name explicitly to GatewayDispatcher
+            dispatcher = GatewayDispatcher(schema_name=_schema)
 
-            # 🆕 Deduct from wallet if using inbuilt system
-            if dispatcher.use_inbuilt:
-                from apps.messaging.services.credit_billing_service import CreditBillingService
-                from django.db import transaction as _tx
-                try:
-                    with _tx.atomic():
-                        CreditBillingService.debit_for_sms(message_text=message)
-                except Exception as credit_err:
-                    print(f"   ❌ Credit deduction failed: {credit_err}")
-                    logger.warning(f"Router alert SMS skipped — insufficient credits: {credit_err}")
-                    continue  # skip this phone, move to next
-
+            # Deduct from wallet if using inbuilt system (handled inside send_sms now)
             result = dispatcher.send_sms(to=phone, message=message)
             print(f"   Gateway result: success={result.get('success')}, error={result.get('error')}")
 
@@ -507,7 +467,6 @@ def _dispatch_router_offline_sms(router_name: str):
     print(f"\n==================================================\n")
 
 
-# NEW TASK: Router Online Alert
 @shared_task(
     bind=True,
     queue='notifications',
@@ -515,56 +474,64 @@ def _dispatch_router_offline_sms(router_name: str):
     default_retry_delay=30,
     ignore_result=True,
 )
-def send_router_online_alert(self, router_name: str, schema_name: str = None):
+def send_router_offline_alert(self, router_name: str, schema_name: str = None):
     """
-    Send SMS to configured alert numbers when a MikroTik router comes back online.
-    
-    Called from Router.sync_status() on the offline → online transition.
+    Send SMS to configured alert numbers when a MikroTik router goes offline.
+
+    Called from Router.sync_status() on the online → offline transition.
     Runs inside the correct tenant schema so it reads the right settings.
     
-    Supports multiple recipient numbers via the router_offline_numbers JSONField.
-    (Reuses the same numbers list since online alerts are paired with offline alerts)
+    Supports multiple recipient numbers via the new router_offline_numbers JSONField.
     """
+    from django_tenants.utils import schema_context
+    
     print(f"\n\n==================================================")
-    print(f"✅ ROUTER ONLINE TASK TRIGGERED")
+    print(f"🚨 ROUTER OFFLINE TASK TRIGGERED")
     print(f"Router: {router_name}")
     print(f"Schema (Tenant): {schema_name}")
     print(f"==================================================")
     
+    if not schema_name:
+        logger.error("No schema_name provided to send_router_offline_alert")
+        return
+    
     try:
-        if schema_name:
-            from django_tenants.utils import schema_context
-            with schema_context(schema_name):
-                _dispatch_router_online_sms(router_name)
-        else:
-            _dispatch_router_online_sms(router_name)
-
+        with schema_context(schema_name):
+            _dispatch_router_offline_sms(router_name, schema_name=schema_name)
     except Exception as exc:
-        print(f"❌ CRITICAL ERROR IN ONLINE TASK: {exc}")
+        print(f"❌ CRITICAL ERROR IN TASK: {exc}")
         logger.error(
-            f"[ROUTER ONLINE ALERT] Failed for router '{router_name}' "
+            f"[ROUTER ALERT] Failed for router '{router_name}' "
             f"(schema={schema_name}): {exc}",
             exc_info=True,
         )
-        try:
-            raise self.retry(exc=exc)
-        except self.MaxRetriesExceededError:
-            print(f"❌ Max retries exceeded for '{router_name}'. Giving up.")
-            logger.error(f"[ROUTER ONLINE ALERT] Max retries exceeded for '{router_name}'. Giving up.")
+        raise self.retry(exc=exc)
 
 
-def _dispatch_router_online_sms(router_name: str):
+def _dispatch_router_online_sms(router_name: str, schema_name: str = None):
     """
     Inner function that runs inside the correct tenant schema context.
     Reads notification settings, validates recipients, and sends SMS.
     Reuses the same numbers and toggle as offline alerts.
+    
+    Args:
+        router_name: Name of the online router
+        schema_name: Explicit tenant schema name
     """
     from .models import SMSNotificationSettings, SMSGatewayConfig, SMSMessage
     from .services.gateway_dispatcher import GatewayDispatcher
     from decimal import Decimal
+    from django.db import connection
+
+    # Determine schema
+    _schema = schema_name or getattr(connection, 'schema_name', None)
+    
+    if not _schema or _schema == 'public':
+        logger.warning(f"[ROUTER ONLINE ALERT] No valid schema for router '{router_name}'")
+        return
 
     print(f"\n->_dispatch_router_online_sms() called for router: {router_name}")
-    print(f"-> Querying Notification Settings...")
+    print(f"-> Schema: {_schema}")
 
     try:
         settings_obj = SMSNotificationSettings.objects.first()
@@ -578,14 +545,12 @@ def _dispatch_router_online_sms(router_name: str):
         logger.info(f"[ROUTER ONLINE ALERT] No SMSNotificationSettings record found for this tenant — skipping '{router_name}'")
         return
 
-    # Reuse the same toggle as offline alerts — if offline alerts are on, online alerts are too
+    # Reuse the same toggle as offline alerts
     is_enabled = getattr(settings_obj, 'router_offline_enabled', False) or getattr(settings_obj, 'system_router_offline', False)
     print(f"-> Toggle Status in Database: {is_enabled}")
-    print(f"   - router_offline_enabled: {getattr(settings_obj, 'router_offline_enabled', 'NOT FOUND')}")
-    print(f"   - system_router_offline: {getattr(settings_obj, 'system_router_offline', 'NOT FOUND')}")
 
     if not is_enabled:
-        print(f"-> 🛑 EXIT: Alerts are toggled OFF in the database. (No online notification sent)")
+        print(f"-> 🛑 EXIT: Alerts are toggled OFF in the database.")
         logger.info(f"[ROUTER ONLINE ALERT] Alerts are currently toggled OFF in settings — skipping for '{router_name}'")
         return
 
@@ -608,7 +573,7 @@ def _dispatch_router_online_sms(router_name: str):
             
     print(f"-> Sending to {len(numbers)} number(s): {numbers}")
 
-    # Build the online alert message (different from offline message)
+    # Build the online alert message
     message = (
         f"✅ RESTORED: Router '{router_name}' is back ONLINE. "
         f"Network connectivity has been restored."
@@ -618,8 +583,6 @@ def _dispatch_router_online_sms(router_name: str):
     # Get the active gateway
     config = SMSGatewayConfig.objects.filter(is_active=True).first()
     use_inbuilt = getattr(settings_obj, 'use_inbuilt_system', False)
-    print(f"-> Active gateway: {config.provider if config else 'None'}")
-    print(f"-> use_inbuilt_system setting: {use_inbuilt}")
 
     if not config and not use_inbuilt:
         print(f"-> 🛑 EXIT: No active SMS gateway found and Inbuilt System is OFF.")
@@ -640,19 +603,8 @@ def _dispatch_router_online_sms(router_name: str):
         phone = phone.strip()
         print(f"-> Sending to: {phone}")
         try:
-            dispatcher = GatewayDispatcher()
-
-            # 🆕 Deduct from wallet if using inbuilt system
-            if dispatcher.use_inbuilt:
-                from apps.messaging.services.credit_billing_service import CreditBillingService
-                from django.db import transaction as _tx
-                try:
-                    with _tx.atomic():
-                        CreditBillingService.debit_for_sms(message_text=message)
-                except Exception as credit_err:
-                    print(f"   ❌ Credit deduction failed: {credit_err}")
-                    logger.warning(f"Router online alert SMS skipped — insufficient credits: {credit_err}")
-                    continue  # skip this phone, move to next
+            # CRITICAL: Pass schema_name explicitly to GatewayDispatcher
+            dispatcher = GatewayDispatcher(schema_name=_schema)
 
             result = dispatcher.send_sms(to=phone, message=message)
             print(f"   Gateway result: success={result.get('success')}, error={result.get('error')}")
@@ -701,6 +653,48 @@ def _dispatch_router_online_sms(router_name: str):
     print(f"\n==================================================\n")
 
 
+@shared_task(
+    bind=True,
+    queue='notifications',
+    max_retries=3,
+    default_retry_delay=30,
+    ignore_result=True,
+)
+def send_router_online_alert(self, router_name: str, schema_name: str = None):
+    """
+    Send SMS to configured alert numbers when a MikroTik router comes back online.
+    
+    Called from Router.sync_status() on the offline → online transition.
+    Runs inside the correct tenant schema so it reads the right settings.
+    
+    Supports multiple recipient numbers via the router_offline_numbers JSONField.
+    (Reuses the same numbers list since online alerts are paired with offline alerts)
+    """
+    from django_tenants.utils import schema_context
+    
+    print(f"\n\n==================================================")
+    print(f"✅ ROUTER ONLINE TASK TRIGGERED")
+    print(f"Router: {router_name}")
+    print(f"Schema (Tenant): {schema_name}")
+    print(f"==================================================")
+    
+    if not schema_name:
+        logger.error("No schema_name provided to send_router_online_alert")
+        return
+    
+    try:
+        with schema_context(schema_name):
+            _dispatch_router_online_sms(router_name, schema_name=schema_name)
+    except Exception as exc:
+        print(f"❌ CRITICAL ERROR IN ONLINE TASK: {exc}")
+        logger.error(
+            f"[ROUTER ONLINE ALERT] Failed for router '{router_name}' "
+            f"(schema={schema_name}): {exc}",
+            exc_info=True,
+        )
+        raise self.retry(exc=exc)
+
+
 # FIX 5: Campaign bulk SMS — Celery task with tenant context
 @shared_task(bind=True, max_retries=2)
 def process_campaign_sms(self, campaign_id: int, phones: list, message: str):
@@ -714,10 +708,10 @@ def process_campaign_sms(self, campaign_id: int, phones: list, message: str):
         message: SMS content to send
     """
     from apps.messaging.models import SMSCampaign
-    from apps.messaging.services.notification_sender import _dispatch
     from django.utils import timezone
     from django_tenants.utils import schema_context, get_public_schema_name
     from apps.core.models import Tenant
+    from .services.gateway_dispatcher import GatewayDispatcher
 
     # Find which tenant owns this campaign
     target_schema = None
@@ -750,13 +744,17 @@ def process_campaign_sms(self, campaign_id: int, phones: list, message: str):
 
         for idx, phone in enumerate(phones):
             try:
-                ok = _dispatch(phone, message)
-                if ok:
+                # CRITICAL: Pass schema_name explicitly to GatewayDispatcher
+                dispatcher = GatewayDispatcher(schema_name=target_schema)
+                result = dispatcher.send_sms(to=phone, message=message)
+                
+                if result.get('success', False):
                     sent += 1
                 else:
                     failed += 1
+                    logger.warning(f"[CAMPAIGN {campaign_id}] Failed to send to {phone}: {result.get('error')}")
             except Exception as e:
-                logger.error(f"[CAMPAIGN {campaign_id}] Failed to send to {phone}: {e}")
+                logger.error(f"[CAMPAIGN {campaign_id}] Exception sending to {phone}: {e}")
                 failed += 1
 
             # Log progress every 100 messages

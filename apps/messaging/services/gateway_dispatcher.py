@@ -340,7 +340,7 @@ BACKENDS = {
     'advanta': AdvantaBackend,
     'hubtel': HubtelBackend,
     'bytewave': BytewaveBackend,
-    'blessedtexts': BlessedTextsBackend,  # ← ADDED
+    'blessedtexts': BlessedTextsBackend,
 }
 
 # Human-readable field labels per provider
@@ -353,7 +353,7 @@ PROVIDER_FIELDS = {
     'advanta':        {'api_key': 'API Key', 'sender_id': 'Short Code'},
     'hubtel':         {'api_key': 'Client ID', 'api_secret': 'Client Secret', 'sender_id': 'Sender ID'},
     'bytewave':       {'api_key': 'API Token', 'sender_id': 'Sender ID'},
-    'blessedtexts':   {'api_key': 'API Key', 'sender_id': 'Sender ID'},  # ← ADDED
+    'blessedtexts':   {'api_key': 'API Key', 'sender_id': 'Sender ID'},
 }
 
 
@@ -364,16 +364,41 @@ class GatewayDispatcher:
     Reads the active SMSGatewayConfig for the current tenant. 
     If using the inbuilt system, it routes via Master Bytewave and deducts credits.
     Otherwise, uses the tenant's custom API keys.
+    
+    CRITICAL: Pass schema_name explicitly when instantiating in Celery tasks
+    to avoid cross-tenant data leaks.
     """
 
-    def __init__(self):
-        from apps.messaging.models import SMSGatewayConfig
-        self.config = SMSGatewayConfig.objects.filter(is_active=True).first()
-        
+    def __init__(self, schema_name: str = None):
+        """
+        Initialize dispatcher.
+        schema_name: explicitly pass the tenant schema to avoid cross-tenant leaks in Celery tasks.
+        """
+        from django.db import connection
+        from django_tenants.utils import schema_context
+
+        # Determine schema: explicit > current connection > fail
+        _schema = schema_name or getattr(connection, 'schema_name', None)
+
+        if not _schema or _schema == 'public':
+            raise ValueError(
+                "GatewayDispatcher requires a valid tenant schema. "
+                "Pass schema_name explicitly in Celery tasks."
+            )
+
+        # CRITICAL: Query SMSGatewayConfig within the correct tenant schema
+        with schema_context(_schema):
+            from apps.messaging.models import SMSGatewayConfig
+            self.config = SMSGatewayConfig.objects.filter(is_active=True).first()
+
         if not self.config:
-            raise ValueError("No active SMS gateway configured. Go to Settings → SMS to set one up.")
-            
+            raise ValueError(
+                f"No active SMS gateway configured for schema '{_schema}'. "
+                "Go to Settings → SMS to set one up."
+            )
+
         self.use_inbuilt = self.config.use_inbuilt_system
+        self._schema = _schema  # store for later use in send_sms
 
         if self.use_inbuilt:
             # 1. USE MASTER CREDENTIALS (Inbuilt Mode)
@@ -407,6 +432,7 @@ class GatewayDispatcher:
         - For external providers: no deduction (they pay their provider directly)
         - On provider failure for inbuilt: refunds the deducted credits
         """
+        from django_tenants.utils import schema_context
         phone = _fmt_phone(to)
 
         # ─── CREDIT DEDUCTION (only for inbuilt system) ───
@@ -415,27 +441,32 @@ class GatewayDispatcher:
             from apps.messaging.services.credit_billing_service import CreditBillingService
             from django.db import transaction as _tx
 
-            # Check if enough credits exist
-            wallet = TenantSMSWallet.objects.filter(is_active=True).first()
-            required = CreditBillingService.sms_units_for_message(message)
-            
-            if not wallet or wallet.sms_units < required:
-                return {
-                    'success': False,
-                    'error': 'Insufficient SMS credits. Please top up your wallet.',
-                    'status': 'failed',
-                }
+            # CRITICAL: query wallet in the correct tenant schema
+            with schema_context(self._schema):
+                # Check if enough credits exist
+                wallet = TenantSMSWallet.objects.filter(is_active=True).first()
+                required = CreditBillingService.sms_units_for_message(message)
+                
+                if not wallet or wallet.sms_units < required:
+                    return {
+                        'success': False,
+                        'error': 'Insufficient SMS credits. Please top up your wallet.',
+                        'status': 'failed',
+                    }
 
-            # DEDUCT HERE — single source of truth
-            try:
-                with _tx.atomic():
-                    CreditBillingService.debit_for_sms(message_text=message)
-            except Exception as e:
-                return {
-                    'success': False,
-                    'error': str(e),
-                    'status': 'failed',
-                }
+                # DEDUCT HERE — single source of truth
+                try:
+                    with _tx.atomic():
+                        CreditBillingService.debit_for_sms(
+                            message_text=message,
+                            schema_name=self._schema  # pass schema explicitly
+                        )
+                except Exception as e:
+                    return {
+                        'success': False,
+                        'error': str(e),
+                        'status': 'failed',
+                    }
 
         # ─── SEND VIA PROVIDER ───
         try:
@@ -444,9 +475,10 @@ class GatewayDispatcher:
             # If sending failed and we're using inbuilt system, refund the credits
             if not ok and self.use_inbuilt:
                 from apps.messaging.services.credit_billing_service import CreditBillingService
-                units = CreditBillingService.sms_units_for_message(message)
-                CreditBillingService.refund_units(units, notes=f"Provider send failure")
-                logger.warning(f"Refunded {units} units due to send failure")
+                with schema_context(self._schema):
+                    units = CreditBillingService.sms_units_for_message(message)
+                    CreditBillingService.refund_units(units, notes=f"Provider send failure")
+                    logger.warning(f"Refunded {units} units due to send failure")
             
             return {
                 'success': ok, 
@@ -458,21 +490,26 @@ class GatewayDispatcher:
             # On exception, refund the credits if using inbuilt system
             if self.use_inbuilt:
                 from apps.messaging.services.credit_billing_service import CreditBillingService
-                units = CreditBillingService.sms_units_for_message(message)
-                CreditBillingService.refund_units(units, notes=f"Provider exception: {e}")
-                logger.warning(f"Refunded {units} units due to exception: {e}")
+                with schema_context(self._schema):
+                    units = CreditBillingService.sms_units_for_message(message)
+                    CreditBillingService.refund_units(units, notes=f"Provider exception: {e}")
+                    logger.warning(f"Refunded {units} units due to exception: {e}")
             
             provider_name = 'INBUILT-BYTEWAVE' if self.use_inbuilt else self.config.provider
             logger.error(f"[{provider_name}] SMS send failed: {e}")
             return {'success': False, 'error': str(e), 'status': 'failed'}
 
     def get_balance(self) -> Dict[str, Any]:
+        from django_tenants.utils import schema_context
+        
         # If using inbuilt system, return the Tenant's wallet balance, NOT your actual Bytewave bank balance!
         if self.use_inbuilt:
             from apps.messaging.models import TenantSMSWallet
-            wallet = TenantSMSWallet.objects.filter(is_active=True).first()
-            units = float(wallet.sms_units) if wallet else 0.0
-            return {'success': True, 'provider': 'Netily Default', 'balance': units, 'currency': 'SMS Units'}
+            # CRITICAL: query wallet in the correct tenant schema
+            with schema_context(self._schema):
+                wallet = TenantSMSWallet.objects.filter(is_active=True).first()
+                units = float(wallet.sms_units) if wallet else 0.0
+                return {'success': True, 'provider': 'Netily Default', 'balance': units, 'currency': 'SMS Units'}
             
         # Otherwise, fetch balance from their custom provider
         try:
