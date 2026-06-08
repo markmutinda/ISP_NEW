@@ -31,6 +31,9 @@ class HotspotPlanSerializer(serializers.ModelSerializer):
         help_text="Dict of day names to boolean values"
     )
     
+    # ADD THIS: Subscriber count for dashboard display
+    subscriber_count = serializers.SerializerMethodField()
+    
     class Meta:
         model = HotspotPlan
         fields = [
@@ -60,6 +63,8 @@ class HotspotPlanSerializer(serializers.ModelSerializer):
             'is_active', 'is_popular', 'sort_order',
             # Computed
             'total_validity_minutes',
+            # ADD THIS: Subscriber count field
+            'subscriber_count',
             # Timestamps
             'created_at', 'updated_at'
         ]
@@ -69,8 +74,19 @@ class HotspotPlanSerializer(serializers.ModelSerializer):
             'valid_days_list', 'total_validity_minutes',
             # Legacy fields computed from new fields
             'duration_minutes', 'data_limit_mb', 'speed_limit_mbps',
-            'created_at', 'updated_at'
+            'created_at', 'updated_at',
+            # ADD THIS: subscriber_count is computed
+            'subscriber_count'
         ]
+    
+    # ADD THIS METHOD: Count active hotspot sessions for this plan
+    def get_subscriber_count(self, obj) -> int:
+        """Count active hotspot sessions for this plan."""
+        from django.utils import timezone
+        return obj.sessions.filter(
+            status='active',
+            expires_at__gt=timezone.now()
+        ).count()
     
     def create(self, validated_data):
         # Extract multi-value fields
