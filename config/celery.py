@@ -151,6 +151,16 @@ app.conf.beat_schedule = {
     # },
 
     # ════════════════════════════════════════════════════════════════
+    # PPPOE INVOICE GENERATION — Auto-renewal invoices 5 days before expiry
+    # Runs daily at 7 AM to generate invoices for customers expiring in 5 days
+    # ════════════════════════════════════════════════════════════════
+    'generate-pppoe-expiry-invoices-daily': {
+        'task': 'apps.radius.tasks.generate_pppoe_expiry_invoices',
+        'schedule': crontab(hour=7, minute=0),  # Daily at 7:00 AM
+        'options': {'queue': 'radius'}
+    },
+
+    # ════════════════════════════════════════════════════════════════
     # CLOUD CONTROLLER — VPN Tunnel Monitoring
     # ════════════════════════════════════════════════════════════════
     'monitor-vpn-tunnels-every-2-min': {
