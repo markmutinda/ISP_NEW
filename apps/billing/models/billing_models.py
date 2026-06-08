@@ -151,10 +151,15 @@ class Plan(models.Model):
 
     @property
     def subscriber_count(self):
-        # Note: Ensure service_connections is a valid related_name or exists on ServiceConnection
+        service_connection_count = 0
         if hasattr(self, 'service_connections'):
-            return self.service_connections.filter(status='ACTIVE').count()
-        return 0
+            service_connection_count = self.service_connections.filter(status='ACTIVE').count()
+
+        subscription_count = 0
+        if hasattr(self, 'subscriptions'):
+            subscription_count = self.subscriptions.filter(status='ACTIVE').count()
+
+        return max(service_connection_count, subscription_count)
 
     @property
     def subscribers_count(self):
