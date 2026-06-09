@@ -190,16 +190,39 @@ def _send_once(dedup_key: str, phone: str, message: str, ttl: int = 600,
 
 
 def _fmt_phone(phone: str) -> str:
-    """Normalize to 2547xxxxxxxx format."""
+    """
+    Normalize strings to standard 2547xxxxxxxx or 2541xxxxxxxx Kenyan mobile formats.
+    Rejects internal database auto-generated identifiers or corrupt digits safely.
+    """
     if not phone:
         return ""
+        
+    # Extract only the raw numbers
     digits = "".join(c for c in phone if c.isdigit())
+    
+    # Strip any leading international zeros if a user typed something like 000254...
+    if digits.startswith("00"):
+        digits = digits[2:]
+        
+    # Standardize local 07... or 01... inputs to international 254... codes
     if digits.startswith("0"):
         digits = "254" + digits[1:]
-    elif digits.startswith("7") or digits.startswith("1"):
+    elif (digits.startswith("7") or digits.startswith("1")) and len(digits) == 9:
         digits = "254" + digits
+        
+    # Strip accidental prepended '+' characters that escaped the digit match
     if not digits.startswith("254"):
-        digits = "254" + digits.lstrip("+")
+        if digits.startswith("7") or digits.startswith("1"):
+            digits = "254" + digits
+        else:
+            digits = "254" + digits.lstrip("+")
+            
+    # 🚨 HARDENED SECURITY CHECK: A true Kenyan international number must be exactly 12 digits long
+    # (e.g., 254 + 9 mobile numbers). If it's shorter or longer, it's an internal test string or corruption.
+    if len(digits) != 12:
+        logger.warning(f"[PHONE SANITIZER] Aborted layout for invalid number reference string: '{phone}' (Cleaned: {digits})")
+        return ""
+        
     return digits
 
 
