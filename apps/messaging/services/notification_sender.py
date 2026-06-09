@@ -191,38 +191,39 @@ def _send_once(dedup_key: str, phone: str, message: str, ttl: int = 600,
 
 def _fmt_phone(phone: str) -> str:
     """
-    Normalize strings to standard 2547xxxxxxxx or 2541xxxxxxxx Kenyan mobile formats.
-    Rejects internal database auto-generated identifiers or corrupt digits safely.
+    Normalize to standard 2547xxxxxxxx or 2541xxxxxxxx format.
+    Returns empty string for anything that is clearly not a phone number.
     """
     if not phone:
         return ""
-        
-    # Extract only the raw numbers
-    digits = "".join(c for c in phone if c.isdigit())
-    
-    # Strip any leading international zeros if a user typed something like 000254...
+
+    raw = str(phone).strip()
+
+    # Hard reject: real phone numbers are never longer than 15 chars (E.164 max).
+    # Hashes, UUIDs, and other corrupt values will be caught here silently.
+    if len(raw) > 15:
+        return ""
+
+    digits = "".join(c for c in raw if c.isdigit())
+
+    # Must have at least 9 digits to be a valid mobile number
+    if len(digits) < 9:
+        return ""
+
     if digits.startswith("00"):
         digits = digits[2:]
-        
-    # Standardize local 07... or 01... inputs to international 254... codes
+
     if digits.startswith("0"):
         digits = "254" + digits[1:]
     elif (digits.startswith("7") or digits.startswith("1")) and len(digits) == 9:
         digits = "254" + digits
-        
-    # Strip accidental prepended '+' characters that escaped the digit match
-    if not digits.startswith("254"):
-        if digits.startswith("7") or digits.startswith("1"):
-            digits = "254" + digits
-        else:
-            digits = "254" + digits.lstrip("+")
-            
-    # 🚨 HARDENED SECURITY CHECK: A true Kenyan international number must be exactly 12 digits long
-    # (e.g., 254 + 9 mobile numbers). If it's shorter or longer, it's an internal test string or corruption.
-    if len(digits) != 12:
-        logger.warning(f"[PHONE SANITIZER] Aborted layout for invalid number reference string: '{phone}' (Cleaned: {digits})")
+    elif not digits.startswith("254"):
+        digits = "254" + digits.lstrip("+")
+
+    # Final hard check: must be exactly 12 digits starting with 254
+    if len(digits) != 12 or not digits.startswith("254"):
         return ""
-        
+
     return digits
 
 
@@ -735,40 +736,22 @@ class SMSNotifier:
 # HELPERS
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _customer_phone(customer, service=None) -> str:
-    """
-    Enhanced phone extractor that prefers real payment metadata 
-    from the service connection over the hashed user profile.
-    """
-    # 1. Try to get phone from ServiceConnection instance if provided
-    if service and hasattr(service, 'mpesa_phone'):
-        if service.mpesa_phone and len(str(service.mpesa_phone)) < 15:
-            return str(service.mpesa_phone)
-    
-    # 2. Check if service has a customer and that customer has alternative_phone
-    if service and hasattr(service, 'customer') and service.customer:
-        try:
-            alt_phone = service.customer.alternative_phone or ""
-            if alt_phone and len(str(alt_phone)) < 15:
-                return str(alt_phone)
-        except Exception:
-            pass
-            
-    # 3. Primary path: user.phone_number
+def _customer_phone(customer) -> str:
+    """Extract best available phone from a Customer instance."""
     try:
-        if customer and customer.user and getattr(customer.user, 'phone_number', None):
-            val = str(customer.user.phone_number)
-            # If it's a valid number, return it. If it's a long hex hash (>20 chars), ignore it.
-            if len(val) < 20 and any(c.isdigit() for c in val):
+        if customer.user and getattr(customer.user, 'phone_number', None):
+            val = str(customer.user.phone_number).strip()
+            # Real E.164 phones are max 15 chars. Anything longer is a hash/corrupt value.
+            if len(val) <= 15:
                 return val
     except Exception:
         pass
-    
-    # 4. Fallback: customer.alternative_phone
+
     try:
-        if customer:
-            return customer.alternative_phone or ""
+        alt = customer.alternative_phone or ""
+        if len(alt) <= 15:
+            return alt
     except Exception:
         pass
-        
+
     return ""
