@@ -736,14 +736,35 @@ class SMSNotifier:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _customer_phone(customer) -> str:
-    """Extract best available phone from a Customer instance."""
+    """
+    Extract best available plain-text phone number from a Customer instance,
+    safely skipping encrypted hex hashes.
+    """
     try:
-        phone = customer.user.phone_number or ""
-        if phone:
-            return phone
+        if customer.user_id:
+            phone = getattr(customer.user, 'phone_number', '') or ''
+            # If the value looks like an encrypted hex hash string, skip it
+            if phone and len(phone) < 20 and any(c.isdigit() for c in phone):
+                return phone
+                
+            # Check if there is an explicit raw or plain text attribute on the user model
+            raw_phone = getattr(customer.user, 'raw_phone', '')
+            if raw_phone:
+                return raw_phone
     except Exception:
         pass
+        
     try:
-        return customer.alternative_phone or ""
+        # Check alternative or fallback phone field structures on the customer profile
+        alt_phone = customer.alternative_phone or ""
+        if alt_phone and len(alt_phone) < 20:
+            return alt_phone
+            
+        # Try a direct .phone property if your customer schema maps it
+        direct_phone = getattr(customer, 'phone', '')
+        if direct_phone and len(direct_phone) < 20:
+            return direct_phone
     except Exception:
-        return ""
+        pass
+        
+    return ""
