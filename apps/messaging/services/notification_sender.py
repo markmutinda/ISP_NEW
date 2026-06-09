@@ -421,12 +421,12 @@ class SMSNotifier:
         return _send_once(f"pppoe_new:{customer.id}", phone, msg, ttl=3600, schema_name=schema_name)
 
     @staticmethod
-    def pppoe_payment(customer, amount: float, reference: str = "", schema_name: str = None) -> bool:
+    def pppoe_payment(customer, amount: float, reference: str = "", service=None, schema_name: str = None) -> bool:
         """Called after a PPPoE payment is completed."""
         s = _get_notif_settings()
         if s and not s.pppoe_payment_confirmation:
             return False
-        phone = _fmt_phone(_customer_phone(customer))
+        phone = _fmt_phone(_customer_phone(customer, service=service))
         if not phone:
             return False
         name = customer.user.first_name or "Customer"
@@ -434,9 +434,9 @@ class SMSNotifier:
         # Fetch plan name for context
         plan_name = ''
         try:
-            service = customer.services.filter(status='ACTIVE', plan__isnull=False).first()
-            if service and service.plan:
-                plan_name = service.plan.name or ''
+            svc = service or customer.services.filter(status='ACTIVE', plan__isnull=False).first()
+            if svc and svc.plan:
+                plan_name = svc.plan.name or ''
         except Exception:
             pass
         
@@ -735,11 +735,28 @@ class SMSNotifier:
 # HELPERS
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _customer_phone(customer) -> str:
-    """Extract best available phone from a Customer instance."""
-    # 1. Primary path: user.phone_number (the one we confirmed works)
+def _customer_phone(customer, service=None) -> str:
+    """
+    Enhanced phone extractor that prefers real payment metadata 
+    from the service connection over the hashed user profile.
+    """
+    # 1. Try to get phone from ServiceConnection instance if provided
+    if service and hasattr(service, 'mpesa_phone'):
+        if service.mpesa_phone and len(str(service.mpesa_phone)) < 15:
+            return str(service.mpesa_phone)
+    
+    # 2. Check if service has a customer and that customer has alternative_phone
+    if service and hasattr(service, 'customer') and service.customer:
+        try:
+            alt_phone = service.customer.alternative_phone or ""
+            if alt_phone and len(str(alt_phone)) < 15:
+                return str(alt_phone)
+        except Exception:
+            pass
+            
+    # 3. Primary path: user.phone_number
     try:
-        if customer.user and getattr(customer.user, 'phone_number', None):
+        if customer and customer.user and getattr(customer.user, 'phone_number', None):
             val = str(customer.user.phone_number)
             # If it's a valid number, return it. If it's a long hex hash (>20 chars), ignore it.
             if len(val) < 20 and any(c.isdigit() for c in val):
@@ -747,8 +764,11 @@ def _customer_phone(customer) -> str:
     except Exception:
         pass
     
-    # 2. Fallback path
+    # 4. Fallback: customer.alternative_phone
     try:
-        return customer.alternative_phone or ""
+        if customer:
+            return customer.alternative_phone or ""
     except Exception:
-        return ""
+        pass
+        
+    return ""
