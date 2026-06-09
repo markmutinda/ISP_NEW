@@ -29,39 +29,48 @@ def _get_notif_settings():
 
 
 # ============================================================
-# FIXED _log_sms - removed invalid 'message_type' field
+# HARDENED _log_sms - prevents transaction poisoning
 # ============================================================
 def _log_sms(phone: str, message: str, status: str = 'sent',
               msg_type: str = 'automated', recipient_name: str = '',
               customer_id=None, provider_id: str = ''):
     """
-    Persist every outbound SMS to SMSMessage so the History tab shows ALL messages
-    (manual, automated, campaign).  Never raises – logging must not break sends.
+    Persist every outbound SMS to SMSMessage so the History tab shows ALL messages.
     
-    FIX: Removed 'message_type' field which does not exist on the SMSMessage model.
-    The model uses 'type' field for the message type (single/bulk/automated/campaign).
+    HARDENING FIX: Uses an explicit nested transaction.atomic savepoint block and string 
+    truncation to prevent VARCHAR length errors from poisoning parent billing transactions.
     """
     try:
         from apps.messaging.models import SMSMessage
         from django.utils import timezone as tz
+        from django.db import transaction
         
         # Ensure we have a valid datetime for sent_at
         sent_at = tz.now() if status == 'sent' else None
         
-        SMSMessage.objects.create(
-            recipient=phone,
-            recipient_name=recipient_name or '',
-            message=message,
-            status=status,
-            type=msg_type,           # FIX: Use 'type' not 'message_type'
-            provider='system',
-            provider_message_id=provider_id or '',
-            sent_at=sent_at,
-            customer_id=customer_id if customer_id else None,
-        )
-        logger.debug(f"SMS logged: {status} to {phone[:6]}***")
+        # ✂️ Force hard truncation to prevent VARCHAR constraint violations on disk
+        safe_recipient = str(phone or '')[:20]
+        safe_status = str(status or 'sent')[:20]
+        safe_type = str(msg_type or 'automated')[:20]
+        safe_recipient_name = str(recipient_name or '')[:120]
+        safe_provider_id = str(provider_id or '')[:100]
+
+        # 🛡️ Use a nested atomic checkpoint to completely isolate this query from the parent billing block
+        with transaction.atomic():
+            SMSMessage.objects.create(
+                recipient=safe_recipient,
+                recipient_name=safe_recipient_name,
+                message=message,
+                status=safe_status,
+                type=safe_type,
+                provider='system',
+                provider_message_id=safe_provider_id,
+                sent_at=sent_at,
+                customer_id=customer_id if customer_id else None,
+            )
+        logger.debug(f"SMS logged cleanly: {safe_status} to {safe_recipient[:6]}***")
     except Exception as exc:
-        logger.warning("[SMS Log] could not persist message: %s", exc)
+        logger.warning("[SMS Log] could not persist message (isolated via savepoint safely): %s", exc)
 
 
 def _render(template: str, **ctx) -> str:
