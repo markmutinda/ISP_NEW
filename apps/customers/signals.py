@@ -283,14 +283,27 @@ def log_ip_assignment_changes(sender, instance, created, **kwargs):
 # ========== TENANT USER LEDGER — IMMUTABLE AUDIT TRAIL ==========
 
 def _get_tenant_for_ledger():
-    """Get the current tenant from the DB connection (set by django-tenants middleware)."""
+    """
+    Get the current tenant from the DB connection, converting FakeTenants to real instances.
+    
+    The django-tenants middleware sometimes attaches a lightweight FakeTenant wrapper
+    instead of the actual Tenant model instance. This helper ensures we always work
+    with the real database object to avoid ledger recording failures.
+    """
     try:
         from django.db import connection
+        from django_tenants.utils import get_tenant_model
+        
         tenant = getattr(connection, 'tenant', None)
         if tenant and tenant.schema_name != 'public':
+            # Check if this object is a mock lightweight FakeTenant wrapper
+            if type(tenant).__name__ == 'FakeTenant' or not getattr(tenant, 'pk', None):
+                # Fetch the true model instance out of the database row registry
+                TenantModel = get_tenant_model()
+                return TenantModel.objects.filter(schema_name=tenant.schema_name).first()
             return tenant
-    except Exception:
-        pass
+    except Exception as e:
+        logger.error(f"Ledger reference helper failed to map tenant context: {e}")
     return None
 
 
