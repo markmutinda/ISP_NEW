@@ -757,7 +757,12 @@ class PaymentViewSet(viewsets.ModelViewSet):
                 return Payment.objects.filter(schema_name=schema_name)
             return Payment.objects.all()
         
-        queryset = Payment.objects.filter(schema_name=connection.schema_name)
+        # FIX: Filter to only show COMPLETED payments in the list view
+        # This ensures the frontend getPayments call only returns successful payments
+        queryset = Payment.objects.filter(
+            schema_name=connection.schema_name,
+            status='COMPLETED'
+        )
         
         if hasattr(user, 'customer_profile'):
             return queryset.filter(customer=user.customer_profile)
@@ -1173,11 +1178,13 @@ class PaymentViewSet(viewsets.ModelViewSet):
         month_amount = float(month_payments.aggregate(Sum('amount'))['amount__sum'] or 0)
         
         # Status distribution
+        # Note: Since queryset only has COMPLETED, we need to query all payments for stats
+        all_payments = Payment.objects.filter(schema_name=connection.schema_name)
         status_counts = {
-            'PENDING': queryset.filter(status='PENDING').count(),
-            'COMPLETED': queryset.filter(status='COMPLETED').count(),
-            'FAILED': queryset.filter(status='FAILED').count(),
-            'REFUNDED': queryset.filter(status='REFUNDED').count(),
+            'PENDING': all_payments.filter(status='PENDING').count(),
+            'COMPLETED': all_payments.filter(status='COMPLETED').count(),
+            'FAILED': all_payments.filter(status='FAILED').count(),
+            'REFUNDED': all_payments.filter(status='REFUNDED').count(),
         }
         
         # 1. Aliased Method Distribution - FIXED: Let the DB do the sum first
@@ -1227,8 +1234,8 @@ class PaymentViewSet(viewsets.ModelViewSet):
         mpesa_stats = self.get_mpesa_stats(queryset)
 
         # Flat totals for frontend stat cards
-        completed_qs = queryset.filter(status='COMPLETED')
-        pending_qs = queryset.filter(status='PENDING')
+        completed_qs = all_payments.filter(status='COMPLETED')
+        pending_qs = all_payments.filter(status='PENDING')
         total_collected = float(completed_qs.aggregate(s=Sum('amount'))['s'] or 0)
         total_pending = float(pending_qs.aggregate(s=Sum('amount'))['s'] or 0)
         
