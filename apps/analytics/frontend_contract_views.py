@@ -136,15 +136,23 @@ def _get_plan_analytics():
     from apps.billing.models.billing_models import Plan
     from apps.billing.models.hotspot_models import HotspotPlan
     from apps.billing.models.payment_models import Payment
-    from django.db.models import Sum, Count
+    from django.db.models import Sum, Count, Q
 
     results = []
 
     # Billing plans (PPPoE etc.)
+    # FIX: Match payments via invoice OR via customer's active service connection on this plan
+    # This catches C2B payments where payment.customer is set and their service connection
+    # links to the plan, even when no invoice is attached.
     for plan in Plan.objects.filter(is_active=True).values("id", "name", "plan_type", "base_price"):
         agg = (
             Payment.objects
-            .filter(status__iexact="completed", invoice__plan_id=plan["id"])
+            .filter(status__iexact="completed")
+            .filter(
+                Q(invoice__plan_id=plan["id"]) |
+                Q(customer__services__plan_id=plan["id"])
+            )
+            .distinct()
             .aggregate(total=Sum("amount"), count=Count("id"))
         )
         results.append({
