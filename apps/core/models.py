@@ -814,6 +814,7 @@ class Lead(models.Model):
     phone = models.CharField(max_length=20, blank=True, default="")
     company_name = models.CharField(max_length=200, blank=True, default="")
     lead_source = models.CharField(max_length=120, blank=True, default="")
+    referral_name = models.CharField(max_length=200, blank=True, default="")
     message = models.TextField(blank=True, default="")
     is_contacted = models.BooleanField(default=False)
     contacted_at = models.DateTimeField(null=True, blank=True)
@@ -914,5 +915,6 @@ def notify_admins_of_new_lead(sender, instance, created, **kwargs):
             name=instance.name,
             email=instance.email,
             phone=instance.phone or 'N/A',
-            company=instance.company_name or 'Not specified'
+            company=instance.company_name or 'Not specified',
+            referral_name=instance.referral_name or 'Not specified',
         )

@@ -374,7 +374,7 @@ def process_alert_rules_task_for_tenant(schema_name):
 # ─────────────────────────────────────────────────────────────────────────────
 
 @shared_task(bind=True, max_retries=2, default_retry_delay=30)
-def send_telegram_lead_alert(self, name: str, email: str, phone: str, company: str):
+def send_telegram_lead_alert(self, name: str, email: str, phone: str, company: str, referral_name: str = "Not specified"):
     """
     Send a Telegram alert to the superadmin group when a new ISP lead submits the contact form.
     
@@ -386,6 +386,7 @@ def send_telegram_lead_alert(self, name: str, email: str, phone: str, company: s
         email: Lead's email address
         phone: Lead's phone number
         company: Lead's ISP/company name
+        referral_name: Optional person or company who referred the lead
     """
     from apps.notifications.services.telegram_service import TelegramService
     
@@ -397,6 +398,7 @@ def send_telegram_lead_alert(self, name: str, email: str, phone: str, company: s
             f"🏢 <b>Company:</b> {company}\n"
             f"📞 <b>Phone:</b> {phone}\n"
             f"✉️ <b>Email:</b> {email}\n\n"
+            f"Referred By: {referral_name}\n\n"
             f"<i>Log in to the Netily Superadmin dashboard to view details.</i>"
         )
         

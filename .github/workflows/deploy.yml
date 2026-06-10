@@ -28,7 +28,6 @@ jobs:
           script: |
             echo "==> Pulling latest backend code..."
             cd ~/netily_cloud
-            git float origin prod-backend
             git fetch origin prod-backend
             git reset --hard origin/prod-backend
 

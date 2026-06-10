@@ -2729,6 +2729,7 @@ class LeadListView(APIView):
                 Q(email__icontains=search) |
                 Q(company_name__icontains=search) |
                 Q(lead_source__icontains=search) |
+                Q(referral_name__icontains=search) |
                 Q(phone__icontains=search)
             )
 
@@ -2751,6 +2752,7 @@ class LeadListView(APIView):
                 "phone": l.phone,
                 "company_name": l.company_name,
                 "lead_source": l.lead_source,
+                "referral_name": l.referral_name,
                 "message": l.message,
                 "is_contacted": l.is_contacted,
                 "contacted_at": l.contacted_at.isoformat() if l.contacted_at else None,
@@ -2841,6 +2843,7 @@ class LeadDetailView(APIView):
             "phone": lead.phone,
             "company_name": lead.company_name,
             "lead_source": lead.lead_source,
+            "referral_name": lead.referral_name,
             "message": lead.message,
             "is_contacted": lead.is_contacted,
             "contacted_at": lead.contacted_at.isoformat() if lead.contacted_at else None,

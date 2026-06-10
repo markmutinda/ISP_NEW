@@ -1600,6 +1600,7 @@ class SubmitLeadView(APIView):
         phone = request.data.get("phone", "").strip()
         company = request.data.get("company", "").strip()
         lead_source = request.data.get("lead_source", "").strip()
+        referral_name = request.data.get("referral_name", "").strip()
         message = request.data.get("message", "").strip()
 
         if not name or not email:
@@ -1614,6 +1615,7 @@ class SubmitLeadView(APIView):
                 phone=phone,
                 company_name=company,
                 lead_source=lead_source,
+                referral_name=referral_name,
                 message=message,
             )
 
@@ -1630,6 +1632,7 @@ class SubmitLeadView(APIView):
                         f"Phone: {phone}\n"
                         f"Company: {company}\n"
                         f"Lead Source: {lead_source or 'Not specified'}\n"
+                        f"Referred By: {referral_name or 'Not specified'}\n"
                         f"Message: {message}"
                     ),
                     from_email=settings.DEFAULT_FROM_EMAIL,
@@ -1654,6 +1657,7 @@ def _serialize_lead(lead):
         "phone": lead.phone,
         "company_name": lead.company_name,
         "lead_source": lead.lead_source,
+        "referral_name": lead.referral_name,
         "message": lead.message,
         "status": derived_status,
         "is_contacted": lead.is_contacted,
@@ -1689,6 +1693,7 @@ class TenantLeadListView(APIView):
                 Q(phone__icontains=search) |
                 Q(company_name__icontains=search) |
                 Q(lead_source__icontains=search) |
+                Q(referral_name__icontains=search) |
                 Q(message__icontains=search)
             )
         if status_filter == "converted":
@@ -1714,6 +1719,7 @@ class TenantLeadListView(APIView):
         phone = (request.data.get("phone") or "").strip()
         company_name = (request.data.get("company_name") or "").strip()
         lead_source = (request.data.get("lead_source") or "").strip()
+        referral_name = (request.data.get("referral_name") or "").strip()
         message = (request.data.get("message") or "").strip()
         status_value = (request.data.get("status") or "not_yet").strip()
 
@@ -1729,6 +1735,7 @@ class TenantLeadListView(APIView):
             phone=phone,
             company_name=company_name,
             lead_source=lead_source,
+            referral_name=referral_name,
             message=message,
             is_contacted=converted,
             contacted_at=timezone.now() if converted else None,
@@ -1761,7 +1768,7 @@ class TenantLeadDetailView(APIView):
         from .models import Lead
 
         lead = get_object_or_404(Lead, pk=pk)
-        for field in ("name", "email", "phone", "company_name", "lead_source", "message"):
+        for field in ("name", "email", "phone", "company_name", "lead_source", "referral_name", "message"):
             if field in request.data:
                 setattr(lead, field, (request.data.get(field) or "").strip())
 
