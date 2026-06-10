@@ -6,10 +6,12 @@ history from earlier branches. During Django's project-state rebuild, certain
 historical operations can fail even though the live schema is already usable:
 
 - RemoveField can raise KeyError if the field is already absent from state.
+- RemoveField can raise UndefinedColumn if the column is already gone from DB.
 - RenameIndex can raise ValueError if the old historical index name is missing.
+- CreateModel can raise DuplicateTable if the table already exists in DB.
+- AddField can raise DuplicateColumn if the column already exists in DB.
 
-We patch those legacy cases, then delegate to the normal migrate_schemas
-command.
+We patch those cases, then delegate to the normal migrate_schemas command.
 """
 
 from django.core.management import call_command
@@ -17,8 +19,8 @@ from django.core.management.base import BaseCommand
 from django.db import ProgrammingError
 from django.apps import apps as django_apps
 from django.db import connection
-from django.db.migrations.operations.fields import AddField
-from django.db.migrations.operations.models import RenameIndex
+from django.db.migrations.operations.fields import AddField, RemoveField
+from django.db.migrations.operations.models import CreateModel, RenameIndex
 from django.db.migrations.state import ProjectState
 
 
@@ -34,6 +36,8 @@ class Command(BaseCommand):
     def handle(self, *args, **options):
         original_remove_field = ProjectState.remove_field
         original_add_field_forwards = AddField.database_forwards
+        original_remove_field_forwards = RemoveField.database_forwards
+        original_create_model_forwards = CreateModel.database_forwards
         original_rename_index_forwards = RenameIndex.database_forwards
         original_rename_index_backwards = RenameIndex.database_backwards
 
@@ -123,6 +127,58 @@ class Command(BaseCommand):
                 )
                 return None
 
+        def resilient_create_model_forwards(operation, app_label, schema_editor, from_state, to_state):
+            """Skip CreateModel if the table already exists in the database."""
+            try:
+                return original_create_model_forwards(
+                    operation,
+                    app_label,
+                    schema_editor,
+                    from_state,
+                    to_state,
+                )
+            except ProgrammingError as exc:
+                if 'already exists' not in str(exc):
+                    raise
+                model_state = to_state.models.get((app_label, operation.name.lower()))
+                table_name = (
+                    (model_state.options.get("db_table") if model_state else None)
+                    or f"{app_label}_{operation.name.lower()}"
+                )
+                self.stdout.write(
+                    self.style.WARNING(
+                        f"Skipping CreateModel for {app_label}.{operation.name}: "
+                        f"table '{table_name}' already exists in database."
+                    )
+                )
+                return None
+
+        def resilient_remove_field_forwards(operation, app_label, schema_editor, from_state, to_state):
+            """Skip RemoveField if the column is already absent from the database."""
+            try:
+                return original_remove_field_forwards(
+                    operation,
+                    app_label,
+                    schema_editor,
+                    from_state,
+                    to_state,
+                )
+            except ProgrammingError as exc:
+                if 'does not exist' not in str(exc):
+                    raise
+                model_state = from_state.models.get((app_label, operation.model_name_lower))
+                table_name = (
+                    (model_state.options.get("db_table") if model_state else None)
+                    or f"{app_label}_{operation.model_name_lower}"
+                )
+                self.stdout.write(
+                    self.style.WARNING(
+                        f"Skipping RemoveField for {app_label}.{operation.model_name}.{operation.name}: "
+                        f"column already absent from table '{table_name}'."
+                    )
+                )
+                return None
+
         def resilient_rename_index_backwards(operation, app_label, schema_editor, from_state, to_state):
             try:
                 return original_rename_index_backwards(
@@ -150,6 +206,8 @@ class Command(BaseCommand):
 
         ProjectState.remove_field = resilient_remove_field
         AddField.database_forwards = resilient_add_field_forwards
+        RemoveField.database_forwards = resilient_remove_field_forwards
+        CreateModel.database_forwards = resilient_create_model_forwards
         RenameIndex.database_forwards = resilient_rename_index_forwards
         RenameIndex.database_backwards = resilient_rename_index_backwards
         try:
@@ -157,6 +215,8 @@ class Command(BaseCommand):
         finally:
             ProjectState.remove_field = original_remove_field
             AddField.database_forwards = original_add_field_forwards
+            RemoveField.database_forwards = original_remove_field_forwards
+            CreateModel.database_forwards = original_create_model_forwards
             RenameIndex.database_forwards = original_rename_index_forwards
             RenameIndex.database_backwards = original_rename_index_backwards
 
