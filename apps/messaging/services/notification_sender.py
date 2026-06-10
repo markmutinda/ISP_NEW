@@ -191,7 +191,7 @@ def _send_once(dedup_key: str, phone: str, message: str, ttl: int = 600,
 
 def _fmt_phone(phone: str) -> str:
     """
-    Normalize to standard 2547xxxxxxxx or 2541xxxxxxxx format.
+    Normalize to standard 254XXXXXXXXX format.
     Returns empty string for anything that is clearly not a phone number.
     """
     if not phone:
@@ -199,28 +199,31 @@ def _fmt_phone(phone: str) -> str:
 
     raw = str(phone).strip()
 
-    # Hard reject: real phone numbers are never longer than 15 chars (E.164 max).
-    # Hashes, UUIDs, and other corrupt values will be caught here silently.
-    if len(raw) > 15:
-        return ""
+    # Strip leading + if present
+    if raw.startswith('+'):
+        raw = raw[1:]
 
     digits = "".join(c for c in raw if c.isdigit())
 
-    # Must have at least 9 digits to be a valid mobile number
-    if len(digits) < 9:
+    # Must have between 9 and 12 digits to be a valid Kenyan mobile number
+    if len(digits) < 9 or len(digits) > 12:
+        logger.debug(f"_fmt_phone: rejected '{raw[:8]}...' (digit count={len(digits)})")
         return ""
 
     if digits.startswith("00"):
         digits = digits[2:]
 
-    if digits.startswith("0"):
+    if digits.startswith("0") and len(digits) == 10:
         digits = "254" + digits[1:]
     elif (digits.startswith("7") or digits.startswith("1")) and len(digits) == 9:
         digits = "254" + digits
-    elif not digits.startswith("254"):
-        digits = "254" + digits.lstrip("+")
+    elif digits.startswith("254") and len(digits) == 12:
+        pass  # already correct
+    else:
+        logger.debug(f"_fmt_phone: unrecognized format '{raw[:8]}...'")
+        return ""
 
-    # Final hard check: must be exactly 12 digits starting with 254
+    # Final hard check: must be exactly 12 digits starting with 2547 or 2541
     if len(digits) != 12 or not digits.startswith("254"):
         return ""
 
@@ -431,16 +434,21 @@ class SMSNotifier:
         if not phone:
             return False
         name = customer.user.first_name or "Customer"
-        
-        # Fetch plan name for context
+
+        # Fetch expiry and plan name for richer template context
         plan_name = ''
+        new_expiry = None
         try:
             svc = service or customer.services.filter(status='ACTIVE', plan__isnull=False).first()
             if svc and svc.plan:
                 plan_name = svc.plan.name or ''
+            creds = customer.radius_credentials
+            new_expiry = creds.expiration_date
         except Exception:
             pass
-        
+
+        expiry_str = new_expiry.strftime('%d %b %Y') if new_expiry else 'N/A'
+
         default_msg = (
             f"Hi {name}, payment of KES {float(amount):,.0f} received. "
             f"Reference: {reference}. Thank you!"
@@ -453,6 +461,8 @@ class SMSNotifier:
             amount=f"{float(amount):,.0f}",
             reference=reference or '',
             plan_name=plan_name,
+            new_expiry=expiry_str,
+            expiry_date=expiry_str,
         )
         return _send_once(f"pppoe_pay:{customer.id}:{reference}", phone, msg, ttl=3600, schema_name=schema_name)
 
@@ -480,7 +490,10 @@ class SMSNotifier:
             expires_at=expiry_str,
             expiry_date=expiry_str,
         )
-        return _send_once(f"pppoe_renew:{customer.id}:{expiry_str}", phone, msg, ttl=3600, schema_name=schema_name)
+        # Use timestamp-aware dedup key so multiple renewals on same day aren't swallowed
+        from django.utils import timezone as _tz
+        ts = int(_tz.now().timestamp() // 3600)  # hourly bucket
+        return _send_once(f"pppoe_renew:{customer.id}:{ts}", phone, msg, ttl=3600, schema_name=schema_name)
 
     @staticmethod
     def pppoe_expiry_reminder(customer, days_left: int, plan_name: str = "", schema_name: str = None) -> bool:
@@ -736,7 +749,7 @@ class SMSNotifier:
 # HELPERS
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _customer_phone(customer) -> str:
+def _customer_phone(customer, service=None) -> str:
     """Extract best available phone from a Customer instance."""
     try:
         if customer.user and getattr(customer.user, 'phone_number', None):
@@ -751,6 +764,15 @@ def _customer_phone(customer) -> str:
         alt = customer.alternative_phone or ""
         if len(alt) <= 15:
             return alt
+    except Exception:
+        pass
+
+    # Try to get phone from service connection
+    try:
+        if service and hasattr(service, 'phone_number') and service.phone_number:
+            val = str(service.phone_number).strip()
+            if len(val) <= 15:
+                return val
     except Exception:
         pass
 

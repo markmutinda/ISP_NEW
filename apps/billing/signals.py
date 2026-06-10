@@ -91,21 +91,27 @@ def handle_payment_completion(sender, instance, created, **kwargs):
                         creds.disabled_reason = ''
                         creds.save()
                         from apps.messaging.services.notification_sender import SMSNotifier
-                        SMSNotifier.pppoe_resumed(customer)
+                        # Pass schema_name for tenant isolation
+                        from django.db import connection as _conn
+                        SMSNotifier.pppoe_resumed(customer, schema_name=_conn.schema_name)
             except Exception as e:
                 logger.warning(f"Resume SMS after invoice paid failed: {e}")
 
+    # Send payment confirmation SMS with proper schema context
     if customer:
         try:
             from apps.messaging.services.notification_sender import SMSNotifier
+            from django.db import connection as _conn
             SMSNotifier.pppoe_payment(
                 customer=customer,
                 amount=float(instance.amount),
                 reference=instance.payment_reference or instance.mpesa_receipt or '',
+                schema_name=_conn.schema_name,
             )
         except Exception as e:
             logger.warning(f"Payment confirmation SMS failed: {e}")
 
+    # Send payment confirmation email
     if customer:
         try:
             from django.db import connection
@@ -128,13 +134,14 @@ def handle_voucher_sale(sender, instance, created, **kwargs):
         # Send voucher PIN via SMS using SMSNotifier
         try:
             from apps.messaging.services.notification_sender import SMSNotifier
+            from django.db import connection as _conn
             # Check if the voucher is for hotspot or PPPoE
             if hasattr(instance, 'batch') and instance.batch and instance.batch.hotspot_plan:
                 # Hotspot voucher
-                SMSNotifier.hotspot_voucher_sold(instance)
+                SMSNotifier.hotspot_voucher_sold(instance, schema_name=_conn.schema_name)
             else:
                 # Generic voucher
-                SMSNotifier.voucher_sold(instance)
+                SMSNotifier.voucher_sold(instance, schema_name=_conn.schema_name)
         except Exception as e:
             logger.warning(f"Voucher SMS failed: {e}")
 
@@ -163,8 +170,9 @@ def send_invoice_notification(sender, instance, created, **kwargs):
                 # Get the customer
                 customer = instance.customer
                 if customer:
-                    # Use SMSNotifier for invoice notification
+                    # Use SMSNotifier for invoice notification with schema context
                     from apps.messaging.services.notification_sender import SMSNotifier
-                    SMSNotifier.pppoe_invoice_issued(customer, instance)
+                    from django.db import connection as _conn
+                    SMSNotifier.pppoe_invoice_issued(customer, instance, schema_name=_conn.schema_name)
             except Exception as e:
                 logger.error(f"Failed to send invoice notification: {e}")

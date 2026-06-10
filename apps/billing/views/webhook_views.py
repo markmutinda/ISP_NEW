@@ -499,7 +499,13 @@ class MpesaC2BWebhookView(APIView):
                         self.trigger_mikrotik_reactivation(service)
                         
                         try:
-                            _send_renewal_sms(customer, amount, quantity, new_expiry, msisdn)
+                            # Use the proper SMSNotifier method that respects toggles
+                            from apps.messaging.services.notification_sender import SMSNotifier
+                            SMSNotifier.pppoe_renewal(
+                                customer=customer,
+                                plan_name=matched_plan.name if matched_plan else '',
+                                expires_at=new_expiry,
+                            )
                         except Exception as e:
                             logger.warning(f"SMS notice skipped: {e}")
                     else:
@@ -529,35 +535,3 @@ class MpesaC2BWebhookView(APIView):
                 )
 
         return Response({"ResultCode": 0, "ResultDesc": "Success"}, status=status.HTTP_200_OK)
-
-
-def _send_renewal_sms(customer, amount, quantity, new_expiry, phone_override=None):
-    """Send a renewal confirmation SMS to the customer."""
-    try:
-        from apps.messaging.services.notification_sender import _send_once, _fmt_phone
-        
-        phone = phone_override or (
-            customer.user.phone_number if customer.user else None
-        )
-        if not phone:
-            return
-
-        period_str = f"{quantity} month{'s' if quantity > 1 else ''}" if quantity > 1 else "1 month"
-        expiry_str = new_expiry.strftime('%d %b %Y') if new_expiry else 'unlimited'
-        name = customer.user.first_name or 'Customer'
-        
-        message = (
-            f"Hi {name}, payment of KES {amount:,.0f} received. "
-            f"Your internet has been renewed for {period_str}. "
-            f"Expires: {expiry_str}. Thank you!"
-        )
-
-        _send_once(
-            f"c2b_renewal:{customer.id}:{int(amount)}",
-            _fmt_phone(phone),
-            message,
-            ttl=3600
-        )
-    except Exception as e:
-        import logging
-        logging.getLogger(__name__).warning(f"Renewal SMS failed: {e}")
