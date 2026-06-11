@@ -27,6 +27,7 @@ from .views.hotspot_admin_views import (
     HotspotClientViewSet,
     ActiveSubscriptionsView,
     RouterIncomeView,
+    HotspotSessionExtendView,  # ADDED: Import the extend view
 )
 from .views.hotspot_voucher_admin_views import (
     HotspotVoucherGenerateView,
@@ -142,6 +143,11 @@ hotspot_admin_urlpatterns = [
     path('admin/routers/<int:router_id>/income/',
          RouterIncomeView.as_view(),
          name='hotspot-router-income'),
+    
+    # SESSION EXTENSION (Admin only)
+    path('admin/sessions/<str:session_id>/extend/',
+         HotspotSessionExtendView.as_view(),
+         name='hotspot-session-extend'),
     
     # Plans CRUD (per-router)
     path('admin/routers/<int:router_id>/plans/', 
