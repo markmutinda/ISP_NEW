@@ -4,10 +4,9 @@ Unified SMS Notification Sender
 Reads SMSNotificationSettings for every toggle, then dispatches
 via GatewayDispatcher (inbuilt Bytewave or custom provider).
 
-Usage:
-    from apps.messaging.services.notification_sender import SMSNotifier
-    SMSNotifier.hotspot_welcome(session)
-    SMSNotifier.pppoe_payment(customer, amount, reference)
+FIX: All PPPoE notification methods now fetch the saved tenant template
+     and pass a comprehensive set of variable aliases so any variable
+     a tenant puts in their template will be substituted correctly.
 """
 
 import logging
@@ -17,7 +16,7 @@ from django.core.cache import cache as _cache
 logger = logging.getLogger(__name__)
 
 
-# ── ADDED HELPER FUNCTIONS ──────────────────────────────────────────────
+# ── HELPERS ──────────────────────────────────────────────────────────────────
 
 def _get_notif_settings():
     """Fetch SMSNotificationSettings, return None on failure."""
@@ -28,34 +27,26 @@ def _get_notif_settings():
         return None
 
 
-# ============================================================
-# HARDENED _log_sms - prevents transaction poisoning
-# ============================================================
 def _log_sms(phone: str, message: str, status: str = 'sent',
               msg_type: str = 'automated', recipient_name: str = '',
               customer_id=None, provider_id: str = ''):
     """
     Persist every outbound SMS to SMSMessage so the History tab shows ALL messages.
-    
-    HARDENING FIX: Uses an explicit nested transaction.atomic savepoint block and string 
-    truncation to prevent VARCHAR length errors from poisoning parent billing transactions.
+    Uses a nested savepoint to avoid poisoning parent billing transactions.
     """
     try:
         from apps.messaging.models import SMSMessage
         from django.utils import timezone as tz
         from django.db import transaction
-        
-        # Ensure we have a valid datetime for sent_at
+
         sent_at = tz.now() if status == 'sent' else None
-        
-        # ✂️ Force hard truncation to prevent VARCHAR constraint violations on disk
+
         safe_recipient = str(phone or '')[:20]
         safe_status = str(status or 'sent')[:20]
         safe_type = str(msg_type or 'automated')[:20]
         safe_recipient_name = str(recipient_name or '')[:120]
         safe_provider_id = str(provider_id or '')[:100]
 
-        # 🛡️ Use a nested atomic checkpoint to completely isolate this query from the parent billing block
         with transaction.atomic():
             SMSMessage.objects.create(
                 recipient=safe_recipient,
@@ -70,14 +61,11 @@ def _log_sms(phone: str, message: str, status: str = 'sent',
             )
         logger.debug(f"SMS logged cleanly: {safe_status} to {safe_recipient[:6]}***")
     except Exception as exc:
-        logger.warning("[SMS Log] could not persist message (isolated via savepoint safely): %s", exc)
+        logger.warning("[SMS Log] could not persist message: %s", exc)
 
 
 def _render(template: str, **ctx) -> str:
-    """
-    Substitute {key} placeholders in *template* with values from *ctx*.
-    Unknown keys are left as-is so nothing breaks.
-    """
+    """Substitute {key} placeholders. Unknown keys are left as-is."""
     for key, value in ctx.items():
         template = template.replace('{' + key + '}', str(value or ''))
     return template
@@ -85,24 +73,18 @@ def _render(template: str, **ctx) -> str:
 
 def _get_rendered_message(event_type: str, default_msg: str, **context) -> str:
     """
-    Fetches the active custom template for a given event from the database.
-    Replaces {variable} placeholders with actual values.
-    Falls back to the hardcoded default_msg if no template exists.
+    Fetch the active custom template for event_type from the DB.
+    Substitute all {variable} placeholders with context values.
+    Falls back to default_msg if no template found or template is blank.
     """
     from apps.messaging.models import SMSTemplate
-    
-    # Query the database for the user's saved template for this specific event
+
     template = SMSTemplate.objects.filter(event_type=event_type, is_active=True).first()
-    
+
     if not template or not template.content.strip():
-        return default_msg
-        
-    msg = template.content
-    # Dynamically inject the context variables (e.g., {name}, {amount}) into the text
-    for key, value in context.items():
-        msg = msg.replace(f"{{{key}}}", str(value))
-        
-    return msg
+        return _render(default_msg, **context)
+
+    return _render(template.content, **context)
 
 
 def _get_settings():
@@ -110,37 +92,18 @@ def _get_settings():
     return SMSNotificationSettings.get_settings()
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# FIXED: _dispatch now accepts schema_name parameter for Celery task safety
-# ─────────────────────────────────────────────────────────────────────────────
-
 def _dispatch(phone: str, message: str, schema_name: str = None) -> bool:
-    """
-    Send via active gateway. 
-    
-    Args:
-        phone: Recipient phone number
-        message: SMS content
-        schema_name: Explicit tenant schema name (REQUIRED for Celery tasks)
-    
-    Returns:
-        bool: True on success, False otherwise
-    """
+    """Send via active gateway."""
     if not phone:
-        logger.debug("SMS skipped: no phone number")
         return False
-    
     try:
         from apps.messaging.services.gateway_dispatcher import GatewayDispatcher
         from django.db import connection
 
-        # Determine schema: explicit > current connection > None
         _schema = schema_name or getattr(connection, 'schema_name', None)
-        
-        # CRITICAL: Pass schema_name explicitly to avoid cross-tenant leaks
         dispatcher = GatewayDispatcher(schema_name=_schema)
         result = dispatcher.send_sms(to=phone, message=message)
-        
+
         if result.get("success"):
             logger.info(f"SMS sent to {phone[:6]}***")
             return True
@@ -156,58 +119,35 @@ def _dispatch(phone: str, message: str, schema_name: str = None) -> bool:
 
 def _send_once(dedup_key: str, phone: str, message: str, ttl: int = 600,
                schema_name: str = None) -> bool:
-    """
-    Send SMS exactly once within the TTL window for the given dedup_key.
-    Logs every attempt to SMSMessage.
-    
-    Args:
-        dedup_key: Unique key for deduplication
-        phone: Recipient phone number
-        message: SMS content
-        ttl: Time-to-live in seconds for dedup cache
-        schema_name: Explicit tenant schema name (for Celery tasks)
-    
-    Returns:
-        bool: True if sent, False if deduped or failed
-    """
+    """Send SMS exactly once within the TTL window for the given dedup_key."""
     full_key = f"sms_once:{dedup_key}"
     if _cache.get(full_key):
         logger.debug(f"SMS deduped (key={full_key})")
         return False
-    
-    # Pass schema_name to _dispatch
+
     result = _dispatch(phone, message, schema_name=schema_name)
-    
+
     if result:
         _cache.set(full_key, 1, ttl)
-        # Log successful send
         _log_sms(phone, message, status='sent', msg_type='automated')
     else:
-        # Log failed send
         _log_sms(phone, message, status='failed', msg_type='automated')
-    
+
     return result
 
 
 def _fmt_phone(phone: str) -> str:
-    """
-    Normalize to standard 254XXXXXXXXX format.
-    Returns empty string for anything that is clearly not a phone number.
-    """
+    """Normalize to standard 254XXXXXXXXX format."""
     if not phone:
         return ""
 
     raw = str(phone).strip()
-
-    # Strip leading + if present
     if raw.startswith('+'):
         raw = raw[1:]
 
     digits = "".join(c for c in raw if c.isdigit())
 
-    # Must have between 9 and 12 digits to be a valid Kenyan mobile number
     if len(digits) < 9 or len(digits) > 12:
-        logger.debug(f"_fmt_phone: rejected '{raw[:8]}...' (digit count={len(digits)})")
         return ""
 
     if digits.startswith("00"):
@@ -218,23 +158,519 @@ def _fmt_phone(phone: str) -> str:
     elif (digits.startswith("7") or digits.startswith("1")) and len(digits) == 9:
         digits = "254" + digits
     elif digits.startswith("254") and len(digits) == 12:
-        pass  # already correct
+        pass
     else:
-        logger.debug(f"_fmt_phone: unrecognized format '{raw[:8]}...'")
         return ""
 
-    # Final hard check: must be exactly 12 digits starting with 2547 or 2541
     if len(digits) != 12 or not digits.startswith("254"):
         return ""
 
     return digits
 
 
+def _customer_phone(customer, service=None) -> str:
+    """Extract best available phone from a Customer instance."""
+    try:
+        if customer.user and getattr(customer.user, 'phone_number', None):
+            val = str(customer.user.phone_number).strip()
+            if len(val) <= 15:
+                return val
+    except Exception:
+        pass
+
+    try:
+        alt = customer.alternative_phone or ""
+        if len(alt) <= 15:
+            return alt
+    except Exception:
+        pass
+
+    try:
+        if service and hasattr(service, 'phone_number') and service.phone_number:
+            val = str(service.phone_number).strip()
+            if len(val) <= 15:
+                return val
+    except Exception:
+        pass
+
+    return ""
+
+
+def _get_customer_context(customer) -> dict:
+    """
+    Build a comprehensive context dict for a customer so ALL reasonable
+    variable names a tenant might use in their template are populated.
+    """
+    name = ""
+    first_name = ""
+    last_name = ""
+    full_name = ""
+    phone = ""
+
+    try:
+        first_name = customer.user.first_name or ""
+        last_name = customer.user.last_name or ""
+        full_name = customer.user.get_full_name() or ""
+        name = first_name or full_name or "Customer"
+        phone = getattr(customer.user, 'phone_number', '') or ""
+    except Exception:
+        name = "Customer"
+
+    # Billing account number
+    customer_account = ""
+    try:
+        service = customer.services.filter(status='ACTIVE').first()
+        if service and service.billing_account_number:
+            customer_account = service.billing_account_number
+        elif hasattr(customer, 'billing_account_number') and customer.billing_account_number:
+            customer_account = customer.billing_account_number
+    except Exception:
+        pass
+
+    return {
+        # Name aliases
+        'name': name,
+        'customer_name': name,
+        'first_name': first_name,
+        'last_name': last_name,
+        'full_name': full_name,
+        # Account aliases
+        'customer_account': customer_account,
+        'account': customer_account,
+        'account_number': customer_account,
+        'billing_account': customer_account,
+        'paybill_account': customer_account,
+        # Phone
+        'phone': phone,
+        'phone_number': phone,
+    }
+
+
+def _get_plan_context(service=None, customer=None) -> dict:
+    """Build plan-related context variables."""
+    plan_name = ""
+    amount = ""
+    amount_due = ""
+
+    try:
+        if service and service.plan:
+            plan_name = service.plan.name or ""
+            price = float(service.plan.base_price or 0)
+            amount = f"{price:,.0f}"
+            amount_due = f"KES {price:,.0f}"
+        elif customer:
+            svc = customer.services.filter(status='ACTIVE', plan__isnull=False).first()
+            if svc and svc.plan:
+                plan_name = svc.plan.name or ""
+                price = float(svc.plan.base_price or 0)
+                amount = f"{price:,.0f}"
+                amount_due = f"KES {price:,.0f}"
+    except Exception:
+        pass
+
+    return {
+        'plan_name': plan_name,
+        'plan': plan_name,
+        'amount': amount,
+        'amount_due': amount_due,
+        'renewal_amount': amount,
+        'subscription_amount': amount,
+    }
+
+
+def _get_expiry_context(expiration_date=None) -> dict:
+    """Build all expiry-related context variables from a datetime."""
+    if not expiration_date:
+        return {
+            'expiry_date': 'N/A',
+            'expiry_time': 'N/A',
+            'expiry_full': 'N/A',
+            'expiry_display': 'soon',
+            'new_expiry': 'N/A',
+            'expires_at': 'N/A',
+            'expiration': 'N/A',
+            'expiry': 'N/A',
+            'valid_until': 'N/A',
+        }
+
+    from django.utils import timezone as _tz
+    local_tz = _tz.get_current_timezone()
+    local_expiry = expiration_date.astimezone(local_tz)
+
+    expiry_date_str = local_expiry.strftime('%d %b %Y')
+    expiry_time_str = local_expiry.strftime('%H:%M')
+    expiry_full_str = local_expiry.strftime('%d %b %Y at %H:%M')
+
+    now = _tz.now()
+    hours_left = (expiration_date - now).total_seconds() / 3600
+
+    if hours_left <= 1:
+        expiry_display = f"in less than 1 hour (at {expiry_time_str})"
+    elif hours_left <= 6:
+        expiry_display = f"in {int(hours_left)} hour(s) at {expiry_time_str}"
+    elif hours_left <= 24:
+        expiry_display = f"today at {expiry_time_str}"
+    else:
+        expiry_display = f"on {expiry_date_str} at {expiry_time_str}"
+
+    return {
+        'expiry_date': expiry_date_str,
+        'expiry_time': expiry_time_str,
+        'expiry_full': expiry_full_str,
+        'expiry_display': expiry_display,
+        # Common aliases tenants might use
+        'new_expiry': expiry_display,          # "today at 20:59" or "on 15 Jan 2026 at 20:59"
+        'expires_at': expiry_display,
+        'expiration': expiry_full_str,
+        'expiry': expiry_full_str,
+        'valid_until': expiry_full_str,
+        'expiry_date_only': expiry_date_str,
+        'expiry_time_only': expiry_time_str,
+    }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# MAIN NOTIFIER CLASS
+# ─────────────────────────────────────────────────────────────────────────────
+
 class SMSNotifier:
     """
     All automated SMS go through this class.
-    Each method checks its toggle before dispatching.
+    Each method:
+      1. Checks its toggle
+      2. Fetches the saved template for that event type
+      3. Builds a comprehensive context with ALL variable aliases
+      4. Renders and sends
     """
+
+    # ─────────────────────────────────────────────────────────────────
+    # PPPOE / STATIC
+    # ─────────────────────────────────────────────────────────────────
+
+    @staticmethod
+    def pppoe_welcome(customer, username: str = "", password: str = "",
+                      schema_name: str = None) -> bool:
+        """Called when a new PPPoE/Static service is activated."""
+        s = _get_notif_settings()
+        if s and not s.pppoe_welcome:
+            return False
+        phone = _fmt_phone(_customer_phone(customer))
+        if not phone:
+            return False
+
+        ctx = _get_customer_context(customer)
+        ctx.update(_get_plan_context(customer=customer))
+
+        # Credentials
+        ctx['username'] = username
+        ctx['pppoe_username'] = username
+        ctx['login'] = username
+        ctx['password'] = password
+        ctx['pppoe_password'] = password
+
+        default_msg = (
+            f"Hi {ctx['name']}, your internet is ready! "
+            f"Username: {username} | Password: {password} | Welcome aboard!"
+        )
+        msg = _get_rendered_message('pppoe_welcome', default_msg, **ctx)
+        return _send_once(f"pppoe_welcome:{customer.id}", phone, msg, ttl=3600,
+                          schema_name=schema_name)
+
+    @staticmethod
+    def pppoe_new_subscription(customer, plan_name: str, amount: float,
+                                expires_at=None, schema_name: str = None) -> bool:
+        """Called when admin sets up a new subscription."""
+        s = _get_notif_settings()
+        if s and not s.pppoe_new_subscription:
+            return False
+        phone = _fmt_phone(_customer_phone(customer))
+        if not phone:
+            return False
+
+        ctx = _get_customer_context(customer)
+        ctx.update(_get_expiry_context(expires_at))
+
+        # Plan/amount overrides from caller
+        ctx['plan_name'] = plan_name
+        ctx['plan'] = plan_name
+        amount_fmt = f"{float(amount):,.0f}"
+        ctx['amount'] = amount_fmt
+        ctx['amount_due'] = f"KES {amount_fmt}"
+        ctx['renewal_amount'] = amount_fmt
+
+        # Credentials
+        try:
+            creds = customer.radius_credentials
+            ctx['username'] = creds.username or ''
+            ctx['pppoe_username'] = creds.username or ''
+            ctx['password'] = creds.password or ''
+            ctx['pppoe_password'] = creds.password or ''
+        except Exception:
+            ctx['username'] = ''
+            ctx['pppoe_username'] = ''
+            ctx['password'] = ''
+            ctx['pppoe_password'] = ''
+
+        default_msg = (
+            f"Hi {ctx['name']}, welcome! Plan: {plan_name} | "
+            f"Username: {ctx['username']} | Password: {ctx['password']} | "
+            f"Expires: {ctx['expiry_date']}. KES {amount_fmt} paid."
+        )
+        msg = _get_rendered_message('pppoe_new_subscription', default_msg, **ctx)
+        return _send_once(f"pppoe_new:{customer.id}", phone, msg, ttl=3600,
+                          schema_name=schema_name)
+
+    @staticmethod
+    def pppoe_payment(customer, amount: float, reference: str = "",
+                      service=None, schema_name: str = None) -> bool:
+        """Called after a PPPoE payment is completed."""
+        s = _get_notif_settings()
+        if s and not s.pppoe_payment_confirmation:
+            return False
+        phone = _fmt_phone(_customer_phone(customer, service=service))
+        if not phone:
+            return False
+
+        ctx = _get_customer_context(customer)
+        ctx.update(_get_plan_context(service=service, customer=customer))
+
+        # Expiry from credentials
+        try:
+            creds = customer.radius_credentials
+            ctx.update(_get_expiry_context(creds.expiration_date))
+        except Exception:
+            ctx.update(_get_expiry_context(None))
+
+        amount_fmt = f"{float(amount):,.0f}"
+        ctx['amount'] = amount_fmt
+        ctx['amount_paid'] = amount_fmt
+        ctx['reference'] = reference or ''
+        ctx['payment_ref'] = reference or ''
+        ctx['receipt'] = reference or ''
+
+        default_msg = (
+            f"Hi {ctx['name']}, payment of KES {amount_fmt} received. "
+            f"Reference: {reference}. Thank you!"
+        )
+        msg = _get_rendered_message('pppoe_payment', default_msg, **ctx)
+        return _send_once(f"pppoe_pay:{customer.id}:{reference}", phone, msg, ttl=3600,
+                          schema_name=schema_name)
+
+    @staticmethod
+    def pppoe_renewal(customer, plan_name: str, expires_at=None,
+                      schema_name: str = None) -> bool:
+        """Called after successful renewal."""
+        s = _get_notif_settings()
+        if s and not s.pppoe_renewal_confirmation:
+            return False
+        phone = _fmt_phone(_customer_phone(customer))
+        if not phone:
+            return False
+
+        ctx = _get_customer_context(customer)
+        ctx.update(_get_expiry_context(expires_at))
+        ctx['plan_name'] = plan_name
+        ctx['plan'] = plan_name
+
+        # Amount from plan
+        try:
+            svc = customer.services.filter(status='ACTIVE', plan__isnull=False).first()
+            if svc and svc.plan:
+                price = float(svc.plan.base_price or 0)
+                ctx['amount'] = f"{price:,.0f}"
+                ctx['amount_due'] = f"KES {price:,.0f}"
+        except Exception:
+            pass
+
+        default_msg = (
+            f"Hi {ctx['name']}, subscription renewed! Plan: {plan_name} | "
+            f"Expires: {ctx['expiry_date']}. Thank you!"
+        )
+        msg = _get_rendered_message('pppoe_renewal', default_msg, **ctx)
+        from django.utils import timezone as _tz
+        ts = int(_tz.now().timestamp() // 3600)
+        return _send_once(f"pppoe_renew:{customer.id}:{ts}", phone, msg, ttl=3600,
+                          schema_name=schema_name)
+
+    @staticmethod
+    def pppoe_expiry_reminder(customer, days_left: int, plan_name: str = "",
+                               schema_name: str = None) -> bool:
+        """
+        Called X days/hours before PPPoE expiry.
+        Uses the saved 'pppoe_expiry_reminder' template with ALL variable aliases.
+        """
+        s = _get_notif_settings()
+        if s and not s.pppoe_expiry_reminder:
+            return False
+        phone = _fmt_phone(_customer_phone(customer))
+        if not phone:
+            return False
+
+        ctx = _get_customer_context(customer)
+
+        # Fetch expiry date from RADIUS credentials
+        expiration_date = None
+        try:
+            creds = customer.radius_credentials
+            expiration_date = creds.expiration_date
+        except Exception:
+            pass
+
+        ctx.update(_get_expiry_context(expiration_date))
+
+        # Plan context
+        amount_due_str = ""
+        try:
+            svc = customer.services.filter(status='ACTIVE', plan__isnull=False).first()
+            if svc and svc.plan:
+                if not plan_name:
+                    plan_name = svc.plan.name or ""
+                price = float(svc.plan.base_price or 0)
+                amount_due_str = f"KES {price:,.0f}"
+                ctx['amount'] = f"{price:,.0f}"
+                ctx['amount_due'] = amount_due_str
+                ctx['renewal_amount'] = f"{price:,.0f}"
+                ctx['price'] = f"{price:,.0f}"
+        except Exception:
+            pass
+
+        ctx['plan_name'] = plan_name
+        ctx['plan'] = plan_name
+        ctx['days_left'] = days_left
+        ctx['days'] = days_left
+
+        default_msg = (
+            f"Hi {ctx['name']}, your {plan_name} plan expires {ctx['expiry_display']}. "
+            f"Renew now{' - ' + amount_due_str if amount_due_str else ''} to avoid disconnection."
+        )
+        msg = _get_rendered_message('pppoe_expiry_reminder', default_msg, **ctx)
+
+        # Plain dispatch (dedup handled at task level via DB)
+        result = _dispatch(phone, msg, schema_name=schema_name)
+        if result:
+            _log_sms(phone, msg, status='sent', msg_type='automated',
+                     recipient_name=ctx['name'], customer_id=customer.id)
+        else:
+            _log_sms(phone, msg, status='failed', msg_type='automated',
+                     recipient_name=ctx['name'], customer_id=customer.id)
+        return result
+
+    @staticmethod
+    def pppoe_suspended(customer, reason: str = "", schema_name: str = None) -> bool:
+        """Called when service is suspended."""
+        s = _get_notif_settings()
+        if s and not s.pppoe_service_suspended:
+            return False
+        phone = _fmt_phone(_customer_phone(customer))
+        if not phone:
+            return False
+
+        ctx = _get_customer_context(customer)
+        ctx['reason'] = reason or 'subscription expired'
+        ctx['suspension_reason'] = reason or 'subscription expired'
+
+        default_msg = (
+            f"Hi {ctx['name']}, your internet service has been suspended. "
+            f"Reason: {ctx['reason']}. Contact support to restore."
+        )
+        msg = _get_rendered_message('pppoe_suspended', default_msg, **ctx)
+        return _send_once(f"pppoe_suspend:{customer.id}", phone, msg, ttl=3600,
+                          schema_name=schema_name)
+
+    @staticmethod
+    def pppoe_resumed(customer, schema_name: str = None) -> bool:
+        """Called when service is restored."""
+        s = _get_notif_settings()
+        if s and not s.pppoe_service_resumed:
+            return False
+        phone = _fmt_phone(_customer_phone(customer))
+        if not phone:
+            return False
+
+        ctx = _get_customer_context(customer)
+
+        service = customer.services.filter(status='ACTIVE').first()
+        plan_name = service.plan.name if (service and service.plan) else ''
+        ctx['plan_name'] = plan_name
+        ctx['plan'] = plan_name
+
+        # Expiry after resume
+        try:
+            creds = customer.radius_credentials
+            ctx.update(_get_expiry_context(creds.expiration_date))
+        except Exception:
+            ctx.update(_get_expiry_context(None))
+
+        default_msg = (
+            f"Hi {ctx['name']}, your internet service has been restored! "
+            f"Plan: {plan_name}. Welcome back."
+        )
+        msg = _get_rendered_message('pppoe_resumed', default_msg, **ctx)
+        return _send_once(f"pppoe_resume:{customer.id}", phone, msg, ttl=3600,
+                          schema_name=schema_name)
+
+    @staticmethod
+    def pppoe_plan_changed(customer, old_plan: str, new_plan: str,
+                            schema_name: str = None) -> bool:
+        """Called when a plan is changed."""
+        s = _get_notif_settings()
+        if s and not s.pppoe_plan_changed:
+            return False
+        phone = _fmt_phone(_customer_phone(customer))
+        if not phone:
+            return False
+
+        ctx = _get_customer_context(customer)
+        ctx['old_plan'] = old_plan
+        ctx['previous_plan'] = old_plan
+        ctx['new_plan'] = new_plan
+        ctx['plan_name'] = new_plan
+        ctx['plan'] = new_plan
+
+        # Expiry context
+        try:
+            creds = customer.radius_credentials
+            ctx.update(_get_expiry_context(creds.expiration_date))
+        except Exception:
+            ctx.update(_get_expiry_context(None))
+
+        default_msg = (
+            f"Hi {ctx['name']}, your plan has been changed from {old_plan} "
+            f"to {new_plan}. Enjoy!"
+        )
+        msg = _get_rendered_message('pppoe_plan_changed', default_msg, **ctx)
+        return _send_once(f"pppoe_plan:{customer.id}:{new_plan}", phone, msg, ttl=3600,
+                          schema_name=schema_name)
+
+    @staticmethod
+    def pppoe_invoice_issued(customer, invoice, schema_name: str = None) -> bool:
+        """Called when an invoice is issued."""
+        s = _get_notif_settings()
+        if s and not s.pppoe_payment_confirmation:
+            return False
+        phone = _fmt_phone(_customer_phone(customer))
+        if not phone:
+            return False
+
+        ctx = _get_customer_context(customer)
+
+        due_date_str = invoice.due_date.strftime('%d %b %Y') if invoice.due_date else 'N/A'
+        amount_fmt = f"{float(invoice.total_amount):,.0f}"
+        invoice_no = invoice.invoice_number or str(invoice.id)
+
+        ctx['amount'] = amount_fmt
+        ctx['amount_due'] = f"KES {amount_fmt}"
+        ctx['invoice_number'] = invoice_no
+        ctx['invoice_no'] = invoice_no
+        ctx['due_date'] = due_date_str
+
+        default_msg = (
+            f"Hi {ctx['name']}, invoice #{invoice_no} of KES {amount_fmt} "
+            f"is due on {due_date_str}. Pay to avoid disconnection."
+        )
+        msg = _get_rendered_message('pppoe_invoice_issued', default_msg, **ctx)
+        return _send_once(f"invoice:{invoice.id}", phone, msg, ttl=3600,
+                          schema_name=schema_name)
 
     # ─────────────────────────────────────────────────────────────────
     # HOTSPOT
@@ -242,7 +678,6 @@ class SMSNotifier:
 
     @staticmethod
     def hotspot_new_subscription(session, schema_name: str = None) -> bool:
-        """Called right after STK push succeeds (payment initiated)."""
         s = _get_notif_settings()
         if s and not s.hotspot_new_subscription:
             return False
@@ -255,16 +690,17 @@ class SMSNotifier:
             f"Access code: {session.access_code or ''}. Enjoy your browsing!"
         )
         msg = _get_rendered_message(
-            event_type='hotspot_new_subscription',
-            default_msg=default_msg,
+            'hotspot_new_subscription', default_msg,
             plan_name=plan.name if plan else '',
             access_code=session.access_code or '',
+            amount=getattr(session, 'amount', ''),
+            session_id=getattr(session, 'session_id', ''),
         )
-        return _send_once(f"hs_new:{session.session_id}", phone, msg, ttl=3600, schema_name=schema_name)
+        return _send_once(f"hs_new:{session.session_id}", phone, msg, ttl=3600,
+                          schema_name=schema_name)
 
     @staticmethod
     def hotspot_welcome(session, schema_name: str = None) -> bool:
-        """Called after session activates — sends access code & expiry."""
         s = _get_notif_settings()
         if s and not s.hotspot_welcome:
             return False
@@ -281,12 +717,11 @@ class SMSNotifier:
             expires = f" Expires at {expires}"
             expiry_time = session.expires_at.astimezone(local_tz).strftime("%d %b %Y %H:%M")
         default_msg = (
-            f"WiFi Active! Code: {session.access_code or ''}. Plan: {plan.name if plan else ''} ({plan.duration_display if hasattr(plan, 'duration_display') else ''}){expires}. "
-            f"Speed: {plan.speed_display if hasattr(plan, 'speed_display') else ''}. Enjoy!"
+            f"WiFi Active! Code: {session.access_code or ''}. "
+            f"Plan: {plan.name if plan else ''}{expires}. Enjoy!"
         )
         msg = _get_rendered_message(
-            event_type='hotspot_welcome',
-            default_msg=default_msg,
+            'hotspot_welcome', default_msg,
             access_code=session.access_code or '',
             plan_name=plan.name if plan else '',
             duration=plan.duration_display if hasattr(plan, 'duration_display') else '',
@@ -294,11 +729,11 @@ class SMSNotifier:
             expiry_time=expiry_time,
             speed=plan.speed_display if hasattr(plan, 'speed_display') else '',
         )
-        return _send_once(f"hs_welcome:{session.session_id}", phone, msg, ttl=3600, schema_name=schema_name)
+        return _send_once(f"hs_welcome:{session.session_id}", phone, msg, ttl=3600,
+                          schema_name=schema_name)
 
     @staticmethod
     def hotspot_expiry_warning(session, schema_name: str = None) -> bool:
-        """Called by Celery task X minutes before expiry."""
         s = _get_notif_settings()
         if s and not s.hotspot_session_expiry:
             return False
@@ -313,17 +748,16 @@ class SMSNotifier:
             f"Renew to stay connected! Code: {session.access_code or ''}"
         )
         msg = _get_rendered_message(
-            event_type='hotspot_expiry_warning',
-            default_msg=default_msg,
+            'hotspot_expiry_warning', default_msg,
             plan_name=session.plan.name if session.plan else '',
             minutes_left=mins,
             access_code=session.access_code or '',
         )
-        return _send_once(f"hotspot_expiry:{session.session_id}", phone, msg, ttl=600, schema_name=schema_name)
+        return _send_once(f"hotspot_expiry:{session.session_id}", phone, msg, ttl=600,
+                          schema_name=schema_name)
 
     @staticmethod
     def hotspot_session_expired(session, schema_name: str = None) -> bool:
-        """Called when session is marked expired."""
         s = _get_notif_settings()
         if s and not s.hotspot_session_expired:
             return False
@@ -332,15 +766,14 @@ class SMSNotifier:
             return False
         default_msg = f"Your {session.plan.name if session.plan else ''} session has expired. Buy a new plan to reconnect!"
         msg = _get_rendered_message(
-            event_type='hotspot_session_expired',
-            default_msg=default_msg,
+            'hotspot_session_expired', default_msg,
             plan_name=session.plan.name if session.plan else '',
         )
-        return _send_once(f"hs_expired:{session.session_id}", phone, msg, ttl=3600, schema_name=schema_name)
+        return _send_once(f"hs_expired:{session.session_id}", phone, msg, ttl=3600,
+                          schema_name=schema_name)
 
     @staticmethod
     def hotspot_payment_failed(session, reason: str = "", schema_name: str = None) -> bool:
-        """Called when STK push fails or is cancelled."""
         s = _get_notif_settings()
         if s and not s.hotspot_payment_failed:
             return False
@@ -349,349 +782,19 @@ class SMSNotifier:
             return False
         default_msg = f"Payment for {session.plan.name if session.plan else ''} failed. {reason} Please try again."
         msg = _get_rendered_message(
-            event_type='hotspot_payment_failed',
-            default_msg=default_msg,
+            'hotspot_payment_failed', default_msg,
             plan_name=session.plan.name if session.plan else '',
             reason=reason or '',
         )
-        return _send_once(f"hs_payfail:{session.session_id}", phone, msg, ttl=3600, schema_name=schema_name)
+        return _send_once(f"hs_payfail:{session.session_id}", phone, msg, ttl=3600,
+                          schema_name=schema_name)
 
     # ─────────────────────────────────────────────────────────────────
-    # PPPOE / STATIC
+    # VOUCHERS
     # ─────────────────────────────────────────────────────────────────
-
-    @staticmethod
-    def pppoe_welcome(customer, username: str = "", password: str = "", schema_name: str = None) -> bool:
-        """Called when a new PPPoE/Static service is activated."""
-        s = _get_notif_settings()
-        if s and not s.pppoe_welcome:
-            return False
-        phone = _fmt_phone(_customer_phone(customer))
-        if not phone:
-            return False
-        name = customer.user.first_name or "Customer"
-        default_msg = (
-            f"Hi {name}, your internet is ready! "
-            f"Username: {username} | Password: {password} | Welcome aboard!"
-        )
-        msg = _get_rendered_message(
-            event_type='pppoe_welcome',
-            default_msg=default_msg,
-            customer_name=name,
-            name=name,
-            username=username,
-            password=password,
-        )
-        return _send_once(f"pppoe_welcome:{customer.id}", phone, msg, ttl=3600, schema_name=schema_name)
-
-    @staticmethod
-    def pppoe_new_subscription(customer, plan_name: str, amount: float,
-                                expires_at=None, schema_name: str = None) -> bool:
-        """Called when admin sets up a new subscription."""
-        s = _get_notif_settings()
-        if s and not s.pppoe_new_subscription:
-            return False
-        phone = _fmt_phone(_customer_phone(customer))
-        if not phone:
-            return False
-        name = customer.user.first_name or "Customer"
-        expiry_str = expires_at.strftime('%d %b %Y') if expires_at else 'N/A'
-        
-        # Try to fetch credentials
-        try:
-            creds = customer.radius_credentials
-            username = creds.username or ''
-            password = creds.password or ''
-        except Exception:
-            username = password = ''
-        
-        default_msg = (
-            f"Hi {name}, welcome! Plan: {plan_name} | "
-            f"Username: {username} | Password: {password} | "
-            f"Expires: {expiry_str}. KES {float(amount):,.0f} paid."
-        )
-        msg = _get_rendered_message(
-            event_type='pppoe_new_subscription',
-            default_msg=default_msg,
-            customer_name=name,
-            name=name,
-            plan_name=plan_name,
-            username=username,
-            password=password,
-            expires_at=expiry_str,
-            expiry_date=expiry_str,
-            amount=f"{float(amount):,.0f}",
-        )
-        return _send_once(f"pppoe_new:{customer.id}", phone, msg, ttl=3600, schema_name=schema_name)
-
-    @staticmethod
-    def pppoe_payment(customer, amount: float, reference: str = "", service=None, schema_name: str = None) -> bool:
-        """Called after a PPPoE payment is completed."""
-        s = _get_notif_settings()
-        if s and not s.pppoe_payment_confirmation:
-            return False
-        phone = _fmt_phone(_customer_phone(customer, service=service))
-        if not phone:
-            return False
-        name = customer.user.first_name or "Customer"
-
-        # Fetch expiry and plan name for richer template context
-        plan_name = ''
-        new_expiry = None
-        try:
-            svc = service or customer.services.filter(status='ACTIVE', plan__isnull=False).first()
-            if svc and svc.plan:
-                plan_name = svc.plan.name or ''
-            creds = customer.radius_credentials
-            new_expiry = creds.expiration_date
-        except Exception:
-            pass
-
-        expiry_str = new_expiry.strftime('%d %b %Y') if new_expiry else 'N/A'
-
-        default_msg = (
-            f"Hi {name}, payment of KES {float(amount):,.0f} received. "
-            f"Reference: {reference}. Thank you!"
-        )
-        msg = _get_rendered_message(
-            event_type='pppoe_payment',
-            default_msg=default_msg,
-            customer_name=name,
-            name=name,
-            amount=f"{float(amount):,.0f}",
-            reference=reference or '',
-            plan_name=plan_name,
-            new_expiry=expiry_str,
-            expiry_date=expiry_str,
-        )
-        return _send_once(f"pppoe_pay:{customer.id}:{reference}", phone, msg, ttl=3600, schema_name=schema_name)
-
-    @staticmethod
-    def pppoe_renewal(customer, plan_name: str, expires_at=None, schema_name: str = None) -> bool:
-        """Called after successful renewal."""
-        s = _get_notif_settings()
-        if s and not s.pppoe_renewal_confirmation:
-            return False
-        phone = _fmt_phone(_customer_phone(customer))
-        if not phone:
-            return False
-        name = customer.user.first_name or "Customer"
-        expiry_str = expires_at.strftime('%d %b %Y') if expires_at else 'N/A'
-        default_msg = (
-            f"Hi {name}, subscription renewed! Plan: {plan_name} | "
-            f"Expires: {expiry_str}. Thank you!"
-        )
-        msg = _get_rendered_message(
-            event_type='pppoe_renewal',
-            default_msg=default_msg,
-            customer_name=name,
-            name=name,
-            plan_name=plan_name,
-            expires_at=expiry_str,
-            expiry_date=expiry_str,
-        )
-        # Use timestamp-aware dedup key so multiple renewals on same day aren't swallowed
-        from django.utils import timezone as _tz
-        ts = int(_tz.now().timestamp() // 3600)  # hourly bucket
-        return _send_once(f"pppoe_renew:{customer.id}:{ts}", phone, msg, ttl=3600, schema_name=schema_name)
-
-    @staticmethod
-    def pppoe_expiry_reminder(customer, days_left: int, plan_name: str = "", schema_name: str = None) -> bool:
-        """
-        Called X days before PPPoE expiry.
-        
-        FIX: Enhanced with smart expiry display (1 hour, 6 hours, today, etc.)
-        FIX: Added {customer_account} variable for billing account number.
-        """
-        s = _get_notif_settings()
-        if s and not s.pppoe_expiry_reminder:
-            return False
-        phone = _fmt_phone(_customer_phone(customer))
-        if not phone:
-            return False
-        name = customer.user.first_name or "Customer"
-
-        # Fetch expiry info
-        try:
-            creds = customer.radius_credentials
-            expiration_date = creds.expiration_date
-            service = customer.services.filter(status='ACTIVE', plan__isnull=False).first()
-            amount_due = f"KES {float(service.plan.base_price):,.0f}" if service and service.plan else ''
-        except Exception:
-            expiration_date = None
-            amount_due = ''
-
-        # Get customer's billing account number for {customer_account} variable
-        customer_account = ''
-        try:
-            service = customer.services.filter(status='ACTIVE').first()
-            if service and service.billing_account_number:
-                customer_account = service.billing_account_number
-            elif hasattr(customer, 'billing_account_number') and customer.billing_account_number:
-                customer_account = customer.billing_account_number
-        except Exception:
-            pass
-
-        # Build smart expiry display
-        if expiration_date:
-            from django.utils import timezone as _tz
-            local_tz = _tz.get_current_timezone()
-            local_expiry = expiration_date.astimezone(local_tz)
-            expiry_time_str = local_expiry.strftime('%H:%M')
-            expiry_date_str = local_expiry.strftime('%d %b %Y')
-            expiry_full_str = local_expiry.strftime('%d %b %Y at %H:%M')
-
-            now = _tz.now()
-            hours_left = (expiration_date - now).total_seconds() / 3600
-
-            if hours_left <= 1:
-                expiry_display = f"in less than 1 hour (at {expiry_time_str})"
-            elif hours_left <= 6:
-                expiry_display = f"in {int(hours_left)} hour(s) at {expiry_time_str}"
-            elif hours_left <= 24:
-                expiry_display = f"today at {expiry_time_str}"
-            else:
-                expiry_display = f"on {expiry_date_str} at {expiry_time_str}"
-        else:
-            expiry_date_str = 'N/A'
-            expiry_full_str = 'N/A'
-            expiry_time_str = 'N/A'
-            expiry_display = 'soon'
-            amount_due = amount_due
-
-        default_msg = (
-            f"Hi {name}, your {plan_name} plan expires {expiry_display}. "
-            f"Renew now{ ' - ' + amount_due if amount_due else ''} to avoid disconnection."
-        )
-        msg = _get_rendered_message(
-            event_type='pppoe_expiry_reminder',
-            default_msg=default_msg,
-            customer_name=name,
-            name=name,
-            plan_name=plan_name,
-            days_left=days_left,
-            days=days_left,
-            expiry_date=expiry_date_str,
-            expiry_time=expiry_time_str,
-            expiry_display=expiry_display,
-            expiry_full=expiry_full_str,
-            amount_due=amount_due,
-            amount=amount_due,
-            customer_account=customer_account,
-        )
-
-        # Plain dispatch with schema — dedup is handled at task level via DB
-        result = _dispatch(phone, msg, schema_name=schema_name)
-        if result:
-            _log_sms(phone, msg, status='sent', msg_type='automated',
-                     recipient_name=name, customer_id=customer.id)
-        else:
-            _log_sms(phone, msg, status='failed', msg_type='automated',
-                     recipient_name=name, customer_id=customer.id)
-        return result
-
-    @staticmethod
-    def pppoe_suspended(customer, reason: str = "", schema_name: str = None) -> bool:
-        """Called when service is suspended."""
-        s = _get_notif_settings()
-        if s and not s.pppoe_service_suspended:
-            return False
-        phone = _fmt_phone(_customer_phone(customer))
-        if not phone:
-            return False
-        name = customer.user.first_name or "Customer"
-        default_msg = (
-            f"Hi {name}, your internet service has been suspended. "
-            f"Reason: {reason or 'subscription expired'}. Contact support to restore."
-        )
-        msg = _get_rendered_message(
-            event_type='pppoe_suspended',
-            default_msg=default_msg,
-            customer_name=name,
-            name=name,
-            reason=reason or 'subscription expired',
-        )
-        return _send_once(f"pppoe_suspend:{customer.id}", phone, msg, ttl=3600, schema_name=schema_name)
-
-    @staticmethod
-    def pppoe_resumed(customer, schema_name: str = None) -> bool:
-        """Called when service is restored."""
-        s = _get_notif_settings()
-        if s and not s.pppoe_service_resumed:
-            return False
-        phone = _fmt_phone(_customer_phone(customer))
-        if not phone:
-            return False
-        name = customer.user.first_name or "Customer"
-        
-        service = customer.services.filter(status='ACTIVE').first()
-        plan_name = service.plan.name if (service and service.plan) else ''
-        
-        default_msg = (
-            f"Hi {name}, your internet service has been restored! "
-            f"Plan: {plan_name}. Welcome back."
-        )
-        msg = _get_rendered_message(
-            event_type='pppoe_resumed',
-            default_msg=default_msg,
-            customer_name=name,
-            name=name,
-            plan_name=plan_name,
-        )
-        return _send_once(f"pppoe_resume:{customer.id}", phone, msg, ttl=3600, schema_name=schema_name)
-
-    @staticmethod
-    def pppoe_plan_changed(customer, old_plan: str, new_plan: str, schema_name: str = None) -> bool:
-        """Called when a plan is changed."""
-        s = _get_notif_settings()
-        if s and not s.pppoe_plan_changed:
-            return False
-        phone = _fmt_phone(_customer_phone(customer))
-        if not phone:
-            return False
-        name = customer.user.first_name or "Customer"
-        default_msg = (
-            f"Hi {name}, your plan has been changed from {old_plan} "
-            f"to {new_plan}. Enjoy!"
-        )
-        msg = _get_rendered_message(
-            event_type='pppoe_plan_changed',
-            default_msg=default_msg,
-            customer_name=name,
-            name=name,
-            old_plan=old_plan,
-            new_plan=new_plan,
-        )
-        return _send_once(f"pppoe_plan:{customer.id}:{new_plan}", phone, msg, ttl=3600, schema_name=schema_name)
-
-    @staticmethod
-    def pppoe_invoice_issued(customer, invoice, schema_name: str = None) -> bool:
-        """Called when an invoice is issued."""
-        s = _get_notif_settings()
-        if s and not s.pppoe_payment_confirmation:
-            return False
-        phone = _fmt_phone(_customer_phone(customer))
-        if not phone:
-            return False
-        name = customer.user.first_name or "Customer"
-        default_msg = (
-            f"Hi {name}, invoice #{invoice.invoice_number or str(invoice.id)} of KES {float(invoice.total_amount):,.0f} "
-            f"is due on {invoice.due_date.strftime('%d %b %Y') if invoice.due_date else 'N/A'}. Pay to avoid disconnection."
-        )
-        msg = _get_rendered_message(
-            event_type='pppoe_invoice_issued',
-            default_msg=default_msg,
-            customer_name=name,
-            name=name,
-            invoice_number=invoice.invoice_number or str(invoice.id),
-            amount=f"{float(invoice.total_amount):,.0f}",
-            due_date=invoice.due_date.strftime('%d %b %Y') if invoice.due_date else 'N/A',
-        )
-        return _send_once(f"invoice:{invoice.id}", phone, msg, ttl=3600, schema_name=schema_name)
 
     @staticmethod
     def hotspot_voucher_sold(voucher, schema_name: str = None) -> bool:
-        """Called when a hotspot voucher is sold."""
         try:
             customer = voucher.sold_to
             if not customer:
@@ -699,28 +802,29 @@ class SMSNotifier:
             phone = _fmt_phone(_customer_phone(customer))
             if not phone:
                 return False
-            
-            plan = voucher.batch.hotspot_plan if (voucher.batch and hasattr(voucher.batch, 'hotspot_plan')) else None
+            plan = voucher.batch.hotspot_plan if (
+                voucher.batch and hasattr(voucher.batch, 'hotspot_plan')
+            ) else None
             default_msg = (
-                f"Voucher: {voucher.code} | PIN: {voucher.pin or ''} | Plan: {plan.name if plan else 'Hotspot'} | "
-                f"Value: KES {float(voucher.face_value):,.0f}. Enjoy your internet!"
+                f"Voucher: {voucher.code} | PIN: {voucher.pin or ''} | "
+                f"Plan: {plan.name if plan else 'Hotspot'} | "
+                f"Value: KES {float(voucher.face_value):,.0f}. Enjoy!"
             )
             msg = _get_rendered_message(
-                event_type='hotspot_voucher_sold',
-                default_msg=default_msg,
+                'hotspot_voucher_sold', default_msg,
                 code=voucher.code,
                 pin=voucher.pin or '',
                 plan_name=plan.name if plan else 'Hotspot',
                 face_value=f"{float(voucher.face_value):,.0f}",
             )
-            return _send_once(f"voucher_sold:{voucher.id}", phone, msg, ttl=3600, schema_name=schema_name)
+            return _send_once(f"voucher_sold:{voucher.id}", phone, msg, ttl=3600,
+                              schema_name=schema_name)
         except Exception as exc:
             logger.warning("hotspot_voucher_sold SMS failed: %s", exc)
             return False
 
     @staticmethod
     def voucher_sold(voucher, schema_name: str = None) -> bool:
-        """Generic voucher (non-hotspot)."""
         try:
             customer = voucher.sold_to
             if not customer:
@@ -733,47 +837,13 @@ class SMSNotifier:
                 f"Value: KES {float(voucher.face_value):,.0f}."
             )
             msg = _get_rendered_message(
-                event_type='voucher_sold',
-                default_msg=default_msg,
+                'voucher_sold', default_msg,
                 code=voucher.code,
                 pin=voucher.pin or '',
                 face_value=f"{float(voucher.face_value):,.0f}",
             )
-            return _send_once(f"voucher:{voucher.id}", phone, msg, ttl=3600, schema_name=schema_name)
+            return _send_once(f"voucher:{voucher.id}", phone, msg, ttl=3600,
+                              schema_name=schema_name)
         except Exception as exc:
             logger.warning("voucher_sold SMS failed: %s", exc)
             return False
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# HELPERS
-# ─────────────────────────────────────────────────────────────────────────────
-
-def _customer_phone(customer, service=None) -> str:
-    """Extract best available phone from a Customer instance."""
-    try:
-        if customer.user and getattr(customer.user, 'phone_number', None):
-            val = str(customer.user.phone_number).strip()
-            # Real E.164 phones are max 15 chars. Anything longer is a hash/corrupt value.
-            if len(val) <= 15:
-                return val
-    except Exception:
-        pass
-
-    try:
-        alt = customer.alternative_phone or ""
-        if len(alt) <= 15:
-            return alt
-    except Exception:
-        pass
-
-    # Try to get phone from service connection
-    try:
-        if service and hasattr(service, 'phone_number') and service.phone_number:
-            val = str(service.phone_number).strip()
-            if len(val) <= 15:
-                return val
-    except Exception:
-        pass
-
-    return ""
