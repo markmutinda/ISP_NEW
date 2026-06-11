@@ -1490,7 +1490,7 @@ class HotspotPhoneReconnectView(APIView):
     - Find their most recent active session on this router
     - If this MAC already has a slot → reconnect (reseed RADIUS)
     - If new MAC and slots remaining under plan.simultaneous_devices → create new slot
-    - If slots full → deny
+    - If slots full → attempt MAC rotation takeover (replace stale session with rotated MAC)
     """
     permission_classes = [AllowAny]
     authentication_classes = []
@@ -1913,8 +1913,75 @@ class HotspotPhoneReconnectView(APIView):
             # Each session with a unique access_code counts as one device slot
             occupied_slots = active_sessions.values('access_code').distinct().count()
 
+            # ═══════════════════════════════════════════════════════════════
+            # FIX: MAC ROTATION TAKEOVER - When slots are full but the 
+            # requesting phone owns ALL of them, replace the stale session
+            # ═══════════════════════════════════════════════════════════════
             if occupied_slots >= plan_device_limit:
-                # Build a helpful message listing how many devices are connected
+                # Before rejecting, check if ALL occupied slots belong to this client.
+                # If so, one of them may have a stale/rotated MAC — allow takeover.
+                
+                # Find sessions NOT matching current MAC (potential stale slots)
+                stale_sessions = active_sessions.exclude(mac_address=mac_address).order_by('activated_at')
+                
+                if stale_sessions.exists():
+                    # All slots are occupied by other MACs — could be legitimate other devices
+                    # OR stale rotated MACs. Since all sessions belong to this client (same phone),
+                    # replace the OLDEST stale session with this new MAC.
+                    oldest_stale = stale_sessions.first()
+                    
+                    logger.info(
+                        f"MAC rotation takeover: phone={phone_canonical} "
+                        f"replacing stale session {oldest_stale.access_code} "
+                        f"old_mac={oldest_stale.mac_address} new_mac={mac_address}"
+                    )
+                    
+                    # Update the old session's MAC to the new one
+                    oldest_stale.mac_address = mac_address
+                    oldest_stale.save(update_fields=['mac_address'])
+                    
+                    # Register new device
+                    HotspotClientDevice.record_device(client=client, mac_address=mac_address)
+                    
+                    # Reseed RADIUS with new MAC
+                    access_code = oldest_stale.access_code
+                    try:
+                        from apps.billing.services.hotspot_radius_service import HotspotRadiusService
+                        HotspotRadiusService().create_hotspot_credentials(
+                            username=access_code,
+                            password=access_code,
+                            router=router,
+                            plan=plan,
+                            expires_at=oldest_stale.expires_at,
+                            mac_address=mac_address,
+                        )
+                    except Exception as e:
+                        logger.error(f"Phone reconnect MAC-rotation takeover RADIUS failed: {e}")
+                        return Response(
+                            {'error': 'Failed to restore connection. Please try again.'},
+                            status=status.HTTP_500_INTERNAL_SERVER_ERROR
+                        )
+                    
+                    remaining_minutes = max(
+                        0, int((oldest_stale.expires_at - now).total_seconds() / 60)
+                    )
+                    logger.info(
+                        f"Phone reconnect (MAC rotation slot takeover): phone={phone_canonical} "
+                        f"old_mac={oldest_stale.mac_address} new_mac={mac_address} "
+                        f"access_code={access_code}"
+                    )
+                    return Response({
+                        'status': 'reconnected',
+                        'message': 'Welcome back! Your connection has been restored.',
+                        'access_code': access_code,
+                        'expires_at': oldest_stale.expires_at.isoformat(),
+                        'remaining_minutes': remaining_minutes,
+                        'plan_name': plan.name,
+                        'device_slot': 'existing',
+                        'credentials': {'username': access_code, 'password': access_code},
+                    })
+                
+                # No stale sessions found — genuinely full with different active MACs
                 return Response(
                     {
                         'error': (
