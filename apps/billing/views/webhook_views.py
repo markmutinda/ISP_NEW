@@ -474,6 +474,24 @@ class MpesaC2BWebhookView(APIView):
                             
                             radius_cred.save()
                             
+                            # ============================================================
+                            # FIX: Clear old expiry reminder logs to prevent duplicate reminders
+                            # This ensures a fresh reminder cycle starts after renewal
+                            # ============================================================
+                            try:
+                                from apps.radius.models import RadiusExpiryReminderLog
+                                deleted_count = RadiusExpiryReminderLog.objects.filter(
+                                    customer_id=str(customer.id)
+                                ).delete()
+                                
+                                if deleted_count[0] > 0:
+                                    logger.info(
+                                        f"[C2B] Cleared {deleted_count[0]} old expiry reminder logs "
+                                        f"for customer {customer.customer_code} after renewal"
+                                    )
+                            except Exception as log_clear_err:
+                                logger.warning(f"Failed to clear old reminder logs (non-fatal): {log_clear_err}")
+                            
                             try:
                                 radius_cred.sync_to_radius()
                             except Exception as e:
@@ -504,7 +522,8 @@ class MpesaC2BWebhookView(APIView):
                             SMSNotifier.pppoe_renewal(
                                 customer=customer,
                                 plan_name=matched_plan.name if matched_plan else '',
-                                expires_at=new_expiry,
+                                new_expiry=new_expiry,
+                                amount_paid=amount,
                             )
                         except Exception as e:
                             logger.warning(f"SMS notice skipped: {e}")

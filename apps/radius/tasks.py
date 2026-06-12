@@ -794,6 +794,9 @@ def send_pppoe_expiry_reminders():
     """
     Send PPPoE expiry reminders with DB-level dedup.
     Runs hourly. Each customer gets exactly one SMS per interval per subscription period.
+    
+    FIX: Skip customers who renewed within the last hour to prevent
+    sending expiry reminders immediately after payment/renewal.
     """
     from django.db import IntegrityError, transaction as db_transaction
     TenantModel = get_tenant_model()
@@ -830,6 +833,19 @@ def send_pppoe_expiry_reminders():
 
                 for cred in expiring:
                     try:
+                        # ============================================================
+                        # FIX: Skip customers who renewed within the last hour
+                        # This prevents sending expiry reminders right after payment
+                        # ============================================================
+                        if cred.subscription_activated_at:
+                            minutes_since_renewal = (now - cred.subscription_activated_at).total_seconds() / 60
+                            if minutes_since_renewal < 60:
+                                logger.debug(
+                                    f"[EXPIRY] Skipping {cred.username} - "
+                                    f"renewed {minutes_since_renewal:.0f} minutes ago (grace period)"
+                                )
+                                continue
+                        
                         remaining_hours = (cred.expiration_date - now).total_seconds() / 3600
                         due = _get_due_reminder(reminders, remaining_hours)
 
@@ -839,9 +855,7 @@ def send_pppoe_expiry_reminders():
                         customer = cred.customer
                         reminder_key = due['key']
 
-                        # ============================================================
-                        # FIX: Normalize to minute precision - microseconds cause false cache misses
-                        # ============================================================
+                        # Normalize to minute precision - microseconds cause false cache misses
                         expiry_normalized = cred.expiration_date.replace(second=0, microsecond=0)
 
                         # DB-level dedup — unique constraint blocks duplicates
