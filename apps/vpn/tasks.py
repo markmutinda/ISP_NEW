@@ -56,13 +56,17 @@ def monitor_vpn_tunnels():
     - OFFLINE: Router was online but handshake is now too old
     - ONLINE: Router was offline and handshake just became active again
     
-    Runs every 2 minutes via Celery Beat.
+    Uses a dedicated cache key (wg_router_status:{id}) to track status changes
+    independently of the sync_status() TCP socket checker.
+    
+    Runs every 3 minutes via Celery Beat.
     """
     import time
     from apps.vpn.services.wireguard_manager import list_connected_peers
     from apps.network.models.router_models import Router
     from django_tenants.utils import schema_context, get_tenant_model
     from django.utils import timezone
+    from django.core.cache import cache as _cache
 
     logger = logging.getLogger(__name__)
 
@@ -97,7 +101,7 @@ def monitor_vpn_tunnels():
 
                 is_connected = router.wireguard_public_key in connected_pubkeys
                 new_status = 'online' if is_connected else 'offline'
-                old_status = router.status
+                schema = router.schema_name or tenant.schema_name
 
                 if is_connected:
                     connected_count += 1
@@ -111,46 +115,54 @@ def monitor_vpn_tunnels():
                     disconnected_count += 1
 
                 # ── TRIGGER ALERTS ON STATUS TRANSITION ──
-                if old_status != new_status:
-                    schema = router.schema_name or tenant.schema_name
-                    alerts_triggered += 1
+                # Use WireGuard as source of truth, ignore what sync_status() set
+                # Always update status in DB based on WireGuard handshake
+                Router.objects.filter(id=router.id).update(status=new_status)
 
-                    # Update status in DB
-                    Router.objects.filter(id=router.id).update(status=new_status)
+                # Use dedicated cache key for WireGuard status tracking
+                wg_cache_key = f"wg_router_status:{router.id}"
+                previous_wg_status = _cache.get(wg_cache_key)
 
-                    if old_status == 'online' and new_status == 'offline':
+                # Only alert when WireGuard status actually changes
+                if previous_wg_status != new_status:
+                    # Store the new status with 10 minute timeout
+                    _cache.set(wg_cache_key, new_status, timeout=600)
+
+                    if previous_wg_status == 'online' and new_status == 'offline':
                         from apps.messaging.tasks import send_router_offline_alert
                         if schema and schema != 'public':
-                            send_router_offline_alert.delay(
-                                router.name,
-                                schema_name=schema
-                            )
+                            send_router_offline_alert.delay(router.name, schema_name=schema)
                             logger.info(
                                 f"[WG MONITOR] 🚨 Router '{router.name}' went OFFLINE "
                                 f"(last handshake > 180 sec) - Alert queued"
                             )
+                            alerts_triggered += 1
                         else:
                             logger.warning(
                                 f"[WG MONITOR] Router '{router.name}' offline but no "
                                 f"valid schema for alert"
                             )
 
-                    elif old_status == 'offline' and new_status == 'online':
+                    elif previous_wg_status == 'offline' and new_status == 'online':
                         from apps.messaging.tasks import send_router_online_alert
                         if schema and schema != 'public':
-                            send_router_online_alert.delay(
-                                router.name,
-                                schema_name=schema
-                            )
+                            send_router_online_alert.delay(router.name, schema_name=schema)
                             logger.info(
                                 f"[WG MONITOR] ✅ Router '{router.name}' came ONLINE "
                                 f"(handshake restored) - Alert queued"
                             )
+                            alerts_triggered += 1
                         else:
                             logger.warning(
                                 f"[WG MONITOR] Router '{router.name}' online but no "
                                 f"valid schema for alert"
                             )
+
+                    elif previous_wg_status is None:
+                        # First time seeing this router, just record status, no alert
+                        logger.info(
+                            f"[WG MONITOR] Router '{router.name}' initial status recorded: {new_status}"
+                        )
 
                 # Update vpn_last_seen for connected routers (already done above)
                 # For disconnected routers, we don't update vpn_last_seen so it ages out
@@ -165,7 +177,7 @@ def monitor_vpn_tunnels():
     
     logger.info(
         f"[WG MONITOR] Complete: {connected_count}/{total_provisioned} routers online, "
-        f"{alerts_triggered} status changes detected"
+        f"{alerts_triggered} alerts triggered"
     )
     
     return result
