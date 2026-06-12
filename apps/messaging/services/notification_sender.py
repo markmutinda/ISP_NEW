@@ -279,7 +279,13 @@ def _get_plan_context(service=None, customer=None) -> dict:
 
 
 def _get_expiry_context(expiration_date=None) -> dict:
-    """Build all expiry-related context variables from a datetime."""
+    """
+    Build all expiry-related context variables from a datetime.
+    
+    FIX: Uses calendar date comparison (local timezone) instead of hour delta
+    to decide "today" vs "tomorrow" vs a full date. This prevents incorrect
+    "today at 09:59" messages when expiry is actually tomorrow.
+    """
     if not expiration_date:
         return {
             'expiry_date': 'N/A',
@@ -302,14 +308,23 @@ def _get_expiry_context(expiration_date=None) -> dict:
     expiry_full_str = local_expiry.strftime('%d %b %Y at %H:%M')
 
     now = _tz.now()
+    now_local = now.astimezone(local_tz)
     hours_left = (expiration_date - now).total_seconds() / 3600
+    
+    expiry_day = local_expiry.date()
+    today = now_local.date()
+    days_diff = (expiry_day - today).days
 
+    # ============================================================
+    # FIX: Use calendar date comparison for "today" vs "tomorrow"
+    # This prevents "today at 09:59" when expiry is actually tomorrow
+    # ============================================================
     if hours_left <= 1:
         expiry_display = f"in less than 1 hour (at {expiry_time_str})"
-    elif hours_left <= 6:
-        expiry_display = f"in {int(hours_left)} hour(s) at {expiry_time_str}"
-    elif hours_left <= 24:
+    elif days_diff <= 0:
         expiry_display = f"today at {expiry_time_str}"
+    elif days_diff == 1:
+        expiry_display = f"tomorrow at {expiry_time_str}"
     else:
         expiry_display = f"on {expiry_date_str} at {expiry_time_str}"
 
@@ -484,7 +499,7 @@ class SMSNotifier:
 
         default_msg = (
             f"Hi {ctx['name']}, subscription renewed! Plan: {plan_name} | "
-            f"Expires: {ctx['expiry_date']}. Thank you!"
+            f"Expires: {ctx['expiry_display']}. Thank you!"
         )
         msg = _get_rendered_message('pppoe_renewal', default_msg, **ctx)
         from django.utils import timezone as _tz
