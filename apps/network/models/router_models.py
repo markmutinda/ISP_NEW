@@ -305,9 +305,25 @@ class Router(AuditMixin):
     def __str__(self):
         return f"{self.name} ({self.ip_address or 'No IP'})"
 
+    def _check_reachable(self, ip, port, timeout=1.5):
+        """Internal helper to check if a host:port is reachable via TCP."""
+        import socket
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(timeout)
+        try:
+            result = sock.connect_ex((ip, port))
+            return result == 0
+        except Exception:
+            return False
+        finally:
+            sock.close()
+
     def sync_status(self, force=False):
         """
         Fast socket check to see if the MikroTik is reachable (1.5s max delay).
+        
+        Includes retry mechanism to prevent false alarms from transient network issues.
+        Only triggers offline alerts after TWO consecutive failed checks (5 min window).
         
         Args:
             force (bool): If True, bypasses the cooldown check and forces a sync.
@@ -316,10 +332,10 @@ class Router(AuditMixin):
         Returns:
             str: The updated status ('online' or 'offline')
         """
-        import socket
         import logging
         from django.utils import timezone
         from django.db import connection as _conn
+        from django.core.cache import cache as _router_cache
         
         logger = logging.getLogger(__name__)
         
@@ -341,34 +357,53 @@ class Router(AuditMixin):
         # Store the old status before checking
         old_status = self.status
 
-        # 3. FAST SOCKET PING: Just check if port 8728 is open (bypasses heavy auth)
-        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        sock.settimeout(1.5)  # Max 1.5 seconds wait time per router!
+        # 3. FAST SOCKET PING with retry to avoid false alarms
+        # First check
+        first_check = self._check_reachable(target_ip, self.api_port or 8728, timeout=1.5)
+
+        if not first_check:
+            # Confirm offline with a second check after a short delay
+            import time
+            time.sleep(2)
+            second_check = self._check_reachable(target_ip, self.api_port or 8728, timeout=1.5)
+            new_status = 'online' if second_check else 'offline'
+        else:
+            new_status = 'online'
         
-        try:
-            result = sock.connect_ex((target_ip, self.api_port or 8728))
-            new_status = 'online' if result == 0 else 'offline'
-        except Exception:
-            new_status = 'offline'
-        finally:
-            sock.close()
-        
-        # ── TRIGGER ALERT ON STATUS TRANSITION ──
+        # ── TRIGGER ALERT ON STATUS TRANSITION (with confirmation to prevent false alarms) ──
         # Get effective schema for tenant context
         effective_schema = self.schema_name or _conn.schema_name
+        
+        # Use cache key to confirm status change is real (not flapping)
+        cache_key = f"router_confirmed_status:{self.id}"
 
-        # Handle OFFLINE transition
+        # Handle OFFLINE transition - only after 2 consecutive failures
         if old_status == 'online' and new_status == 'offline':
-            from apps.messaging.tasks import send_router_offline_alert
+            # Check if this is the second consecutive offline detection
+            previous_offline = _router_cache.get(cache_key)
             
-            if effective_schema and effective_schema != 'public':
-                send_router_offline_alert.delay(self.name, schema_name=effective_schema)
-                logger.info(f"[OFFLINE ALERT] Queued SMS for {self.name} (schema={effective_schema})")
+            if previous_offline == 'offline':
+                # Confirmed offline - send alert
+                from apps.messaging.tasks import send_router_offline_alert
+                
+                if effective_schema and effective_schema != 'public':
+                    send_router_offline_alert.delay(self.name, schema_name=effective_schema)
+                    logger.info(f"[OFFLINE ALERT] Confirmed offline, queued SMS for {self.name} (schema={effective_schema})")
+                else:
+                    logger.warning(f"[OFFLINE ALERT] Could not queue SMS — no valid schema for {self.name}")
+                
+                # Clear the confirmation key
+                _router_cache.delete(cache_key)
             else:
-                logger.warning(f"[OFFLINE ALERT] Could not queue SMS — no valid schema for {self.name}")
+                # First offline detection - mark and wait for next check
+                _router_cache.set(cache_key, 'offline', timeout=300)  # 5 min window
+                logger.info(f"[OFFLINE ALERT] First offline detection for {self.name}, waiting for confirmation")
 
-        # Handle ONLINE transition (new addition)
+        # Handle ONLINE transition - send immediately (no confirmation needed)
         elif old_status == 'offline' and new_status == 'online':
+            # Clear any pending offline confirmation
+            _router_cache.delete(cache_key)
+            
             from apps.messaging.tasks import send_router_online_alert
             
             if effective_schema and effective_schema != 'public':
@@ -376,6 +411,10 @@ class Router(AuditMixin):
                 logger.info(f"[ONLINE ALERT] Queued SMS for {self.name} (schema={effective_schema})")
             else:
                 logger.warning(f"[ONLINE ALERT] Could not queue SMS — no valid schema for {self.name}")
+
+        # Keep the cache key alive if still offline (for next check cycle)
+        elif new_status == 'offline':
+            _router_cache.set(cache_key, 'offline', timeout=300)
         
         # Update status and timestamp
         if new_status == 'online':
