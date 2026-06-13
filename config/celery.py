@@ -163,12 +163,9 @@ app.conf.beat_schedule = {
     # ════════════════════════════════════════════════════════════════
     # CLOUD CONTROLLER — VPN Tunnel Monitoring
     # ════════════════════════════════════════════════════════════════
-    # Monitor every 3 minutes to match WireGuard handshake window
-    # WireGuard automatically sends handshakes every 2 minutes
-    # If last handshake > 180 seconds, tunnel is genuinely down
-    'monitor-vpn-tunnels-every-3-min': {
+    'monitor-vpn-tunnels-every-2-min': {
         'task': 'apps.vpn.tasks.monitor_vpn_tunnels',
-        'schedule': crontab(minute='*/3'),  # Changed from */2 to */3
+        'schedule': crontab(minute='*/2'),
         'options': {'queue': 'default'}
     },
     'check-vpn-health-every-minute': {
@@ -179,11 +176,6 @@ app.conf.beat_schedule = {
     'cleanup-orphaned-ccd-daily': {
         'task': 'apps.vpn.tasks.cleanup_orphaned_ccd',
         'schedule': crontab(hour=4, minute=0),  # Daily at 4 AM
-        'options': {'queue': 'default'}
-    },
-    'cleanup-orphaned-peers-daily': {
-        'task': 'apps.vpn.tasks.cleanup_orphaned_peers',
-        'schedule': crontab(hour=4, minute=15),  # Daily at 4:15 AM
         'options': {'queue': 'default'}
     },
 

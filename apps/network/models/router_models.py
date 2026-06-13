@@ -305,25 +305,9 @@ class Router(AuditMixin):
     def __str__(self):
         return f"{self.name} ({self.ip_address or 'No IP'})"
 
-    def _try_connect(self, ip, port, timeout=2.0):
-        """Internal helper to check if a host:port is reachable via TCP."""
-        import socket as _socket
-        sock = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)
-        sock.settimeout(timeout)
-        try:
-            return sock.connect_ex((ip, port)) == 0
-        except Exception:
-            return False
-        finally:
-            sock.close()
-
     def sync_status(self, force=False):
         """
-        Fast socket check to see if the MikroTik is reachable.
-        
-        This is a lightweight status check that updates the router's status
-        but does NOT trigger alerts. Alerting is handled by the WireGuard
-        tunnel monitor (monitor_vpn_tunnels task) which is more reliable.
+        Fast socket check to see if the MikroTik is reachable (1.5s max delay).
         
         Args:
             force (bool): If True, bypasses the cooldown check and forces a sync.
@@ -332,9 +316,10 @@ class Router(AuditMixin):
         Returns:
             str: The updated status ('online' or 'offline')
         """
+        import socket
         import logging
-        import time
         from django.utils import timezone
+        from django.db import connection as _conn
         
         logger = logging.getLogger(__name__)
         
@@ -353,16 +338,44 @@ class Router(AuditMixin):
             self.save(update_fields=['status', 'updated_at'])
             return self.status
 
-        # 3. FAST SOCKET PING with retry to avoid false alarms
-        # First attempt
-        reachable = self._try_connect(target_ip, self.api_port or 8728, timeout=2.0)
+        # Store the old status before checking
+        old_status = self.status
 
-        # If first check fails, wait 3 seconds and try once more
-        if not reachable:
-            time.sleep(3)
-            reachable = self._try_connect(target_ip, self.api_port or 8728, timeout=2.0)
+        # 3. FAST SOCKET PING: Just check if port 8728 is open (bypasses heavy auth)
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(1.5)  # Max 1.5 seconds wait time per router!
+        
+        try:
+            result = sock.connect_ex((target_ip, self.api_port or 8728))
+            new_status = 'online' if result == 0 else 'offline'
+        except Exception:
+            new_status = 'offline'
+        finally:
+            sock.close()
+        
+        # ── TRIGGER ALERT ON STATUS TRANSITION ──
+        # Get effective schema for tenant context
+        effective_schema = self.schema_name or _conn.schema_name
 
-        new_status = 'online' if reachable else 'offline'
+        # Handle OFFLINE transition
+        if old_status == 'online' and new_status == 'offline':
+            from apps.messaging.tasks import send_router_offline_alert
+            
+            if effective_schema and effective_schema != 'public':
+                send_router_offline_alert.delay(self.name, schema_name=effective_schema)
+                logger.info(f"[OFFLINE ALERT] Queued SMS for {self.name} (schema={effective_schema})")
+            else:
+                logger.warning(f"[OFFLINE ALERT] Could not queue SMS — no valid schema for {self.name}")
+
+        # Handle ONLINE transition (new addition)
+        elif old_status == 'offline' and new_status == 'online':
+            from apps.messaging.tasks import send_router_online_alert
+            
+            if effective_schema and effective_schema != 'public':
+                send_router_online_alert.delay(self.name, schema_name=effective_schema)
+                logger.info(f"[ONLINE ALERT] Queued SMS for {self.name} (schema={effective_schema})")
+            else:
+                logger.warning(f"[ONLINE ALERT] Could not queue SMS — no valid schema for {self.name}")
         
         # Update status and timestamp
         if new_status == 'online':
@@ -370,13 +383,8 @@ class Router(AuditMixin):
         
         self.status = new_status
         
-        # Save silently - NO ALERTS here (handled by WireGuard monitor)
+        # 4. UPDATE DB silently
         self.save(update_fields=['status', 'last_seen', 'updated_at'])
-        
-        # Log status changes for debugging (no SMS)
-        if new_status != self.status:
-            logger.debug(f"[STATUS UPDATE] Router '{self.name}' status changed to {new_status} (no alert - WireGuard handles alerts)")
-        
         return self.status
 
     def _sync_to_global_map(self):
