@@ -188,9 +188,6 @@ class ServiceConnectionViewSet(viewsets.ModelViewSet):
         service = self.get_object()
         customer = service.customer
         
-        # Track old status for resume SMS
-        old_status = service.status
-        
         # Track if we actually performed activation
         was_activated = False
         new_expiration = None
@@ -305,17 +302,10 @@ class ServiceConnectionViewSet(viewsets.ModelViewSet):
                     logger.warning(f"Welcome SMS failed for customer {customer.id}: {e}")
                 # ────────────────────────────────────────────────────────────
                 
-                # ────────────────────────────────────────────────────────────
-                # SEND SERVICE RESUMED SMS (if coming from SUSPENDED)
-                # ────────────────────────────────────────────────────────────
-                if old_status == 'SUSPENDED':
-                    try:
-                        from apps.messaging.services.notification_sender import SMSNotifier
-                        SMSNotifier.pppoe_resumed(customer=customer)
-                        logger.info(f"Service resumed SMS sent to customer {customer.id}")
-                    except Exception as e:
-                        logger.warning(f"Resumed SMS failed for customer {customer.id}: {e}")
-                # ────────────────────────────────────────────────────────────
+                # ============================================================
+                # REMOVED: pppoe_resumed SMS call (toggle no longer exists)
+                # The service resumed notification is no longer supported.
+                # ============================================================
                 
                 # ────────────────────────────────────────────────────────────
                 # MANUAL ADMIN ACTIVATION: SYNCHRONISE SUBSCRIPTION MODEL
@@ -362,18 +352,11 @@ class ServiceConnectionViewSet(viewsets.ModelViewSet):
                     exc_info=True,
                 )
             
-            # SMS notification for new activation (plan details)
-            try:
-                from apps.messaging.services.notification_sender import SMSNotifier
-                SMSNotifier.pppoe_new_subscription(
-                    customer=customer,
-                    plan_name=service.plan.name if service.plan else "",
-                    amount=float(service.monthly_price or 0),
-                    expires_at=new_expiration,
-                )
-                logger.info(f"New subscription SMS sent to customer {customer.id}")
-            except Exception as e:
-                logger.warning(f"New subscription SMS failed: {e}")
+            # ============================================================
+            # REMOVED: pppoe_new_subscription SMS call (toggle no longer exists)
+            # New subscription notification is no longer supported.
+            # Only the merged payment/renewal notification should be used.
+            # ============================================================
         
         # ── STEP 2: Payment block (runs regardless of activation status) ──
         # This allows recording payments against already-active services
@@ -527,20 +510,10 @@ class ServiceConnectionViewSet(viewsets.ModelViewSet):
         service.updated_by = request.user
         service.save()
         
-        # ────────────────────────────────────────────────────────────
-        # SEND PLAN CHANGE SMS NOTIFICATION
-        # ────────────────────────────────────────────────────────────
-        try:
-            from apps.messaging.services.notification_sender import SMSNotifier
-            SMSNotifier.pppoe_plan_changed(
-                customer=service.customer,
-                old_plan=old_plan_name,
-                new_plan=new_plan.name,
-            )
-            logger.info(f"Plan change SMS sent to customer {service.customer.id}: {old_plan_name} → {new_plan.name}")
-        except Exception as e:
-            logger.warning(f"Plan change SMS failed for customer {service.customer.id}: {e}")
-        # ────────────────────────────────────────────────────────────
+        # ============================================================
+        # REMOVED: pppoe_plan_changed SMS call (toggle no longer exists)
+        # Plan change notification is no longer supported.
+        # ============================================================
 
         return Response({
             'status': 'success',
@@ -763,7 +736,7 @@ class ServiceConnectionViewSet(viewsets.ModelViewSet):
                 service.activation_date = service.activation_date or timezone.now()
                 service.save(update_fields=['status', 'activation_date'])
             
-            # Send notification SMS
+            # Send notification SMS (uses merged payment/renewal template)
             try:
                 from apps.messaging.services.notification_sender import SMSNotifier
                 SMSNotifier.pppoe_renewal(
@@ -775,18 +748,9 @@ class ServiceConnectionViewSet(viewsets.ModelViewSet):
             except Exception as e:
                 logger.warning(f"Expiry date set SMS failed: {e}")
             
-            # Send plan change SMS if applicable
-            if plan_changed and new_plan:
-                try:
-                    from apps.messaging.services.notification_sender import SMSNotifier
-                    SMSNotifier.pppoe_plan_changed(
-                        customer=customer,
-                        old_plan=old_plan_name,
-                        new_plan=new_plan.name,
-                    )
-                    logger.info(f"Plan change SMS sent to customer {customer.id}: {old_plan_name} → {new_plan.name}")
-                except Exception as e:
-                    logger.warning(f"Plan change SMS failed: {e}")
+            # ============================================================
+            # REMOVED: pppoe_plan_changed SMS call (toggle no longer exists)
+            # ============================================================
             
             logger.info(
                 f"Direct expiry set for service {service.id} for {customer.customer_code}: "
@@ -897,7 +861,7 @@ class ServiceConnectionViewSet(viewsets.ModelViewSet):
             service.save()
         
         # ────────────────────────────────────────────────────────────
-        # SEND RENEWAL SMS NOTIFICATION
+        # SEND RENEWAL SMS NOTIFICATION (uses merged payment/renewal template)
         # ────────────────────────────────────────────────────────────
         try:
             from apps.messaging.services.notification_sender import SMSNotifier
@@ -911,21 +875,9 @@ class ServiceConnectionViewSet(viewsets.ModelViewSet):
             logger.warning(f"Renewal SMS failed: {e}")
         # ────────────────────────────────────────────────────────────
 
-        # ────────────────────────────────────────────────────────────
-        # SEND PLAN CHANGE SMS (if plan was changed during extension)
-        # ────────────────────────────────────────────────────────────
-        if plan_changed and new_plan:
-            try:
-                from apps.messaging.services.notification_sender import SMSNotifier
-                SMSNotifier.pppoe_plan_changed(
-                    customer=customer,
-                    old_plan=old_plan_name,
-                    new_plan=new_plan.name,
-                )
-                logger.info(f"Plan change SMS sent to customer {customer.id}: {old_plan_name} → {new_plan.name}")
-            except Exception as e:
-                logger.warning(f"Plan change SMS failed: {e}")
-        # ────────────────────────────────────────────────────────────
+        # ============================================================
+        # REMOVED: pppoe_plan_changed SMS call (toggle no longer exists)
+        # ============================================================
         
         msg_parts = [f'Subscription extended by {human_label}']
         if plan_changed:

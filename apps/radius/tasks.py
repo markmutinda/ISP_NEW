@@ -629,9 +629,14 @@ def extend_user_validity(self, credentials_id: int, extend_by_plan: bool = True)
 @shared_task
 def process_expired_subscriptions():
     """
-    FIXED: Now loops through all tenants to find and disable expired users.
+    Disables expired RADIUS credentials and sends a ONE-TIME
+    'subscription expired' notice (pppoe_expiry_notification toggle).
+    
+    Each credential only crosses the expiry threshold once per renewal cycle
+    since expiration_date is moved forward on renewal.
     """
     from apps.radius.models import CustomerRadiusCredentials
+    from apps.messaging.services.notification_sender import SMSNotifier
     TenantModel = get_tenant_model()
     now = timezone.now()
     stats = {'checked': 0, 'expired': 0, 'disabled': 0, 'errors': 0}
@@ -646,7 +651,7 @@ def process_expired_subscriptions():
                     is_enabled=True, 
                     expiration_date__isnull=False, 
                     expiration_date__lt=now
-                )
+                ).select_related('customer__user', 'bandwidth_profile')
                 
                 stats['checked'] += expired_credentials.count()
                 
@@ -659,6 +664,32 @@ def process_expired_subscriptions():
                     
                     # Kick them off the router immediately
                     disconnect_user_immediately.delay(username=credentials.username, connection_type='both')
+                    
+                    # ============================================================
+                    # ONE-TIME "subscription expired" SMS
+                    # Fires exactly once per expiry cycle because the credential
+                    # is disabled after this and won't be processed again until
+                    # the next renewal moves expiration_date forward.
+                    # ============================================================
+                    try:
+                        plan_name = (
+                            credentials.bandwidth_profile.name
+                            if credentials.bandwidth_profile else ""
+                        )
+                        SMSNotifier.pppoe_expired_notice(
+                            customer=credentials.customer,
+                            plan_name=plan_name,
+                        )
+                        logger.info(
+                            f"[EXPIRED CHECK] Sent expiry notice SMS to "
+                            f"{credentials.customer.customer_code} for plan {plan_name}"
+                        )
+                    except Exception as sms_err:
+                        logger.warning(
+                            f"[EXPIRED CHECK] Expiry notice SMS failed for "
+                            f"{credentials.username}: {sms_err}"
+                        )
+
                     logger.info(f"[EXPIRED CHECK] Disabled expired user: {credentials.username} in tenant {tenant.schema_name}")
                     
         except Exception as e:
