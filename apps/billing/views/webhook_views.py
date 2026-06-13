@@ -516,17 +516,22 @@ class MpesaC2BWebhookView(APIView):
 
                         self.trigger_mikrotik_reactivation(service)
                         
+                        # ============================================================
+                        # FIX: Use only pppoe_renewal (which now checks pppoe_payment_confirmation)
+                        # No duplicate SMS calls here - the renewal method handles the merged notification
+                        # ============================================================
                         try:
-                            # Use the proper SMSNotifier method that respects toggles
                             from apps.messaging.services.notification_sender import SMSNotifier
+                            # The pppoe_renewal method now checks pppoe_payment_confirmation toggle
                             SMSNotifier.pppoe_renewal(
                                 customer=customer,
                                 plan_name=matched_plan.name if matched_plan else '',
-                                new_expiry=new_expiry,
-                                amount_paid=amount,
+                                expires_at=new_expiry,
+                                schema_name=target_tenant_schema
                             )
+                            logger.info(f"PPPoE renewal SMS sent to customer {customer.id}")
                         except Exception as e:
-                            logger.warning(f"SMS notice skipped: {e}")
+                            logger.warning(f"PPPoE renewal SMS failed for customer {customer.id}: {e}")
                     else:
                         logger.info(f"Partial payment processed for customer: {customer.customer_code}")
 

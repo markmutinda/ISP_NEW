@@ -14,7 +14,7 @@ DEFAULTS = [
      'Your WiFi session ({access_code}) expires in {minutes} minute(s). Buy another plan to stay connected.',
      ['{access_code}', '{minutes}']),
 
-    ('hotspot_session_expired',  'Hotspot — Session Expired',    # FIXED: changed from 'hotspot_expired' to 'hotspot_session_expired'
+    ('hotspot_session_expired',  'Hotspot — Session Expired',
      'Your WiFi session has ended. Visit the portal to buy a new plan and reconnect. Thank you!',
      []),
 
@@ -22,38 +22,30 @@ DEFAULTS = [
      'WiFi payment failed. Please try again from the portal. No amount was deducted.',
      []),
 
+    # ── PPPOE / STATIC TEMPLATES (REDUCED SET) ─────────────────────────────
     ('pppoe_welcome',            'PPPoE — Welcome',
-     'Welcome {name}! Your internet service is now active. Username: {username} / Password: {password}. '
+     'Welcome {customer_name}! Your internet service is now active. Username: {username} / Password: {password}. '
      'Contact support if you need help.',
-     ['{name}', '{username}', '{password}']),
+     ['{customer_name}', '{username}', '{password}']),
 
-    ('pppoe_new_subscription',   'PPPoE — New Subscription',
-     'Hi {name}, your {plan_name} subscription (KES {amount}) is now active. Expires: {expiry_date}. Enjoy!',
-     ['{name}', '{plan_name}', '{amount}', '{expiry_date}']),
-
-    ('pppoe_payment',            'PPPoE — Payment Confirmation',
-     'Hi {name}, payment of KES {amount} received. Ref: {reference}. Thank you!',
-     ['{name}', '{amount}', '{reference}']),
-
-    ('pppoe_renewal',            'PPPoE — Renewal Confirmation',
-     'Hi {name}, your {plan_name} subscription has been renewed. New expiry: {expiry_date}. Stay connected!',
-     ['{name}', '{plan_name}', '{expiry_date}']),
+    # MERGED: payment confirmation + renewal confirmation into one template
+    ('pppoe_payment',            'PPPoE — Payment / Renewal Confirmation',
+     'Hi {customer_name}, payment of KES {amount} received for {plan_name}. '
+     'Your subscription is now valid until {expiry_full}. Thank you!',
+     ['{customer_name}', '{amount}', '{plan_name}', '{expiry_full}',
+      '{expiry_display}', '{reference}', '{customer_account}']),
 
     ('pppoe_expiry_reminder',    'PPPoE — Expiry Reminder',
-     'Hi {name}, your internet subscription ({plan_name}) expires in {days} day(s). Please renew to avoid interruption.',
-     ['{name}', '{plan_name}', '{days}']),
+     'Hi {customer_name}, your internet subscription ({plan_name}) expires in {days} day(s). '
+     'Please renew to avoid interruption.',
+     ['{customer_name}', '{plan_name}', '{days}', '{expiry_date}', '{expiry_time}',
+      '{expiry_display}', '{expiry_full}', '{amount_due}', '{customer_account}']),
 
-    ('pppoe_suspended',          'PPPoE — Service Suspended',
-     'Hi {name}, your internet service has been suspended. Please contact support or make a payment to restore.',
-     ['{name}']),
-
-    ('pppoe_resumed',            'PPPoE — Service Restored',
-     'Great news {name}! Your internet service has been restored. You should be connected now.',
-     ['{name}']),
-
-    ('pppoe_plan_changed',       'PPPoE — Plan Changed',
-     'Hi {name}, your internet plan has been updated from {old_plan} to {new_plan}. Enjoy!',
-     ['{name}', '{old_plan}', '{new_plan}']),
+    # NEW: fires once when subscription actually lapses
+    ('pppoe_expiry_notification', 'PPPoE — Subscription Expired',
+     'Hi {customer_name}, your internet subscription ({plan_name}) has expired. '
+     'Please renew to restore your connection.',
+     ['{customer_name}', '{plan_name}', '{customer_account}', '{amount_due}']),
 ]
 
 

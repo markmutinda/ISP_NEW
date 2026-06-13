@@ -139,6 +139,8 @@ def auto_create_radius_for_service(sender, instance, created, **kwargs):
     
     NOTE: Welcome SMS (pppoe_welcome) is sent from service_views.activate,
     NOT from this signal, to avoid duplicate SMS.
+    
+    NOTE: New subscription SMS has been REMOVED - toggle no longer exists.
     """
     # 🛑 RECURSION GUARD for ServiceConnection as well
     if getattr(instance, '_is_processing_radius', False):
@@ -202,7 +204,7 @@ def auto_create_radius_for_service(sender, instance, created, **kwargs):
                 needs_save = True
                 logger.info(f"Re-enabled RADIUS for customer: {customer.customer_code}")
                 
-                # NOTE: pppoe_resumed SMS is sent from service_views.activate, not here
+                # NOTE: pppoe_resumed SMS has been REMOVED - toggle no longer exists
                 
             elif instance.status in ['SUSPENDED', 'TERMINATED'] and credentials.is_enabled:
                 credentials.is_enabled = False
@@ -210,12 +212,7 @@ def auto_create_radius_for_service(sender, instance, created, **kwargs):
                 needs_save = True
                 logger.info(f"Disabled RADIUS for customer: {customer.customer_code}")
                 
-                # ── SMS: service suspended ──
-                try:
-                    from apps.messaging.services.notification_sender import SMSNotifier
-                    SMSNotifier.pppoe_suspended(customer)
-                except Exception as e:
-                    logger.warning(f"Suspension SMS failed: {e}")
+                # NOTE: pppoe_suspended SMS has been REMOVED - toggle no longer exists
             
             # 🎯 Handle PLAN CHANGE: Update bandwidth profile and expiration
             if instance.plan:
@@ -225,7 +222,7 @@ def auto_create_radius_for_service(sender, instance, created, **kwargs):
                     needs_save = True
                     logger.info(f"Updated bandwidth profile for: {credentials.username}")
                     
-                    # NOTE: pppoe_plan_changed SMS is sent from service_views.activate, not here
+                    # NOTE: pppoe_plan_changed SMS has been REMOVED - toggle no longer exists
             
             # 🎯 Handle ROUTER / IP POOL / ASSIGNED IP update from service creation form
             radius_router_id = getattr(instance, '_radius_router_id', None)
@@ -391,22 +388,11 @@ def auto_create_radius_for_service(sender, instance, created, **kwargs):
                      f"{f', ip_pool={radius_ip_pool}' if radius_ip_pool else ''}"
                      f"{f', assigned_ip={assigned_ip_obj.ip_address if assigned_ip_obj else ''}' if assigned_ip_obj else ''}")
         
-        # ────────────────────────────────────────────────────────────
-        # 🆕 SEND NEW SUBSCRIPTION SMS NOTIFICATION
-        # ────────────────────────────────────────────────────────────
-        # Send SMS notification when a new subscription is created (service is ACTIVE)
-        if instance.status == 'ACTIVE' and instance.plan:
-            try:
-                from apps.messaging.services.notification_sender import SMSNotifier
-                SMSNotifier.pppoe_new_subscription(
-                    customer=customer,
-                    plan_name=instance.plan.name,
-                    amount=float(instance.plan.base_price),
-                    expires_at=create_kwargs.get('expiration_date'),
-                )
-                logger.info(f"New subscription SMS sent to customer {customer.id} for plan {instance.plan.name}")
-            except Exception as e:
-                logger.warning(f"New subscription SMS failed for customer {customer.id}: {e}")
+        # ============================================================
+        # REMOVED: pppoe_new_subscription SMS call (toggle no longer exists)
+        # New subscription SMS has been deprecated. Only the merged
+        # pppoe_payment template should be used for payment confirmations.
+        # ============================================================
         
         # NOTE: Welcome SMS (pppoe_welcome) is sent from service_views.activate,
         # NOT from this signal, to avoid duplicate SMS.
@@ -510,12 +496,7 @@ def sync_customer_status_to_radius(sender, instance, **kwargs):
                 credentials.save()
                 logger.info(f"Disabled RADIUS for {cust_status.lower()} customer: {instance.customer_code}")
                 
-                # ── SMS: service suspended ──
-                try:
-                    from apps.messaging.services.notification_sender import SMSNotifier
-                    SMSNotifier.pppoe_suspended(instance)
-                except Exception as e:
-                    logger.warning(f"Suspension SMS failed: {e}")
+                # NOTE: pppoe_suspended SMS has been REMOVED - toggle no longer exists
                     
         elif cust_status == 'ACTIVE':
             if not credentials.is_enabled:
@@ -524,7 +505,7 @@ def sync_customer_status_to_radius(sender, instance, **kwargs):
                 credentials.save()
                 logger.info(f"Enabled RADIUS for active customer: {instance.customer_code}")
                 
-                # NOTE: pppoe_resumed SMS is sent from service_views.activate, not here
+                # NOTE: pppoe_resumed SMS has been REMOVED - toggle no longer exists
                 
     except Exception as e:
         logger.error(f"Failed to sync customer status to RADIUS: {e}")
@@ -632,12 +613,7 @@ def handle_invoice_status_radius(sender, instance, **kwargs):
                 credentials.save()
                 logger.info(f"Suspended RADIUS for overdue invoice: {instance.id}")
                 
-                # ── SMS: service suspended due to overdue invoice ──
-                try:
-                    from apps.messaging.services.notification_sender import SMSNotifier
-                    SMSNotifier.pppoe_suspended(customer, reason="Invoice overdue")
-                except Exception as e:
-                    logger.warning(f"Overdue suspension SMS failed: {e}")
+                # NOTE: pppoe_suspended SMS has been REMOVED - toggle no longer exists
                 
         elif status == 'PAID':
             pending = customer.invoices.filter(
@@ -650,13 +626,7 @@ def handle_invoice_status_radius(sender, instance, **kwargs):
                 credentials.save()
                 logger.info(f"Restored RADIUS after payment: {instance.id}")
                 
-                # Send resumed SMS - respects the pppoe_service_resumed toggle
-                try:
-                    from apps.messaging.services.notification_sender import SMSNotifier
-                    SMSNotifier.pppoe_resumed(customer)
-                    logger.info(f"Resumed SMS sent to customer {customer.id} after invoice paid")
-                except Exception as e:
-                    logger.warning(f"Resumed SMS after invoice paid failed: {e}")
+                # NOTE: pppoe_resumed SMS has been REMOVED - toggle no longer exists
                 
     except Exception as e:
         logger.error(f"Failed to handle invoice status for RADIUS: {e}")

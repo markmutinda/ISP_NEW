@@ -322,28 +322,23 @@ class SMSNotificationSettings(models.Model):
     # ── PPPOE / STATIC NOTIFICATIONS ─────────────────────────────────────
     pppoe_welcome = models.BooleanField(default=False,
         help_text="Welcome SMS when a new PPPoE/Static customer is activated")
+
+    # MERGED: payment confirmation + renewal confirmation -> one toggle
     pppoe_payment_confirmation = models.BooleanField(default=False,
-        help_text="SMS confirmation after a PPPoE payment is received")
+        help_text="SMS confirmation after a PPPoE payment / renewal is received")
+
     pppoe_expiry_reminder = models.BooleanField(default=False,
         help_text="Remind PPPoE customer before subscription expires")
     
-    # REPLACED: pppoe_expiry_days_before with flexible JSON intervals
     pppoe_expiry_intervals = models.JSONField(
         default=list,
         blank=True,
         help_text='List of {"value": 4, "unit": "days"} objects, e.g. [{"value":4,"unit":"days"},{"value":5,"unit":"hours"}]'
     )
     
-    pppoe_service_suspended = models.BooleanField(default=False,
-        help_text="Notify when PPPoE service is suspended")
-    pppoe_service_resumed = models.BooleanField(default=False,
-        help_text="Notify when PPPoE service is restored")
-    pppoe_plan_changed = models.BooleanField(default=False,
-        help_text="Notify customer when their plan is changed")
-    pppoe_renewal_confirmation = models.BooleanField(default=False,
-        help_text="Confirm successful subscription renewal")
-    pppoe_new_subscription = models.BooleanField(default=False,
-        help_text="SMS when admin creates a new PPPoE subscription for a customer")
+    # NEW: one-time notice when subscription has actually expired
+    pppoe_expiry_notification = models.BooleanField(default=False,
+        help_text="Notify customer once when their subscription has expired")
 
     # ── SYSTEM NOTIFICATIONS ───────────────────────────────────────────────
     system_router_offline = models.BooleanField(

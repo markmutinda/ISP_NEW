@@ -391,49 +391,7 @@ class SMSNotifier:
         return _send_once(f"pppoe_welcome:{customer.id}", phone, msg, ttl=3600,
                           schema_name=schema_name)
 
-    @staticmethod
-    def pppoe_new_subscription(customer, plan_name: str, amount: float,
-                                expires_at=None, schema_name: str = None) -> bool:
-        """Called when admin sets up a new subscription."""
-        s = _get_notif_settings()
-        if s and not s.pppoe_new_subscription:
-            return False
-        phone = _fmt_phone(_customer_phone(customer))
-        if not phone:
-            return False
-
-        ctx = _get_customer_context(customer)
-        ctx.update(_get_expiry_context(expires_at))
-
-        # Plan/amount overrides from caller
-        ctx['plan_name'] = plan_name
-        ctx['plan'] = plan_name
-        amount_fmt = f"{float(amount):,.0f}"
-        ctx['amount'] = amount_fmt
-        ctx['amount_due'] = f"KES {amount_fmt}"
-        ctx['renewal_amount'] = amount_fmt
-
-        # Credentials
-        try:
-            creds = customer.radius_credentials
-            ctx['username'] = creds.username or ''
-            ctx['pppoe_username'] = creds.username or ''
-            ctx['password'] = creds.password or ''
-            ctx['pppoe_password'] = creds.password or ''
-        except Exception:
-            ctx['username'] = ''
-            ctx['pppoe_username'] = ''
-            ctx['password'] = ''
-            ctx['pppoe_password'] = ''
-
-        default_msg = (
-            f"Hi {ctx['name']}, welcome! Plan: {plan_name} | "
-            f"Username: {ctx['username']} | Password: {ctx['password']} | "
-            f"Expires: {ctx['expiry_date']}. KES {amount_fmt} paid."
-        )
-        msg = _get_rendered_message('pppoe_new_subscription', default_msg, **ctx)
-        return _send_once(f"pppoe_new:{customer.id}", phone, msg, ttl=3600,
-                          schema_name=schema_name)
+    # REMOVED: pppoe_new_subscription (no longer used)
 
     @staticmethod
     def pppoe_payment(customer, amount: float, reference: str = "",
@@ -474,9 +432,13 @@ class SMSNotifier:
     @staticmethod
     def pppoe_renewal(customer, plan_name: str, expires_at=None,
                       schema_name: str = None) -> bool:
-        """Called after successful renewal."""
+        """
+        Called after successful renewal - uses the merged payment/renewal toggle.
+        (FIXED: now checks pppoe_payment_confirmation instead of removed pppoe_renewal_confirmation)
+        """
         s = _get_notif_settings()
-        if s and not s.pppoe_renewal_confirmation:
+        # FIX: Use merged payment_confirmation toggle
+        if s and not s.pppoe_payment_confirmation:
             return False
         phone = _fmt_phone(_customer_phone(customer))
         if not phone:
@@ -497,11 +459,13 @@ class SMSNotifier:
         except Exception:
             pass
 
+        ctx.setdefault('reference', '')
+
         default_msg = (
-            f"Hi {ctx['name']}, subscription renewed! Plan: {plan_name} | "
-            f"Expires: {ctx['expiry_display']}. Thank you!"
+            f"Hi {ctx['name']}, payment received for {plan_name}. "
+            f"Your subscription is now valid until {ctx['expiry_full']}. Thank you!"
         )
-        msg = _get_rendered_message('pppoe_renewal', default_msg, **ctx)
+        msg = _get_rendered_message('pppoe_payment', default_msg, **ctx)
         from django.utils import timezone as _tz
         ts = int(_tz.now().timestamp() // 3600)
         return _send_once(f"pppoe_renew:{customer.id}:{ts}", phone, msg, ttl=3600,
@@ -571,32 +535,13 @@ class SMSNotifier:
         return result
 
     @staticmethod
-    def pppoe_suspended(customer, reason: str = "", schema_name: str = None) -> bool:
-        """Called when service is suspended."""
+    def pppoe_expired_notice(customer, plan_name: str = "", schema_name: str = None) -> bool:
+        """
+        Called once when a customer's subscription has actually expired
+        (not a reminder — the period is over).
+        """
         s = _get_notif_settings()
-        if s and not s.pppoe_service_suspended:
-            return False
-        phone = _fmt_phone(_customer_phone(customer))
-        if not phone:
-            return False
-
-        ctx = _get_customer_context(customer)
-        ctx['reason'] = reason or 'subscription expired'
-        ctx['suspension_reason'] = reason or 'subscription expired'
-
-        default_msg = (
-            f"Hi {ctx['name']}, your internet service has been suspended. "
-            f"Reason: {ctx['reason']}. Contact support to restore."
-        )
-        msg = _get_rendered_message('pppoe_suspended', default_msg, **ctx)
-        return _send_once(f"pppoe_suspend:{customer.id}", phone, msg, ttl=3600,
-                          schema_name=schema_name)
-
-    @staticmethod
-    def pppoe_resumed(customer, schema_name: str = None) -> bool:
-        """Called when service is restored."""
-        s = _get_notif_settings()
-        if s and not s.pppoe_service_resumed:
+        if s and not s.pppoe_expiry_notification:
             return False
         phone = _fmt_phone(_customer_phone(customer))
         if not phone:
@@ -604,58 +549,35 @@ class SMSNotifier:
 
         ctx = _get_customer_context(customer)
 
-        service = customer.services.filter(status='ACTIVE').first()
-        plan_name = service.plan.name if (service and service.plan) else ''
+        if not plan_name:
+            try:
+                svc = customer.services.filter(plan__isnull=False).order_by('-updated_at').first()
+                if svc and svc.plan:
+                    plan_name = svc.plan.name or ""
+            except Exception:
+                pass
+
+        try:
+            svc = customer.services.filter(plan__isnull=False).order_by('-updated_at').first()
+            if svc and svc.plan:
+                price = float(svc.plan.base_price or 0)
+                ctx['amount'] = f"{price:,.0f}"
+                ctx['amount_due'] = f"KES {price:,.0f}"
+        except Exception:
+            pass
+
         ctx['plan_name'] = plan_name
         ctx['plan'] = plan_name
 
-        # Expiry after resume
-        try:
-            creds = customer.radius_credentials
-            ctx.update(_get_expiry_context(creds.expiration_date))
-        except Exception:
-            ctx.update(_get_expiry_context(None))
-
         default_msg = (
-            f"Hi {ctx['name']}, your internet service has been restored! "
-            f"Plan: {plan_name}. Welcome back."
+            f"Hi {ctx['name']}, your internet subscription ({plan_name}) has expired. "
+            f"Please renew to restore your connection."
         )
-        msg = _get_rendered_message('pppoe_resumed', default_msg, **ctx)
-        return _send_once(f"pppoe_resume:{customer.id}", phone, msg, ttl=3600,
+        msg = _get_rendered_message('pppoe_expiry_notification', default_msg, **ctx)
+        return _send_once(f"pppoe_expired:{customer.id}", phone, msg, ttl=3600,
                           schema_name=schema_name)
 
-    @staticmethod
-    def pppoe_plan_changed(customer, old_plan: str, new_plan: str,
-                            schema_name: str = None) -> bool:
-        """Called when a plan is changed."""
-        s = _get_notif_settings()
-        if s and not s.pppoe_plan_changed:
-            return False
-        phone = _fmt_phone(_customer_phone(customer))
-        if not phone:
-            return False
-
-        ctx = _get_customer_context(customer)
-        ctx['old_plan'] = old_plan
-        ctx['previous_plan'] = old_plan
-        ctx['new_plan'] = new_plan
-        ctx['plan_name'] = new_plan
-        ctx['plan'] = new_plan
-
-        # Expiry context
-        try:
-            creds = customer.radius_credentials
-            ctx.update(_get_expiry_context(creds.expiration_date))
-        except Exception:
-            ctx.update(_get_expiry_context(None))
-
-        default_msg = (
-            f"Hi {ctx['name']}, your plan has been changed from {old_plan} "
-            f"to {new_plan}. Enjoy!"
-        )
-        msg = _get_rendered_message('pppoe_plan_changed', default_msg, **ctx)
-        return _send_once(f"pppoe_plan:{customer.id}:{new_plan}", phone, msg, ttl=3600,
-                          schema_name=schema_name)
+    # REMOVED: pppoe_suspended, pppoe_resumed, pppoe_plan_changed (no longer used)
 
     @staticmethod
     def pppoe_invoice_issued(customer, invoice, schema_name: str = None) -> bool:
