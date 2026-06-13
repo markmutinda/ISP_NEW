@@ -535,7 +535,7 @@ class HardDeleteTenantView(APIView):
     """
     Synchronous hard-delete escape hatch.
 
-    POST /api/v1/superadmin/tenants/<pk>/hard-delete/
+    DELETE /api/v1/superadmin/tenants/<pk>/hard-delete/
     Body: { "confirmation_name": "<company name or subdomain>" }
 
     Bypasses Celery and calls purge_tenant_completely() directly.
@@ -548,7 +548,7 @@ class HardDeleteTenantView(APIView):
     """
     permission_classes = SUPERADMIN_PERMS
 
-    def post(self, request, pk):
+    def delete(self, request, pk):
         _ensure_public()
         tenant = get_object_or_404(
             Tenant.objects.select_related("company").exclude(schema_name__in=PROTECTED_SCHEMAS),
@@ -630,6 +630,10 @@ class HardDeleteTenantView(APIView):
             },
             status=status.HTTP_200_OK,
         )
+
+    # Backwards-compatible for any older frontend bundle that still posts here.
+    def post(self, request, pk):
+        return self.delete(request, pk)
 
 
 class CompanyUpdateView(APIView):

@@ -265,10 +265,15 @@ def purge_tenant_completely(tenant_pk) -> PurgeResult:
                 )
 
             # 2. Users linked to this company or tenant (public schema)
-            user_qs = User.objects.filter(
-                Q(company=company) | Q(tenant=tenant)
-            ).distinct()
-            result.users_deleted = user_qs.delete()[0]
+            # Django intentionally blocks delete() on distinct() querysets, so
+            # de-duplicate first, then delete through a plain pk__in queryset.
+            user_ids = list(
+                User.objects.filter(Q(company=company) | Q(tenant=tenant))
+                .values_list("pk", flat=True)
+                .distinct()
+            )
+            if user_ids:
+                result.users_deleted = User.objects.filter(pk__in=user_ids).delete()[0]
 
             # 3. Domains (FK → Tenant)
             result.domains_deleted = tenant.domains.all().delete()[0]
