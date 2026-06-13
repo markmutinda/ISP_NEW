@@ -522,6 +522,36 @@ class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
             
             # Add user data to response
             user = self.user
+            tenant_subdomain = getattr(user, "tenant_subdomain", None)
+            company_name = getattr(user, "company_name", None)
+
+            if tenant_subdomain or company_name:
+                from django_tenants.utils import get_public_schema_name, schema_context
+                from apps.core.models import Company, Tenant
+
+                with schema_context(get_public_schema_name()):
+                    tenant_exists = (
+                        Tenant.objects.filter(subdomain=tenant_subdomain).exists()
+                        if tenant_subdomain
+                        else False
+                    )
+                    company_exists = (
+                        Company.objects.filter(name=company_name).exists()
+                        if company_name
+                        else False
+                    )
+
+                if (tenant_subdomain and not tenant_exists) or (company_name and not company_exists):
+                    logger.warning(
+                        "JWT login blocked for deleted tenant account user_id=%s tenant_subdomain=%s company_name=%s",
+                        user.id,
+                        tenant_subdomain,
+                        company_name,
+                    )
+                    raise serializers.ValidationError({
+                        "detail": "This tenant account no longer exists."
+                    })
+
             data['user'] = {
                 'id': user.id,
                 'email': user.email,

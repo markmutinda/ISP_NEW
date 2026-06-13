@@ -456,6 +456,37 @@ class UserViewSet(viewsets.ModelViewSet):
     @action(detail=False, methods=['get'])
     def me(self, request):
         """Get current user profile"""
+        tenant_subdomain = getattr(request.user, "tenant_subdomain", None)
+        company_name = getattr(request.user, "company_name", None)
+
+        if tenant_subdomain or company_name:
+            from django_tenants.utils import get_public_schema_name, schema_context
+            from apps.core.models import Company as PublicCompany, Tenant as PublicTenant
+
+            with schema_context(get_public_schema_name()):
+                tenant_exists = (
+                    PublicTenant.objects.filter(subdomain=tenant_subdomain).exists()
+                    if tenant_subdomain
+                    else False
+                )
+                company_exists = (
+                    PublicCompany.objects.filter(name=company_name).exists()
+                    if company_name
+                    else False
+                )
+
+            if (tenant_subdomain and not tenant_exists) or (company_name and not company_exists):
+                logger.warning(
+                    "Rejected stale session for deleted tenant account user_id=%s tenant_subdomain=%s company_name=%s",
+                    request.user.id,
+                    tenant_subdomain,
+                    company_name,
+                )
+                return Response(
+                    {"detail": "This tenant account no longer exists."},
+                    status=status.HTTP_401_UNAUTHORIZED,
+                )
+
         serializer = ProfileSerializer(request.user)
         return Response(serializer.data)
     

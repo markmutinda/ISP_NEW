@@ -267,8 +267,12 @@ def purge_tenant_completely(tenant_pk) -> PurgeResult:
             # 2. Users linked to this company or tenant (public schema)
             # Django intentionally blocks delete() on distinct() querysets, so
             # de-duplicate first, then delete through a plain pk__in queryset.
+            user_filter = Q(tenant=tenant) | Q(tenant_subdomain=tenant.subdomain)
+            if company:
+                user_filter |= Q(company=company) | Q(company_name=company.name)
+
             user_ids = list(
-                User.objects.filter(Q(company=company) | Q(tenant=tenant))
+                User.objects.filter(user_filter)
                 .values_list("pk", flat=True)
                 .distinct()
             )
