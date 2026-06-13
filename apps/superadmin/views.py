@@ -531,6 +531,107 @@ class TenantDeletionJobDetailView(APIView):
         return Response(_serialize_deletion_job(job))
 
 
+class HardDeleteTenantView(APIView):
+    """
+    Synchronous hard-delete escape hatch.
+
+    POST /api/v1/superadmin/tenants/<pk>/hard-delete/
+    Body: { "confirmation_name": "<company name or subdomain>" }
+
+    Bypasses Celery and calls purge_tenant_completely() directly.
+    Use when the async deletion job failed and left ghost records,
+    or when you need a guaranteed, immediate, zero-ghost-record deletion.
+
+    Deletion order (FK-safe):
+      SubscriptionPayment -> CompanySubscription -> User -> Domain
+      -> Tenant -> Company -> DROP SCHEMA CASCADE (outside transaction)
+    """
+    permission_classes = SUPERADMIN_PERMS
+
+    def post(self, request, pk):
+        _ensure_public()
+        tenant = get_object_or_404(
+            Tenant.objects.select_related("company").exclude(schema_name__in=PROTECTED_SCHEMAS),
+            pk=pk,
+        )
+
+        # Confirmation gate
+        confirmation_name = str(request.data.get("confirmation_name", "")).strip()
+        company_name_val = tenant.company.name if tenant.company else ""
+        expected = {tenant.subdomain.strip().lower(), company_name_val.strip().lower()}
+        if confirmation_name.lower() not in expected:
+            return Response(
+                {
+                    "detail": "Confirmation text does not match the tenant name or subdomain.",
+                    "expected": company_name_val or tenant.subdomain,
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        # Only superusers may hard-delete
+        if not request.user.is_superuser:
+            return Response(
+                {"detail": "Only superusers may perform a hard delete."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        # Snapshot identifiers before the purge removes the rows
+        tenant_id = str(tenant.pk)
+        subdomain = tenant.subdomain
+        schema_name = tenant.schema_name
+
+        logger.warning(
+            "SUPERADMIN %s initiating HARD DELETE -- tenant=%s schema=%s",
+            request.user.email, subdomain, schema_name,
+        )
+
+        # Execute purge
+        try:
+            from apps.core.tenant_purge import purge_tenant_completely
+            result = purge_tenant_completely(pk)
+        except ValueError as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        except Exception as exc:
+            logger.exception("Hard delete failed for tenant %s", subdomain)
+            return Response(
+                {"detail": f"Hard delete failed: {exc}"},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+
+        # Cancel any queued/running deletion jobs for this tenant
+        TenantDeletionJob.objects.filter(
+            schema_name=schema_name,
+            status__in=[TenantDeletionJob.STATUS_QUEUED, TenantDeletionJob.STATUS_RUNNING],
+        ).update(
+            status=TenantDeletionJob.STATUS_COMPLETED,
+            status_message="Superseded by synchronous hard-delete.",
+        )
+
+        # Audit log
+        _log_action(
+            request.user, "delete", "Tenant",
+            object_repr=subdomain,
+            object_id=tenant_id,
+            changes={
+                "method": "hard_delete",
+                "schema_name": schema_name,
+                "company_name": company_name_val,
+                "purge_summary": result.as_dict(),
+            },
+            request=request,
+        )
+
+        return Response(
+            {
+                "detail": (
+                    f"Tenant '{company_name_val}' ({subdomain}) has been permanently deleted."
+                ),
+                "purge_summary": result.as_dict(),
+            },
+            status=status.HTTP_200_OK,
+        )
+
+
 class CompanyUpdateView(APIView):
     """PATCH company details for a tenant."""
     permission_classes = SUPERADMIN_PERMS

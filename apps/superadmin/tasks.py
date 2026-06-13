@@ -277,44 +277,47 @@ def process_tenant_deletion(self, job_id: str) -> dict:
                 extra_summary=integration_summary,
             )
 
-            with transaction.atomic():
-                _drop_tenant_schema(job)
+            _record_job_step(
+                job,
+                TenantDeletionJob.STEP_DROPPING_SCHEMA,
+                "Dropping tenant database schema and purging all public records.",
+            )
+
+            # ── Hard purge: uses purge_tenant_completely which handles
+            #    SubscriptionPayment → CompanySubscription → User → Domain
+            #    → Tenant → Company in the correct FK order, then DROP SCHEMA
+            from apps.core.tenant_purge import purge_tenant_completely
+
+            purge_result = purge_tenant_completely(job.tenant_id)
 
             _record_job_step(
                 job,
                 TenantDeletionJob.STEP_DELETING_RECORDS,
-                "Deleting shared tenant records and audit references.",
+                "Auditing deletion — recording final cleanup summary.",
+                extra_summary=purge_result.as_dict(),
             )
 
-            with transaction.atomic():
-                tenant = Tenant.objects.select_related("company").filter(pk=job.tenant_id).first()
-                company = getattr(tenant, "company", None)
-                if tenant:
-                    tenant.domains.all().delete()
-                    tenant.delete()
-                if company:
-                    company.delete()
+            from apps.core.models import AuditLog
 
-                from apps.core.models import AuditLog
-
-                AuditLog.log_action(
-                    user=job.requested_by,
-                    action="delete",
-                    model_name="Tenant",
-                    object_id=str(job.tenant_id) if job.tenant_id else "",
-                    object_repr=job.subdomain,
-                    changes={
-                        "company_name": job.company_name,
-                        "schema_name": job.schema_name,
-                        "deletion_job_id": str(job.id),
-                        "status": "completed",
-                    },
-                )
+            AuditLog.log_action(
+                user=job.requested_by,
+                action="delete",
+                model_name="Tenant",
+                object_id=str(job.tenant_id) if job.tenant_id else "",
+                object_repr=job.subdomain,
+                changes={
+                    "company_name": job.company_name,
+                    "schema_name": job.schema_name,
+                    "deletion_job_id": str(job.id),
+                    "status": "completed",
+                    "purge_summary": purge_result.as_dict(),
+                },
+            )
 
             _record_job_step(
                 job,
                 TenantDeletionJob.STEP_COMPLETED,
-                f"{job.company_name} was deleted successfully.",
+                f"{job.company_name} was permanently deleted.",
                 status_value=TenantDeletionJob.STATUS_COMPLETED,
             )
             return {"status": job.status, "job_id": str(job.id)}
