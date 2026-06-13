@@ -255,7 +255,8 @@ class CaptivePortalView(APIView):
                         'support_phone': '',
                         'announcement_text': '',
                         'gateway_ip': '',
-                        'router_logo_url': None,  # ← NEW
+                        'router_logo_url': None,
+                        'hide_plan_speed': False,  # ← ADDED
                     }
                     branding_data = None
                 else:
@@ -273,7 +274,8 @@ class CaptivePortalView(APIView):
                         'support_phone': router.support_phone or '',
                         'announcement_text': router.announcement_text or '',
                         'gateway_ip': router.gateway_ip,
-                        'router_logo_url': router_logo_url,  # ← NEW
+                        'router_logo_url': router_logo_url,
+                        'hide_plan_speed': getattr(router, 'hide_plan_speed', False),  # ← ADDED
                     }
 
                     branding_data = None
@@ -389,7 +391,7 @@ class HotspotPlansView(APIView):
 
         router_qs = Router.objects.filter(is_active=True).only(
             'id', 'name', 'location', 'template_id', 'hotspot_name',
-            'support_phone', 'announcement_text'
+            'support_phone', 'announcement_text', 'hide_plan_speed'  # ← ADDED hide_plan_speed
         )
 
         try:
@@ -470,7 +472,8 @@ class HotspotPlansView(APIView):
             'hotspot_name': router.hotspot_name or router.name,
             'support_phone': router.support_phone or (branding.support_phone if branding else ''),
             'announcement_text': router.announcement_text or '',
-            'router_logo_url': router_logo_url,  # ← NEW
+            'router_logo_url': router_logo_url,
+            'hide_plan_speed': getattr(router, 'hide_plan_speed', False),  # ← ADDED
         }
 
         payload = {
@@ -486,6 +489,9 @@ class HotspotPlansView(APIView):
 
         cache.set(cache_key, payload, timeout=30)
         return Response(payload)
+
+
+# ... (rest of the file remains the same - HotspotPurchaseView, HotspotPurchaseStatusView, HotspotVoucherRedeemView, HotspotPhoneReconnectView)
 
 
 class HotspotPurchaseView(APIView):

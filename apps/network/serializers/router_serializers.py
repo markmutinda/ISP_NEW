@@ -58,6 +58,7 @@ class RouterSerializer(serializers.ModelSerializer):
             'config_type',
             # Captive Portal Customisation
             'template_id', 'hotspot_name', 'support_phone', 'announcement_text', 'logo',
+            'hide_plan_speed',
             # Remote access ports (HAProxy managed)
             'winbox_remote_port', 'api_remote_port', 'remote_access_url',
             'created_at', 'updated_at',
@@ -104,6 +105,7 @@ class RouterSerializer(serializers.ModelSerializer):
             'hotspot_name': {'required': False, 'allow_blank': True},
             'support_phone': {'required': False, 'allow_blank': True},
             'announcement_text': {'required': False, 'allow_blank': True},
+            'hide_plan_speed': {'required': False},
             'logo': {'required': False, 'allow_null': True},
         }
 
