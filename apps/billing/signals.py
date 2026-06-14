@@ -97,21 +97,27 @@ def handle_payment_completion(sender, instance, created, **kwargs):
             except Exception as e:
                 logger.warning(f"Resume SMS after invoice paid failed: {e}")
 
+    # ============================================================
+    # REMOVED: Duplicate payment confirmation SMS
+    # The webhook (C2B) already calls pppoe_renewal which sends the
+    # payment confirmation. This signal call was causing double SMS.
+    # Keeping the email notification below as it's separate.
+    # ============================================================
     # Send payment confirmation SMS with proper schema context
-    if customer:
-        try:
-            from apps.messaging.services.notification_sender import SMSNotifier
-            from django.db import connection as _conn
-            SMSNotifier.pppoe_payment(
-                customer=customer,
-                amount=float(instance.amount),
-                reference=instance.payment_reference or instance.mpesa_receipt or '',
-                schema_name=_conn.schema_name,
-            )
-        except Exception as e:
-            logger.warning(f"Payment confirmation SMS failed: {e}")
+    # if customer:
+    #     try:
+    #         from apps.messaging.services.notification_sender import SMSNotifier
+    #         from django.db import connection as _conn
+    #         SMSNotifier.pppoe_payment(
+    #             customer=customer,
+    #             amount=float(instance.amount),
+    #             reference=instance.payment_reference or instance.mpesa_receipt or '',
+    #             schema_name=_conn.schema_name,
+    #         )
+    #     except Exception as e:
+    #         logger.warning(f"Payment confirmation SMS failed: {e}")
 
-    # Send payment confirmation email
+    # Send payment confirmation email (kept - separate channel)
     if customer:
         try:
             from django.db import connection
