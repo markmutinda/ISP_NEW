@@ -74,17 +74,30 @@ def _render(template: str, **ctx) -> str:
 def _get_rendered_message(event_type: str, default_msg: str, **context) -> str:
     """
     Fetch the active custom template for event_type from the DB.
-    Substitute all {variable} placeholders with context values.
+    Prefers tenant-customised rows (is_system=False) over system defaults.
+    Substitutes all {variable} placeholders with context values.
     Falls back to default_msg if no template found or template is blank.
     """
     from apps.messaging.models import SMSTemplate
 
-    template = SMSTemplate.objects.filter(event_type=event_type, is_active=True).first()
+    # Prefer tenant-customised template, fall back to system default
+    template = (
+        SMSTemplate.objects
+        .filter(event_type=event_type, is_active=True)
+        .order_by('is_system')  # False (0) before True (1) — tenant custom first
+        .first()
+    )
 
     if not template or not template.content.strip():
-        return _render(default_msg, **context)
+        rendered = default_msg
+    else:
+        rendered = template.content
 
-    return _render(template.content, **context)
+    # Substitute all {key} placeholders
+    for key, value in context.items():
+        rendered = rendered.replace('{' + key + '}', str(value) if value is not None else '')
+
+    return rendered
 
 
 def _get_settings():
@@ -119,16 +132,38 @@ def _dispatch(phone: str, message: str, schema_name: str = None) -> bool:
 
 def _send_once(dedup_key: str, phone: str, message: str, ttl: int = 600,
                schema_name: str = None) -> bool:
-    """Send SMS exactly once within the TTL window for the given dedup_key."""
+    """
+    Send SMS exactly once within the TTL window for the given dedup_key.
+    Uses DB dedup (INSERT ... ON CONFLICT) as primary guard,
+    cache as secondary fast-path.
+    """
+    from django.db import IntegrityError, transaction as _tx
+    from apps.messaging.models import SMSDeduplicationLog
+
     full_key = f"sms_once:{dedup_key}"
+
+    # Fast path: cache check
     if _cache.get(full_key):
-        logger.debug(f"SMS deduped (key={full_key})")
+        logger.debug(f"SMS deduped via cache (key={full_key})")
         return False
+
+    # DB-level dedup: atomic insert — if row exists, skip
+    try:
+        with _tx.atomic():
+            SMSDeduplicationLog.objects.create(dedup_key=full_key)
+    except IntegrityError:
+        logger.info(f"SMS deduped via DB (key={full_key})")
+        return False
+    except Exception as e:
+        # If dedup model doesn't exist yet (pre-migration), fall through
+        logger.warning(f"SMS dedup DB check failed (non-fatal): {e}")
+
+    # Set cache so subsequent calls in same process skip DB hit
+    _cache.set(full_key, 1, ttl)
 
     result = _dispatch(phone, message, schema_name=schema_name)
 
     if result:
-        _cache.set(full_key, 1, ttl)
         _log_sms(phone, message, status='sent', msg_type='automated')
     else:
         _log_sms(phone, message, status='failed', msg_type='automated')
@@ -574,8 +609,22 @@ class SMSNotifier:
             f"Please renew to restore your connection."
         )
         msg = _get_rendered_message('pppoe_expiry_notification', default_msg, **ctx)
-        return _send_once(f"pppoe_expired:{customer.id}", phone, msg, ttl=3600,
-                          schema_name=schema_name)
+
+        # Build a dedup key that includes the expiry date to allow a new notice after renewal
+        expiry_timestamp = None
+        try:
+            creds = customer.radius_credentials
+            if creds and creds.expiration_date:
+                expiry_timestamp = int(creds.expiration_date.timestamp())
+        except Exception:
+            pass
+
+        if expiry_timestamp:
+            dedup_key = f"pppoe_expired:{customer.id}:{expiry_timestamp}"
+        else:
+            dedup_key = f"pppoe_expired:{customer.id}"
+
+        return _send_once(dedup_key, phone, msg, ttl=3600, schema_name=schema_name)
 
     # REMOVED: pppoe_suspended, pppoe_resumed, pppoe_plan_changed (no longer used)
 

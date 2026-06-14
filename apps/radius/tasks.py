@@ -667,15 +667,22 @@ def process_expired_subscriptions():
                     
                     # ============================================================
                     # ONE-TIME "subscription expired" SMS
-                    # Fires exactly once per expiry cycle because the credential
-                    # is disabled after this and won't be processed again until
-                    # the next renewal moves expiration_date forward.
+                    # Use human-readable plan name from the active service, not bandwidth_profile
                     # ============================================================
                     try:
-                        plan_name = (
-                            credentials.bandwidth_profile.name
-                            if credentials.bandwidth_profile else ""
-                        )
+                        plan_name = ""
+                        # Try to get the real plan name from the customer's active service
+                        svc = credentials.customer.services.filter(
+                            status='ACTIVE', plan__isnull=False
+                        ).first()
+                        if svc and svc.plan:
+                            plan_name = svc.plan.name or ""
+                        if not plan_name and credentials.bandwidth_profile:
+                            # Fallback to bandwidth_profile but strip internal prefix if needed
+                            bp_name = credentials.bandwidth_profile.name or ""
+                            if not bp_name.startswith('plan_'):
+                                plan_name = bp_name
+                        
                         SMSNotifier.pppoe_expired_notice(
                             customer=credentials.customer,
                             plan_name=plan_name,
@@ -907,10 +914,18 @@ def send_pppoe_expiry_reminders():
                             continue
 
                         # Send SMS
-                        plan_name = (
-                            cred.bandwidth_profile.name
-                            if cred.bandwidth_profile else ""
-                        )
+                        # Get human-readable plan name from the service, not bandwidth profile
+                        plan_name = ""
+                        svc = customer.services.filter(
+                            status='ACTIVE', plan__isnull=False
+                        ).first()
+                        if svc and svc.plan:
+                            plan_name = svc.plan.name or ""
+                        if not plan_name and cred.bandwidth_profile:
+                            bp_name = cred.bandwidth_profile.name or ""
+                            if not bp_name.startswith('plan_'):
+                                plan_name = bp_name
+                        
                         days_left = due['value'] if due['unit'] in ('day', 'days') else 0
 
                         sent = SMSNotifier.pppoe_expiry_reminder(

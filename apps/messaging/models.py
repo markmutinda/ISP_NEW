@@ -416,3 +416,21 @@ class SMSUnitTopup(models.Model):
 
     def __str__(self):
         return f"{self.units_purchased} units — {self.status}"
+
+
+# ============================================================
+# DEDUPLICATION LOG MODEL (for preventing duplicate SMS)
+# ============================================================
+
+class SMSDeduplicationLog(models.Model):
+    """Prevents duplicate automated SMS within a time window."""
+    dedup_key = models.CharField(max_length=255, unique=True, db_index=True)
+    sent_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        app_label = 'messaging'
+        verbose_name = "SMS Deduplication Log"
+        verbose_name_plural = "SMS Deduplication Logs"
+
+    def __str__(self):
+        return self.dedup_key

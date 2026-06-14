@@ -152,7 +152,7 @@ app.conf.beat_schedule = {
 
     # ════════════════════════════════════════════════════════════════
     # PPPOE INVOICE GENERATION — Auto-renewal invoices 5 days before expiry
-    # Runs daily at 7 AM to generate invoices for customers expiring in 5 days
+    # Runs daily at 7 AM for customers expiring in 5 days
     # ════════════════════════════════════════════════════════════════
     'generate-pppoe-expiry-invoices-daily': {
         'task': 'apps.radius.tasks.generate_pppoe_expiry_invoices',
@@ -268,6 +268,16 @@ app.conf.beat_schedule = {
     'cleanup-old-sms-history-daily': {
         'task': 'apps.messaging.tasks.cleanup_old_sms_history',
         'schedule': crontab(hour=3, minute=0),  # Daily at 3 AM
+        'options': {'queue': 'default'}
+    },
+
+    # ════════════════════════════════════════════════════════════════
+    # SMS DEDUPLICATION LOG CLEANUP — Weekly on Monday at 2 AM
+    # Removes old entries from SMSDeduplicationLog table
+    # ════════════════════════════════════════════════════════════════
+    'cleanup-sms-dedup-log-weekly': {
+        'task': 'apps.messaging.tasks.cleanup_sms_dedup_log',
+        'schedule': crontab(day_of_week='monday', hour=2, minute=0),
         'options': {'queue': 'default'}
     },
 }

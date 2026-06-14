@@ -806,3 +806,35 @@ def cleanup_old_sms_history():
             logger.error(f"[SMS CLEANUP] Error in {tenant.schema_name}: {e}")
 
     return {'deleted': total_deleted}
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# SMS DEDUPLICATION LOG CLEANUP (TENANT‑AWARE)
+# ════════════════════════════════════════════════════════════════════════════
+
+@shared_task(name='apps.messaging.tasks.cleanup_sms_dedup_log')
+def cleanup_sms_dedup_log():
+    """
+    Delete SMS dedup log entries older than 7 days for all tenant schemas.
+    """
+    from django.utils import timezone
+    import datetime
+    from django_tenants.utils import schema_context, get_tenant_model
+    from apps.messaging.models import SMSDeduplicationLog
+
+    TenantModel = get_tenant_model()
+    cutoff = timezone.now() - datetime.timedelta(days=7)
+    total_deleted = 0
+
+    for tenant in TenantModel.objects.exclude(schema_name='public'):
+        try:
+            with schema_context(tenant.schema_name):
+                deleted, _ = SMSDeduplicationLog.objects.filter(sent_at__lt=cutoff).delete()
+                if deleted:
+                    logger.info(f"[SMS DEDUP CLEANUP] Deleted {deleted} entries from {tenant.schema_name}")
+                total_deleted += deleted
+        except Exception as e:
+            logger.error(f"[SMS DEDUP CLEANUP] Error in {tenant.schema_name}: {e}")
+
+    logger.info(f"Cleaned up {total_deleted} old SMS dedup log entries across all tenants")
+    return {'deleted': total_deleted}
