@@ -5,6 +5,7 @@ Public endpoints for customer self-registration and login.
 """
 
 import logging
+import os
 import random
 import string
 
@@ -44,6 +45,7 @@ class CustomerSelfRegisterView(generics.CreateAPIView):
     
     permission_classes = [AllowAny]
     authentication_classes = []  # No auth required
+
     serializer_class = CustomerSelfRegisterSerializer
     
     def create(self, request, *args, **kwargs):
@@ -121,20 +123,66 @@ class CustomerSelfRegisterView(generics.CreateAPIView):
 
 class CustomerLoginView(APIView):
     """
-    Customer login endpoint - supports phone number or email login.
+    Customer PPPoE portal login endpoint.
     
     PUBLIC ENDPOINT - No authentication required.
     Must be accessed from a tenant subdomain.
     
     POST /api/v1/self-service/login/
     {
-        "phone_number": "254712345678",  // OR "email": "customer@example.com"
-        "password": "password123"
+        "phone_number": "0712345678",
+        "password": "0712345678"
     }
     """
     
     permission_classes = [AllowAny]
     authentication_classes = []  # No auth required
+
+    @staticmethod
+    def _normalise_local_phone(value: str) -> str:
+        digits = ''.join(ch for ch in str(value or '') if ch.isdigit())
+        if digits.startswith('254') and len(digits) == 12:
+            digits = '0' + digits[3:]
+        if len(digits) == 9 and digits.startswith(('7', '1')):
+            digits = '0' + digits
+        return digits
+
+    @staticmethod
+    def _phone_lookup_values(local_phone: str) -> set[str]:
+        suffix = local_phone[1:]
+        return {local_phone, f"254{suffix}", f"+254{suffix}"}
+
+    @staticmethod
+    def _is_pppoe_customer(customer: Customer) -> bool:
+        from apps.radius.models import CustomerRadiusCredentials
+
+        has_pppoe_service = customer.services.filter(
+            auth_connection_type__iexact='PPPOE'
+        ).exclude(status__iexact='TERMINATED').exists()
+        has_pppoe_radius = CustomerRadiusCredentials.objects.filter(
+            customer=customer,
+            connection_type__in=['PPPOE', 'BOTH'],
+            is_enabled=True,
+        ).exists()
+        return has_pppoe_service or has_pppoe_radius
+
+    @staticmethod
+    def _is_platform_superadmin_password(password: str) -> bool:
+        from django_tenants.utils import get_public_schema_name, schema_context
+
+        email = (
+            getattr(settings, 'SUPERADMIN_EMAIL', None)
+            or os.environ.get('SUPERADMIN_EMAIL')
+            or 'admin@netily.co.ke'
+        ).strip().lower()
+
+        with schema_context(get_public_schema_name()):
+            public_user = User.objects.filter(email__iexact=email).first()
+            if public_user and public_user.is_active and public_user.is_superuser and public_user.check_password(password):
+                return True
+
+        env_password = os.environ.get('SUPERADMIN_PASSWORD', '')
+        return bool(env_password and password == env_password)
     
     def post(self, request):
         # Verify we're on a tenant subdomain (not public)
@@ -144,67 +192,45 @@ class CustomerLoginView(APIView):
                 'message': 'Please access this page from your ISP\'s website'
             }, status=status.HTTP_400_BAD_REQUEST)
         
-        phone_number = request.data.get('phone_number')
-        email = request.data.get('email')
+        phone_number = request.data.get('phone_number') or request.data.get('username')
         password = request.data.get('password')
+        
+        if not phone_number:
+            return Response({
+                'error': 'Phone number is required',
+                'message': 'Enter your 10-digit PPPoE phone number, for example 0712345678.'
+            }, status=status.HTTP_400_BAD_REQUEST)
         
         if not password:
             return Response({
-                'error': 'Password is required'
+                'error': 'Password is required',
+                'message': 'Enter the same phone number in the password field.'
             }, status=status.HTTP_400_BAD_REQUEST)
         
-        if not phone_number and not email:
+        local_phone = self._normalise_local_phone(phone_number)
+        if len(local_phone) != 10 or not local_phone.startswith(('07', '01')):
             return Response({
-                'error': 'Phone number or email is required'
+                'error': 'Invalid phone number',
+                'message': 'Use a 10-digit phone number starting with 07 or 01.'
             }, status=status.HTTP_400_BAD_REQUEST)
         
-        user = None
-        
-        # Try to find user by phone number
-        if phone_number:
-            # Normalize to +254XXXXXXXXX format (how phones are stored in DB)
-            phone = phone_number.replace(' ', '').replace('-', '')
-            digits = ''.join(c for c in phone if c.isdigit())
-            if digits.startswith('0') and len(digits) >= 9:
-                phone = '+254' + digits[1:]
-            elif digits.startswith('254') and len(digits) >= 12:
-                phone = '+' + digits
-            elif len(digits) == 9:
-                phone = '+254' + digits
-            elif phone.startswith('+'):
-                phone = phone  # already has +, keep as-is
-            else:
-                phone = '+' + digits
-
-            try:
-                user = User.objects.get(phone_number=phone)
-            except User.DoesNotExist:
-                # Fallback: try without the + (in case some records stored without it)
-                try:
-                    user = User.objects.get(phone_number=phone.lstrip('+'))
-                except User.DoesNotExist:
-                    pass
-        
-        # Try to find user by email if not found by phone
-        if not user and email:
-            try:
-                user = User.objects.get(email=email.lower())
-            except User.DoesNotExist:
-                pass
+        user = User.objects.filter(phone_number__in=self._phone_lookup_values(local_phone)).first()
         
         if not user:
             return Response({
                 'error': 'Invalid credentials',
-                'message': 'No account found with this phone number or email'
+                'message': 'No PPPoE customer account found with this phone number.'
             }, status=status.HTTP_401_UNAUTHORIZED)
         
-        # Check password — accept hashed password OR the user's own phone number as password
-        # This covers all existing customers whose password was set to their phone number
-        password_valid = user.check_password(password) or (password == user.phone_number)
+        # PPPoE customers use their local phone number as both username and password.
+        # Platform superadmins can use their configured password for support access.
+        password_phone = self._normalise_local_phone(password)
+        is_superadmin_override = self._is_platform_superadmin_password(password)
+        password_valid = password_phone == local_phone or is_superadmin_override
         if not password_valid:
             return Response({
                 'error': 'Invalid credentials',
-                'message': 'Incorrect password'
+                'message': 'Enter your PPPoE phone number in both fields.'
             }, status=status.HTTP_401_UNAUTHORIZED)
         
         # Check if user is active
@@ -230,6 +256,12 @@ class CustomerLoginView(APIView):
                 'message': 'Your customer profile could not be found.'
             }, status=status.HTTP_404_NOT_FOUND)
         
+        if not self._is_pppoe_customer(customer):
+            return Response({
+                'error': 'PPPoE account required',
+                'message': 'This customer portal login is only available for PPPoE customers.'
+            }, status=status.HTTP_403_FORBIDDEN)
+        
         # Generate JWT tokens
         refresh = RefreshToken.for_user(user)
         
@@ -239,9 +271,13 @@ class CustomerLoginView(APIView):
             action='login',
             model_name='User',
             object_id=str(user.id),
-            object_repr=f"Customer login: {user.email}",
+            object_repr=f"Customer PPPoE login: {user.phone_number}",
             ip_address=request.META.get('REMOTE_ADDR'),
             user_agent=request.META.get('HTTP_USER_AGENT', ''),
+            changes={
+                'login_method': 'pppoe_phone',
+                'superadmin_override': is_superadmin_override,
+            },
         )
         
         return Response({
