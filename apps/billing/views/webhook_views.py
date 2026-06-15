@@ -523,13 +523,15 @@ class MpesaC2BWebhookView(APIView):
                         try:
                             from apps.messaging.services.notification_sender import SMSNotifier
                             # The pppoe_renewal method now checks pppoe_payment_confirmation toggle
+                            # Pass the M-Pesa transaction ID as reference so it appears in the SMS
                             SMSNotifier.pppoe_renewal(
                                 customer=customer,
                                 plan_name=matched_plan.name if matched_plan else '',
                                 expires_at=new_expiry,
+                                reference=trans_id,  # <-- ADDED: Pass M-Pesa transaction ID as reference
                                 schema_name=target_tenant_schema
                             )
-                            logger.info(f"PPPoE renewal SMS sent to customer {customer.id}")
+                            logger.info(f"PPPoE renewal SMS sent to customer {customer.id} with reference {trans_id}")
                         except Exception as e:
                             logger.warning(f"PPPoE renewal SMS failed for customer {customer.id}: {e}")
                     else:

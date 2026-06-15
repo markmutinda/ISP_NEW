@@ -465,7 +465,7 @@ class SMSNotifier:
                           schema_name=schema_name)
 
     @staticmethod
-    def pppoe_renewal(customer, plan_name: str, expires_at=None,
+    def pppoe_renewal(customer, plan_name: str, expires_at=None, reference: str = "",
                       schema_name: str = None) -> bool:
         """
         Called after successful renewal - uses the merged payment/renewal toggle.
@@ -483,6 +483,9 @@ class SMSNotifier:
         ctx.update(_get_expiry_context(expires_at))
         ctx['plan_name'] = plan_name
         ctx['plan'] = plan_name
+        ctx['reference'] = reference or ''
+        ctx['receipt'] = reference or ''
+        ctx['mpesa_receipt'] = reference or ''
 
         # Amount from plan
         try:
@@ -494,10 +497,8 @@ class SMSNotifier:
         except Exception:
             pass
 
-        ctx.setdefault('reference', '')
-
         default_msg = (
-            f"Hi {ctx['name']}, payment received for {plan_name}. "
+            f"Hi {ctx['name']}, payment of KES {ctx.get('amount','')} received for {plan_name}. "
             f"Your subscription is now valid until {ctx['expiry_full']}. Thank you!"
         )
         msg = _get_rendered_message('pppoe_payment', default_msg, **ctx)
