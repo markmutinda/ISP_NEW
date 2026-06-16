@@ -8,7 +8,7 @@ logger = logging.getLogger(__name__)
 
 from rest_framework.views import APIView
 from django_tenants.utils import schema_context, get_public_schema_name
-from apps.core.models import Tenant, TumaCallbackMap  # ADDED: TumaCallbackMap for O(1) lookup
+from apps.core.models import Tenant, TumaCallbackMap
 
 from apps.billing.models.payment_models import Payment, StkCancellationTracker
 
@@ -18,10 +18,10 @@ class TumaWebhookView(APIView):
     Webhook endpoint for Tuma payment gateway callbacks.
     This endpoint is PUBLIC (no authentication) because Tuma's servers call it.
     
-    NOTE: This webhook ONLY updates payment status. It does NOT activate
-    hotspot sessions or create RADIUS credentials. That responsibility
-    belongs to the polling endpoint (HotspotPurchaseStatusView) to ensure
-    idempotency and proper error handling.
+    This webhook now handles both payment status updates AND server-side
+    activation of hotspot sessions. This decouples activation from the
+    client's browser, ensuring sessions activate even if the user's
+    phone locks, loses WiFi, or closes the tab mid-payment.
     """
     authentication_classes = []
     permission_classes = []
@@ -114,9 +114,9 @@ class TumaWebhookView(APIView):
             "failure_reason": "string"  # on failure
         }
         
-        NOTE: @transaction.atomic is NOT applied at the method level.
-        We use a narrower transaction scope only for the final update
-        to avoid long-running transactions and deadlocks.
+        This webhook now performs server-side activation for hotspot sessions
+        immediately upon successful payment confirmation. This eliminates the
+        dependency on the client's browser polling to complete activation.
         """
         data = request.data
         merchant_id = data.get("merchant_request_id")
@@ -146,7 +146,7 @@ class TumaWebhookView(APIView):
         # ============================================================
         with schema_context(payment_schema):
             with transaction.atomic():
-                # Re-fetch the payment within the transaction to ensure we have the latest
+                # Re-fetch the payment within the transaction with row lock
                 payment = Payment.objects.select_for_update().get(pk=payment.pk)
 
                 # ====================== UPDATE STK CANCELLATION TRACKER ======================
@@ -185,27 +185,59 @@ class TumaWebhookView(APIView):
                     
                     logger.info(f"Payment {payment.payment_number} marked as COMPLETED")
                     
-                    # ═══════════════════════════════════════════════════════════════════
-                    # WEBHOOK ONLY MARKS PAYMENT AS COMPLETED
-                    # Activation is handled by HotspotPurchaseStatusView polling
-                    # ═══════════════════════════════════════════════════════════════════
-                    # If linked hotspot session exists, just mark it as paid (not active)
-                    # The polling endpoint will handle activation and RADIUS creation
+                    # ============================================================
+                    # HOTSPOT SESSION ACTIVATION - SERVER-SIDE
+                    # ============================================================
+                    # The webhook now takes ownership of activation. This decouples
+                    # the activation process from the client's browser, ensuring
+                    # sessions activate even if the user's phone locks, loses WiFi,
+                    # or closes the tab mid-payment.
                     hotspot_session = getattr(payment, 'hotspot_session', None)
                     if hotspot_session:
-                        # Only mark as paid if not already paid or active
+                        # Sync payment receipt first
                         if hotspot_session.status not in ['paid', 'active']:
                             logger.info(
-                                f"Webhook: Marking hotspot session {hotspot_session.session_id} "
-                                f"as paid for payment {payment.payment_number} (activation deferred to polling)"
+                                f"Webhook: Syncing payment parameters for hotspot session {hotspot_session.session_id} "
+                                f"linked to payment {payment.payment_number}"
                             )
-                            # Just mark as paid - don't activate yet
+                            # 1. Sync the receipt parameters first
                             hotspot_session.mark_paid(payment.mpesa_receipt or payment.transaction_id or "")
+                        
+                        # 2. Immediately trigger server-side activation and RADIUS credential synchronization
+                        # This uses select_for_update() internally to prevent race conditions
+                        if hotspot_session.status in ['paid', 'pending']:
+                            try:
+                                # Trigger timelines, expirations, and metered metrics row updates
+                                hotspot_session.activate(hotspot_session.access_code)
+                                
+                                # Sync directly into FreeRADIUS table matrices
+                                from apps.billing.services.hotspot_radius_service import HotspotRadiusService
+                                HotspotRadiusService().create_hotspot_credentials(
+                                    username=hotspot_session.access_code,
+                                    password=hotspot_session.access_code,
+                                    router=hotspot_session.router,
+                                    plan=hotspot_session.plan,
+                                    expires_at=hotspot_session.expires_at,
+                                    mac_address=hotspot_session.mac_address or '',
+                                )
+                                logger.info(
+                                    f"🚀 Webhook Core: Successfully auto-activated session {hotspot_session.session_id} "
+                                    f"and provisioned RADIUS profiles directly to disk."
+                                )
+                            except Exception as radius_err:
+                                logger.error(
+                                    f"❌ Webhook Core: RADIUS profile synchronization failed for session "
+                                    f"{hotspot_session.session_id}: {radius_err}"
+                                )
+                                # Don't re-raise - we want to keep the payment as completed
+                                # even if RADIUS sync fails. The polling endpoint can retry.
                         else:
                             logger.debug(
-                                f"Webhook: Hotspot session {hotspot_session.session_id} already "
-                                f"in status {hotspot_session.status}, skipping mark_paid"
+                                f"Webhook: Hotspot session {hotspot_session.session_id} is already "
+                                f"at status '{hotspot_session.status}'. Direct server activation skipped."
                             )
+                    else:
+                        logger.debug(f"No hotspot session linked to payment {payment.payment_number}")
                     
                     # ================================================================
                     # PPPoE / STANDARD PLAN ACTIVATION LOGIC
