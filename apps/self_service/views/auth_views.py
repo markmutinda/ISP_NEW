@@ -50,10 +50,11 @@ class CustomerSelfRegisterView(generics.CreateAPIView):
     
     def create(self, request, *args, **kwargs):
         # Verify we're on a tenant subdomain (not public)
-        if not hasattr(request, 'tenant') or request.tenant.schema_name == 'public':
+        tenant = getattr(request, 'tenant', None)
+        if not tenant or tenant.schema_name == 'public':
             return Response({
-                'error': 'Registration must be done on an ISP subdomain',
-                'message': 'Please access this page from your ISP\'s website'
+                'error': 'Tenant not found',
+                'message': 'Registration must be done on an ISP subdomain or custom domain'
             }, status=status.HTTP_400_BAD_REQUEST)
         
         serializer = self.get_serializer(data=request.data)
@@ -186,10 +187,11 @@ class CustomerLoginView(APIView):
     
     def post(self, request):
         # Verify we're on a tenant subdomain (not public)
-        if not hasattr(request, 'tenant') or request.tenant.schema_name == 'public':
+        tenant = getattr(request, 'tenant', None)
+        if not tenant or tenant.schema_name == 'public':
             return Response({
-                'error': 'Login must be done on an ISP subdomain',
-                'message': 'Please access this page from your ISP\'s website'
+                'error': 'Tenant not found',
+                'message': 'Login must be done on an ISP subdomain or custom domain'
             }, status=status.HTTP_400_BAD_REQUEST)
         
         phone_number = request.data.get('phone_number') or request.data.get('username')
@@ -405,11 +407,13 @@ class AvailablePlansView(APIView):
     def get(self, request):
         from apps.billing.models import Plan
         
-        # Verify we're on a tenant subdomain
-        if not hasattr(request, 'tenant') or request.tenant.schema_name == 'public':
+        # Verify we're on a tenant subdomain (not public)
+        tenant = getattr(request, 'tenant', None)
+        if not tenant or tenant.schema_name == 'public':
             return Response({
-                'error': 'Must access from ISP subdomain'
-            }, status=status.HTTP_400_BAD_REQUEST)
+                'error': 'Tenant not found',
+                'message': 'Must access from ISP subdomain or custom domain'
+            }, status=status.HTTP_404_NOT_FOUND)
         
         # Get active, public plans
         plans = Plan.objects.filter(is_active=True, is_public=True).order_by('base_price')
@@ -438,8 +442,8 @@ class AvailablePlansView(APIView):
         # Get ISP branding info
         branding = None
         try:
-            if hasattr(request, 'tenant') and hasattr(request.tenant, 'company') and request.tenant.company:
-                company = request.tenant.company
+            if tenant and hasattr(tenant, 'company') and tenant.company:
+                company = tenant.company
                 logo_url = None
                 if company.logo:
                     logo_url = request.build_absolute_uri(company.logo.url)
