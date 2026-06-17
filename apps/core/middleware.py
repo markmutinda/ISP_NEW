@@ -66,6 +66,7 @@ class TenantMainMiddleware(MiddlewareMixin):
     - Local:      bluenet.localhost:8000
     - Production: bluenet.netily.co.ke
     - API host:   api.netily.co.ke  → public schema
+    - Custom domains: bentrextechnologies.com → tenant lookup via Domain model
     This replaces django_tenants.middleware.main.TenantMainMiddleware
     """
 
@@ -116,19 +117,40 @@ class TenantMainMiddleware(MiddlewareMixin):
             request.company = None
             return None
 
-        host = request.get_host().split(':')[0]  # Remove port
+        host = request.get_host().split(':')[0].lower()  # Force lowercase for absolute matching matchers
         subdomain, _ = self._extract_subdomain(host)
 
+        # 1. First, attempt standard platform subdomain matching pipelines
         if subdomain:
             tenant, company = self._resolve_tenant(subdomain, host)
-            if tenant:
-                connection.set_tenant(tenant)
-                request.tenant = tenant
-                request.company = company
-                return None
-            # Unknown subdomain → fall through to public
+        else:
+            # 2. 🚀 FIX: If no platform subdomain is found, look up the domain record index directly
+            connection.set_schema_to_public()
+            try:
+                domain = Domain.objects.select_related('tenant').get(domain=host)
+                tenant = domain.tenant
+                
+                # Check active lifecycle states
+                if tenant and not tenant.is_active:
+                    tenant = None
+                    
+                company = None
+                if tenant:
+                    try:
+                        company = tenant.company
+                    except Exception:
+                        pass
+            except Domain.DoesNotExist:
+                tenant, company = None, None
 
-        # Main domain / API domain / unknown → public schema
+        # 3. If a valid custom domain or subdomain tenant matches, switch context schemas
+        if tenant:
+            connection.set_tenant(tenant)
+            request.tenant = tenant
+            request.company = company
+            return None
+
+        # Main domain / API domain / unknown → fallback safely to public schema container
         connection.set_schema_to_public()
         request.tenant = None
         request.company = None
