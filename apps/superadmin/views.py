@@ -682,13 +682,12 @@ class TenantSuspendView(APIView):
             changes={"action": "suspend", "reason": reason},
             request=request,
         )
-        return Response({
-            "detail": (
-                f"Tenant {tenant.subdomain} suspended. "
-                "Tenant admins will now see a contact-support message until the account is reactivated."
-            ),
-            "status": "suspended",
-        })
+        data = TenantListSerializer(tenant).data
+        data["detail"] = (
+            f"Tenant {tenant.subdomain} suspended. "
+            "Tenant admins will now see a contact-support message until the account is reactivated."
+        )
+        return Response(data)
 
 
 class TenantActivateView(APIView):
