@@ -682,7 +682,13 @@ class TenantSuspendView(APIView):
             changes={"action": "suspend", "reason": reason},
             request=request,
         )
-        return Response({"detail": f"Tenant {tenant.subdomain} suspended.", "status": "suspended"})
+        return Response({
+            "detail": (
+                f"Tenant {tenant.subdomain} suspended. "
+                "Tenant admins will now see a contact-support message until the account is reactivated."
+            ),
+            "status": "suspended",
+        })
 
 
 class TenantActivateView(APIView):
@@ -2526,6 +2532,400 @@ class TenantUserLedgerListView(APIView):
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 #  TUMA SUBSCRIPTION PAYMENTS (ISPs paying Netily)
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+
+def _decimal_money(value):
+    return Decimal(str(value or "0")).quantize(Decimal("0.01"))
+
+
+def _subscription_invoice_admins(tenant):
+    with schema_context(tenant.schema_name):
+        admin_roles = ["admin", "super_admin", "superadmin", "accountant", "support"]
+        admins = User.objects.filter(
+            is_active=True,
+            role__in=admin_roles,
+        ).values("id", "email", "phone_number", "first_name", "last_name")
+        return list(admins)
+
+
+def _get_or_create_subscription_invoice(cycle, *, create=False):
+    invoice_id = cycle.invoice_reference
+    invoice = None
+
+    actual_hotspot_revenue = _decimal_money(cycle.refresh_actual_hotspot_revenue())
+    pppoe_count = cycle.calculate_total_pppoe()
+    pppoe_charge = _decimal_money(cycle.calculate_pppoe_charge())
+    hotspot_share = _decimal_money(cycle.calculate_hotspot_revenue_share(actual_hotspot_revenue))
+    minimum_adjustment = _decimal_money(cycle.calculate_minimum_adjustment(actual_hotspot_revenue))
+    total_due = _decimal_money(cycle.calculate_billable_usage_charge(actual_hotspot_revenue))
+
+    with schema_context(cycle.tenant.schema_name):
+        from apps.billing.models import Invoice, InvoiceItem
+        from apps.customers.models import Customer
+
+        if invoice_id:
+            try:
+                invoice = Invoice.objects.filter(pk=invoice_id).first()
+            except (TypeError, ValueError):
+                invoice = None
+        if invoice or not create:
+            return invoice
+
+        billing_user, _ = User.objects.get_or_create(
+            email="billing@netily.io",
+            defaults={
+                "first_name": "Netily",
+                "last_name": "Platform",
+                "role": "admin",
+                "is_staff": True,
+                "is_active": True,
+            },
+        )
+        sys_customer, _ = Customer.objects.get_or_create(
+            customer_code="NET-001",
+            defaults={"user": billing_user, "status": "active"},
+        )
+
+        now_ts = timezone.now()
+        due_date = cycle.grace_ends_at.date() if cycle.grace_ends_at else (now_ts + timedelta(days=5)).date()
+
+        invoice = Invoice.objects.create(
+            invoice_number=f'NET-BILL-{now_ts.strftime("%y%m%d%H%M%S")}',
+            customer=sys_customer,
+            subtotal=total_due,
+            total_amount=total_due,
+            status="ISSUED",
+            service_period_start=cycle.start_date.date(),
+            service_period_end=cycle.end_date.date(),
+            due_date=due_date,
+            billing_date=now_ts.date(),
+            notes="Netily platform subscription invoice.",
+        )
+        if pppoe_charge:
+            InvoiceItem.objects.create(
+                invoice=invoice,
+                description=f"PPPoE Client Footprint ({pppoe_count} users @ KES {cycle.snapshot_pppoe_price} each)",
+                quantity=pppoe_count,
+                unit_price=cycle.snapshot_pppoe_price,
+                tax_rate=0,
+                tax_amount=0,
+                total=pppoe_charge,
+            )
+        if hotspot_share:
+            InvoiceItem.objects.create(
+                invoice=invoice,
+                description=f"Hotspot Revenue Share ({cycle.snapshot_hotspot_share_pct}% of KES {actual_hotspot_revenue:,.2f})",
+                quantity=1,
+                unit_price=hotspot_share,
+                tax_rate=0,
+                tax_amount=0,
+                total=hotspot_share,
+            )
+        if minimum_adjustment:
+            InvoiceItem.objects.create(
+                invoice=invoice,
+                description=f"Monthly Minimum Charge Adjustment (minimum KES {cycle.snapshot_base_fee or Decimal('500.00'):,.2f})",
+                quantity=1,
+                unit_price=minimum_adjustment,
+                tax_rate=0,
+                tax_amount=0,
+                total=minimum_adjustment,
+            )
+
+    update_fields = {"invoice_reference": str(invoice.id)}
+    if cycle.status == "active":
+        update_fields["status"] = "invoiced"
+    if not cycle.grace_ends_at:
+        update_fields["grace_ends_at"] = timezone.now() + timedelta(days=5)
+    cycle.__class__.objects.filter(pk=cycle.pk).update(**update_fields)
+    for field, value in update_fields.items():
+        setattr(cycle, field, value)
+    return invoice
+
+
+def _subscription_invoice_payload(cycle, *, include_recipients=False):
+    tenant = cycle.tenant
+    company = getattr(tenant, "company", None)
+    invoice_snapshot = None
+
+    try:
+        actual_hotspot_revenue = _decimal_money(cycle.refresh_actual_hotspot_revenue())
+    except Exception as exc:
+        logger.warning("Failed to refresh hotspot revenue for cycle %s: %s", cycle.id, exc)
+        actual_hotspot_revenue = _decimal_money(cycle.hotspot_revenue_accumulated)
+
+    pppoe_count = cycle.calculate_total_pppoe()
+    pppoe_charge = _decimal_money(cycle.calculate_pppoe_charge())
+    hotspot_share = _decimal_money(cycle.calculate_hotspot_revenue_share(actual_hotspot_revenue))
+    usage_subtotal = _decimal_money(cycle.calculate_usage_subtotal(actual_hotspot_revenue))
+    minimum_adjustment = _decimal_money(cycle.calculate_minimum_adjustment(actual_hotspot_revenue))
+    calculated_total = _decimal_money(cycle.calculate_billable_usage_charge(actual_hotspot_revenue))
+
+    try:
+        invoice = _get_or_create_subscription_invoice(cycle, create=False)
+    except Exception as exc:
+        logger.warning("Failed to load linked tenant invoice for cycle %s: %s", cycle.id, exc)
+        invoice = None
+    if invoice:
+        invoice_snapshot = {
+            "id": invoice.id,
+            "invoice_number": invoice.invoice_number,
+            "status": invoice.status,
+            "subtotal": str(_decimal_money(invoice.subtotal or calculated_total)),
+            "discount_amount": str(_decimal_money(invoice.discount_amount)),
+            "total_amount": str(_decimal_money(invoice.total_amount)),
+            "balance": str(_decimal_money(invoice.balance)),
+            "due_date": invoice.due_date.isoformat() if invoice.due_date else None,
+            "notes": invoice.notes or "",
+            "internal_notes": invoice.internal_notes or "",
+        }
+
+    recipients = _subscription_invoice_admins(tenant) if include_recipients else []
+
+    return {
+        "id": str(cycle.id),
+        "tenant_id": str(tenant.id),
+        "tenant_name": getattr(company, "name", tenant.subdomain),
+        "tenant_subdomain": tenant.subdomain,
+        "tenant_schema": tenant.schema_name,
+        "company_email": getattr(company, "email", ""),
+        "company_phone": getattr(company, "phone_number", ""),
+        "status": cycle.status,
+        "start_date": cycle.start_date.isoformat() if cycle.start_date else None,
+        "end_date": cycle.end_date.isoformat() if cycle.end_date else None,
+        "grace_ends_at": cycle.grace_ends_at.isoformat() if cycle.grace_ends_at else None,
+        "invoice_reference": cycle.invoice_reference,
+        "pppoe_count": pppoe_count,
+        "pppoe_unit_price": str(_decimal_money(cycle.snapshot_pppoe_price)),
+        "pppoe_charge": str(pppoe_charge),
+        "hotspot_revenue": str(actual_hotspot_revenue),
+        "hotspot_share_pct": str(_decimal_money(cycle.snapshot_hotspot_share_pct)),
+        "hotspot_share": str(hotspot_share),
+        "usage_subtotal": str(usage_subtotal),
+        "monthly_minimum": str(_decimal_money(cycle.snapshot_base_fee or Decimal("500.00"))),
+        "minimum_adjustment": str(minimum_adjustment),
+        "calculated_total": str(calculated_total),
+        "invoice": invoice_snapshot,
+        "recipients": recipients,
+    }
+
+
+class SubscriptionInvoiceListView(APIView):
+    permission_classes = SUPERADMIN_PERMS
+
+    def get(self, request):
+        _ensure_public()
+        from apps.subscriptions.models import BillingCycle
+
+        page = int(request.query_params.get("page", 1))
+        page_size = int(request.query_params.get("page_size", PAGE_SIZE))
+        status_filter = request.query_params.get("status")
+        tenant_id = request.query_params.get("tenant_id")
+        search = request.query_params.get("search", "").strip()
+
+        qs = BillingCycle.objects.select_related(
+            "tenant",
+            "tenant__company",
+            "subscription",
+            "subscription__plan",
+        ).order_by("-start_date")
+
+        if status_filter and status_filter != "all":
+            qs = qs.filter(status=status_filter)
+        if tenant_id:
+            qs = qs.filter(tenant_id=tenant_id)
+        if search:
+            qs = qs.filter(
+                Q(tenant__subdomain__icontains=search)
+                | Q(tenant__schema_name__icontains=search)
+                | Q(tenant__company__name__icontains=search)
+                | Q(tenant__company__email__icontains=search)
+                | Q(invoice_reference__icontains=search)
+            )
+
+        total = qs.count()
+        start = (page - 1) * page_size
+        cycles = list(qs[start:start + page_size])
+        results = [_subscription_invoice_payload(cycle) for cycle in cycles]
+
+        return Response({
+            "count": total,
+            "page": page,
+            "page_size": page_size,
+            "summary": {
+                "count": total,
+                "active": qs.filter(status="active").count(),
+                "invoiced": qs.filter(status="invoiced").count(),
+                "paid": qs.filter(status="paid").count(),
+                "calculated_total": str(_decimal_money(sum(Decimal(row["calculated_total"]) for row in results))),
+                "hotspot_revenue": str(_decimal_money(sum(Decimal(row["hotspot_revenue"]) for row in results))),
+            },
+            "results": results,
+        })
+
+
+class SubscriptionInvoiceDetailView(APIView):
+    permission_classes = SUPERADMIN_PERMS
+
+    def get_cycle(self, pk):
+        _ensure_public()
+        from apps.subscriptions.models import BillingCycle
+        return get_object_or_404(
+            BillingCycle.objects.select_related("tenant", "tenant__company", "subscription", "subscription__plan"),
+            pk=pk,
+        )
+
+    def get(self, request, pk):
+        cycle = self.get_cycle(pk)
+        return Response(_subscription_invoice_payload(cycle, include_recipients=True))
+
+    def patch(self, request, pk):
+        cycle = self.get_cycle(pk)
+        discount_amount = _decimal_money(request.data.get("discount_amount", "0"))
+        discount_reason = (request.data.get("discount_reason") or "").strip()
+        if discount_amount < 0:
+            return Response({"detail": "discount_amount cannot be negative."}, status=status.HTTP_400_BAD_REQUEST)
+
+        invoice = _get_or_create_subscription_invoice(cycle, create=True)
+        with schema_context(cycle.tenant.schema_name):
+            from apps.billing.models import Invoice
+            invoice = Invoice.objects.get(pk=invoice.pk)
+            subtotal = _decimal_money(invoice.subtotal or invoice.total_amount)
+            if discount_amount > subtotal:
+                return Response({"detail": "discount_amount cannot exceed invoice subtotal."}, status=status.HTTP_400_BAD_REQUEST)
+            invoice.discount_amount = discount_amount
+            invoice.total_amount = max(subtotal - discount_amount, Decimal("0.00"))
+            note = f"Manual discount applied by superadmin: KES {discount_amount}"
+            if discount_reason:
+                note = f"{note} - {discount_reason}"
+            invoice.internal_notes = f"{invoice.internal_notes or ''}\n{note}".strip()
+            invoice.save()
+
+        _log_action(
+            request.user,
+            "update",
+            "SubscriptionInvoice",
+            object_repr=f"{cycle.tenant.subdomain} invoice discount",
+            object_id=cycle.id,
+            changes={"discount_amount": str(discount_amount), "discount_reason": discount_reason},
+            request=request,
+        )
+        cycle.refresh_from_db()
+        return Response(_subscription_invoice_payload(cycle, include_recipients=True))
+
+
+class SubscriptionInvoiceSendView(APIView):
+    permission_classes = SUPERADMIN_PERMS
+
+    def post(self, request, pk):
+        _ensure_public()
+        from apps.subscriptions.models import BillingCycle
+        from apps.core.email_delivery import send_transactional_email
+
+        cycle = get_object_or_404(
+            BillingCycle.objects.select_related("tenant", "tenant__company", "subscription", "subscription__plan"),
+            pk=pk,
+        )
+        invoice = _get_or_create_subscription_invoice(cycle, create=True)
+        channel = (request.data.get("channel") or "email").lower()
+        if channel not in {"email", "sms", "in_app", "all"}:
+            return Response({"detail": "channel must be email, sms, in_app or all."}, status=status.HTTP_400_BAD_REQUEST)
+
+        payload = _subscription_invoice_payload(cycle, include_recipients=True)
+        subject = f"Netily invoice for {payload['tenant_name']} - KES {payload['invoice']['total_amount']}"
+        message = (
+            "Your Netily subscription invoice is ready.\n\n"
+            f"Invoice: {payload['invoice']['invoice_number']}\n"
+            f"Amount due: KES {payload['invoice']['total_amount']}\n"
+            f"Period: {cycle.start_date.date()} to {cycle.end_date.date()}\n"
+            f"Due date: {payload['invoice']['due_date'] or 'Pending'}\n\n"
+            "Please open your Netily admin billing page to review and settle it."
+        )
+        recipients = payload["recipients"]
+        email_count = 0
+        notification_count = 0
+        sms_count = 0
+
+        with schema_context(cycle.tenant.schema_name):
+            from apps.notifications.models import Notification
+            from apps.notifications.services.notification_manager import NotificationManager
+
+            notification_manager = NotificationManager()
+
+            for recipient in recipients:
+                email = recipient.get("email")
+                phone = recipient.get("phone_number")
+                user_id = recipient.get("id")
+
+                if channel in {"email", "all"} and email:
+                    result = send_transactional_email(
+                        subject=subject,
+                        recipient=email,
+                        plain_message=message,
+                        html_message=message.replace("\n", "<br>"),
+                    )
+                    if result.get("sent"):
+                        email_count += 1
+
+                if channel in {"in_app", "all"}:
+                    notification = Notification.objects.create(
+                        user_id=user_id,
+                        notification_type="in_app",
+                        subject=subject,
+                        message=message,
+                        priority=4,
+                        metadata={
+                            "source": "superadmin_subscription_invoice",
+                            "billing_cycle_id": str(cycle.id),
+                            "invoice_id": invoice.id,
+                        },
+                    )
+                    notification_manager.send_notification(notification)
+                    notification_count += 1
+
+                if channel in {"sms", "all"} and phone:
+                    notification = Notification.objects.create(
+                        user_id=user_id,
+                        notification_type="sms",
+                        subject=subject,
+                        message=(
+                            f"Netily invoice {payload['invoice']['invoice_number']}: "
+                            f"KES {payload['invoice']['total_amount']} due {payload['invoice']['due_date'] or 'soon'}. "
+                            "Open admin billing to pay."
+                        ),
+                        recipient_phone=phone,
+                        priority=4,
+                        metadata={
+                            "source": "superadmin_subscription_invoice",
+                            "billing_cycle_id": str(cycle.id),
+                            "invoice_id": invoice.id,
+                        },
+                    )
+                    notification_manager.send_notification(notification)
+                    sms_count += 1
+
+            if invoice.status in {"DRAFT", "ISSUED"}:
+                invoice.status = "SENT"
+                invoice.save(update_fields=["status", "updated_at"])
+
+        _log_action(
+            request.user,
+            "update",
+            "SubscriptionInvoice",
+            object_repr=f"Sent invoice {payload['invoice']['invoice_number']} to {cycle.tenant.subdomain}",
+            object_id=cycle.id,
+            changes={"channel": channel, "email_count": email_count, "notification_count": notification_count, "sms_count": sms_count},
+            request=request,
+        )
+
+        return Response({
+            "detail": "Invoice send action completed.",
+            "channel": channel,
+            "email_count": email_count,
+            "notification_count": notification_count,
+            "sms_count": sms_count,
+            "invoice": _subscription_invoice_payload(cycle, include_recipients=True),
+        })
 
 
 class SubscriptionStkPushView(APIView):

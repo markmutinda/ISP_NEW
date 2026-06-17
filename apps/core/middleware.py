@@ -299,8 +299,19 @@ class SubscriptionEnforcementMiddleware(MiddlewareMixin):
         if hasattr(request, 'user') and hasattr(request.user, 'is_superuser') and request.user.is_superuser:
             return None
 
-        # 5. Check subscription state
+        # 5. Hard block manually suspended tenants for all non-payment API work.
         tenant = getattr(request, 'tenant', None)
+        if tenant and getattr(tenant, 'status', None) == 'suspended':
+            company_name = getattr(getattr(request, 'company', None), 'name', None) or getattr(tenant, 'subdomain', 'tenant')
+            logger.warning("Blocked suspended tenant API request for %s: %s", company_name, request.path)
+            return JsonResponse({
+                'error': 'tenant_suspended',
+                'message': 'This ISP workspace is currently suspended. Please contact Netily Support to restore access.',
+                'code': 'TENANT_SUSPENDED',
+                'status': 'suspended',
+            }, status=403)
+
+        # 6. Check subscription state
         
         # Only enforce if we have a tenant and company
         if tenant and hasattr(request, 'company') and request.company:

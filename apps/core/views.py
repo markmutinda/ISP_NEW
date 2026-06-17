@@ -200,6 +200,23 @@ class CustomTokenObtainPairView(TokenObtainPairView):
             return Response({"detail": "Invalid email or password."}, status=status.HTTP_401_UNAUTHORIZED)
         if not user.is_active:
             return Response({"detail": "Account is disabled."}, status=status.HTTP_403_FORBIDDEN)
+        tenant = getattr(request, "tenant", None)
+        if (
+            tenant
+            and getattr(tenant, "schema_name", None) != "public"
+            and getattr(tenant, "status", None) == "suspended"
+            and not getattr(user, "is_superuser", False)
+        ):
+            return Response(
+                {
+                    "detail": (
+                        "This ISP workspace is currently suspended. "
+                        "Please contact Netily Support to restore access."
+                    ),
+                    "code": "TENANT_SUSPENDED",
+                },
+                status=status.HTTP_403_FORBIDDEN,
+            )
         if OTPService.is_otp_exempt_user(user):
             requires_otp = False
         else:
@@ -486,6 +503,24 @@ class UserViewSet(viewsets.ModelViewSet):
                     {"detail": "This tenant account no longer exists."},
                     status=status.HTTP_401_UNAUTHORIZED,
                 )
+
+            if tenant_subdomain:
+                with schema_context(get_public_schema_name()):
+                    suspended = PublicTenant.objects.filter(
+                        subdomain=tenant_subdomain,
+                        status="suspended",
+                    ).exists()
+                if suspended and not getattr(request.user, "is_superuser", False):
+                    return Response(
+                        {
+                            "detail": (
+                                "This ISP workspace is currently suspended. "
+                                "Please contact Netily Support to restore access."
+                            ),
+                            "code": "TENANT_SUSPENDED",
+                        },
+                        status=status.HTTP_403_FORBIDDEN,
+                    )
 
         serializer = ProfileSerializer(request.user)
         return Response(serializer.data)
