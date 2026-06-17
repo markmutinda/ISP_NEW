@@ -121,6 +121,21 @@ CSRF_TRUSTED_ORIGINS = [
     'https://*.netily.co.ke',
     'https://api.netily.co.ke',
 ]
+
+# ─── DYNAMIC CSRF TRUSTED ORIGINS FROM ENV ─────────────────────
+# This automatically adds any custom domains from your .env file
+# to the CSRF safelist, supporting custom tenant domains like
+# bentrextechnologies.com, www.bentrextechnologies.com, etc.
+_extra_csrf_origins = os.environ.get('CSRF_TRUSTED_ORIGINS_EXTRA', '')
+if _extra_csrf_origins:
+    for origin in _extra_csrf_origins.split(','):
+        origin_str = origin.strip()
+        if origin_str:
+            if not origin_str.startswith('http'):
+                CSRF_TRUSTED_ORIGINS.append(f'https://{origin_str}')
+            else:
+                CSRF_TRUSTED_ORIGINS.append(origin_str)
+
 # Add the DO domain if set
 _domain = os.environ.get('DOMAIN', '')
 if _domain:
