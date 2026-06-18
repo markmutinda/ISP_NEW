@@ -2910,29 +2910,34 @@ def _subscription_invoice_payload(cycle, *, include_recipients=False):
         invoice = None
     effective_total = calculated_total
     if invoice:
-        manual_adjustment = invoice.items.filter(service_type="netily_manual_adjustment").aggregate(
-            total=Sum("total")
-        )["total"] or Decimal("0.00")
-        manual_adjustment_item = (
-            invoice.items.filter(service_type="netily_manual_adjustment")
-            .order_by("-id")
-            .first()
-        )
-        invoice_snapshot = {
-            "id": invoice.id,
-            "invoice_number": invoice.invoice_number,
-            "status": invoice.status,
-            "subtotal": str(_decimal_money(invoice.subtotal or calculated_total)),
-            "discount_amount": str(_decimal_money(invoice.discount_amount)),
-            "manual_adjustment_amount": str(_decimal_money(manual_adjustment)),
-            "manual_adjustment_description": manual_adjustment_item.description if manual_adjustment_item else "",
-            "total_amount": str(_decimal_money(invoice.total_amount)),
-            "balance": str(_decimal_money(invoice.balance)),
-            "due_date": invoice.due_date.isoformat() if invoice.due_date else None,
-            "notes": invoice.notes or "",
-            "internal_notes": invoice.internal_notes or "",
-        }
-        effective_total = _decimal_money(invoice.total_amount)
+        with schema_context(tenant.schema_name):
+            from apps.billing.models import Invoice
+
+            tenant_invoice = Invoice.objects.filter(pk=invoice.pk).first()
+            if tenant_invoice:
+                manual_adjustment = tenant_invoice.items.filter(service_type="netily_manual_adjustment").aggregate(
+                    total=Sum("total")
+                )["total"] or Decimal("0.00")
+                manual_adjustment_item = (
+                    tenant_invoice.items.filter(service_type="netily_manual_adjustment")
+                    .order_by("-id")
+                    .first()
+                )
+                invoice_snapshot = {
+                    "id": tenant_invoice.id,
+                    "invoice_number": tenant_invoice.invoice_number,
+                    "status": tenant_invoice.status,
+                    "subtotal": str(_decimal_money(tenant_invoice.subtotal or calculated_total)),
+                    "discount_amount": str(_decimal_money(tenant_invoice.discount_amount)),
+                    "manual_adjustment_amount": str(_decimal_money(manual_adjustment)),
+                    "manual_adjustment_description": manual_adjustment_item.description if manual_adjustment_item else "",
+                    "total_amount": str(_decimal_money(tenant_invoice.total_amount)),
+                    "balance": str(_decimal_money(tenant_invoice.balance)),
+                    "due_date": tenant_invoice.due_date.isoformat() if tenant_invoice.due_date else None,
+                    "notes": tenant_invoice.notes or "",
+                    "internal_notes": tenant_invoice.internal_notes or "",
+                }
+                effective_total = _decimal_money(tenant_invoice.total_amount)
 
     recipients = _subscription_invoice_admins(tenant) if include_recipients else []
 
