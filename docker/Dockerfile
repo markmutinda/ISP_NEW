@@ -7,14 +7,25 @@ FROM python:3.12-slim
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
 
-# System dependencies (Added docker.io and docker-compose)
-RUN apt-get update && apt-get install -y \
+# ── System dependencies ───────────────────────────────────────────────────────
+# NOTE: We install 'docker-cli' (the client binary only, ~7 MB) rather than
+# 'docker.io' (the full daemon, which pulls gcc/systemd/containerd adding
+# ~930 MB and breaking incremental BuildKit layer caching on every build).
+#
+# The Django app only needs the docker *client* to run:
+#   docker exec netily_radius ...   (RADIUS reload)
+#   docker restart netily_radius    (signal from network signals.py)
+#   docker exec netily_haproxy ...  (HAProxy reload)
+#
+# WireGuard manager talks to the Docker socket directly (no CLI needed).
+# The docker-compose CLI is not called from within the container.
+# ─────────────────────────────────────────────────────────────────────────────
+RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     libpq-dev \
     netcat-openbsd \
     iproute2 \
-    docker.io \
-    docker-compose \
+    docker-cli \
     && rm -rf /var/lib/apt/lists/*
 
 # Working directory

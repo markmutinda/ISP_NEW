@@ -1,4 +1,4 @@
-﻿name: Deploy Backend to DigitalOcean VPS
+name: Deploy Backend to DigitalOcean VPS
 
 on:
   push:
@@ -24,7 +24,7 @@ jobs:
           host: ${{ secrets.VPS_HOST }}
           username: ${{ secrets.VPS_USERNAME }}
           key: ${{ secrets.VPS_SSH_KEY }}
-          command_timeout: 12m
+          command_timeout: 14m
           script: |
             echo "==> Pulling latest backend code..."
             cd ~/netily_cloud
@@ -35,6 +35,13 @@ jobs:
             git clean -fd apps/*/migrations 2>/dev/null || true
             find apps -type d -name __pycache__ -prune -exec rm -rf {} + 2>/dev/null || true
             find apps -type f \( -name '*.pyc' -o -name '*.pyo' \) -delete 2>/dev/null || true
+
+            echo "==> Pre-build disk & image inventory..."
+            df -h / | tail -2
+            docker images --format "table {{.Repository}}\t{{.Tag}}\t{{.Size}}" 2>/dev/null | head -20 || true
+
+            echo "==> Freeing dangling images before build..."
+            docker image prune -f || true
 
             echo "==> Rebuilding ONLY backend application services..."
             cd docker
