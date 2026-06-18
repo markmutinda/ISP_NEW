@@ -110,11 +110,6 @@ class TenantMainMiddleware(MiddlewareMixin):
         return tenant, company
 
     def process_request(self, request):
-        # DEBUG: Print the incoming host to see what Django is receiving
-        host = request.get_host().split(':')[0].lower()
-        print(f"DEBUG_NETILY: Request received from host: {host}")
-        print(f"DEBUG_NETILY: Request path: {request.path}")
-        
         # Skip public machine-to-server endpoints
         if any(request.path.startswith(p) for p in PUBLIC_ROUTER_PATHS):
             connection.set_schema_to_public()
@@ -122,56 +117,40 @@ class TenantMainMiddleware(MiddlewareMixin):
             request.company = None
             return None
 
+        host = request.get_host().split(':')[0].lower()  # Force lowercase for absolute matching matchers
         subdomain, _ = self._extract_subdomain(host)
-        print(f"DEBUG_NETILY: Extracted subdomain: {subdomain}")
 
         # 1. First, attempt standard platform subdomain matching pipelines
         if subdomain:
-            print(f"DEBUG_NETILY: Attempting subdomain lookup for: {subdomain}")
             tenant, company = self._resolve_tenant(subdomain, host)
-            if tenant:
-                print(f"DEBUG_NETILY: Found tenant via subdomain: {tenant.subdomain}")
-            else:
-                print(f"DEBUG_NETILY: No tenant found for subdomain: {subdomain}")
         else:
             # 2. 🚀 FIX: If no platform subdomain is found, look up the domain record index directly
-            print(f"DEBUG_NETILY: No subdomain found, attempting direct domain lookup for: {host}")
             connection.set_schema_to_public()
             try:
                 domain = Domain.objects.select_related('tenant').get(domain=host)
                 tenant = domain.tenant
-                print(f"DEBUG_NETILY: Found domain {host} mapped to tenant: {tenant.subdomain} (ID: {tenant.id})")
                 
                 # Check active lifecycle states
                 if tenant and not tenant.is_active:
-                    print(f"DEBUG_NETILY: Tenant {tenant.subdomain} is inactive!")
                     tenant = None
                     
                 company = None
                 if tenant:
                     try:
                         company = tenant.company
-                        print(f"DEBUG_NETILY: Company found: {company.name if company else 'None'}")
-                    except Exception as e:
-                        print(f"DEBUG_NETILY: Error getting company: {e}")
+                    except Exception:
                         pass
             except Domain.DoesNotExist:
-                print(f"DEBUG_NETILY: Domain {host} not found in Domain table!")
-                tenant, company = None, None
-            except Exception as e:
-                print(f"DEBUG_NETILY: Unexpected error in domain lookup: {e}")
                 tenant, company = None, None
 
         # 3. If a valid custom domain or subdomain tenant matches, switch context schemas
         if tenant:
-            print(f"DEBUG_NETILY: Setting tenant to: {tenant.subdomain}")
             connection.set_tenant(tenant)
             request.tenant = tenant
             request.company = company
             return None
 
         # Main domain / API domain / unknown → fallback safely to public schema container
-        print(f"DEBUG_NETILY: No tenant found, falling back to public schema")
         connection.set_schema_to_public()
         request.tenant = None
         request.company = None
