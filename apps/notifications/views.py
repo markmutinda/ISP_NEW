@@ -8,6 +8,7 @@ from django.utils import timezone
 from django.db.models import Q, Count, F
 from datetime import timedelta
 import logging
+from django.db import connection  # ADD THIS IMPORT
 
 from .models import (
     NotificationTemplate, 
@@ -125,6 +126,26 @@ class NotificationViewSet(viewsets.ModelViewSet):
         return [permission() for permission in permission_classes]
     
     def get_queryset(self):
+        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        # DIAGNOSTIC LOGGING - Trace tenant/schema issues
+        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        try:
+            with connection.cursor() as cursor:
+                cursor.execute("SHOW search_path;")
+                search_path = cursor.fetchone()[0]
+                cursor.execute("SELECT current_schema();")
+                current_schema = cursor.fetchone()[0]
+
+            logger.warning(
+                "[NotificationViewSet.get_queryset] host=%s connection_schema=%s current_schema=%s search_path=%s",
+                self.request.get_host(),
+                getattr(connection, "schema_name", None),
+                current_schema,
+                search_path
+            )
+        except Exception as e:
+            logger.error(f"[NotificationViewSet.get_queryset] Error getting schema info: {e}")
+        
         user = self.request.user
         
         if user.is_superuser or user.is_staff:
