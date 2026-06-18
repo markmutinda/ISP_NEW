@@ -1264,6 +1264,16 @@ class CampaignSendToGroupView(APIView):
         from apps.messaging.services.notification_sender import (
             _send_once, _render, _log_sms, _fmt_phone
         )
+        from django.db import connection as _conn
+        
+        # Get the current schema to pass explicitly
+        _current_schema = _conn.schema_name
+
+        if not _current_schema or _current_schema == 'public':
+            return Response(
+                {'error': 'Cannot send campaign from public schema.'},
+                status=400
+            )
 
         sent = 0
         failed = 0
@@ -1282,7 +1292,8 @@ class CampaignSendToGroupView(APIView):
                 # dedup collisions with other automated messages
                 _send_once(
                     f"campaign:{campaign.id if campaign else 'x'}:{phone}",
-                    phone, personalised, ttl=3600
+                    phone, personalised, ttl=3600,
+                    schema_name=_current_schema  # ← FIX: Pass schema explicitly
                 )
                 _log_sms(phone, personalised, status='sent',
                           msg_type='campaign', recipient_name=name,

@@ -433,34 +433,37 @@ class GatewayDispatcher:
         - On provider failure for inbuilt: refunds the deducted credits
         """
         from django_tenants.utils import schema_context
+        from rest_framework.exceptions import ValidationError
         phone = _fmt_phone(to)
 
         # ─── CREDIT DEDUCTION (only for inbuilt system) ───
         if self.use_inbuilt:
-            from apps.messaging.models import TenantSMSWallet
             from apps.messaging.services.credit_billing_service import CreditBillingService
             from django.db import transaction as _tx
 
             # CRITICAL: query wallet in the correct tenant schema
             with schema_context(self._schema):
-                # Check if enough credits exist
-                wallet = TenantSMSWallet.objects.filter(is_active=True).first()
-                required = CreditBillingService.sms_units_for_message(message)
-                
-                if not wallet or wallet.sms_units < required:
-                    return {
-                        'success': False,
-                        'error': 'Insufficient SMS credits. Please top up your wallet.',
-                        'status': 'failed',
-                    }
-
-                # DEDUCT HERE — single source of truth
                 try:
                     with _tx.atomic():
-                        CreditBillingService.debit_for_sms(
+                        debited = CreditBillingService.debit_for_sms(
                             message_text=message,
                             schema_name=self._schema  # pass schema explicitly
                         )
+                        # debit_for_sms raises ValidationError if insufficient
+                        # but also returns 0 if use_inbuilt is False on the config
+                        # We must block if 0 units debited on inbuilt mode
+                        if debited <= 0:
+                            return {
+                                'success': False,
+                                'error': 'Insufficient SMS credits. Please top up your wallet.',
+                                'status': 'failed',
+                            }
+                except ValidationError as e:
+                    return {
+                        'success': False,
+                        'error': str(e.detail) if hasattr(e, 'detail') else str(e),
+                        'status': 'failed',
+                    }
                 except Exception as e:
                     return {
                         'success': False,
@@ -477,7 +480,8 @@ class GatewayDispatcher:
                 from apps.messaging.services.credit_billing_service import CreditBillingService
                 with schema_context(self._schema):
                     units = CreditBillingService.sms_units_for_message(message)
-                    CreditBillingService.refund_units(units, notes=f"Provider send failure")
+                    CreditBillingService.refund_units(units, notes="Provider send failure",
+                                                       schema_name=self._schema)
                     logger.warning(f"Refunded {units} units due to send failure")
             
             return {
@@ -492,7 +496,8 @@ class GatewayDispatcher:
                 from apps.messaging.services.credit_billing_service import CreditBillingService
                 with schema_context(self._schema):
                     units = CreditBillingService.sms_units_for_message(message)
-                    CreditBillingService.refund_units(units, notes=f"Provider exception: {e}")
+                    CreditBillingService.refund_units(units, notes=f"Provider exception: {e}",
+                                                       schema_name=self._schema)
                     logger.warning(f"Refunded {units} units due to exception: {e}")
             
             provider_name = 'INBUILT-BYTEWAVE' if self.use_inbuilt else self.config.provider

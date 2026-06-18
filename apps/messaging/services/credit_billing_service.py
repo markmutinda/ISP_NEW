@@ -65,20 +65,12 @@ class CreditBillingService:
             # 1. Check if they are using an external gateway
             gateway = SMSGatewayConfig.objects.filter(is_active=True).first()
             
-            # Determine inbuilt from EITHER source — notification settings is the
-            # user-facing toggle; gateway config should mirror it but may drift.
-            try:
-                notif_settings = SMSNotificationSettings.get_settings()
-                notif_inbuilt = notif_settings.use_inbuilt_system if notif_settings else False
-            except Exception:
-                notif_inbuilt = False
-            
+            # FIX: Gateway config is the authoritative source of truth
+            # Notification settings is just a UI mirror, not the actual source
             gateway_inbuilt = gateway.use_inbuilt_system if gateway else False
+            use_inbuilt = gateway_inbuilt  # gateway config is authoritative
             
-            # Use inbuilt if EITHER source says true (this prevents drift issues)
-            use_inbuilt = notif_inbuilt or gateway_inbuilt
-            
-            # If they are NOT using the inbuilt system (either source says false),
+            # If they are NOT using the inbuilt system,
             # they are using their own provider keys — no wallet deduction.
             if not use_inbuilt:
                 logger.debug(f"Schema {_schema} using external gateway — skipping debit")
