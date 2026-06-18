@@ -306,6 +306,11 @@ class SubscriptionUsageView(APIView):
             'minimum_charge': Decimal(str(plan.base_license_fee or 500)) if plan.is_metered else Decimal('0.00'),
             'minimum_adjustment': Decimal(str(plan.base_license_fee or 500)) if plan.is_metered else Decimal('0.00'),
             'total_estimate': Decimal(str(plan.base_license_fee or 500)) if plan.is_metered else Decimal('0.00'),
+            'invoice_adjustment_amount': Decimal('0.00'),
+            'invoice_discount_amount': Decimal('0.00'),
+            'invoice_total_estimate': None,
+            'invoice_number': '',
+            'invoice_adjustment_note': '',
             'hotspot_revenue_note': 'Hotspot revenue is reconciled from paid hotspot sessions in the active billing cycle.',
         }
 
@@ -314,7 +319,7 @@ class SubscriptionUsageView(APIView):
                 active_cycle = BillingCycle.objects.filter(
                     tenant=tenant,
                     subscription=subscription,
-                    status='active',
+                    status__in=['active', 'invoiced'],
                 ).select_related('tenant', 'subscription__plan').order_by('-start_date').first()
 
                 if not active_cycle:
@@ -353,6 +358,33 @@ class SubscriptionUsageView(APIView):
                         Decimal('0.00'),
                     ).quantize(Decimal('0.01'))
                     total_estimate = max(usage_subtotal, minimum_charge).quantize(Decimal('0.01'))
+                    invoice_adjustment_amount = Decimal('0.00')
+                    invoice_discount_amount = Decimal('0.00')
+                    invoice_total_estimate = None
+                    invoice_number = ''
+                    invoice_adjustment_note = ''
+
+                    if active_cycle.invoice_reference:
+                        try:
+                            with schema_context(tenant.schema_name):
+                                from apps.billing.models import Invoice
+                                invoice = Invoice.objects.filter(pk=active_cycle.invoice_reference).first()
+                                if invoice:
+                                    invoice_adjustment_amount = (
+                                        invoice.items.filter(service_type='netily_manual_adjustment')
+                                        .aggregate(total=Sum('total'))['total'] or Decimal('0.00')
+                                    ).quantize(Decimal('0.01'))
+                                    invoice_discount_amount = (invoice.discount_amount or Decimal('0.00')).quantize(Decimal('0.01'))
+                                    invoice_total_estimate = (invoice.total_amount or Decimal('0.00')).quantize(Decimal('0.01'))
+                                    invoice_number = invoice.invoice_number
+                                    if invoice_adjustment_amount or invoice_discount_amount:
+                                        invoice_adjustment_note = 'Adjusted by Netily Support on the linked invoice.'
+                        except Exception as invoice_err:
+                            logger.warning(
+                                "Failed loading adjusted subscription invoice for %s: %s",
+                                tenant.schema_name,
+                                invoice_err,
+                            )
 
                     metered_data.update({
                         'billing_cycle_id': str(active_cycle.id),
@@ -366,7 +398,12 @@ class SubscriptionUsageView(APIView):
                         'usage_subtotal': usage_subtotal,
                         'minimum_charge': minimum_charge,
                         'minimum_adjustment': minimum_adjustment,
-                        'total_estimate': total_estimate,
+                        'total_estimate': invoice_total_estimate or total_estimate,
+                        'invoice_adjustment_amount': invoice_adjustment_amount,
+                        'invoice_discount_amount': invoice_discount_amount,
+                        'invoice_total_estimate': invoice_total_estimate,
+                        'invoice_number': invoice_number,
+                        'invoice_adjustment_note': invoice_adjustment_note,
                     })
         
         data = {

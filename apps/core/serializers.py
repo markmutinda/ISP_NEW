@@ -162,7 +162,18 @@ class UserUpdateSerializer(serializers.ModelSerializer):
             'date_of_birth', 'current_password', 'new_password',
             'is_active'  # 🟢 FIX: Added is_active to allow deactivation/reactivation
         ]
-        read_only_fields = ['id', 'email']
+        read_only_fields = ['id']
+
+    def validate_email(self, value):
+        if value in (None, ""):
+            return value
+        normalized = User.objects.normalize_email(value).strip().lower()
+        qs = User.objects.filter(email__iexact=normalized)
+        if self.instance and self.instance.pk:
+            qs = qs.exclude(pk=self.instance.pk)
+        if qs.exists():
+            raise serializers.ValidationError("A user with this email already exists.")
+        return normalized
     
     def validate(self, data):
         current_password = data.get('current_password')

@@ -147,6 +147,11 @@ class SubscriptionUsageSerializer(serializers.Serializer):
     minimum_charge = serializers.DecimalField(max_digits=12, decimal_places=2, required=False)
     minimum_adjustment = serializers.DecimalField(max_digits=12, decimal_places=2, required=False)
     total_estimate = serializers.DecimalField(max_digits=12, decimal_places=2, required=False)
+    invoice_adjustment_amount = serializers.DecimalField(max_digits=12, decimal_places=2, required=False)
+    invoice_discount_amount = serializers.DecimalField(max_digits=12, decimal_places=2, required=False)
+    invoice_total_estimate = serializers.DecimalField(max_digits=12, decimal_places=2, required=False, allow_null=True)
+    invoice_number = serializers.CharField(required=False, allow_blank=True)
+    invoice_adjustment_note = serializers.CharField(required=False, allow_blank=True)
     hotspot_revenue_note = serializers.CharField(required=False, allow_blank=True)
     
     # Trial status

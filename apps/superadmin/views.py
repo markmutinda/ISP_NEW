@@ -12,7 +12,9 @@ from datetime import timedelta
 from decimal import Decimal
 
 from django.conf import settings
+from django.core.exceptions import ValidationError as DjangoValidationError
 from django.core.management import call_command
+from django.core.validators import validate_email
 from django.db import connection, transaction
 from django.db.models import Sum, Count, Q, F
 from django.http import HttpResponse
@@ -856,6 +858,157 @@ class TenantActivateView(APIView):
 
         tenant.refresh_from_db()
         return Response(TenantListSerializer(tenant).data)
+
+
+class TenantSupportEmailView(APIView):
+    """
+    Superadmin support endpoint for repairing tenant contact/login emails.
+
+    GET returns the public company email and tenant-schema admin users.
+    PATCH updates company_email and/or one tenant admin login email.
+    """
+    permission_classes = SUPERADMIN_PERMS
+    admin_roles = ["admin", "super_admin", "superadmin"]
+
+    def _clean_email(self, value, field_name):
+        if value in (None, ""):
+            return None
+        email = User.objects.normalize_email(str(value).strip()).lower()
+        try:
+            validate_email(email)
+        except DjangoValidationError:
+            raise ValueError(f"{field_name} must be a valid email address.")
+        return email
+
+    def _admin_payload(self, tenant):
+        admins = []
+        with schema_context(tenant.schema_name):
+            for user in User.objects.filter(role__in=self.admin_roles).order_by("-is_superuser", "id"):
+                admins.append({
+                    "id": user.id,
+                    "email": user.email,
+                    "name": user.get_full_name() or user.email,
+                    "is_superuser": user.is_superuser,
+                    "is_active": user.is_active,
+                })
+        return admins
+
+    def get(self, request, pk):
+        _ensure_public()
+        tenant = get_object_or_404(Tenant.objects.select_related("company"), pk=pk)
+        try:
+            admin_users = self._admin_payload(tenant)
+        except Exception as exc:
+            logger.warning("Failed to read tenant admins for %s: %s", tenant.schema_name, exc)
+            admin_users = []
+
+        return Response({
+            "tenant_id": str(tenant.id),
+            "tenant_subdomain": tenant.subdomain,
+            "company_email": tenant.company.email if tenant.company else "",
+            "admin_users": admin_users,
+        })
+
+    def patch(self, request, pk):
+        _ensure_public()
+        tenant = get_object_or_404(Tenant.objects.select_related("company"), pk=pk)
+
+        try:
+            company_email = self._clean_email(request.data.get("company_email"), "company_email")
+            tenant_admin_email = self._clean_email(
+                request.data.get("tenant_admin_email") or request.data.get("login_email"),
+                "tenant_admin_email",
+            )
+        except ValueError as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+
+        user_id = request.data.get("user_id")
+        if not company_email and not tenant_admin_email:
+            return Response(
+                {"detail": "Provide company_email or tenant_admin_email."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        if company_email and Company.objects.filter(email__iexact=company_email).exclude(pk=tenant.company_id).exists():
+            return Response(
+                {"detail": "Another company already uses this email."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        try:
+            with schema_context(tenant.schema_name):
+                target_user = None
+                if tenant_admin_email:
+                    if user_id:
+                        target_user = User.objects.filter(pk=user_id, role__in=self.admin_roles).first()
+                    if not target_user:
+                        target_user = (
+                            User.objects.filter(role__in=self.admin_roles)
+                            .order_by("-is_superuser", "id")
+                            .first()
+                        )
+                    if not target_user:
+                        return Response(
+                            {"detail": "No tenant admin user was found to update."},
+                            status=status.HTTP_400_BAD_REQUEST,
+                        )
+                    if User.objects.filter(email__iexact=tenant_admin_email).exclude(pk=target_user.pk).exists():
+                        return Response(
+                            {"detail": "Another tenant user already uses this login email."},
+                            status=status.HTTP_400_BAD_REQUEST,
+                        )
+        except Exception as exc:
+            logger.exception("Failed validating tenant admin email for %s", tenant.schema_name)
+            return Response(
+                {"detail": f"Could not inspect tenant users: {exc}"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        changes = {}
+        with transaction.atomic():
+            if company_email and tenant.company and (tenant.company.email or "").lower() != company_email:
+                changes["company_email"] = {"from": tenant.company.email, "to": company_email}
+                tenant.company.email = company_email
+                tenant.company.save(update_fields=["email", "updated_at"])
+
+            if tenant_admin_email:
+                with schema_context(tenant.schema_name):
+                    target_user = None
+                    if user_id:
+                        target_user = User.objects.filter(pk=user_id, role__in=self.admin_roles).first()
+                    if not target_user:
+                        target_user = (
+                            User.objects.filter(role__in=self.admin_roles)
+                            .order_by("-is_superuser", "id")
+                            .first()
+                        )
+                    old_email = target_user.email
+                    if (old_email or "").lower() != tenant_admin_email:
+                        changes["tenant_admin_email"] = {"from": old_email, "to": tenant_admin_email}
+                        target_user.email = tenant_admin_email
+                        target_user.is_verified = True
+                        target_user.save(update_fields=["email", "is_verified"])
+
+        _ensure_public()
+        if changes:
+            _log_action(
+                request.user,
+                "update",
+                "TenantSupportEmail",
+                object_repr=tenant.subdomain,
+                object_id=tenant.id,
+                changes=changes,
+                request=request,
+            )
+
+        tenant.refresh_from_db()
+        data = TenantDetailSerializer(tenant).data
+        data["support_email_info"] = {
+            "company_email": tenant.company.email if tenant.company else "",
+            "admin_users": self._admin_payload(tenant),
+        }
+        data["detail"] = "Tenant support email details updated."
+        return Response(data)
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -2755,19 +2908,31 @@ def _subscription_invoice_payload(cycle, *, include_recipients=False):
     except Exception as exc:
         logger.warning("Failed to load linked tenant invoice for cycle %s: %s", cycle.id, exc)
         invoice = None
+    effective_total = calculated_total
     if invoice:
+        manual_adjustment = invoice.items.filter(service_type="netily_manual_adjustment").aggregate(
+            total=Sum("total")
+        )["total"] or Decimal("0.00")
+        manual_adjustment_item = (
+            invoice.items.filter(service_type="netily_manual_adjustment")
+            .order_by("-id")
+            .first()
+        )
         invoice_snapshot = {
             "id": invoice.id,
             "invoice_number": invoice.invoice_number,
             "status": invoice.status,
             "subtotal": str(_decimal_money(invoice.subtotal or calculated_total)),
             "discount_amount": str(_decimal_money(invoice.discount_amount)),
+            "manual_adjustment_amount": str(_decimal_money(manual_adjustment)),
+            "manual_adjustment_description": manual_adjustment_item.description if manual_adjustment_item else "",
             "total_amount": str(_decimal_money(invoice.total_amount)),
             "balance": str(_decimal_money(invoice.balance)),
             "due_date": invoice.due_date.isoformat() if invoice.due_date else None,
             "notes": invoice.notes or "",
             "internal_notes": invoice.internal_notes or "",
         }
+        effective_total = _decimal_money(invoice.total_amount)
 
     recipients = _subscription_invoice_admins(tenant) if include_recipients else []
 
@@ -2794,6 +2959,7 @@ def _subscription_invoice_payload(cycle, *, include_recipients=False):
         "monthly_minimum": str(_decimal_money(cycle.snapshot_base_fee or Decimal("500.00"))),
         "minimum_adjustment": str(minimum_adjustment),
         "calculated_total": str(calculated_total),
+        "effective_total": str(effective_total),
         "invoice": invoice_snapshot,
         "recipients": recipients,
     }
@@ -2846,7 +3012,7 @@ class SubscriptionInvoiceListView(APIView):
                 "active": qs.filter(status="active").count(),
                 "invoiced": qs.filter(status="invoiced").count(),
                 "paid": qs.filter(status="paid").count(),
-                "calculated_total": str(_decimal_money(sum(Decimal(row["calculated_total"]) for row in results))),
+                "calculated_total": str(_decimal_money(sum(Decimal(row.get("effective_total") or row["calculated_total"]) for row in results))),
                 "hotspot_revenue": str(_decimal_money(sum(Decimal(row["hotspot_revenue"]) for row in results))),
             },
             "results": results,
@@ -2872,31 +3038,82 @@ class SubscriptionInvoiceDetailView(APIView):
         cycle = self.get_cycle(pk)
         discount_amount = _decimal_money(request.data.get("discount_amount", "0"))
         discount_reason = (request.data.get("discount_reason") or "").strip()
+        adjustment_amount = _decimal_money(request.data.get("manual_adjustment_amount", "0"))
+        adjustment_description = (
+            request.data.get("manual_adjustment_description")
+            or request.data.get("adjustment_description")
+            or "Manual custom charge"
+        ).strip()
         if discount_amount < 0:
             return Response({"detail": "discount_amount cannot be negative."}, status=status.HTTP_400_BAD_REQUEST)
+        if adjustment_amount < 0:
+            return Response({"detail": "manual_adjustment_amount cannot be negative."}, status=status.HTTP_400_BAD_REQUEST)
 
         invoice = _get_or_create_subscription_invoice(cycle, create=True)
         with schema_context(cycle.tenant.schema_name):
-            from apps.billing.models import Invoice
+            from apps.billing.models import Invoice, InvoiceItem
             invoice = Invoice.objects.get(pk=invoice.pk)
-            subtotal = _decimal_money(invoice.subtotal or invoice.total_amount)
-            if discount_amount > subtotal:
+            manual_items = invoice.items.filter(service_type="netily_manual_adjustment")
+            existing_adjustment = manual_items.aggregate(total=Sum("total"))["total"] or Decimal("0.00")
+            base_subtotal = _decimal_money((invoice.subtotal or invoice.total_amount) - existing_adjustment)
+            intended_subtotal = _decimal_money(base_subtotal + adjustment_amount)
+            if discount_amount > intended_subtotal:
                 return Response({"detail": "discount_amount cannot exceed invoice subtotal."}, status=status.HTTP_400_BAD_REQUEST)
+
+            if adjustment_amount > 0:
+                item = manual_items.order_by("id").first()
+                if item:
+                    item.description = adjustment_description
+                    item.quantity = Decimal("1.00")
+                    item.unit_price = adjustment_amount
+                    item.tax_rate = Decimal("0.00")
+                    item.tax_amount = Decimal("0.00")
+                    item.save()
+                    manual_items.exclude(pk=item.pk).delete()
+                else:
+                    InvoiceItem.objects.create(
+                        invoice=invoice,
+                        description=adjustment_description,
+                        quantity=1,
+                        unit_price=adjustment_amount,
+                        tax_rate=0,
+                        tax_amount=0,
+                        service_type="netily_manual_adjustment",
+                    )
+            else:
+                manual_items.delete()
+
+            invoice.calculate_totals()
+            invoice.refresh_from_db()
+            subtotal = _decimal_money(invoice.subtotal or invoice.total_amount)
             invoice.discount_amount = discount_amount
-            invoice.total_amount = max(subtotal - discount_amount, Decimal("0.00"))
-            note = f"Manual discount applied by superadmin: KES {discount_amount}"
-            if discount_reason:
-                note = f"{note} - {discount_reason}"
-            invoice.internal_notes = f"{invoice.internal_notes or ''}\n{note}".strip()
-            invoice.save()
+            invoice.calculate_totals()
+
+            notes = []
+            if adjustment_amount > 0:
+                notes.append(f"Manual charge applied by superadmin: KES {adjustment_amount} - {adjustment_description}")
+            if discount_amount > 0:
+                note = f"Manual discount applied by superadmin: KES {discount_amount}"
+                if discount_reason:
+                    note = f"{note} - {discount_reason}"
+                notes.append(note)
+            if notes:
+                invoice.internal_notes = f"{invoice.internal_notes or ''}\n" + "\n".join(notes)
+                invoice.internal_notes = invoice.internal_notes.strip()
+                invoice.save(update_fields=["internal_notes", "updated_at"])
 
         _log_action(
             request.user,
             "update",
             "SubscriptionInvoice",
-            object_repr=f"{cycle.tenant.subdomain} invoice discount",
+            object_repr=f"{cycle.tenant.subdomain} invoice adjustment",
             object_id=cycle.id,
-            changes={"discount_amount": str(discount_amount), "discount_reason": discount_reason},
+            changes={
+                "discount_amount": str(discount_amount),
+                "discount_reason": discount_reason,
+                "manual_adjustment_amount": str(adjustment_amount),
+                "manual_adjustment_description": adjustment_description,
+            },
             request=request,
         )
         cycle.refresh_from_db()

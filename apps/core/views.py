@@ -470,9 +470,9 @@ class UserViewSet(viewsets.ModelViewSet):
         
         logger.info(f"UserViewSet: Created {role} user {serializer.instance.email}. is_staff={is_staff_status}")
     
-    @action(detail=False, methods=['get'])
+    @action(detail=False, methods=['get', 'patch', 'put'])
     def me(self, request):
-        """Get current user profile"""
+        """Get or update current user profile."""
         tenant_subdomain = getattr(request.user, "tenant_subdomain", None)
         company_name = getattr(request.user, "company_name", None)
 
@@ -521,6 +521,18 @@ class UserViewSet(viewsets.ModelViewSet):
                         },
                         status=status.HTTP_403_FORBIDDEN,
                     )
+
+        if request.method in ("PATCH", "PUT"):
+            serializer = UserUpdateSerializer(
+                request.user,
+                data=request.data,
+                partial=request.method == "PATCH",
+                context={'request': request},
+            )
+            if serializer.is_valid():
+                serializer.save()
+                return Response(ProfileSerializer(request.user).data)
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
         serializer = ProfileSerializer(request.user)
         return Response(serializer.data)

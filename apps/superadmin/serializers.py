@@ -134,11 +134,6 @@ class TenantListSerializer(serializers.ModelSerializer):
         return obj.subscription_expiry
 
     def get_status(self, obj):
-        sub = self._get_subscription(obj)
-        if sub:
-            if sub.status == 'trialing':
-                return 'trial'
-            return sub.status
         return obj.status
 
     def get_subscription_expiry(self, obj):
@@ -188,7 +183,7 @@ class TenantListSerializer(serializers.ModelSerializer):
             'cancelled': 'Cancelled',
             'expired': 'Expired',
         }
-        code = self.get_status(obj)
+        code = obj.status
         return labels.get(code, code.replace('_', ' ').title())
     
     def get_active_cycle(self, obj):

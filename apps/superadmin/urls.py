@@ -22,6 +22,7 @@ urlpatterns = [
     path("tenants/<uuid:pk>/hard-delete/", views.HardDeleteTenantView.as_view(), name="tenant-hard-delete"),
     path("tenants/<uuid:pk>/suspend/", views.TenantSuspendView.as_view(), name="tenant-suspend"),
     path("tenants/<uuid:pk>/activate/", views.TenantActivateView.as_view(), name="tenant-activate"),
+    path("tenants/<uuid:pk>/support-email/", views.TenantSupportEmailView.as_view(), name="tenant-support-email"),
     path("tenants/<uuid:pk>/company/", views.CompanyUpdateView.as_view(), name="company-update"),
     path("tenants/<uuid:pk>/stats/", views.TenantStatsView.as_view(), name="tenant-stats"),
     path("tenants/<uuid:pk>/audit-log/", views.TenantAuditLogView.as_view(), name="tenant-audit-log"),
