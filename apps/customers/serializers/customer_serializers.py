@@ -31,7 +31,7 @@ class CustomerCreateSerializer(serializers.ModelSerializer):
             'date_of_birth', 'gender', 'id_type', 'id_number',
             'marital_status', 'occupation', 'employer', 
             'customer_type', 'category', 'referral_source',
-            'billing_cycle', 'credit_limit'
+            'billing_cycle', 'credit_limit', 'location'
         ]
     
     def validate(self, data):
@@ -148,6 +148,7 @@ class CustomerCreateSerializer(serializers.ModelSerializer):
             'status': getattr(instance, 'status', 'ACTIVE'),
             'date_of_birth': instance.date_of_birth,
             'gender': instance.gender,
+            'location': instance.location,
             'created_at': instance.created_at.isoformat() if hasattr(instance, 'created_at') and instance.created_at else None,
         }
 
