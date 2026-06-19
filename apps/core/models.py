@@ -583,6 +583,12 @@ class GlobalSystemSettings(models.Model):
     # Controls whether tenant admin login requires email OTP challenge.
     admin_email_otp_enabled = models.BooleanField(default=False)
 
+    # Customer Portal Settings
+    # When enabled, the customer plans page only shows the customer's
+    # current plan and plans priced >= their current plan (hides downgrades).
+    # Defaults to False so existing tenants keep seeing all plans.
+    hide_lower_plans_in_customer_portal = models.BooleanField(default=False)
+
     class Meta:
         app_label = 'core'
         verbose_name = 'Global System Settings'

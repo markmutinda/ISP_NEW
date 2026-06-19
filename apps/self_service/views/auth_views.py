@@ -11,6 +11,7 @@ import string
 
 from django.conf import settings
 from django.contrib.auth import get_user_model
+from django.db import models
 from django.db import transaction
 from django.utils import timezone
 
@@ -21,13 +22,14 @@ from rest_framework.views import APIView
 from rest_framework_simplejwt.tokens import RefreshToken
 
 from apps.customers.models import Customer
-from apps.core.models import AuditLog
+from apps.core.models import AuditLog, GlobalSystemSettings
 
 from ..serializers import (
     CustomerSelfRegisterSerializer,
     PhoneVerificationSerializer,
     ResendOTPSerializer,
 )
+from ..authentication import OptionalJWTAuthentication
 
 logger = logging.getLogger(__name__)
 User = get_user_model()
@@ -396,18 +398,20 @@ class AvailablePlansView(APIView):
     """
     Get available ISP plans for customers to view.
     
-    PUBLIC ENDPOINT - No authentication required.
+    PUBLIC ENDPOINT - works with or without a customer JWT.
+    If a tenant has enabled "hide lower plans" and the requester is a
+    logged-in customer, only their current plan + higher-priced plans
+    are returned.
     
     GET /api/v1/self-service/plans/
     """
     
     permission_classes = [AllowAny]
-    authentication_classes = []
+    authentication_classes = [OptionalJWTAuthentication]
     
     def get(self, request):
         from apps.billing.models import Plan
         
-        # Verify we're on a tenant subdomain (not public)
         tenant = getattr(request, 'tenant', None)
         if not tenant or tenant.schema_name == 'public':
             return Response({
@@ -415,8 +419,36 @@ class AvailablePlansView(APIView):
                 'message': 'Must access from ISP subdomain or custom domain'
             }, status=status.HTTP_404_NOT_FOUND)
         
-        # Get active, public plans
-        plans = Plan.objects.filter(is_active=True, is_public=True).order_by('base_price')
+        plans_qs = Plan.objects.filter(is_active=True, is_public=True).order_by('base_price')
+        
+        # Try to resolve the logged-in customer's current plan price
+        current_plan_id = None
+        current_plan_price = None
+        user = getattr(request, 'user', None)
+        if user and user.is_authenticated and getattr(user, 'role', None) == 'customer':
+            try:
+                customer = user.customer_profile
+                active_service = (
+                    customer.services
+                    .filter(status__in=['ACTIVE', 'SUSPENDED'])
+                    .select_related('plan')
+                    .first()
+                )
+                if active_service and active_service.plan:
+                    current_plan_id = active_service.plan.id
+                    current_plan_price = active_service.plan.base_price
+            except Exception:
+                pass
+        
+        settings_obj = GlobalSystemSettings.get_solo()
+        if (
+            settings_obj.hide_lower_plans_in_customer_portal
+            and current_plan_price is not None
+        ):
+            # Keep the current plan itself plus anything priced the same or higher
+            plans_qs = plans_qs.filter(
+                models.Q(base_price__gte=current_plan_price) | models.Q(id=current_plan_id)
+            )
         
         plans_data = [
             {
@@ -436,10 +468,9 @@ class AvailablePlansView(APIView):
                 'features': plan.features or [],
                 'is_active': plan.is_active,
             }
-            for plan in plans
+            for plan in plans_qs
         ]
         
-        # Get ISP branding info
         branding = None
         try:
             if tenant and hasattr(tenant, 'company') and tenant.company:
