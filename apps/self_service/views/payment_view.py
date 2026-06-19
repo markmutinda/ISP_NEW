@@ -123,17 +123,46 @@ class PaymentView(APIView):
         if invoice:
             description = f"Invoice #{invoice.invoice_number}"
         
+        # ============================================================
+        # FIX 1: Try to link the customer's current service plan amount
+        # so the C2B webhook plan-matching works
+        # ============================================================
+        actual_amount = amount
+        try:
+            # Get the customer's active service with plan
+            service = customer.services.filter(
+                status__in=['ACTIVE', 'SUSPENDED'],
+                plan__isnull=False
+            ).first()
+            
+            if service and service.plan:
+                # If the service has a plan, use the plan amount
+                # This helps the C2B webhook match the payment to the right plan
+                plan_amount = service.plan.price or service.plan.amount
+                if plan_amount and plan_amount > 0:
+                    # If the customer is paying exactly the plan amount, use it
+                    # to ensure proper matching
+                    if amount == plan_amount or amount >= plan_amount:
+                        actual_amount = plan_amount
+                        logger.info(f"Using plan amount {plan_amount} for C2B matching for customer {customer.customer_code}")
+        except Exception as e:
+            logger.warning(f"Could not get service plan for amount matching: {e}")
+        
+        # ============================================================
+        # FIX 2: Create Payment with enhanced notes to identify it as 
+        # a customer portal payment (per Claude's instruction)
+        # ============================================================
         payment = Payment.objects.create(
             schema_name=connection.schema_name,
             customer=customer,
             invoice=invoice,
-            amount=amount,
+            amount=actual_amount,  # Use the actual amount (plan amount if matched)
             payment_method=payment_method,
             payer_phone=phone_number,
             mpesa_phone=phone_number,
             payment_reference=reference,
             status='PENDING',
-            notes="Customer initiated payment via dashboard",
+            notes=f"Customer portal STK payment. Plan: {invoice.invoice_number if invoice else 'account recharge'}. Schema: {connection.schema_name}",
         )
 
         # ==========================================
@@ -146,7 +175,7 @@ class PaymentView(APIView):
                 
                 result = mpesa_service.initiate_stk_push(
                     phone_number=phone_number,
-                    amount=amount,
+                    amount=actual_amount,  # Use the actual amount
                     account_reference=reference,
                     transaction_desc=description,
                     payment=payment
@@ -190,7 +219,7 @@ class PaymentView(APIView):
                 # Push to Tuma
                 tuma_response = client.stk_push(
                     token=child_token,
-                    amount=int(amount),
+                    amount=int(actual_amount),  # Use the actual amount
                     phone=phone_number,
                     callback_url=callback_url,
                     description=reference

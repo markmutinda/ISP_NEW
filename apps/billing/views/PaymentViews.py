@@ -1032,7 +1032,78 @@ class PaymentViewSet(viewsets.ModelViewSet):
                     payment.transaction_id = transaction_data['mpesa_receipt']
                     payment.payment_date = timezone.now()
                     payment.mark_as_completed()
-                    
+
+                    # ============================================================
+                    # FIX: PPPoE Subscription Renewal (Customer Portal STK payments)
+                    # Added per Claude's instruction - handles PPPoE renewal for
+                    # customer-portal-initiated STK payments
+                    # ============================================================
+                    if payment.customer and not getattr(payment, 'hotspot_session', None):
+                        try:
+                            from apps.radius.models import CustomerRadiusCredentials
+                            from django.utils import timezone as _tz
+                            
+                            creds = CustomerRadiusCredentials.objects.filter(
+                                customer=payment.customer
+                            ).first()
+                            
+                            service = payment.customer.services.filter(
+                                status__in=['ACTIVE', 'SUSPENDED'],
+                                plan__isnull=False
+                            ).first()
+                            
+                            if creds and service and service.plan:
+                                plan = service.plan
+                                now = _tz.now()
+                                validity_delta = plan.get_validity_timedelta()
+                                
+                                if validity_delta is None:
+                                    new_expiry = None
+                                else:
+                                    current_expiry = creds.expiration_date
+                                    if current_expiry and current_expiry > now:
+                                        new_expiry = current_expiry + validity_delta
+                                    else:
+                                        new_expiry = now + validity_delta
+                                
+                                creds.expiration_date = new_expiry
+                                creds.is_enabled = True
+                                creds.subscription_activated_at = now
+                                creds.save(update_fields=['expiration_date', 'is_enabled', 'subscription_activated_at'])
+                                creds.sync_to_radius()
+                                
+                                if service.status == 'SUSPENDED':
+                                    service.status = 'ACTIVE'
+                                    service.save(update_fields=['status'])
+                                
+                                try:
+                                    from apps.messaging.services.notification_sender import SMSNotifier
+                                    SMSNotifier.pppoe_renewal(
+                                        customer=payment.customer,
+                                        plan_name=plan.name,
+                                        expires_at=new_expiry,
+                                        reference=payment.mpesa_receipt or '',
+                                        schema_name=connection.schema_name,
+                                    )
+                                except Exception as sms_err:
+                                    logger.warning(f"Renewal SMS failed: {sms_err}")
+                                
+                                try:
+                                    from apps.radius.services.coa_service import CoAService
+                                    coa = CoAService()
+                                    router_ip = (
+                                        creds.router.vpn_ip_address or creds.router.ip_address
+                                        if creds.router else None
+                                    )
+                                    if router_ip:
+                                        coa.disconnect_user(username=creds.username, nas_ip_address=router_ip)
+                                except Exception:
+                                    pass
+                                
+                                logger.info(f"PPPoE renewed via STK for {payment.customer.customer_code}, new expiry: {new_expiry}")
+                        except Exception as pppoe_err:
+                            logger.error(f"PPPoE renewal failed for payment {payment.payment_number}: {pppoe_err}")
+
                     # ============================================================
                     # FIX: Propagate completion to linked HotspotSession (Daraja hotspot flow)
                     # ============================================================
