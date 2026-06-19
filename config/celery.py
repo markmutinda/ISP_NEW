@@ -161,6 +161,16 @@ app.conf.beat_schedule = {
     },
 
     # ════════════════════════════════════════════════════════════════
+    # PPPOE AUTO-INVOICE GENERATION — NEW using billing.tasks
+    # Runs daily at 6:30 AM, respects per-tenant toggle
+    # ════════════════════════════════════════════════════════════════
+    'auto-generate-pppoe-invoices-daily': {
+        'task': 'apps.billing.tasks.auto_generate_pppoe_invoices',
+        'schedule': crontab(hour=6, minute=30),  # Daily at 6:30 AM
+        'options': {'queue': 'billing'}
+    },
+
+    # ════════════════════════════════════════════════════════════════
     # CLOUD CONTROLLER — VPN Tunnel Monitoring
     # ════════════════════════════════════════════════════════════════
     'monitor-vpn-tunnels-every-2-min': {

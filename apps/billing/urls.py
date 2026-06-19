@@ -74,6 +74,11 @@ from .views.hotspot_loyalty_views import (
     HotspotLoyaltyRedeemView,
 )
 
+# ==========================
+# Invoice Settings & Utilities (NEW)
+# ==========================
+from .views.invoice_settings_views import InvoiceSettingsView, CustomerSearchView, InvoicePDFView
+
 router = DefaultRouter()
 
 # Invoice URLs
@@ -237,6 +242,13 @@ tuma_webhook_urlpatterns = [
 # ==========================
 urlpatterns = [
     path('', include(router.urls)),
+
+    # ==========================
+    # INVOICE SETTINGS & UTILITIES (NEW - Added above Tuma)
+    # ==========================
+    path('invoice-settings/', InvoiceSettingsView.as_view(), name='invoice-settings'),
+    path('customers/search/', CustomerSearchView.as_view(), name='invoice-customer-search'),
+    path('invoices/<int:invoice_id>/pdf/', InvoicePDFView.as_view(), name='invoice-pdf'),
 
     # ==========================
     # Tuma Endpoints

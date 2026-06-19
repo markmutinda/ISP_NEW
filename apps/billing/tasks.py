@@ -8,6 +8,7 @@ Periodic tasks for:
 - Sending payment confirmation emails
 - Sending hotspot expiry warnings
 - Notifying expired hotspot sessions
+- Auto-generating invoices for PPPoE subscribers
 
 NOTE: billing models live in TENANT_APPS, so every query must
 run inside the correct tenant schema.  We iterate over all tenants
@@ -339,3 +340,124 @@ def send_payment_confirmation_email(customer_id, amount, reference='', payment_m
             )
         except Exception as e:
             logger.error(f"Payment confirmation email failed for customer {customer_id}: {e}")
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# PPPOE AUTO-INVOICE GENERATION (NEW)
+# ═══════════════════════════════════════════════════════════════════════════
+
+@shared_task(name='apps.billing.tasks.auto_generate_pppoe_invoices')
+def auto_generate_pppoe_invoices():
+    """
+    Auto-generate invoices for PPPoE subscribers whose subscriptions
+    are expiring soon or have expired. Respects per-tenant toggle.
+    
+    Runs daily via Celery Beat at 6:30 AM.
+    """
+    def _generate(tenant):
+        from apps.billing.models.billing_models import InvoiceSettings, Invoice, InvoiceItem, Plan
+        from apps.radius.models import CustomerRadiusCredentials
+        from decimal import Decimal
+
+        settings = InvoiceSettings.get_settings(tenant.schema_name)
+        if not settings.auto_generate_enabled:
+            return {'generated': 0, 'skipped_disabled': 1}
+
+        now = timezone.now()
+        threshold = now + timedelta(days=settings.days_before_expiry)
+        generated = 0
+        skipped_no_plan = 0
+        skipped_no_price = 0
+        skipped_existing = 0
+
+        # Find credentials expiring within threshold or already expired (not yet invoiced)
+        expiring_creds = CustomerRadiusCredentials.objects.filter(
+            expiration_date__isnull=False,
+            expiration_date__lte=threshold,
+            is_enabled=True,
+        ).select_related('customer__user', 'bandwidth_profile')
+
+        for cred in expiring_creds:
+            customer = cred.customer
+            if not customer:
+                continue
+
+            # Check if an unpaid invoice already exists for this customer
+            existing = Invoice.objects.filter(
+                customer=customer,
+                status__in=['DRAFT', 'ISSUED', 'SENT', 'PARTIAL', 'OVERDUE'],
+            ).exists()
+
+            if existing:
+                skipped_existing += 1
+                continue
+
+            # Get active service and plan
+            service = customer.services.filter(
+                status='ACTIVE',
+                plan__isnull=False,
+            ).first()
+
+            if not service or not service.plan:
+                skipped_no_plan += 1
+                continue
+
+            plan = service.plan
+            amount = plan.base_price or Decimal('0')
+            if amount <= 0:
+                skipped_no_price += 1
+                continue
+
+            due_date = (cred.expiration_date or now).date()
+
+            try:
+                invoice = Invoice.objects.create(
+                    customer=customer,
+                    billing_date=now.date(),
+                    due_date=due_date,
+                    status='ISSUED',
+                    service_connection=service,
+                    plan=plan,
+                    notes=f'Auto-generated for {plan.name} subscription renewal',
+                    service_period_start=now.date(),
+                    service_period_end=due_date,
+                )
+
+                InvoiceItem.objects.create(
+                    invoice=invoice,
+                    description=f'{plan.name} - Internet Subscription',
+                    quantity=1,
+                    unit_price=amount,
+                    tax_rate=Decimal('0'),
+                    tax_amount=Decimal('0'),
+                    total=amount,
+                    service_type='INTERNET',
+                    service_period_start=now.date(),
+                    service_period_end=due_date,
+                )
+
+                # Recalculate totals
+                invoice.subtotal = amount
+                invoice.tax_amount = Decimal('0')
+                invoice.total_amount = amount
+                invoice.balance = amount
+                invoice.save()
+
+                generated += 1
+                logger.info(f"[{tenant.schema_name}] Auto-generated invoice {invoice.invoice_number} for {customer.customer_code}")
+            except Exception as e:
+                logger.error(f"[{tenant.schema_name}] Failed to generate invoice for {customer.customer_code}: {e}")
+
+        return {
+            'generated': generated,
+            'skipped_disabled': 0,
+            'skipped_no_plan': skipped_no_plan,
+            'skipped_no_price': skipped_no_price,
+            'skipped_existing': skipped_existing,
+        }
+
+    try:
+        return _for_each_tenant(_generate)
+    except Exception as e:
+        logger.error(f"Auto invoice generation task failed: {e}", exc_info=True)
+        return {'error': str(e)}

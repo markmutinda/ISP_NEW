@@ -575,6 +575,37 @@ class InvoiceItem(models.Model):
         self.invoice.calculate_totals()
 
 
+# ========== INVOICE SETTINGS MODEL (NEW) ==========
+
+class InvoiceSettings(models.Model):
+    """Per-tenant invoice generation settings"""
+    schema_name = models.SlugField(max_length=63, unique=True)
+    auto_generate_enabled = models.BooleanField(
+        default=False,
+        help_text="When enabled, automatically generates invoices for PPPoE subscribers"
+    )
+    days_before_expiry = models.IntegerField(
+        default=5,
+        help_text="Generate invoice N days before subscription expires"
+    )
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        app_label = 'billing'
+        verbose_name = 'Invoice Setting'
+        verbose_name_plural = 'Invoice Settings'
+
+    def __str__(self):
+        return f"Invoice Settings for {self.schema_name}"
+
+    @classmethod
+    def get_settings(cls, schema_name=None):
+        from django.db import connection
+        schema = schema_name or connection.schema_name
+        settings, _ = cls.objects.get_or_create(schema_name=schema)
+        return settings
+
+
 # ========== SIGNAL HANDLERS ==========
 
 @receiver(pre_delete, sender=Plan)
