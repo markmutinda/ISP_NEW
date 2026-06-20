@@ -789,19 +789,7 @@ class PaymentViewSet(viewsets.ModelViewSet):
     def mark_completed(self, request, pk=None):
         payment = self.get_object()
         if payment.mark_as_completed(request.user):
-            # Safely send SMS confirmation for the tenant
-            try:
-                from apps.core.models import Company
-                # Find the company matching the current active tenant
-                current_company = Company.objects.filter(tenant__schema_name=connection.schema_name).first()
-                if current_company:
-                    sms_service = SMSService(company=current_company)
-                    sms_service.send_payment_confirmation(payment.customer, payment)
-                else:
-                    logger.warning(f"No company found for schema {connection.schema_name}, SMS not sent")
-            except Exception as e:
-                logger.error(f"SMS sending failed: {str(e)}")
-            
+            # SMS BLOCK REMOVED - Dead code cleanup
             return Response({'status': 'success', 'message': 'Payment marked as completed'})
         return Response({'error': 'Cannot mark payment as completed'}, status=status.HTTP_400_BAD_REQUEST)
 
@@ -1134,18 +1122,9 @@ class PaymentViewSet(viewsets.ModelViewSet):
                         # Already completed by a parallel callback - ignore
                         logger.warning(f"MpesaTransaction already completed: {e}")
                     
-                    # Safely send SMS confirmation for the tenant
-                    try:
-                        from apps.core.models import Company
-                        # Find the company matching the current active tenant
-                        current_company = Company.objects.filter(tenant__schema_name=connection.schema_name).first()
-                        if current_company:
-                            sms_service = SMSService(company=current_company)
-                            sms_service.send_payment_confirmation(payment.customer, payment)
-                        else:
-                            logger.warning(f"No company found for schema {connection.schema_name}, SMS not sent")
-                    except Exception as e:
-                        logger.error(f"SMS sending failed: {str(e)}")
+                    # SMS BLOCK REMOVED - Dead code cleanup. Real SMS already sent via:
+                    # - SMSNotifier.pppoe_renewal() for PPPoE payments (above)
+                    # - hotspot_session.mark_paid() for hotspot payments (above)
                     
                     return Response({
                         'ResultCode': 0,
