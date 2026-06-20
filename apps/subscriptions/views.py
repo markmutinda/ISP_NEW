@@ -349,7 +349,7 @@ class SubscriptionUsageView(APIView):
                         active_cycle.snapshot_base_fee = Decimal(str(plan.base_license_fee or 500))
                         updates['snapshot_base_fee'] = active_cycle.snapshot_base_fee
                     if not active_cycle.snapshot_pppoe_price:
-                        active_cycle.snapshot_pppoe_price = Decimal(str(plan.pppoe_unit_price or 20))
+                        active_cycle.snapshot_pppoe_price = Decimal(str(plan.pppoe_unit_price or 25))
                         updates['snapshot_pppoe_price'] = active_cycle.snapshot_pppoe_price
                     if updates:
                         BillingCycle.objects.filter(pk=active_cycle.pk).update(**updates)

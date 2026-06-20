@@ -54,7 +54,7 @@ class NetilyPlan(models.Model):
         help_text="If True, uses dynamic metered billing instead of flat price_monthly"
     )
     base_license_fee = models.DecimalField(max_digits=10, decimal_places=2, default=Decimal('500.00'))
-    pppoe_unit_price = models.DecimalField(max_digits=10, decimal_places=2, default=Decimal('20.00'))
+    pppoe_unit_price = models.DecimalField(max_digits=10, decimal_places=2, default=Decimal('25.00'))
     pppoe_min_clients = models.PositiveIntegerField(
         default=20,
         help_text="Minimum billable PPPoE clients per cycle (floor). ISPs with fewer active clients are still billed for this many."

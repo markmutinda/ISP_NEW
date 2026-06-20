@@ -84,6 +84,8 @@ services:
              python manage.py migrate_schemas_resilient --shared &&
              python manage.py migrate_schemas_resilient --tenant &&
              echo 'Migrations complete.' &&
+             echo 'Syncing subscription plan pricing...' &&
+             python manage.py seed_plans &&
              echo 'Setting up routes...' &&
              while ! getent hosts netily-openvpn-isp; do sleep 1; done &&
              VPN_IP=$$(getent hosts netily-openvpn-isp | awk '{ print $$1 }') &&
