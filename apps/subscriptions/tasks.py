@@ -222,6 +222,7 @@ def generate_metered_invoices():
                                 'activation_fee': minimum_charge,
                                 'minimum_charge': minimum_charge,
                                 'pppoe_count': pppoe_count,
+                                'pppoe_unit_price': cycle.snapshot_pppoe_price,
                                 'pppoe_fee': pppoe_fee,
                                 'hotspot_share': hotspot_share,
                                 'actual_hotspot_revenue': actual_hotspot_revenue,
@@ -539,6 +540,8 @@ def send_cycle_activated_email(self, company_id):
             'cycle_start': cycle.start_date if cycle else sub.current_period_start,
             'cycle_end': cycle.end_date if cycle else sub.current_period_end,
             'base_fee': str(sub.plan.base_license_fee) if sub.plan else '500',
+            'pppoe_unit_price': str(sub.plan.pppoe_unit_price) if sub.plan else '25',
+            'pppoe_min_clients': str(sub.plan.pppoe_min_clients) if sub.plan else '20',
             'amount_paid': str(latest_payment.amount) if latest_payment else '',
             'mpesa_receipt': latest_payment.mpesa_receipt if latest_payment else '',
         }

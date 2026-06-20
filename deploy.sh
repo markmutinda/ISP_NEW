@@ -106,6 +106,7 @@ $DC $ENV_FLAG run --rm web python manage.py prepare_migrations
 $DC $ENV_FLAG run --rm web python manage.py migrate_schemas_resilient --shared
 echo -e "${GREEN}  ✓ Shared schema migrated${NC}"
 $DC $ENV_FLAG run --rm web python manage.py migrate_schemas_resilient --tenant
+$DC $ENV_FLAG run --rm web python manage.py seed_plans
 echo -e "${GREEN}  ✓ Tenant schemas migrated${NC}"
 $DC $ENV_FLAG up -d
 $DC $ENV_FLAG restart nginx

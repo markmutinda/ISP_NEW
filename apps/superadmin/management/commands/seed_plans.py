@@ -16,14 +16,14 @@ PLANS = [
         "tagline": "Pay as you grow — perfect for new ISPs",
         "description": (
             "Usage-based pricing that scales with your business. "
-            "Base fee of KES 500/mo plus KES 20 per active PPPoE client "
-            "and 3% of hotspot revenue."
+            "A KES 500 monthly minimum applies; usage is KES 25 per active "
+            "PPPoE client plus 3% of hotspot revenue."
         ),
         "price_monthly": Decimal("500.00"),   # base only; actual bill is metered
         "price_yearly": Decimal("5400.00"),    # ~10% discount on base
         "is_metered": True,
         "base_license_fee": Decimal("500.00"),
-        "pppoe_unit_price": Decimal("20.00"),
+        "pppoe_unit_price": Decimal("25.00"),
         "pppoe_min_clients": 20,
         "hotspot_revenue_share_pct": Decimal("3.00"),
         "max_subscribers": 0,   # unlimited
@@ -53,7 +53,7 @@ PLANS = [
         "price_yearly": Decimal("29990.00"),   # ~2 months free
         "is_metered": False,
         "base_license_fee": Decimal("500.00"),
-        "pppoe_unit_price": Decimal("20.00"),
+        "pppoe_unit_price": Decimal("25.00"),
         "pppoe_min_clients": 20,
         "hotspot_revenue_share_pct": Decimal("3.00"),
         "max_subscribers": 200,
@@ -85,7 +85,7 @@ PLANS = [
         "price_yearly": Decimal("79990.00"),   # ~2 months free
         "is_metered": False,
         "base_license_fee": Decimal("500.00"),
-        "pppoe_unit_price": Decimal("20.00"),
+        "pppoe_unit_price": Decimal("25.00"),
         "pppoe_min_clients": 20,
         "hotspot_revenue_share_pct": Decimal("3.00"),
         "max_subscribers": 1000,
@@ -118,7 +118,7 @@ PLANS = [
         "price_yearly": Decimal("199990.00"),  # ~2 months free
         "is_metered": False,
         "base_license_fee": Decimal("500.00"),
-        "pppoe_unit_price": Decimal("20.00"),
+        "pppoe_unit_price": Decimal("25.00"),
         "pppoe_min_clients": 20,
         "hotspot_revenue_share_pct": Decimal("3.00"),
         "max_subscribers": 0,   # unlimited
@@ -179,7 +179,7 @@ class Command(BaseCommand):
         return new_plans_by_code.get(self.DEFAULT_MIGRATION_TARGET)
 
     def handle(self, *args, **options):
-        from apps.subscriptions.models import NetilyPlan, CompanySubscription
+        from apps.subscriptions.models import BillingCycle, NetilyPlan, CompanySubscription
 
         # ── STEP 1: Create/update the 4 canonical plans first ─────────────────
         created = 0
@@ -200,6 +200,18 @@ class Command(BaseCommand):
         # Reload the canonical plans for the migration map
         valid_codes = [p["code"] for p in PLANS]
         new_plans_by_code = {p.code: p for p in NetilyPlan.objects.filter(code__in=valid_codes)}
+
+        active_cycle_updates = BillingCycle.objects.filter(
+            status="active",
+            snapshot_pppoe_price=Decimal("20.00"),
+        ).update(snapshot_pppoe_price=Decimal("25.00"))
+        if active_cycle_updates:
+            self.stdout.write(
+                self.style.HTTP_INFO(
+                    f"  Updated {active_cycle_updates} active billing cycle snapshot(s) "
+                    "from KES 20.00 to KES 25.00"
+                )
+            )
 
         # ── STEP 2: Migrate subscriptions off old/junk plans ──────────────────
         junk_plans = NetilyPlan.objects.exclude(code__in=valid_codes)

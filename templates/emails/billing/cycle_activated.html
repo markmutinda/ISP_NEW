@@ -28,8 +28,8 @@
 
     <p><strong>How billing works during the cycle:</strong></p>
     <ul>
-      <li><strong>Base Fee:</strong> KES 500 (included in your payment)</li>
-      <li><strong>PPPoE Usage:</strong> KES 20 per active client (min. 20 clients)</li>
+      <li><strong>Monthly Minimum:</strong> KES 500 (covered by your cycle payment)</li>
+      <li><strong>PPPoE Usage:</strong> KES {{ pppoe_unit_price|default:"25" }} per active client (min. {{ pppoe_min_clients|default:"20" }} clients)</li>
       <li><strong>Hotspot Commission:</strong> 3% of hotspot revenue</li>
     </ul>
     <p>At the end of 30 days, we'll generate your invoice with the total breakdown. You'll have a <strong>4-day grace period</strong> to settle.</p>
