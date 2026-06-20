@@ -55,6 +55,11 @@ class MpesaC2BWebhookView(APIView):
         Persist the raw C2B transaction before customer activation work.
         Intentionally runs outside transaction.atomic() so that a failed activation
         does not delete evidence that a customer paid.
+        
+        Returns:
+            tuple: (mpesa_txn, created_or_handled)
+                - created_or_handled: True if newly created, False if existing without payment,
+                  None if already fully processed (has payment linked)
         """
         try:
             mpesa_txn, created = MpesaTransaction.objects.get_or_create(
@@ -90,11 +95,18 @@ class MpesaC2BWebhookView(APIView):
                 if update_fields:
                     mpesa_txn.save(update_fields=update_fields)
 
-            return mpesa_txn, created
+            # Signal to caller if this was already fully processed (has payment linked)
+            already_processed = mpesa_txn.payment_id is not None
+            return mpesa_txn, None if already_processed else created
 
         except IntegrityError:
             logger.info(f"Duplicate C2B transaction ignored at raw persist stage: {trans_id}")
-            return MpesaTransaction.objects.filter(transaction_id=trans_id).first(), False
+            existing = MpesaTransaction.objects.filter(transaction_id=trans_id).first()
+            if existing:
+                # Signal to caller if this was already fully processed (has payment linked)
+                already_processed = existing.payment_id is not None
+                return existing, None if already_processed else False
+            return None, False
 
     def _calculate_renewal_expiry(self, service, amount, current_expiry=None, customer=None):
         """
@@ -262,16 +274,34 @@ class MpesaC2BWebhookView(APIView):
 
         # 2. PROCESS INSIDE TENANT SCHEMA
         with schema_context(target_tenant_schema):
-            # Check for existing completed records upfront
-            existing = Payment.objects.filter(
+            # ============================================================
+            # FIX: Check if already processed by STK callback path
+            # ============================================================
+            # Check 1: Payment record already completed
+            existing_payment = Payment.objects.filter(
                 schema_name=target_tenant_schema,
                 mpesa_receipt=trans_id,
                 status='COMPLETED',
             ).first()
-            if existing:
-                logger.info(f"C2B {trans_id} already completed by STK callback, skipping")
+            if existing_payment:
+                logger.info(f"C2B {trans_id} already completed by STK callback (payment={existing_payment.id}), skipping")
                 return Response(
                     {"ResultCode": 0, "ResultDesc": "Already processed"},
+                    status=status.HTTP_200_OK
+                )
+            
+            # Check 2: MpesaTransaction already has a payment linked (STK path)
+            existing_txn = MpesaTransaction.objects.filter(
+                transaction_id=trans_id,
+                status='COMPLETED',
+            ).first()
+            if existing_txn and existing_txn.payment_id:
+                logger.info(
+                    f"C2B {trans_id} already processed via STK callback "
+                    f"(payment={existing_txn.payment_id}), skipping C2B duplicate"
+                )
+                return Response(
+                    {"ResultCode": 0, "ResultDesc": "Already processed via STK"},
                     status=status.HTTP_200_OK
                 )
 
@@ -299,6 +329,14 @@ class MpesaC2BWebhookView(APIView):
                 logger.error(f"Could not persist raw C2B transaction: {trans_id}")
                 return Response(
                     {"ResultCode": 1, "ResultDesc": "Could not persist transaction"},
+                    status=status.HTTP_200_OK
+                )
+
+            # If created is None, it means already fully processed (has payment linked)
+            if created is None:
+                logger.info(f"C2B {trans_id} already fully processed (STK path), skipping")
+                return Response(
+                    {"ResultCode": 0, "ResultDesc": "Already processed"},
                     status=status.HTTP_200_OK
                 )
 
