@@ -1,4 +1,4 @@
-#apps/billing/serializers/invoice_serializers.py
+# apps/billing/serializers/invoice_serializers.py
 from rest_framework import serializers
 from django.utils import timezone
 from decimal import Decimal
@@ -168,6 +168,9 @@ class BillingCycleSerializer(serializers.ModelSerializer):
         ]
 
 
+# ============================================================
+# FIX 2: InvoiceItemSerializer - invoice field must NOT be required
+# ============================================================
 class InvoiceItemSerializer(serializers.ModelSerializer):
     """Serializer for InvoiceItem model"""
     
@@ -179,6 +182,12 @@ class InvoiceItemSerializer(serializers.ModelSerializer):
             'service_period_end', 'created_at', 'updated_at'
         ]
         read_only_fields = ['tax_amount', 'total', 'created_at', 'updated_at']
+        extra_kwargs = {
+            'invoice': {'required': False, 'allow_null': True},
+            'service_period_start': {'required': False, 'allow_null': True},
+            'service_period_end': {'required': False, 'allow_null': True},
+            'service_type': {'required': False, 'allow_blank': True, 'allow_null': True},
+        }
 
 
 class InvoiceSerializer(serializers.ModelSerializer):
@@ -211,6 +220,9 @@ class InvoiceSerializer(serializers.ModelSerializer):
         ]
 
 
+# ============================================================
+# FIX 1: InvoiceCreateSerializer - Replaced with Claude's version
+# ============================================================
 class InvoiceCreateSerializer(serializers.ModelSerializer):
     """Serializer for creating invoices"""
     items = InvoiceItemSerializer(many=True, required=False)
@@ -220,24 +232,59 @@ class InvoiceCreateSerializer(serializers.ModelSerializer):
         fields = [
             'customer', 'billing_cycle', 'billing_date', 'due_date', 'payment_terms',
             'service_period_start', 'service_period_end', 'discount_amount',
-            'service_connection', 'plan', 'notes', 'internal_notes', 'items'
+            'service_connection', 'plan', 'notes', 'internal_notes', 'items', 'status'
         ]
+        extra_kwargs = {
+            'service_period_start': {'required': False, 'allow_null': True},
+            'service_period_end': {'required': False, 'allow_null': True},
+            'billing_cycle': {'required': False, 'allow_null': True},
+            'billing_date': {'required': False, 'allow_null': True},
+            'payment_terms': {'required': False, 'allow_null': True},
+            'discount_amount': {'required': False, 'allow_null': True},
+            'service_connection': {'required': False, 'allow_null': True},
+            'plan': {'required': False, 'allow_null': True},
+            'notes': {'required': False, 'allow_blank': True},
+            'internal_notes': {'required': False, 'allow_blank': True},
+            'status': {'required': False},
+        }
     
     def create(self, validated_data):
         items_data = validated_data.pop('items', [])
+        
+        # Auto-set billing_date if not provided
+        from django.utils import timezone
+        if not validated_data.get('billing_date'):
+            validated_data['billing_date'] = timezone.now().date()
+        
         invoice = Invoice.objects.create(**validated_data)
         
+        subtotal = 0
         for item_data in items_data:
+            # Remove 'invoice' key if frontend accidentally sent it
+            item_data.pop('invoice', None)
+            quantity = item_data.get('quantity', 1)
+            unit_price = item_data.get('unit_price', 0)
+            tax_rate = item_data.get('tax_rate', 0)
+            
+            from decimal import Decimal
+            total = Decimal(str(quantity)) * Decimal(str(unit_price))
+            tax_amount = total * Decimal(str(tax_rate)) / 100
+            
+            item_data['total'] = total + tax_amount
+            item_data['tax_amount'] = tax_amount
+            
             InvoiceItem.objects.create(invoice=invoice, **item_data)
+            subtotal += float(total)
         
         # Calculate totals
-        from ..calculators.invoice_calculator import InvoiceCalculator
-        totals = InvoiceCalculator.calculate_invoice_totals(invoice)
-        
-        invoice.subtotal = totals['subtotal']
-        invoice.tax_amount = totals['tax_amount']
-        invoice.total_amount = totals['total_amount']
-        invoice.balance = totals['total_amount']
+        from decimal import Decimal
+        discount = Decimal(str(validated_data.get('discount_amount', 0) or 0))
+        invoice.subtotal = Decimal(str(subtotal))
+        invoice.tax_amount = sum(
+            item.tax_amount for item in invoice.items.all()
+        )
+        invoice.total_amount = invoice.subtotal + invoice.tax_amount - discount
+        invoice.balance = invoice.total_amount
         invoice.save()
         
         return invoice
