@@ -275,7 +275,7 @@ class MpesaC2BWebhookView(APIView):
         # 2. PROCESS INSIDE TENANT SCHEMA
         with schema_context(target_tenant_schema):
             # ============================================================
-            # FIX: Check if already processed by STK callback path
+            # FIX 1: Check if already processed by STK callback path
             # ============================================================
             # Check 1: Payment record already completed
             existing_payment = Payment.objects.filter(
@@ -364,6 +364,28 @@ class MpesaC2BWebhookView(APIView):
                         ).select_related('plan', 'router').first()
                         
                         if hotspot_session:
+                            # ============================================================
+                            # FIX 2: Check if already activated by STK callback
+                            # ============================================================
+                            hotspot_session.refresh_from_db()
+                            if hotspot_session.status in ('active', 'paid'):
+                                logger.info(
+                                    f"HotspotSession {hotspot_session.session_id} already processed via STK, "
+                                    "skipping C2B"
+                                )
+                                # Link the existing payment if found
+                                existing_payment = Payment.objects.filter(
+                                    hotspot_session=hotspot_session,
+                                    status='COMPLETED'
+                                ).first()
+                                if existing_payment:
+                                    mpesa_txn.payment = existing_payment
+                                    mpesa_txn.save(update_fields=['payment'])
+                                return Response(
+                                    {"ResultCode": 0, "ResultDesc": "Already processed"},
+                                    status=status.HTTP_200_OK
+                                )
+                            
                             logger.info(f"Found HotspotSession {hotspot_session.session_id} for payment")
                             method, _ = InvoiceItemPayment.objects.get_or_create(
                                 method_type='MPESA_PAYBILL', schema_name=target_tenant_schema,

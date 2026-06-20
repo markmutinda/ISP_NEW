@@ -1112,12 +1112,24 @@ class PaymentViewSet(viewsets.ModelViewSet):
                     except Exception as hs_err:
                         logger.warning(f"Could not update hotspot session from Daraja callback: {hs_err}")
                     
-                    # Update the MpesaTransaction
+                    # ============================================================
+                    # FIX: Update MpesaTransaction with idempotency check
+                    # Only call mark_completed if not already COMPLETED
+                    # ============================================================
                     try:
-                        mpesa_transaction.mark_completed(
-                            transaction_id=transaction_data['mpesa_receipt'],
-                            callback_data=callback_data
-                        )
+                        # Refresh from DB to get latest status
+                        mpesa_transaction.refresh_from_db()
+                        if mpesa_transaction.status != 'COMPLETED':
+                            mpesa_transaction.mark_completed(
+                                transaction_id=transaction_data['mpesa_receipt'],
+                                callback_data=callback_data
+                            )
+                            logger.info(f"MpesaTransaction {checkout_request_id} marked COMPLETED")
+                        else:
+                            logger.info(
+                                f"MpesaTransaction {checkout_request_id} already completed "
+                                f"(C2B path), skipping mark_completed"
+                            )
                     except Exception as e:
                         # Already completed by a parallel callback - ignore
                         logger.warning(f"MpesaTransaction already completed: {e}")
