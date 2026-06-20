@@ -67,6 +67,10 @@ class TenantMainMiddleware(MiddlewareMixin):
     - Production: bluenet.netily.co.ke
     - API host:   api.netily.co.ke  → public schema
     - Custom domains: bentrextechnologies.com → tenant lookup via Domain model
+    
+    FIX: Properly distinguishes between "main app domain" and "unresolved tenant subdomain"
+    - Only the main app domain (netily.co.ke, localhost) should fall back to public schema
+    - Unresolved subdomains (unknown.netily.co.ke) should 404/error, NOT fallback to public schema
     This replaces django_tenants.middleware.main.TenantMainMiddleware
     """
 
@@ -117,23 +121,35 @@ class TenantMainMiddleware(MiddlewareMixin):
             request.company = None
             return None
 
-        host = request.get_host().split(':')[0].lower()  # Force lowercase for absolute matching matchers
-        subdomain, _ = self._extract_subdomain(host)
+        host = request.get_host().split(':')[0].lower()
+        subdomain, base_domain = self._extract_subdomain(host)
 
-        # 1. First, attempt standard platform subdomain matching pipelines
+        # ============================================================
+        # FIX 1 (critical): Don't fall back to public schema for 
+        # unresolved tenant subdomains
+        # ============================================================
         if subdomain:
+            # This host LOOKS like a tenant subdomain pattern (sub.netily.co.ke).
+            # If it doesn't resolve to a real tenant, this is NOT a fallback case —
+            # it's an unknown/mistyped tenant and must be rejected, never routed
+            # to the public schema.
             tenant, company = self._resolve_tenant(subdomain, host)
+            if not tenant:
+                connection.set_schema_to_public()
+                request.tenant = None
+                request.company = None
+                request.tenant_not_found = True  # flag for views/middleware downstream
+                return None
         else:
-            # 2. 🚀 FIX: If no platform subdomain is found, look up the domain record index directly
+            # No subdomain pattern detected — could be the main domain (netily.co.ke)
+            # or a custom tenant domain (bentrextechnologies.com). Try Domain lookup;
+            # if nothing matches, this really is the main app domain — safe to use public schema.
             connection.set_schema_to_public()
             try:
                 domain = Domain.objects.select_related('tenant').get(domain=host)
                 tenant = domain.tenant
-                
-                # Check active lifecycle states
                 if tenant and not tenant.is_active:
                     tenant = None
-                    
                 company = None
                 if tenant:
                     try:
@@ -143,14 +159,14 @@ class TenantMainMiddleware(MiddlewareMixin):
             except Domain.DoesNotExist:
                 tenant, company = None, None
 
-        # 3. If a valid custom domain or subdomain tenant matches, switch context schemas
+        # If we found a valid tenant, switch to it
         if tenant:
             connection.set_tenant(tenant)
             request.tenant = tenant
             request.company = company
             return None
 
-        # Main domain / API domain / unknown → fallback safely to public schema container
+        # Genuine main/API domain — public schema is correct here.
         connection.set_schema_to_public()
         request.tenant = None
         request.company = None

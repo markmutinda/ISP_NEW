@@ -168,6 +168,7 @@ class DebugAuthView(APIView):
         logger.debug(f"DebugAuthView: {debug_info}")
         return Response(debug_info)
         
+
 class CustomTokenObtainPairView(TokenObtainPairView):
     """Custom JWT token view with additional user data"""
     serializer_class = CustomTokenObtainPairSerializer
@@ -180,6 +181,16 @@ class CustomTokenObtainPairView(TokenObtainPairView):
 
         if not email or not password:
             return Response({"detail": "Email and password are required."}, status=status.HTTP_400_BAD_REQUEST)
+
+        # ============================================================
+        # FIX: Reject login attempts on a subdomain that didn't resolve 
+        # to a real tenant
+        # ============================================================
+        if getattr(request, "tenant_not_found", False):
+            return Response(
+                {"detail": "No account found for this address. Please check the URL and try again."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
 
         exempt_emails = _platform_admin_emails()
 
@@ -1865,4 +1876,3 @@ class TenantLeadDetailView(APIView):
         lead = get_object_or_404(Lead, pk=pk)
         lead.delete()
         return Response(status=status.HTTP_204_NO_CONTENT)
-
