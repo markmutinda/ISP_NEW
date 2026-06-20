@@ -45,6 +45,9 @@ def track_payment_status_change(sender, instance, **kwargs):
         instance._status_changed = True  # new object
 
 
+# ============================================================
+# FIX 5: handle_payment_completion - Fixed invoice status update
+# ============================================================
 @receiver(post_save, sender=Payment)
 def handle_payment_completion(sender, instance, created, **kwargs):
     """Handle actions when payment is completed"""
@@ -67,19 +70,30 @@ def handle_payment_completion(sender, instance, created, **kwargs):
         )
         customer.save(update_fields=['outstanding_balance', 'updated_at'])
     
+    # ============================================================
+    # FIX 5: Recalculate invoice totals from all completed payments
+    # to avoid drift and correctly set status
+    # ============================================================
     if instance.invoice:
+        from django.db.models import Sum
         invoice = instance.invoice
-        invoice.amount_paid += instance.amount
-        invoice.balance = invoice.total_amount - invoice.amount_paid
+        # Recalculate from all completed payments to avoid drift
+        total_paid = invoice.payments.filter(
+            status='COMPLETED'
+        ).aggregate(s=Sum('amount'))['s'] or 0
         
-        # Track whether invoice just became PAID
+        invoice.amount_paid = total_paid
+        invoice.balance = max(0, invoice.total_amount - invoice.amount_paid)
+        
         was_paid = (invoice.status == 'PAID')
         if invoice.balance <= 0 and not was_paid:
             invoice.status = 'PAID'
             invoice.paid_at = timezone.now()
             invoice.paid_by = instance.created_by
+        elif invoice.amount_paid > 0 and invoice.balance > 0:
+            invoice.status = 'PARTIAL'
         
-        invoice.save()
+        invoice.save(update_fields=['amount_paid', 'balance', 'status', 'paid_at', 'paid_by'])
 
         # If invoice status became PAID due to this payment, restore credentials and send resume SMS
         if invoice.status == 'PAID' and not was_paid and customer:
