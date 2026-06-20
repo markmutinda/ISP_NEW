@@ -947,7 +947,16 @@ class HotspotPurchaseView(APIView):
 
             except Exception as e:
                 err_text = str(e)
-                logger.error(f"STK initiation failed for session {session.session_id}: {err_text}", exc_info=True)
+                
+                # Determine if this is a 403 blacklist error
+                is_403 = "403" in err_text or "blacklisted" in err_text.lower()
+                
+                # Use appropriate log level and suppress traceback for 403s
+                log_fn = logger.warning if is_403 else logger.error
+                log_fn(
+                    f"STK initiation failed for session {session.session_id}: {err_text}",
+                    exc_info=not is_403,  # suppress traceback for known 403s
+                )
 
                 retriable_markers = ["404", "429", "502", "503", "504", "timed out", "connection", "temporar"]
                 is_retriable = any(m in err_text.lower() for m in retriable_markers)

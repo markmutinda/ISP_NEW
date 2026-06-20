@@ -61,7 +61,7 @@ class CustomerInvoicesView(APIView):
             results.append({
                 'id': invoice.id,
                 'invoice_number': invoice.invoice_number,
-                'amount': float(invoice.amount),
+                'amount': float(invoice.total_amount),
                 'amount_paid': float(getattr(invoice, 'amount_paid', 0) or 0),
                 'amount_due': float(getattr(invoice, 'amount_due', invoice.amount) or invoice.amount),
                 'status': invoice.status,

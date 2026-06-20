@@ -292,16 +292,20 @@ class TumaClient:
         # 6. 🟢 FIX: Allow both 200 (OK) and 201 (Created) success codes from Tuma
         if response.status_code not in (200, 201):
             body = response.text[:500]
-            logger.error("TUMA STK-PUSH ERROR (%s): %s", response.status_code, body)
             # Try to parse a human-readable message from the response
             try:
                 err_data = response.json()
                 err_msg = err_data.get("message") or err_data.get("error") or body
             except Exception:
                 err_msg = body
-            raise TumaError(
-                f"Tuma STK push failed (HTTP {response.status_code}): {err_msg}"
-            )
+            
+            # Shorten 403 blacklist error and drop traceback
+            if response.status_code == 403:
+                logger.warning("TUMA STK blocked (403): %s", err_msg)
+            else:
+                logger.error("TUMA STK-PUSH ERROR (%s): %s", response.status_code, body)
+            
+            raise TumaError(f"Tuma STK push failed (HTTP {response.status_code}): {err_msg}")
 
         # 7. Parse successful response
         try:
