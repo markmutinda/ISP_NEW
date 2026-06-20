@@ -7,6 +7,7 @@ All endpoints live under /api/v1/superadmin/
 from django.urls import path
 
 from . import views
+from . import support_views
 
 app_name = "superadmin"
 
@@ -95,4 +96,9 @@ urlpatterns = [
     path("leads/stats/", views.LeadStatsView.as_view(), name="lead-stats"),
     path("leads/<int:pk>/", views.LeadDetailView.as_view(), name="lead-detail"),
     path("tenant-deletion-jobs/<uuid:job_id>/", views.TenantDeletionJobDetailView.as_view(), name="tenant-deletion-job-detail"),
+
+    # Platform support executives
+    path("support-executives/", support_views.SuperadminSupportExecutiveListCreateView.as_view(), name="support-executive-list"),
+    path("support-executives/<int:user_id>/", support_views.SuperadminSupportExecutiveDetailView.as_view(), name="support-executive-detail"),
+    path("support-activity/", support_views.SuperadminSupportActivityListView.as_view(), name="support-activity-list"),
 ]

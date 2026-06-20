@@ -83,6 +83,9 @@ api_urlpatterns = [
 
     # Superadmin (platform-owner) endpoints — PUBLIC schema only
     path('superadmin/', include('apps.superadmin.urls')),
+
+    # Platform support console endpoints (customer support executives)
+    path('support-console/', include('apps.superadmin.support_urls')),
     
     # FUP (Fair Usage Policy) app
     path('fup/', include('apps.fup.urls')),

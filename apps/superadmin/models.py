@@ -87,3 +87,68 @@ class TenantDeletionJob(models.Model):
 
     def __str__(self):
         return f"{self.company_name} ({self.schema_name}) - {self.status}"
+
+
+class SupportExecutiveProfile(models.Model):
+    """Platform-owned support identity attached to a normal User account."""
+
+    user = models.OneToOneField(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="platform_support_profile",
+    )
+    title = models.CharField(max_length=120, blank=True, default="")
+    phone_number = models.CharField(max_length=30, blank=True, default="")
+    can_register_tenants = models.BooleanField(default=True)
+    can_manage_leads = models.BooleanField(default=True)
+    can_view_tenants = models.BooleanField(default=True)
+    is_active = models.BooleanField(default=True)
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="created_support_executives",
+    )
+    last_seen_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["user__first_name", "user__email"]
+        indexes = [
+            models.Index(fields=["is_active", "created_at"], name="sadm_support_active_idx"),
+        ]
+
+    def __str__(self):
+        return self.user.email or str(self.user_id)
+
+
+class SupportActivityLog(models.Model):
+    """Simple immutable trail for platform support work."""
+
+    support_user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="platform_support_activity",
+    )
+    action = models.CharField(max_length=80)
+    area = models.CharField(max_length=80, blank=True, default="")
+    summary = models.CharField(max_length=255)
+    metadata = models.JSONField(default=dict, blank=True)
+    ip_address = models.GenericIPAddressField(null=True, blank=True)
+    user_agent = models.TextField(blank=True, default="")
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        indexes = [
+            models.Index(fields=["support_user", "created_at"], name="sadm_sact_user_created_idx"),
+            models.Index(fields=["action", "created_at"], name="sadm_sact_action_created_idx"),
+        ]
+
+    def __str__(self):
+        actor = getattr(self.support_user, "email", None) or "system"
+        return f"{actor}: {self.action}"

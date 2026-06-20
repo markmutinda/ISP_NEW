@@ -12,6 +12,7 @@ from decimal import Decimal
 
 from apps.core.models import Tenant, Company, Domain, User
 from apps.subscriptions.models import BillingCycle, CompanySubscription, TenantUserLedger
+from apps.superadmin.models import SupportActivityLog, SupportExecutiveProfile
 
 
 # ──────────────────────────────────────────
@@ -40,6 +41,48 @@ class TenantUserLedgerSerializer(serializers.ModelSerializer):
 
     def get_tenant_subdomain(self, obj):
         return getattr(getattr(obj, "tenant", None), "schema_name", "")
+
+
+# ─────────────────────────────────────────────────────────────
+# PLATFORM SUPPORT EXECUTIVES
+# ─────────────────────────────────────────────────────────────
+
+class SupportExecutiveSerializer(serializers.ModelSerializer):
+    id = serializers.IntegerField(source="user.id", read_only=True)
+    email = serializers.EmailField(source="user.email", read_only=True)
+    first_name = serializers.CharField(source="user.first_name", read_only=True)
+    last_name = serializers.CharField(source="user.last_name", read_only=True)
+    role = serializers.CharField(source="user.role", read_only=True)
+    user_is_active = serializers.BooleanField(source="user.is_active", read_only=True)
+    created_by_email = serializers.EmailField(source="created_by.email", read_only=True, allow_null=True)
+
+    class Meta:
+        model = SupportExecutiveProfile
+        fields = [
+            "id", "email", "first_name", "last_name", "role", "user_is_active",
+            "title", "phone_number", "can_register_tenants", "can_manage_leads",
+            "can_view_tenants", "is_active", "last_seen_at", "created_by_email",
+            "created_at", "updated_at",
+        ]
+
+
+class SupportActivityLogSerializer(serializers.ModelSerializer):
+    support_email = serializers.EmailField(source="support_user.email", read_only=True, allow_null=True)
+    support_name = serializers.SerializerMethodField()
+
+    class Meta:
+        model = SupportActivityLog
+        fields = [
+            "id", "support_user", "support_email", "support_name", "action",
+            "area", "summary", "metadata", "ip_address", "user_agent", "created_at",
+        ]
+        read_only_fields = fields
+
+    def get_support_name(self, obj):
+        user = getattr(obj, "support_user", None)
+        if not user:
+            return "System"
+        return (f"{user.first_name} {user.last_name}".strip() or user.email or "Support")
 
 
 # ──────────────────────────────────────────
