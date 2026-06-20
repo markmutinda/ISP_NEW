@@ -19,8 +19,8 @@ from apps.subscriptions.models import BillingCycle, CompanySubscription, TenantU
 # ──────────────────────────────────────────
 
 class TenantUserLedgerSerializer(serializers.ModelSerializer):
-    tenant_name = serializers.CharField(source='tenant.company.name', read_only=True)
-    tenant_subdomain = serializers.CharField(source='tenant.schema_name', read_only=True)
+    tenant_name = serializers.SerializerMethodField()
+    tenant_subdomain = serializers.SerializerMethodField()
 
     class Meta:
         model = TenantUserLedger
@@ -33,6 +33,13 @@ class TenantUserLedgerSerializer(serializers.ModelSerializer):
             'created_at',
         ]
         read_only_fields = fields
+
+    def get_tenant_name(self, obj):
+        company = getattr(getattr(obj, "tenant", None), "company", None)
+        return getattr(company, "name", None) or getattr(getattr(obj, "tenant", None), "schema_name", "")
+
+    def get_tenant_subdomain(self, obj):
+        return getattr(getattr(obj, "tenant", None), "schema_name", "")
 
 
 # ──────────────────────────────────────────

@@ -1,8 +1,10 @@
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
+from rest_framework import status
 from ..permissions import CustomerOnlyPermission
 from apps.customers.models import CustomerAddress
+from apps.core.models import User
 
 class CustomerProfileView(APIView):
     """
@@ -48,7 +50,13 @@ class CustomerProfileView(APIView):
         if 'last_name' in data:
             user.last_name = data['last_name']
         if 'email' in data:
-            user.email = data['email']
+            email = str(data['email'] or '').strip().lower()
+            if email and User.objects.exclude(pk=user.pk).filter(email__iexact=email).exists():
+                return Response(
+                    {'email': 'This email is already in use by another account.'},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            user.email = email
         user.save()
 
         # 2. Update or Create Address

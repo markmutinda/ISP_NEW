@@ -2655,8 +2655,12 @@ class TenantUserLedgerListView(APIView):
         search = request.query_params.get("search", "")
         date_from = request.query_params.get("date_from")
         date_to = request.query_params.get("date_to")
-        page = int(request.query_params.get("page", 1))
-        page_size = int(request.query_params.get("page_size", PAGE_SIZE))
+        try:
+            page = max(int(request.query_params.get("page", 1)), 1)
+            page_size = max(min(int(request.query_params.get("page_size", PAGE_SIZE)), 200), 1)
+        except (TypeError, ValueError):
+            page = 1
+            page_size = PAGE_SIZE
 
         qs = TenantUserLedger.objects.select_related(
             "tenant", "tenant__company",
@@ -2685,35 +2689,43 @@ class TenantUserLedgerListView(APIView):
         start = (page - 1) * page_size
         entries = qs[start:start + page_size]
 
-        metered_subscriptions = CompanySubscription.objects.filter(
-            status__in=['active', 'trialing'],
-            plan__is_metered=True,
-            company__tenant__isnull=False,
-        ).select_related("company__tenant", "plan")
-        if tenant_id:
-            metered_subscriptions = metered_subscriptions.filter(company__tenant__id=tenant_id)
-
-        for subscription in metered_subscriptions:
-            tenant = subscription.company.tenant
-            BillingCycle.objects.get_or_create(
-                tenant=tenant,
-                subscription=subscription,
-                status='active',
-                defaults={
-                    "start_date": subscription.current_period_start or timezone.now(),
-                    "end_date": subscription.current_period_end or (timezone.now() + timedelta(days=30)),
-                },
-            )
-
-        active_cycles = BillingCycle.objects.filter(status='active').select_related(
-            "tenant", "tenant__company", "subscription__plan"
-        )
-        if tenant_id:
-            active_cycles = active_cycles.filter(tenant_id=tenant_id)
-
         hotspot_revenue_total = Decimal("0.00")
         hotspot_share_total = Decimal("0.00")
         hotspot_tenants = []
+        active_cycle_count = 0
+
+        try:
+            metered_subscriptions = CompanySubscription.objects.filter(
+                status__in=['active', 'trialing'],
+                plan__is_metered=True,
+                company__tenant__isnull=False,
+            ).select_related("company__tenant", "plan")
+            if tenant_id:
+                metered_subscriptions = metered_subscriptions.filter(company__tenant__id=tenant_id)
+
+            for subscription in metered_subscriptions:
+                tenant = getattr(subscription.company, "tenant", None)
+                if not tenant:
+                    continue
+                BillingCycle.objects.get_or_create(
+                    tenant=tenant,
+                    subscription=subscription,
+                    status='active',
+                    defaults={
+                        "start_date": subscription.current_period_start or timezone.now(),
+                        "end_date": subscription.current_period_end or (timezone.now() + timedelta(days=30)),
+                    },
+                )
+
+            active_cycles = BillingCycle.objects.filter(status='active').select_related(
+                "tenant", "tenant__company", "subscription__plan"
+            )
+            if tenant_id:
+                active_cycles = active_cycles.filter(tenant_id=tenant_id)
+            active_cycle_count = active_cycles.count()
+        except Exception as exc:
+            logger.warning("User ledger billing-cycle summary setup failed: %s", exc)
+            active_cycles = BillingCycle.objects.none()
 
         for cycle in active_cycles:
             try:
@@ -2762,7 +2774,7 @@ class TenantUserLedgerListView(APIView):
             "page": page,
             "page_size": page_size,
             "summary": {
-                "active_cycle_count": active_cycles.count(),
+                "active_cycle_count": active_cycle_count,
                 "hotspot_revenue_total": str(hotspot_revenue_total),
                 "hotspot_share_total": str(hotspot_share_total),
                 "hotspot_tenants": hotspot_tenants,
