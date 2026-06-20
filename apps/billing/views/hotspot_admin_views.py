@@ -692,23 +692,40 @@ class HotspotSessionExtendView(APIView):
         session.expires_at = new_expiry
         session.save(update_fields=['expires_at', 'updated_at'])
         
-        # Update RADIUS credentials with new expiry
+        # ============================================================
+        # FIX: Update RADIUS credentials with correct Session-Timeout
+        # The extend_session method now calculates remaining seconds
+        # from new_expires_at instead of using additional_minutes
+        # ============================================================
         try:
             radius_service = HotspotRadiusService()
+            
+            # Calculate the number of minutes added (for logging only)
+            added_minutes = int((new_expiry - base_time).total_seconds() / 60)
+            
+            # Call extend_session - it will calculate Session-Timeout
+            # correctly from new_expires_at
             radius_service.extend_session(
                 username=session.access_code,
-                additional_minutes=int((new_expiry - now).total_seconds() / 60),
+                additional_minutes=added_minutes,  # Used as fallback only
                 new_expires_at=new_expiry,
             )
+            
             logger.info(
                 f"Session {session.session_id} extended from {old_expiry} to {new_expiry} "
-                f"by {request.user.username}"
+                f"by {request.user.username} (added {added_minutes} minutes)"
             )
         except Exception as e:
-            # Non-fatal: session expiry updated in DB, RADIUS will catch up on next reauth
+            # ============================================================
+            # FIX: Even if RADIUS extension fails, the session expiry is
+            # already updated in DB. The user will get the new expiry on
+            # next re-authentication. Log but don't fail the request.
+            # ============================================================
             logger.warning(
-                f"RADIUS extension failed for session {session.session_id} (non-fatal): {e}"
+                f"RADIUS extension failed for session {session.session_id} "
+                f"(session expiry already updated in DB): {e}"
             )
+            # Not raising an exception - the DB update is what matters most
         
         # Calculate human-readable extension display
         extension_display = ""

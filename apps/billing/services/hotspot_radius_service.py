@@ -95,9 +95,39 @@ class HotspotRadiusService:
                 except (ValueError, TypeError):
                     logger.warning(f"Invalid speed limit for plan {plan.name}: {plan.speed_limit_mbps}")
             
-            # Session timeout (duration in seconds)
-            if plan.duration_minutes:
-                reply_attributes['Session-Timeout'] = str(plan.duration_minutes * 60)
+            # ============================================================
+            # FIX: Session-Timeout should reflect ACTUAL remaining time
+            # from expires_at, not the plan's fixed duration.
+            # 
+            # OLD (broken):
+            # if plan.duration_minutes:
+            #     reply_attributes['Session-Timeout'] = str(plan.duration_minutes * 60)
+            #
+            # NEW (fixed): Calculate remaining seconds from expires_at
+            # ============================================================
+            if expires_at and expires_at > timezone.now():
+                remaining_seconds = int((expires_at - timezone.now()).total_seconds())
+                # Safety: Don't set Session-Timeout to 0 or negative
+                if remaining_seconds > 0:
+                    reply_attributes['Session-Timeout'] = str(remaining_seconds)
+                    logger.debug(
+                        f"Session-Timeout set to {remaining_seconds}s "
+                        f"(expires_at={expires_at}, now={timezone.now()})"
+                    )
+                else:
+                    logger.warning(
+                        f"Session-Timeout would be <= 0 ({remaining_seconds}s) "
+                        f"for {username} — skipping to prevent instant disconnect"
+                    )
+            elif plan.duration_minutes:
+                # Fallback only if expires_at is not available
+                fallback_seconds = plan.duration_minutes * 60
+                reply_attributes['Session-Timeout'] = str(fallback_seconds)
+                logger.warning(
+                    f"No valid expires_at for {username}, using plan fallback: "
+                    f"{fallback_seconds}s (may not match actual subscription)"
+                )
+            # ============================================================
             
             # Data limit (if applicable)
             # FIX: Force conversion here too
@@ -224,9 +254,27 @@ class HotspotRadiusService:
         try:
             self.sync_service.set_user_expiration(username, new_expires_at)
             
-            # Also update Session-Timeout
-            new_timeout = str(additional_minutes * 60)
-            self._update_reply_attribute(username, 'Session-Timeout', new_timeout)
+            # ============================================================
+            # FIX: Also update Session-Timeout to reflect new remaining time
+            # ============================================================
+            if new_expires_at and new_expires_at > timezone.now():
+                new_timeout = int((new_expires_at - timezone.now()).total_seconds())
+                if new_timeout > 0:
+                    self._update_reply_attribute(username, 'Session-Timeout', str(new_timeout))
+                    logger.debug(f"Session-Timeout updated to {new_timeout}s for {username}")
+                else:
+                    logger.warning(
+                        f"Session-Timeout would be <= 0 ({new_timeout}s) for {username} "
+                        f"— using fallback additional_minutes={additional_minutes}"
+                    )
+                    # Fallback to the additional minutes
+                    fallback_timeout = additional_minutes * 60
+                    self._update_reply_attribute(username, 'Session-Timeout', str(fallback_timeout))
+            else:
+                # Fallback: use additional_minutes
+                new_timeout = str(additional_minutes * 60)
+                self._update_reply_attribute(username, 'Session-Timeout', new_timeout)
+            # ============================================================
             
             logger.info(
                 f"Hotspot session extended: user={username} "
