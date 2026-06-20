@@ -5,7 +5,8 @@ import json
 import logging
 from decimal import Decimal
 from django.conf import settings
-from django.db import transaction, connection
+from django.core.cache import cache  # ← ADDED: For cross-process locking
+from django.db import transaction, connection, IntegrityError  # ← ADDED: IntegrityError
 from django.utils import timezone
 from django.views.decorators.csrf import csrf_exempt
 from rest_framework import viewsets, status, filters
@@ -1014,136 +1015,165 @@ class PaymentViewSet(viewsets.ModelViewSet):
                     
                     transaction_data = result['transaction_data']
                     
-                    # Update payment with M-Pesa details
-                    payment.mpesa_receipt = transaction_data['mpesa_receipt']
-                    payment.mpesa_phone = transaction_data['phone_number']
-                    payment.transaction_id = transaction_data['mpesa_receipt']
-                    payment.payment_date = timezone.now()
-                    payment.mark_as_completed()
-
-                    # ============================================================
-                    # FIX: PPPoE Subscription Renewal (Customer Portal STK payments)
-                    # Added per Claude's instruction - handles PPPoE renewal for
-                    # customer-portal-initiated STK payments
-                    # ============================================================
-                    if payment.customer and not getattr(payment, 'hotspot_session', None):
-                        try:
-                            from apps.radius.models import CustomerRadiusCredentials
-                            from django.utils import timezone as _tz
-                            
-                            creds = CustomerRadiusCredentials.objects.filter(
-                                customer=payment.customer
-                            ).first()
-                            
-                            service = payment.customer.services.filter(
-                                status__in=['ACTIVE', 'SUSPENDED'],
-                                plan__isnull=False
-                            ).first()
-                            
-                            if creds and service and service.plan:
-                                plan = service.plan
-                                now = _tz.now()
-                                validity_delta = plan.get_validity_timedelta()
-                                
-                                if validity_delta is None:
-                                    new_expiry = None
-                                else:
-                                    current_expiry = creds.expiration_date
-                                    if current_expiry and current_expiry > now:
-                                        new_expiry = current_expiry + validity_delta
-                                    else:
-                                        new_expiry = now + validity_delta
-                                
-                                creds.expiration_date = new_expiry
-                                creds.is_enabled = True
-                                creds.subscription_activated_at = now
-                                creds.save(update_fields=['expiration_date', 'is_enabled', 'subscription_activated_at'])
-                                creds.sync_to_radius()
-                                
-                                if service.status == 'SUSPENDED':
-                                    service.status = 'ACTIVE'
-                                    service.save(update_fields=['status'])
-                                
-                                try:
-                                    from apps.messaging.services.notification_sender import SMSNotifier
-                                    SMSNotifier.pppoe_renewal(
-                                        customer=payment.customer,
-                                        plan_name=plan.name,
-                                        expires_at=new_expiry,
-                                        reference=payment.mpesa_receipt or '',
-                                        schema_name=connection.schema_name,
-                                    )
-                                except Exception as sms_err:
-                                    logger.warning(f"Renewal SMS failed: {sms_err}")
-                                
-                                try:
-                                    from apps.radius.services.coa_service import CoAService
-                                    coa = CoAService()
-                                    router_ip = (
-                                        creds.router.vpn_ip_address or creds.router.ip_address
-                                        if creds.router else None
-                                    )
-                                    if router_ip:
-                                        coa.disconnect_user(username=creds.username, nas_ip_address=router_ip)
-                                except Exception:
-                                    pass
-                                
-                                logger.info(f"PPPoE renewed via STK for {payment.customer.customer_code}, new expiry: {new_expiry}")
-                        except Exception as pppoe_err:
-                            logger.error(f"PPPoE renewal failed for payment {payment.payment_number}: {pppoe_err}")
-
-                    # ============================================================
-                    # FIX: Propagate completion to linked HotspotSession (Daraja hotspot flow)
-                    # ============================================================
-                    try:
-                        from apps.billing.models.hotspot_models import HotspotSession
-                        hotspot_session = (
-                            HotspotSession.objects
-                            .filter(payment=payment, status='pending')
-                            .select_related('plan', 'router')
-                            .first()
+                    # ── NEW: Get receipt before doing any work ──
+                    mpesa_receipt = transaction_data.get('mpesa_receipt')
+                    
+                    # ── NEW: cross-process lock ──
+                    lock_key = f"mpesa_receipt_lock:{mpesa_receipt}" if mpesa_receipt else None
+                    if lock_key and not cache.add(lock_key, "1", timeout=25):
+                        logger.info(
+                            f"STK callback: receipt {mpesa_receipt} already being processed "
+                            "(likely the matching C2B confirmation), skipping duplicate"
                         )
-                        if hotspot_session:
-                            hotspot_session.mark_paid(payment.mpesa_receipt or '')
-                            logger.info(
-                                f"HotspotSession {hotspot_session.session_id} marked paid "
-                                f"via Daraja callback (receipt={payment.mpesa_receipt})"
-                            )
-                    except Exception as hs_err:
-                        logger.warning(f"Could not update hotspot session from Daraja callback: {hs_err}")
+                        return Response({'ResultCode': 0, 'ResultDesc': 'Already processing'})
                     
-                    # ============================================================
-                    # FIX: Update MpesaTransaction with idempotency check
-                    # Only call mark_completed if not already COMPLETED
-                    # ============================================================
                     try:
-                        # Refresh from DB to get latest status
-                        mpesa_transaction.refresh_from_db()
-                        if mpesa_transaction.status != 'COMPLETED':
-                            mpesa_transaction.mark_completed(
-                                transaction_id=transaction_data['mpesa_receipt'],
-                                callback_data=callback_data
+                        # ── NEW: Belt-and-braces check before touching Payment ──
+                        # Guard against a C2B-created MpesaTransaction already
+                        # owning this receipt before we touch the Payment at all
+                        if mpesa_receipt and MpesaTransaction.objects.filter(
+                            transaction_id=mpesa_receipt
+                        ).exclude(pk=mpesa_transaction.pk).exists():
+                            logger.warning(
+                                f"Receipt {mpesa_receipt} already recorded by another "
+                                f"MpesaTransaction (C2B race) — skipping STK duplicate processing"
                             )
-                            logger.info(f"MpesaTransaction {checkout_request_id} marked COMPLETED")
-                        else:
-                            logger.info(
-                                f"MpesaTransaction {checkout_request_id} already completed "
-                                f"(C2B path), skipping mark_completed"
+                            return Response({'ResultCode': 0, 'ResultDesc': 'Already processed via C2B'})
+                        
+                        # Update payment with M-Pesa details
+                        payment.mpesa_receipt = mpesa_receipt
+                        payment.mpesa_phone = transaction_data['phone_number']
+                        payment.transaction_id = mpesa_receipt
+                        payment.payment_date = timezone.now()
+                        payment.mark_as_completed()
+
+                        # ============================================================
+                        # FIX: PPPoE Subscription Renewal (Customer Portal STK payments)
+                        # Added per Claude's instruction - handles PPPoE renewal for
+                        # customer-portal-initiated STK payments
+                        # ============================================================
+                        if payment.customer and not getattr(payment, 'hotspot_session', None):
+                            try:
+                                from apps.radius.models import CustomerRadiusCredentials
+                                from django.utils import timezone as _tz
+                                
+                                creds = CustomerRadiusCredentials.objects.filter(
+                                    customer=payment.customer
+                                ).first()
+                                
+                                service = payment.customer.services.filter(
+                                    status__in=['ACTIVE', 'SUSPENDED'],
+                                    plan__isnull=False
+                                ).first()
+                                
+                                if creds and service and service.plan:
+                                    plan = service.plan
+                                    now = _tz.now()
+                                    validity_delta = plan.get_validity_timedelta()
+                                    
+                                    if validity_delta is None:
+                                        new_expiry = None
+                                    else:
+                                        current_expiry = creds.expiration_date
+                                        if current_expiry and current_expiry > now:
+                                            new_expiry = current_expiry + validity_delta
+                                        else:
+                                            new_expiry = now + validity_delta
+                                    
+                                    creds.expiration_date = new_expiry
+                                    creds.is_enabled = True
+                                    creds.subscription_activated_at = now
+                                    creds.save(update_fields=['expiration_date', 'is_enabled', 'subscription_activated_at'])
+                                    creds.sync_to_radius()
+                                    
+                                    if service.status == 'SUSPENDED':
+                                        service.status = 'ACTIVE'
+                                        service.save(update_fields=['status'])
+                                    
+                                    try:
+                                        from apps.messaging.services.notification_sender import SMSNotifier
+                                        SMSNotifier.pppoe_renewal(
+                                            customer=payment.customer,
+                                            plan_name=plan.name,
+                                            expires_at=new_expiry,
+                                            reference=payment.mpesa_receipt or '',
+                                            schema_name=connection.schema_name,
+                                        )
+                                    except Exception as sms_err:
+                                        logger.warning(f"Renewal SMS failed: {sms_err}")
+                                    
+                                    try:
+                                        from apps.radius.services.coa_service import CoAService
+                                        coa = CoAService()
+                                        router_ip = (
+                                            creds.router.vpn_ip_address or creds.router.ip_address
+                                            if creds.router else None
+                                        )
+                                        if router_ip:
+                                            coa.disconnect_user(username=creds.username, nas_ip_address=router_ip)
+                                    except Exception:
+                                        pass
+                                    
+                                    logger.info(f"PPPoE renewed via STK for {payment.customer.customer_code}, new expiry: {new_expiry}")
+                            except Exception as pppoe_err:
+                                logger.error(f"PPPoE renewal failed for payment {payment.payment_number}: {pppoe_err}")
+
+                        # ============================================================
+                        # FIX: Propagate completion to linked HotspotSession (Daraja hotspot flow)
+                        # ============================================================
+                        try:
+                            from apps.billing.models.hotspot_models import HotspotSession
+                            hotspot_session = (
+                                HotspotSession.objects
+                                .filter(payment=payment, status='pending')
+                                .select_related('plan', 'router')
+                                .first()
                             )
-                    except Exception as e:
-                        # Already completed by a parallel callback - ignore
-                        logger.warning(f"MpesaTransaction already completed: {e}")
-                    
-                    # SMS BLOCK REMOVED - Dead code cleanup. Real SMS already sent via:
-                    # - SMSNotifier.pppoe_renewal() for PPPoE payments (above)
-                    # - hotspot_session.mark_paid() for hotspot payments (above)
-                    
-                    return Response({
-                        'ResultCode': 0,
-                        'ResultDesc': 'Success',
-                        'payment_id': payment.id,
-                        'receipt_number': payment.mpesa_receipt
-                    })
+                            if hotspot_session:
+                                hotspot_session.mark_paid(payment.mpesa_receipt or '')
+                                logger.info(
+                                    f"HotspotSession {hotspot_session.session_id} marked paid "
+                                    f"via Daraja callback (receipt={payment.mpesa_receipt})"
+                                )
+                        except Exception as hs_err:
+                            logger.warning(f"Could not update hotspot session from Daraja callback: {hs_err}")
+                        
+                        # ============================================================
+                        # FIX: Update MpesaTransaction with idempotency check
+                        # Only call mark_completed if not already COMPLETED
+                        # ============================================================
+                        try:
+                            # Refresh from DB to get latest status
+                            mpesa_transaction.refresh_from_db()
+                            if mpesa_transaction.status != 'COMPLETED':
+                                mpesa_transaction.mark_completed(
+                                    transaction_id=mpesa_receipt,
+                                    callback_data=callback_data
+                                )
+                                logger.info(f"MpesaTransaction {checkout_request_id} marked COMPLETED")
+                            else:
+                                logger.info(
+                                    f"MpesaTransaction {checkout_request_id} already completed "
+                                    f"(C2B path), skipping mark_completed"
+                                )
+                        except Exception as e:
+                            # Already completed by a parallel callback - ignore
+                            logger.warning(f"MpesaTransaction already completed: {e}")
+                        
+                        # SMS BLOCK REMOVED - Dead code cleanup. Real SMS already sent via:
+                        # - SMSNotifier.pppoe_renewal() for PPPoE payments (above)
+                        # - hotspot_session.mark_paid() for hotspot payments (above)
+                        
+                        return Response({
+                            'ResultCode': 0,
+                            'ResultDesc': 'Success',
+                            'payment_id': payment.id,
+                            'receipt_number': payment.mpesa_receipt
+                        })
+                    finally:
+                        # ── NEW: Always release the lock ──
+                        if lock_key:
+                            cache.delete(lock_key)
                 else:
                     logger.warning(f"No payment linked to transaction {checkout_request_id}")
                     
