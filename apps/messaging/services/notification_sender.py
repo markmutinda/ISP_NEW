@@ -664,117 +664,82 @@ class SMSNotifier:
     # ─────────────────────────────────────────────────────────────────
 
     @staticmethod
-    def hotspot_new_subscription(session, schema_name: str = None) -> bool:
-        s = _get_notif_settings()
-        if s and not s.hotspot_new_subscription:
-            return False
-        phone = _fmt_phone(session.phone_number)
-        if not phone:
-            return False
-        plan = session.plan
-        default_msg = (
-            f"Hi! Your {plan.name if plan else ''} plan purchase is confirmed. "
-            f"Access code: {session.access_code or ''}. Enjoy your browsing!"
-        )
-        msg = _get_rendered_message(
-            'hotspot_new_subscription', default_msg,
-            plan_name=plan.name if plan else '',
-            access_code=session.access_code or '',
-            amount=getattr(session, 'amount', ''),
-            session_id=getattr(session, 'session_id', ''),
-        )
-        return _send_once(f"hs_new:{session.session_id}", phone, msg, ttl=3600,
-                          schema_name=schema_name)
-
-    @staticmethod
     def hotspot_welcome(session, schema_name: str = None) -> bool:
+        """Welcome SMS when a hotspot session activates."""
         s = _get_notif_settings()
         if s and not s.hotspot_welcome:
             return False
         phone = _fmt_phone(session.phone_number)
         if not phone:
             return False
-        plan = session.plan
-        expires = ""
-        expiry_time = "N/A"
-        if session.expires_at:
-            from django.utils import timezone
-            local_tz = timezone.get_current_timezone()
-            expires = session.expires_at.astimezone(local_tz).strftime("%H:%M")
-            expires = f" Expires at {expires}"
-            expiry_time = session.expires_at.astimezone(local_tz).strftime("%d %b %Y %H:%M")
-        default_msg = (
-            f"WiFi Active! Code: {session.access_code or ''}. "
-            f"Plan: {plan.name if plan else ''}{expires}. Enjoy!"
-        )
-        msg = _get_rendered_message(
-            'hotspot_welcome', default_msg,
-            access_code=session.access_code or '',
-            plan_name=plan.name if plan else '',
-            duration=plan.duration_display if hasattr(plan, 'duration_display') else '',
-            expires=expires or '',
-            expiry_time=expiry_time,
-            speed=plan.speed_display if hasattr(plan, 'speed_display') else '',
-        )
-        return _send_once(f"hs_welcome:{session.session_id}", phone, msg, ttl=3600,
-                          schema_name=schema_name)
 
-    @staticmethod
-    def hotspot_expiry_warning(session, schema_name: str = None) -> bool:
-        s = _get_notif_settings()
-        if s and not s.hotspot_session_expiry:
-            return False
-        phone = _fmt_phone(session.phone_number)
-        if not phone:
-            return False
-        from django.utils import timezone
-        mins = max(0, int((session.expires_at - timezone.now()).total_seconds() / 60)) \
-            if session.expires_at else 0
+        plan = session.plan
+
+        # Build expiry string
+        expiry_time = 'N/A'
+        if session.expires_at:
+            from django.utils import timezone as _tz
+            local_tz = _tz.get_current_timezone()
+            expiry_time = session.expires_at.astimezone(local_tz).strftime('%d %b %Y %H:%M')
+
+        duration = plan.duration_display if plan and hasattr(plan, 'duration_display') else ''
+        speed = plan.speed_display if plan and hasattr(plan, 'speed_display') else (
+            f"{plan.speed_limit_mbps} Mbps" if plan else ''
+        )
+        plan_name = plan.name if plan else ''
+        access_code = session.access_code or ''
+
         default_msg = (
-            f"Your {session.plan.name if session.plan else ''} hotspot session expires in {mins} minutes. "
-            f"Renew to stay connected! Code: {session.access_code or ''}"
+            f"WiFi Active! Code: {access_code}. "
+            f"Plan: {plan_name} ({duration}). "
+            f"Expires: {expiry_time}. Speed: {speed}. Enjoy!"
         )
         msg = _get_rendered_message(
-            'hotspot_expiry_warning', default_msg,
-            plan_name=session.plan.name if session.plan else '',
-            minutes_left=mins,
-            access_code=session.access_code or '',
+            'hotspot_welcome',
+            default_msg,
+            access_code=access_code,
+            plan_name=plan_name,
+            duration=duration,
+            expiry_time=expiry_time,
+            speed=speed,
         )
-        return _send_once(f"hotspot_expiry:{session.session_id}", phone, msg, ttl=600,
-                          schema_name=schema_name)
+        return _send_once(
+            f"hs_welcome:{session.session_id}",
+            phone, msg, ttl=3600,
+            schema_name=schema_name,
+        )
 
     @staticmethod
     def hotspot_session_expired(session, schema_name: str = None) -> bool:
+        """Notify when hotspot session has fully expired."""
         s = _get_notif_settings()
         if s and not s.hotspot_session_expired:
             return False
         phone = _fmt_phone(session.phone_number)
         if not phone:
             return False
-        default_msg = f"Your {session.plan.name if session.plan else ''} session has expired. Buy a new plan to reconnect!"
-        msg = _get_rendered_message(
-            'hotspot_session_expired', default_msg,
-            plan_name=session.plan.name if session.plan else '',
-        )
-        return _send_once(f"hs_expired:{session.session_id}", phone, msg, ttl=3600,
-                          schema_name=schema_name)
 
-    @staticmethod
-    def hotspot_payment_failed(session, reason: str = "", schema_name: str = None) -> bool:
-        s = _get_notif_settings()
-        if s and not s.hotspot_payment_failed:
-            return False
-        phone = _fmt_phone(session.phone_number)
-        if not phone:
-            return False
-        default_msg = f"Payment for {session.plan.name if session.plan else ''} failed. {reason} Please try again."
-        msg = _get_rendered_message(
-            'hotspot_payment_failed', default_msg,
-            plan_name=session.plan.name if session.plan else '',
-            reason=reason or '',
+        plan_name = session.plan.name if session.plan else ''
+
+        default_msg = (
+            f"Your WiFi session has ended. "
+            f"Visit the portal to buy a new plan and reconnect. Thank you!"
         )
-        return _send_once(f"hs_payfail:{session.session_id}", phone, msg, ttl=3600,
-                          schema_name=schema_name)
+        msg = _get_rendered_message(
+            'hotspot_session_expired',
+            default_msg,
+            plan_name=plan_name,
+        )
+        return _send_once(
+            f"hs_expired:{session.session_id}",
+            phone, msg, ttl=3600,
+            schema_name=schema_name,
+        )
+
+    # REMOVED METHODS:
+    # - hotspot_new_subscription
+    # - hotspot_expiry_warning
+    # - hotspot_payment_failed
 
     # ─────────────────────────────────────────────────────────────────
     # VOUCHERS

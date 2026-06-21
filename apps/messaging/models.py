@@ -306,16 +306,8 @@ class SMSNotificationSettings(models.Model):
     )
 
     # ── HOTSPOT NOTIFICATIONS ─────────────────────────────────────────────
-    hotspot_new_subscription = models.BooleanField(default=False,
-        help_text="SMS when a hotspot user makes a new purchase")
     hotspot_welcome = models.BooleanField(default=False,
         help_text="Welcome SMS when a hotspot session activates")
-    hotspot_session_expiry = models.BooleanField(default=False,
-        help_text="Notify hotspot user when their session is about to expire")
-    hotspot_expiry_minutes_before = models.PositiveIntegerField(default=15,
-        help_text="How many minutes before expiry to send the hotspot reminder")
-    hotspot_payment_failed = models.BooleanField(default=False,
-        help_text="Notify when hotspot STK push payment fails")
     hotspot_session_expired = models.BooleanField(default=False,
         help_text="Notify when hotspot session has fully expired")
 
