@@ -532,8 +532,10 @@ class Router(AuditMixin):
                 raise RuntimeError("System busy allocating backend routing ports, please retry in a second.")
 
             try:
-                # Re-check inside lock context — another thread may have just populated fields
-                if not self.winbox_remote_port or not self.api_remote_port:
+                # 🟢 FIXED: Inner guard now catches the default 40001/50001 fallbacks too!
+                if (not self.winbox_remote_port or not self.api_remote_port or 
+                    int(self.winbox_remote_port) == 40001 or int(self.api_remote_port) == 50001):
+                    
                     highest_winbox = 40000
                     highest_api = 50000
                     
