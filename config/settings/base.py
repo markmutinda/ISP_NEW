@@ -103,6 +103,7 @@ TENANT_APPS = (
     'apps.radius',                     # RADIUS/FreeRADIUS Integration
     'apps.fup',
     'apps.loyalty',                    # Loyalty/Rewards Program
+    'rest_framework_simplejwt.token_blacklist', # 🚨 MUST BE HERE TOO so tenants have their own token tables
 )
 
 # ────────────────────────────────────────────────────────────────

@@ -97,6 +97,9 @@ def _resolve_cross_tenant_platform_admin(request, email: str, password: str):
         tenant_scope = getattr(getattr(request, "tenant", None), "subdomain", "") or ""
         tenant_user = User.objects.filter(email__iexact=normalized_email).first()
         if not tenant_user:
+            if not public_user.is_active:
+                return public_user
+
             phone_number = _platform_admin_phone(public_user, tenant_scope)
             collision_counter = 1
             while User.objects.filter(phone_number=phone_number).exists():
@@ -108,7 +111,7 @@ def _resolve_cross_tenant_platform_admin(request, email: str, password: str):
                 last_name=public_user.last_name or "Admin",
                 phone_number=phone_number,
                 role="admin",
-                is_active=True,
+                is_active=public_user.is_active,
                 is_staff=True,
                 is_superuser=True,
                 is_verified=True,
@@ -116,7 +119,7 @@ def _resolve_cross_tenant_platform_admin(request, email: str, password: str):
                 tenant_subdomain=getattr(getattr(request, "tenant", None), "subdomain", "") or "",
             )
         else:
-            tenant_user.is_active = True
+            tenant_user.is_active = public_user.is_active
             tenant_user.is_staff = True
             tenant_user.is_superuser = True
             tenant_user.role = "admin"
@@ -228,14 +231,13 @@ class CustomTokenObtainPairView(TokenObtainPairView):
         # Always prioritize platform-admin resolution on tenant schemas to avoid
         # matching a local customer account with the same email.
         is_platform_admin_email = email in exempt_emails
-        has_tenant_platform_mirror = _tenant_local_platform_admin_exists(email)
         user = _resolve_cross_tenant_platform_admin(request, email, password)
         if not user:
             # Critical safety rule:
             # if email belongs to platform-admin list and platform resolution fails,
             # do NOT fall back to tenant-local authenticate() to avoid accidental
             # login as a customer/support account with same email.
-            if is_platform_admin_email or has_tenant_platform_mirror:
+            if is_platform_admin_email:
                 return Response({"detail": "Invalid platform admin credentials."}, status=status.HTTP_401_UNAUTHORIZED)
             user = authenticate(request=request, username=email, password=password)
 
