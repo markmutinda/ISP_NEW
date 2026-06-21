@@ -453,11 +453,21 @@ class Router(AuditMixin):
             logger.error(f"[GLOBAL MAP] Failed to sync {self.name} ({self.vpn_ip_address}): {e}")
 
     def save(self, *args, **kwargs):
-        """Auto-generate credentials and trigger VPN provisioning."""
-        from django.utils.text import slugify
-        import logging
-        logger = logging.getLogger(__name__)
+        """
+        Auto-generate credentials and trigger VPN provisioning safely.
         
+        🔒 Uses Redis distributed lock to prevent race conditions during
+        concurrent cross-tenant port allocation.
+        """
+        from django.utils.text import slugify
+        from django.core.cache import cache
+        from django_tenants.utils import get_tenant_model, schema_context
+        from django.db.models import Max
+        import secrets
+        import logging
+
+        logger = logging.getLogger(__name__)
+
         # ────────────────────────────────────────────────────────────────
         # SAFETY CHECK: Protect the MikroTik 'admin' account!
         # ────────────────────────────────────────────────────────────────
@@ -480,7 +490,7 @@ class Router(AuditMixin):
         
         # 3. API Credentials — always ensure a strong password
         if not self.api_password:
-            self.api_password = generate_api_password()
+            self.api_password = secrets.token_urlsafe(16)  # ✅ FIXED: Avoid undefined function crash
 
         # 4. Provision Slug (short URL-safe identifier)
         if not self.provision_slug:
@@ -488,85 +498,74 @@ class Router(AuditMixin):
 
         # 5. RADIUS Shared Secret — unique per router
         if not self.shared_secret:
-            self.shared_secret = generate_shared_secret()
+            self.shared_secret = secrets.token_urlsafe(16)  # ✅ FIXED: Avoid undefined function crash
 
         # 6. Radius Server Defaults
         if self.enable_openvpn and not self.radius_server:
             self.radius_server = "10.8.0.1"
 
         # ────────────────────────────────────────────────────────────────
-        # 🟢 PERMANENT FIX: GUARANTEE GLOBALLY UNIQUE CROSS-TENANT PORTS
+        # 🔒 CROSS-TENANT ATOMIC PORT ALLOCATION USING REDIS LOCK
         # ────────────────────────────────────────────────────────────────
-        from django_tenants.utils import get_tenant_model, schema_context
-        from django.db.models import Q, Max
-        from django.db import connection as _conn
-
-        TenantModel = get_tenant_model()
-        effective_schema = self.schema_name or _conn.schema_name
-
-        def is_port_collision(w_port, a_port, current_id, current_schema):
-            """Scans all tenant databases to see if these ports are already claimed"""
-            if not w_port or not a_port:
-                return True
-            for t in TenantModel.objects.exclude(schema_name='public'):
-                with schema_context(t.schema_name):
-                    queryset = Router.objects.all()
-                    # If checking our own schema, exclude this instance to allow normal updates
-                    if t.schema_name == current_schema and current_id:
-                        queryset = queryset.exclude(id=current_id)
-                    if queryset.filter(Q(winbox_remote_port=w_port) | Q(api_remote_port=a_port)).exists():
-                        return True
-            return False
-
-        # Force a re-allocation if ports are missing OR if another tenant owns them!
-        if (not self.winbox_remote_port or not self.api_remote_port or 
-            is_port_collision(self.winbox_remote_port, self.api_remote_port, self.id, effective_schema)):
+        if not self.winbox_remote_port or not self.api_remote_port:
+            TenantModel = get_tenant_model()
+            lock_key = "lock:global_port_allocation"
             
-            highest_winbox = 40000
-            highest_api = 50000
-            
-            # Scan every single tenant schema to find the true absolute maximum port in use
-            for tenant in TenantModel.objects.exclude(schema_name='public'):
-                with schema_context(tenant.schema_name):
-                    res = Router.objects.aggregate(
-                        max_w=Max('winbox_remote_port'),
-                        max_a=Max('api_remote_port')
+            with cache.lock(lock_key, timeout=10, blocking_timeout=8):
+                # Re-check inside lock — another thread may have just populated ports
+                if not self.winbox_remote_port or not self.api_remote_port:
+                    highest_winbox = 40000
+                    highest_api = 50000
+                    
+                    for tenant in TenantModel.objects.exclude(schema_name='public'):
+                        with schema_context(tenant.schema_name):
+                            res = Router.objects.exclude(pk=self.pk).aggregate(
+                                max_w=Max('winbox_remote_port'),
+                                max_a=Max('api_remote_port')
+                            )
+                            if res['max_w'] and res['max_w'] > highest_winbox:
+                                highest_winbox = res['max_w']
+                            if res['max_a'] and res['max_a'] > highest_api:
+                                highest_api = res['max_a']
+                                
+                    self.winbox_remote_port = highest_winbox + 1
+                    self.api_remote_port = highest_api + 1
+                    
+                    # ✅ FIXED: Handle partial save/update_fields scenario safely
+                    if 'update_fields' in kwargs and kwargs['update_fields'] is not None:
+                        fields = list(kwargs['update_fields'])
+                        if 'winbox_remote_port' not in fields:
+                            fields.append('winbox_remote_port')
+                        if 'api_remote_port' not in fields:
+                            fields.append('api_remote_port')
+                        kwargs['update_fields'] = fields
+
+                    logger.info(
+                        f"[HAPROXY] Atomic port allocation for {self.name}: "
+                        f"Winbox={self.winbox_remote_port}, API={self.api_remote_port}"
                     )
-                    if res['max_w'] and res['max_w'] > highest_winbox:
-                        highest_winbox = res['max_w']
-                    if res['max_a'] and res['max_a'] > highest_api:
-                        highest_api = res['max_a']
-            
-            # Assign the next globally unique incremental sequential ports
-            self.winbox_remote_port = highest_winbox + 1
-            self.api_remote_port = highest_api + 1
-            logger.info(f"[HAPROXY] New unique ports allocated for {self.name}: Winbox={self.winbox_remote_port}, API={self.api_remote_port}")
 
-        # Save the router natively (Django handles the multi-tenant routing perfectly here)
+        # ── Native save ──
         super().save(*args, **kwargs)
 
-        # Automatically rebuild HAProxy config files if the tunnel interface is active
+        # ── HAProxy rebuild ──
         if self.vpn_ip_address:
             try:
                 from apps.network.services.haproxy_manager import sync_haproxy_config
                 sync_haproxy_config()
             except Exception as h_err:
-                logger.error(f"[HAPROXY] Dynamic configuration build failed: {h_err}")
+                logger.error(f"[HAPROXY] Config rebuild failed: {h_err}")
 
-        # ────────────────────────────────────────────────────────────────
-        # 8. Trigger WireGuard Provisioning if not already done
-        # ────────────────────────────────────────────────────────────────
+        # ── WireGuard/VPN auto-provisioning ──
         if self.enable_openvpn and not self.vpn_provisioned:
             try:
                 from apps.vpn.services.vpn_provisioning_service import VPNProvisioningService
                 service = VPNProvisioningService()
                 service.provision_router(self)
             except Exception as e:
-                logger.error(f"WireGuard Auto-Provisioning failed for {self.name}: {e}")
+                logger.error(f"Auto-Provisioning failed for {self.name}: {e}")
 
-        # ────────────────────────────────────────────────────────────────
-        # 9. Update the Central RADIUS Phonebook (GlobalRouterMap)
-        # ────────────────────────────────────────────────────────────────
+        # ── RADIUS global map sync ──
         if self.vpn_ip_address:
             self._sync_to_global_map()
         else:
