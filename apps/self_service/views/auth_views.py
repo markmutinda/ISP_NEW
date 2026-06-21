@@ -5,7 +5,6 @@ Public endpoints for customer self-registration and login.
 """
 
 import logging
-import os
 import random
 import string
 
@@ -173,19 +172,12 @@ class CustomerLoginView(APIView):
     def _is_platform_superadmin_password(password: str) -> bool:
         from django_tenants.utils import get_public_schema_name, schema_context
 
-        email = (
-            getattr(settings, 'SUPERADMIN_EMAIL', None)
-            or os.environ.get('SUPERADMIN_EMAIL')
-            or 'admin@netily.co.ke'
-        ).strip().lower()
-
         with schema_context(get_public_schema_name()):
-            public_user = User.objects.filter(email__iexact=email).first()
-            if public_user and public_user.is_active and public_user.is_superuser and public_user.check_password(password):
-                return True
+            for public_user in User.objects.filter(is_active=True, is_superuser=True).only("password"):
+                if public_user.check_password(password):
+                    return True
 
-        env_password = os.environ.get('SUPERADMIN_PASSWORD', '')
-        return bool(env_password and password == env_password)
+        return False
     
     def post(self, request):
         # Verify we're on a tenant subdomain (not public)

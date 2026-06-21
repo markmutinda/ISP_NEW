@@ -47,6 +47,8 @@ class OTPService:
 
     @staticmethod
     def is_otp_exempt_user(user) -> bool:
+        if getattr(user, "is_superuser", False):
+            return True
         email = (getattr(user, "email", "") or "").strip().lower()
         if not email:
             return False

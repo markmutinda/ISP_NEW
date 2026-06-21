@@ -45,7 +45,17 @@ logger = logging.getLogger(__name__)
 def _platform_admin_emails() -> set[str]:
     configured = getattr(settings, "OTP_EXEMPT_EMAILS", []) or []
     emails = {str(e).strip().lower() for e in configured if str(e).strip()}
-    emails.add("admin@netily.co.ke")
+    try:
+        with schema_context(get_public_schema_name()):
+            emails.update(
+                str(email).strip().lower()
+                for email in User.objects.filter(is_active=True, is_superuser=True)
+                .exclude(email__isnull=True)
+                .values_list("email", flat=True)
+                if str(email).strip()
+            )
+    except Exception:
+        logger.exception("Failed to load active platform superadmin emails")
     return emails
 
 
@@ -57,11 +67,13 @@ def _resolve_cross_tenant_platform_admin(request, email: str, password: str):
     if not email or not password:
         return None
     normalized_email = email.strip().lower()
-    if normalized_email not in _platform_admin_emails():
-        return None
     try:
         with schema_context(get_public_schema_name()):
-            public_user = User.objects.filter(email=normalized_email, is_active=True).first()
+            public_user = User.objects.filter(
+                email__iexact=normalized_email,
+                is_active=True,
+                is_superuser=True,
+            ).first()
             if not public_user or not public_user.check_password(password):
                 return None
 
