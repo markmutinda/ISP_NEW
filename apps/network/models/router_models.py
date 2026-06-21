@@ -465,7 +465,7 @@ class Router(AuditMixin):
         from django.db.models import Max
         import secrets
         import logging
-        import time  # ✅ Added for atomic spin-lock polling
+        import time
 
         logger = logging.getLogger(__name__)
 
@@ -508,67 +508,81 @@ class Router(AuditMixin):
         # ────────────────────────────────────────────────────────────────
         # 🔒 CROSS-TENANT UNIVERSAL ATOMIC PORT ALLOCATION SPIN-LOCK
         # ────────────────────────────────────────────────────────────────
-        # Force re-allocation if ports are blank, 0, or sitting on the clashing default bases
-        if (not self.winbox_remote_port or not self.api_remote_port or 
-            int(self.winbox_remote_port) == 40001 or int(self.api_remote_port) == 50001):
-            
+        _needs_port_allocation = (
+            not self.winbox_remote_port
+            or not self.api_remote_port
+            or int(self.winbox_remote_port) == 40001
+            or int(self.api_remote_port) == 50001
+        )
+
+        if _needs_port_allocation:
             TenantModel = get_tenant_model()
             lock_key = "lock:global_port_allocation"
-            
+
             lock_acquired = False
-            blocking_timeout = 8.0  # Max seconds to wait for lock to release
-            lock_expiry = 10        # Auto-expire lock if container crashes mid-save
+            blocking_timeout = 8.0
+            lock_expiry = 10
             start_time = time.time()
 
-            # Poll atomically using cache.add (SETNX wrapper)
             while time.time() - start_time < blocking_timeout:
                 if cache.add(lock_key, "acquired", lock_expiry):
                     lock_acquired = True
                     break
-                time.sleep(0.2)  # Rest briefly to avoid hammering CPU/Redis
+                time.sleep(0.2)
 
             if not lock_acquired:
                 logger.error(f"[HAPROXY] Could not acquire port lock for {self.name} within timeout.")
                 raise RuntimeError("System busy allocating backend routing ports, please retry in a second.")
 
             try:
-                # 🟢 FIXED: Inner guard now catches the default 40001/50001 fallbacks too!
-                if (not self.winbox_remote_port or not self.api_remote_port or 
-                    int(self.winbox_remote_port) == 40001 or int(self.api_remote_port) == 50001):
-                    
+                # Re-read from DB to get the freshest state (handles race after lock acquired)
+                if self.pk:
+                    fresh = Router.objects.filter(pk=self.pk).values('winbox_remote_port', 'api_remote_port').first()
+                    if fresh:
+                        already_has_valid_winbox = fresh['winbox_remote_port'] and int(fresh['winbox_remote_port']) != 40001
+                        already_has_valid_api = fresh['api_remote_port'] and int(fresh['api_remote_port']) != 50001
+                        if already_has_valid_winbox and already_has_valid_api:
+                            self.winbox_remote_port = fresh['winbox_remote_port']
+                            self.api_remote_port = fresh['api_remote_port']
+                            _needs_port_allocation = False
+
+                if _needs_port_allocation:
                     highest_winbox = 40000
                     highest_api = 50000
-                    
+
                     for tenant in TenantModel.objects.exclude(schema_name='public'):
-                        with schema_context(tenant.schema_name):
-                            res = Router.objects.exclude(pk=self.pk).aggregate(
-                                max_w=Max('winbox_remote_port'),
-                                max_a=Max('api_remote_port')
-                            )
-                            if res['max_w'] and res['max_w'] > highest_winbox:
-                                highest_winbox = res['max_w']
-                            if res['max_a'] and res['max_a'] > highest_api:
-                                highest_api = res['max_a']
-                                
+                        try:
+                            with schema_context(tenant.schema_name):
+                                res = Router.objects.exclude(pk=self.pk).aggregate(
+                                    max_w=Max('winbox_remote_port'),
+                                    max_a=Max('api_remote_port')
+                                )
+                                if res['max_w'] and int(res['max_w']) > highest_winbox:
+                                    highest_winbox = int(res['max_w'])
+                                if res['max_a'] and int(res['max_a']) > highest_api:
+                                    highest_api = int(res['max_a'])
+                        except Exception as tenant_err:
+                            logger.warning(f"[HAPROXY] Could not scan tenant {tenant.schema_name}: {tenant_err}")
+
                     self.winbox_remote_port = highest_winbox + 1
                     self.api_remote_port = highest_api + 1
-                    
-                    # Handle partial save/update_fields scenario safely
-                    if 'update_fields' in kwargs and kwargs['update_fields'] is not None:
-                        fields = list(kwargs['update_fields'])
-                        if 'winbox_remote_port' not in fields:
-                            fields.append('winbox_remote_port')
-                        if 'api_remote_port' not in fields:
-                            fields.append('api_remote_port')
-                        kwargs['update_fields'] = fields
 
                     logger.info(
                         f"[HAPROXY] Atomic port allocation for {self.name}: "
                         f"Winbox={self.winbox_remote_port}, API={self.api_remote_port}"
                     )
+
             finally:
-                # 🚨 ALWAYS guarantee lock release regardless of evaluation outcomes
                 cache.delete(lock_key)
+
+            # Ensure ports are included in partial saves
+            if 'update_fields' in kwargs and kwargs['update_fields'] is not None:
+                fields = list(kwargs['update_fields'])
+                if 'winbox_remote_port' not in fields:
+                    fields.append('winbox_remote_port')
+                if 'api_remote_port' not in fields:
+                    fields.append('api_remote_port')
+                kwargs['update_fields'] = fields
 
         # ── Native save ──
         super().save(*args, **kwargs)
