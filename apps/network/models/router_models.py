@@ -508,7 +508,10 @@ class Router(AuditMixin):
         # ────────────────────────────────────────────────────────────────
         # 🔒 CROSS-TENANT UNIVERSAL ATOMIC PORT ALLOCATION SPIN-LOCK
         # ────────────────────────────────────────────────────────────────
-        if not self.winbox_remote_port or not self.api_remote_port:
+        # Force re-allocation if ports are blank, 0, or sitting on the clashing default bases
+        if (not self.winbox_remote_port or not self.api_remote_port or 
+            int(self.winbox_remote_port) == 40001 or int(self.api_remote_port) == 50001):
+            
             TenantModel = get_tenant_model()
             lock_key = "lock:global_port_allocation"
             
