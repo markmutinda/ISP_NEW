@@ -1,4 +1,3 @@
-# apps/messaging/serializers.py
 from rest_framework import serializers
 from .models import SMSMessage, SMSTemplate, SMSCampaign, SMSGatewayConfig, SMSNotificationSettings, SMSUnitTopup, TenantSMSWallet
 from .services.gateway_dispatcher import PROVIDER_FIELDS
@@ -284,7 +283,7 @@ class SMSGatewayConfigWriteSerializer(serializers.ModelSerializer):
 
 
 # ============================================================
-# NEW SERIALIZERS ADDED BELOW
+# UPDATED SERIALIZER - Removed deprecated hotspot fields
 # ============================================================
 
 class SMSNotificationSettingsSerializer(serializers.ModelSerializer):
@@ -292,11 +291,10 @@ class SMSNotificationSettingsSerializer(serializers.ModelSerializer):
         model = SMSNotificationSettings
         fields = [
             'use_inbuilt_system',
-            # hotspot
-            'hotspot_new_subscription', 'hotspot_welcome',
-            'hotspot_session_expiry', 'hotspot_expiry_minutes_before',
-            'hotspot_payment_failed', 'hotspot_session_expired',
-            # pppoe — reduced set (removed deprecated fields)
+            # hotspot — only two remain
+            'hotspot_welcome',
+            'hotspot_session_expired',
+            # pppoe
             'pppoe_welcome',
             'pppoe_payment_confirmation',  # MERGED: handles both payment AND renewal confirmations
             'pppoe_expiry_reminder',
