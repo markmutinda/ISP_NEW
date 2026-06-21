@@ -16,6 +16,7 @@ from rest_framework.views import APIView
 from rest_framework import generics
 from rest_framework.parsers import MultiPartParser, FormParser, JSONParser
 from datetime import timedelta
+from hashlib import sha1
 from django_tenants.utils import schema_context, get_public_schema_name  # Add this import
 from .models import GlobalSystemSettings  # Add this
 from .serializers import GlobalSystemSettingsSerializer, CustomTokenRefreshSerializer  # Add this
@@ -59,6 +60,23 @@ def _platform_admin_emails() -> set[str]:
     return emails
 
 
+def _tenant_local_platform_admin_exists(email: str) -> bool:
+    normalized_email = (email or "").strip().lower()
+    if not normalized_email:
+        return False
+    try:
+        return User.objects.filter(email__iexact=normalized_email, is_superuser=True).exists()
+    except Exception:
+        return False
+
+
+def _platform_admin_phone(public_user, tenant_scope: str) -> str:
+    tenant_scope = tenant_scope or "tenant"
+    tenant_seed = int(sha1(tenant_scope.encode("utf-8")).hexdigest()[:8], 16) % 1_000_000
+    user_seed = int(getattr(public_user, "id", 0) or 0) % 1_000
+    return f"+2547{user_seed:03d}{tenant_seed:06d}"
+
+
 def _resolve_cross_tenant_platform_admin(request, email: str, password: str):
     """
     Resolve platform admin credentials from public schema and mirror them into
@@ -76,40 +94,39 @@ def _resolve_cross_tenant_platform_admin(request, email: str, password: str):
             if not public_user or not public_user.check_password(password):
                 return None
 
-            tenant_user = User.objects.filter(email=normalized_email).first()
-            if not tenant_user:
-                if not public_user.is_active:
-                    return public_user
-                    
-                tenant_scope = getattr(getattr(request, "tenant", None), "subdomain", "") or ""
-                phone_seed = "".join(ch for ch in (tenant_scope or "0") if ch.isdigit())[:6]
-                if not phone_seed:
-                    phone_seed = str((abs(hash(tenant_scope or "tenant")) % 900000) + 100000)
-                tenant_user = User.objects.create(
-                    email=normalized_email,
-                    first_name=public_user.first_name or "Netily",
-                    last_name=public_user.last_name or "Admin",
-                    phone_number=f"+254700{phone_seed}",
-                    role="admin",
-                    is_active=public_user.is_active,
-                    is_staff=True,
-                    is_superuser=True,
-                    is_verified=True,
-                    company_name=getattr(getattr(request, "company", None), "name", "") or "",
-                    tenant_subdomain=getattr(getattr(request, "tenant", None), "subdomain", "") or "",
-                )
-            else:
-                tenant_user.is_active = public_user.is_active
-                tenant_user.is_staff = True
-                tenant_user.is_superuser = True
-                tenant_user.role = "admin"
-                if not tenant_user.first_name:
-                    tenant_user.first_name = public_user.first_name or "Netily"
-                if not tenant_user.last_name:
-                    tenant_user.last_name = public_user.last_name or "Admin"
-            tenant_user.password = public_user.password
-            tenant_user.save()
-            return tenant_user
+        tenant_scope = getattr(getattr(request, "tenant", None), "subdomain", "") or ""
+        tenant_user = User.objects.filter(email__iexact=normalized_email).first()
+        if not tenant_user:
+            phone_number = _platform_admin_phone(public_user, tenant_scope)
+            collision_counter = 1
+            while User.objects.filter(phone_number=phone_number).exists():
+                phone_number = _platform_admin_phone(public_user, f"{tenant_scope}-{collision_counter}")
+                collision_counter += 1
+            tenant_user = User.objects.create(
+                email=normalized_email,
+                first_name=public_user.first_name or "Netily",
+                last_name=public_user.last_name or "Admin",
+                phone_number=phone_number,
+                role="admin",
+                is_active=True,
+                is_staff=True,
+                is_superuser=True,
+                is_verified=True,
+                company_name=getattr(getattr(request, "company", None), "name", "") or "",
+                tenant_subdomain=getattr(getattr(request, "tenant", None), "subdomain", "") or "",
+            )
+        else:
+            tenant_user.is_active = True
+            tenant_user.is_staff = True
+            tenant_user.is_superuser = True
+            tenant_user.role = "admin"
+            if not tenant_user.first_name:
+                tenant_user.first_name = public_user.first_name or "Netily"
+            if not tenant_user.last_name:
+                tenant_user.last_name = public_user.last_name or "Admin"
+        tenant_user.password = public_user.password
+        tenant_user.save()
+        return tenant_user
     except Exception:
         logger.exception("Failed to resolve tenant-local platform admin for %s", normalized_email)
         return None
@@ -211,13 +228,14 @@ class CustomTokenObtainPairView(TokenObtainPairView):
         # Always prioritize platform-admin resolution on tenant schemas to avoid
         # matching a local customer account with the same email.
         is_platform_admin_email = email in exempt_emails
+        has_tenant_platform_mirror = _tenant_local_platform_admin_exists(email)
         user = _resolve_cross_tenant_platform_admin(request, email, password)
         if not user:
             # Critical safety rule:
             # if email belongs to platform-admin list and platform resolution fails,
             # do NOT fall back to tenant-local authenticate() to avoid accidental
             # login as a customer/support account with same email.
-            if is_platform_admin_email:
+            if is_platform_admin_email or has_tenant_platform_mirror:
                 return Response({"detail": "Invalid platform admin credentials."}, status=status.HTTP_401_UNAUTHORIZED)
             user = authenticate(request=request, username=email, password=password)
 
@@ -331,9 +349,10 @@ class ResendLoginOTPView(APIView):
             return Response({"detail": "Email, password and challenge_id are required."}, status=status.HTTP_400_BAD_REQUEST)
 
         exempt_emails = _platform_admin_emails()
+        has_tenant_platform_mirror = _tenant_local_platform_admin_exists(email)
         user = _resolve_cross_tenant_platform_admin(request, email, password)
         if not user:
-            if email in exempt_emails:
+            if email in exempt_emails or has_tenant_platform_mirror:
                 return Response({"detail": "Invalid platform admin credentials."}, status=status.HTTP_401_UNAUTHORIZED)
             user = authenticate(request=request, username=email, password=password)
         if not user:
