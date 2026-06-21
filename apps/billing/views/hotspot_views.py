@@ -988,13 +988,10 @@ class HotspotPurchaseView(APIView):
                 )
 
             # ============================================================
-            # SMS: new subscription initiated (after STK push succeeds)
+            # SMS: REMOVED - hotspot_new_subscription toggle no longer exists
             # ============================================================
-            try:
-                from apps.messaging.services.notification_sender import SMSNotifier
-                SMSNotifier.hotspot_new_subscription(session)
-            except Exception as e:
-                logger.warning(f"Hotspot new-subscription SMS failed: {e}")
+            # The hotspot_new_subscription method was removed from SMSNotifier.
+            # Welcome SMS will be sent when the session is activated (paid/active status).
 
             # ============================================================
             # OPTIONALLY invalidate used TV code after successful payment init
@@ -1238,12 +1235,10 @@ class HotspotPurchaseStatusView(APIView):
                 
                 elif status == 'failed':
                     session.mark_failed(message)
-                    # ── SMS: payment failed ──
-                    try:
-                        from apps.messaging.services.notification_sender import SMSNotifier
-                        SMSNotifier.hotspot_payment_failed(session, message)
-                    except Exception as e:
-                        logger.warning(f"Hotspot failed SMS error: {e}")
+                    # ── SMS: REMOVED - hotspot_payment_failed toggle no longer exists ──
+                    # The hotspot_payment_failed method was removed from SMSNotifier.
+                    # Only welcome and session_expired remain.
+                    
                     return Response({
                         'status': 'failed',
                         'message': message or 'Payment failed. Please try again.',
