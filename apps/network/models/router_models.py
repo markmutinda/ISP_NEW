@@ -456,8 +456,8 @@ class Router(AuditMixin):
         """
         Auto-generate credentials and trigger VPN provisioning safely.
         
-        🔒 Uses Redis distributed lock to prevent race conditions during
-        concurrent cross-tenant port allocation.
+        🔒 Uses atomic spin-lock with cache.add() (SETNX) to prevent race conditions
+        during concurrent cross-tenant port allocation. Works with ANY cache backend.
         """
         from django.utils.text import slugify
         from django.core.cache import cache
@@ -465,6 +465,7 @@ class Router(AuditMixin):
         from django.db.models import Max
         import secrets
         import logging
+        import time  # ✅ Added for atomic spin-lock polling
 
         logger = logging.getLogger(__name__)
 
@@ -490,7 +491,7 @@ class Router(AuditMixin):
         
         # 3. API Credentials — always ensure a strong password
         if not self.api_password:
-            self.api_password = secrets.token_urlsafe(16)  # ✅ FIXED: Avoid undefined function crash
+            self.api_password = secrets.token_urlsafe(16)
 
         # 4. Provision Slug (short URL-safe identifier)
         if not self.provision_slug:
@@ -498,21 +499,37 @@ class Router(AuditMixin):
 
         # 5. RADIUS Shared Secret — unique per router
         if not self.shared_secret:
-            self.shared_secret = secrets.token_urlsafe(16)  # ✅ FIXED: Avoid undefined function crash
+            self.shared_secret = secrets.token_urlsafe(16)
 
         # 6. Radius Server Defaults
         if self.enable_openvpn and not self.radius_server:
             self.radius_server = "10.8.0.1"
 
         # ────────────────────────────────────────────────────────────────
-        # 🔒 CROSS-TENANT ATOMIC PORT ALLOCATION USING REDIS LOCK
+        # 🔒 CROSS-TENANT UNIVERSAL ATOMIC PORT ALLOCATION SPIN-LOCK
         # ────────────────────────────────────────────────────────────────
         if not self.winbox_remote_port or not self.api_remote_port:
             TenantModel = get_tenant_model()
             lock_key = "lock:global_port_allocation"
             
-            with cache.lock(lock_key, timeout=10, blocking_timeout=8):
-                # Re-check inside lock — another thread may have just populated ports
+            lock_acquired = False
+            blocking_timeout = 8.0  # Max seconds to wait for lock to release
+            lock_expiry = 10        # Auto-expire lock if container crashes mid-save
+            start_time = time.time()
+
+            # Poll atomically using cache.add (SETNX wrapper)
+            while time.time() - start_time < blocking_timeout:
+                if cache.add(lock_key, "acquired", lock_expiry):
+                    lock_acquired = True
+                    break
+                time.sleep(0.2)  # Rest briefly to avoid hammering CPU/Redis
+
+            if not lock_acquired:
+                logger.error(f"[HAPROXY] Could not acquire port lock for {self.name} within timeout.")
+                raise RuntimeError("System busy allocating backend routing ports, please retry in a second.")
+
+            try:
+                # Re-check inside lock context — another thread may have just populated fields
                 if not self.winbox_remote_port or not self.api_remote_port:
                     highest_winbox = 40000
                     highest_api = 50000
@@ -531,7 +548,7 @@ class Router(AuditMixin):
                     self.winbox_remote_port = highest_winbox + 1
                     self.api_remote_port = highest_api + 1
                     
-                    # ✅ FIXED: Handle partial save/update_fields scenario safely
+                    # Handle partial save/update_fields scenario safely
                     if 'update_fields' in kwargs and kwargs['update_fields'] is not None:
                         fields = list(kwargs['update_fields'])
                         if 'winbox_remote_port' not in fields:
@@ -544,6 +561,9 @@ class Router(AuditMixin):
                         f"[HAPROXY] Atomic port allocation for {self.name}: "
                         f"Winbox={self.winbox_remote_port}, API={self.api_remote_port}"
                     )
+            finally:
+                # 🚨 ALWAYS guarantee lock release regardless of evaluation outcomes
+                cache.delete(lock_key)
 
         # ── Native save ──
         super().save(*args, **kwargs)
