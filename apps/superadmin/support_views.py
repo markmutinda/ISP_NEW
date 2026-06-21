@@ -20,6 +20,13 @@ from apps.superadmin.serializers import (
     SupportActivityLogSerializer,
     SupportExecutiveSerializer,
 )
+from apps.superadmin.tasks import revoke_superadmin_tenant_mirrors
+
+try:
+    from rest_framework_simplejwt.token_blacklist.models import OutstandingToken, BlacklistedToken
+except ImportError:
+    OutstandingToken = None
+    BlacklistedToken = None
 
 
 SUPPORT_PERMS = [IsAuthenticated, IsPlatformSupport]
@@ -553,6 +560,14 @@ class SuperadminAccountDetailView(APIView):
         user.is_superuser = True
         user.role = "admin"
         user.save()
+        
+        # If deactivated, blacklist tokens and mirror user deactivation across tenants
+        if not user.is_active:
+            if OutstandingToken and BlacklistedToken:
+                tokens = OutstandingToken.objects.filter(user=user)
+                for token in tokens:
+                    BlacklistedToken.objects.get_or_create(token=token)
+            revoke_superadmin_tenant_mirrors.delay(user.email)
 
         record_superadmin_activity(
             request,
@@ -598,6 +613,15 @@ class SuperadminAccountDetailView(APIView):
             "password", "email", "phone_number", "is_active",
             "is_staff", "is_superuser", "role", "updated_at",
         ])
+        
+        # Blacklist tokens and fan out tenant mirror revocation
+        if OutstandingToken and BlacklistedToken:
+            tokens = OutstandingToken.objects.filter(user=user)
+            for token in tokens:
+                BlacklistedToken.objects.get_or_create(token=token)
+        # Use the original email we just cached before scrambling it
+        revoke_superadmin_tenant_mirrors.delay(email)
+        
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 

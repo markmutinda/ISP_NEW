@@ -71,7 +71,6 @@ def _resolve_cross_tenant_platform_admin(request, email: str, password: str):
         with schema_context(get_public_schema_name()):
             public_user = User.objects.filter(
                 email__iexact=normalized_email,
-                is_active=True,
                 is_superuser=True,
             ).first()
             if not public_user or not public_user.check_password(password):
@@ -79,6 +78,9 @@ def _resolve_cross_tenant_platform_admin(request, email: str, password: str):
 
             tenant_user = User.objects.filter(email=normalized_email).first()
             if not tenant_user:
+                if not public_user.is_active:
+                    return public_user
+                    
                 tenant_scope = getattr(getattr(request, "tenant", None), "subdomain", "") or ""
                 phone_seed = "".join(ch for ch in (tenant_scope or "0") if ch.isdigit())[:6]
                 if not phone_seed:
@@ -89,7 +91,7 @@ def _resolve_cross_tenant_platform_admin(request, email: str, password: str):
                     last_name=public_user.last_name or "Admin",
                     phone_number=f"+254700{phone_seed}",
                     role="admin",
-                    is_active=True,
+                    is_active=public_user.is_active,
                     is_staff=True,
                     is_superuser=True,
                     is_verified=True,
@@ -97,7 +99,7 @@ def _resolve_cross_tenant_platform_admin(request, email: str, password: str):
                     tenant_subdomain=getattr(getattr(request, "tenant", None), "subdomain", "") or "",
                 )
             else:
-                tenant_user.is_active = True
+                tenant_user.is_active = public_user.is_active
                 tenant_user.is_staff = True
                 tenant_user.is_superuser = True
                 tenant_user.role = "admin"

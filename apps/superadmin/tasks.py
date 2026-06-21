@@ -445,3 +445,49 @@ def deliver_changelog_notifications(self, changelog_id: int, channels: list[str]
 
     connection.set_schema_to_public()
     return summary
+
+
+@shared_task(bind=True, max_retries=3)
+def revoke_superadmin_tenant_mirrors(self, email: str) -> dict:
+    """
+    Fans out across all tenant schemas and deactivates any user matching
+    the superadmin's email. This revokes their access to tenant admin panels
+    if their platform superadmin account was deactivated or deleted.
+    """
+    if not email:
+        return {"status": "error", "message": "Email is required"}
+        
+    email = email.strip().lower()
+    public_schema = get_public_schema_name()
+    
+    with schema_context(public_schema):
+        tenants = list(Tenant.objects.exclude(schema_name=public_schema).values_list("schema_name", flat=True))
+        
+    summary = {
+        "email": email,
+        "schemas_checked": 0,
+        "users_deactivated": 0,
+        "errors": []
+    }
+    
+    for schema_name in tenants:
+        summary["schemas_checked"] += 1
+        try:
+            with schema_context(schema_name):
+                # Using update() is safe here as it will affect all matching rows.
+                # It doesn't trigger save() signals, but we're just revoking access.
+                updated_count = User.objects.filter(email__iexact=email, is_active=True).update(
+                    is_active=False,
+                    is_staff=False,
+                    is_superuser=False
+                )
+                summary["users_deactivated"] += updated_count
+        except Exception as exc:
+            logger.exception("Failed to revoke superadmin mirror %s in tenant %s", email, schema_name)
+            summary["errors"].append({
+                "tenant": schema_name,
+                "error": str(exc)
+            })
+            
+    connection.set_schema_to_public()
+    return summary

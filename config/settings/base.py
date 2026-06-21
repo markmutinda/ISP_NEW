@@ -77,7 +77,8 @@ SHARED_APPS = (
     'django.contrib.admin',           # SHOULD be in both
     'apps.core',                       # Tenant & Domain models go here - MUST be in BOTH
     'apps.subscriptions',              # Netily platform subscriptions (public schema only)
-    'apps.superadmin', 
+    'apps.superadmin',
+    'rest_framework_simplejwt.token_blacklist', # Required to instantly revoke deactivated admin tokens
 ) + CELERY_APPS  # Add Celery apps to SHARED_APPS
 
 TENANT_APPS = (
@@ -287,6 +288,7 @@ SIMPLE_JWT = {
     'ALGORITHM': 'HS256',
     'SIGNING_KEY': SECRET_KEY,
     'AUTH_HEADER_TYPES': ('Bearer',),
+    'TOKEN_TYPE_CLAIM': 'token_type',
 }
 
 # ────────────────────────────────────────────────────────────────
