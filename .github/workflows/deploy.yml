@@ -49,6 +49,9 @@ jobs:
             # 🟢 OPTIMIZATION 2: Removed '--no-cache' to allow ultra-fast incremental builds.
             docker compose build web celery-worker celery-beat
 
+            echo "==> Checking for missing model migrations..."
+            docker compose run --rm web python manage.py makemigrations --check --dry-run
+
             echo "==> Preparing migration history..."
             docker compose run --rm web python manage.py prepare_migrations
 

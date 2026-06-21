@@ -1,4 +1,5 @@
 from datetime import timedelta
+from uuid import uuid4
 
 from django.contrib.auth import authenticate
 from django.db import IntegrityError, transaction, connection
@@ -543,8 +544,10 @@ class SuperadminAccountDetailView(APIView):
         for field in ["first_name", "last_name"]:
             if field in request.data:
                 setattr(user, field, (request.data.get(field) or "").strip())
+        password_changed = False
         if request.data.get("password"):
             user.set_password(request.data["password"])
+            password_changed = True
 
         user.is_staff = True
         user.is_superuser = True
@@ -553,10 +556,10 @@ class SuperadminAccountDetailView(APIView):
 
         record_superadmin_activity(
             request,
-            "superadmin_updated",
-            f"Updated superadmin credentials for {user.email}",
+            "superadmin_password_changed" if password_changed else "superadmin_updated",
+            f"{'Changed password for' if password_changed else 'Updated superadmin credentials for'} {user.email}",
             target_user=user,
-            metadata={"target_user_id": user.id},
+            metadata={"target_user_id": user.id, "password_changed": password_changed},
         )
         return Response(SuperAdminAccountSerializer(user).data)
 
@@ -575,14 +578,26 @@ class SuperadminAccountDetailView(APIView):
 
         email = user.email
         target_id = user.id
+        retired_email = f"deleted-superadmin-{target_id}-{uuid4().hex[:8]}@deleted.netily.local"
+        retired_phone = f"+999{target_id:012d}"
         record_superadmin_activity(
             request,
-            "superadmin_deleted",
-            f"Deleted superadmin credentials for {email}",
+            "superadmin_retired",
+            f"Retired superadmin credentials for {email}",
             target_user=user,
             metadata={"target_user_id": target_id, "email": email},
         )
-        user.delete()
+        user.set_unusable_password()
+        user.email = retired_email
+        user.phone_number = retired_phone
+        user.is_active = False
+        user.is_staff = False
+        user.is_superuser = False
+        user.role = "staff"
+        user.save(update_fields=[
+            "password", "email", "phone_number", "is_active",
+            "is_staff", "is_superuser", "role", "updated_at",
+        ])
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 
