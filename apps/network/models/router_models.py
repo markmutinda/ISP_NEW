@@ -494,21 +494,38 @@ class Router(AuditMixin):
         if self.enable_openvpn and not self.radius_server:
             self.radius_server = "10.8.0.1"
 
-        # 7. Save the router first (so it has an ID for certificate generation)
-        super().save(*args, **kwargs)
+        # ────────────────────────────────────────────────────────────────
+        # 🟢 PERMANENT FIX: GUARANTEE GLOBALLY UNIQUE CROSS-TENANT PORTS
+        # ────────────────────────────────────────────────────────────────
+        from django_tenants.utils import get_tenant_model, schema_context
+        from django.db.models import Q, Max
+        from django.db import connection as _conn
 
-        # ────────────────────────────────────────────────────────────────
-        # 🟢 FIX: SCANS ALL TENANTS TO PREVENT PUBLIC PORT COLLISIONS
-        # ────────────────────────────────────────────────────────────────
-        if not self.winbox_remote_port or not self.api_remote_port:
-            from django_tenants.utils import get_tenant_model, schema_context
-            from django.db.models import Max
+        TenantModel = get_tenant_model()
+        effective_schema = self.schema_name or _conn.schema_name
+
+        def is_port_collision(w_port, a_port, current_id, current_schema):
+            """Scans all tenant databases to see if these ports are already claimed"""
+            if not w_port or not a_port:
+                return True
+            for t in TenantModel.objects.exclude(schema_name='public'):
+                with schema_context(t.schema_name):
+                    queryset = Router.objects.all()
+                    # If checking our own schema, exclude this instance to allow normal updates
+                    if t.schema_name == current_schema and current_id:
+                        queryset = queryset.exclude(id=current_id)
+                    if queryset.filter(Q(winbox_remote_port=w_port) | Q(api_remote_port=a_port)).exists():
+                        return True
+            return False
+
+        # Force a re-allocation if ports are missing OR if another tenant owns them!
+        if (not self.winbox_remote_port or not self.api_remote_port or 
+            is_port_collision(self.winbox_remote_port, self.api_remote_port, self.id, effective_schema)):
             
-            TenantModel = get_tenant_model()
             highest_winbox = 40000
             highest_api = 50000
             
-            # Scan every single tenant schema to find the maximum port in use
+            # Scan every single tenant schema to find the true absolute maximum port in use
             for tenant in TenantModel.objects.exclude(schema_name='public'):
                 with schema_context(tenant.schema_name):
                     res = Router.objects.aggregate(
@@ -520,16 +537,13 @@ class Router(AuditMixin):
                     if res['max_a'] and res['max_a'] > highest_api:
                         highest_api = res['max_a']
             
-            # Assign the next globally unique incremental integers
+            # Assign the next globally unique incremental sequential ports
             self.winbox_remote_port = highest_winbox + 1
             self.api_remote_port = highest_api + 1
-            
-            # Perform a silent update to avoid recursive save signal loops
-            Router.objects.filter(id=self.id).update(
-                winbox_remote_port=self.winbox_remote_port,
-                api_remote_port=self.api_remote_port
-            )
-            logger.info(f"[HAPROXY] Globally unique ports allocated for {self.name}: Winbox={self.winbox_remote_port}, API={self.api_remote_port}")
+            logger.info(f"[HAPROXY] New unique ports allocated for {self.name}: Winbox={self.winbox_remote_port}, API={self.api_remote_port}")
+
+        # Save the router natively (Django handles the multi-tenant routing perfectly here)
+        super().save(*args, **kwargs)
 
         # Automatically rebuild HAProxy config files if the tunnel interface is active
         if self.vpn_ip_address:

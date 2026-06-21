@@ -31,14 +31,15 @@ def generate_haproxy_config(routers: list) -> str:
         if not vpn_ip:
             continue
 
-        # 🟢 FIX 1: Read pre-allocated unique ports directly instead of calculating from tenant ID
+        # 🟢 Read pre-allocated unique ports directly instead of calculating from tenant ID
         winbox_port = router.get('winbox_remote_port')
         api_port = router.get('api_remote_port')
 
-        # Safeguard: Skip generating if ports are unassigned/null
+        # 🟢 FIX: Use `continue` instead of `return config` to skip this router
+        # and continue processing the remaining routers in the loop
         if not winbox_port or not api_port:
-            logger.warning(f"[HAPROXY] Router {name} (ID: {router_id}) missing remote port assignments. Skipping config.")
-            return config
+            logger.warning(f"[HAPROXY] Router {name} (ID: {router_id}) missing remote port assignments. Skipping.")
+            continue  # ← Was `return config` — this bug exits the whole loop early
 
         sections.append(f"""
 frontend winbox_{name}_{router_id}
@@ -82,7 +83,7 @@ def sync_haproxy_config() -> bool:
     for tenant in TenantModel.objects.exclude(schema_name='public'):
         try:
             with schema_context(tenant.schema_name):
-                # 🟢 FIX 2: Explicitly fetch 'winbox_remote_port' and 'api_remote_port'
+                # 🟢 Explicitly fetch 'winbox_remote_port' and 'api_remote_port'
                 routers = Router.objects.filter(
                     vpn_provisioned=True,
                     is_active=True,
