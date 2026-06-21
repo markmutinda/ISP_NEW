@@ -12,7 +12,7 @@ from decimal import Decimal
 
 from apps.core.models import Tenant, Company, Domain, User
 from apps.subscriptions.models import BillingCycle, CompanySubscription, TenantUserLedger
-from apps.superadmin.models import SupportActivityLog, SupportExecutiveProfile
+from apps.superadmin.models import SuperAdminActivityLog, SupportActivityLog, SupportExecutiveProfile
 
 
 # ──────────────────────────────────────────
@@ -83,6 +83,45 @@ class SupportActivityLogSerializer(serializers.ModelSerializer):
         if not user:
             return "System"
         return (f"{user.first_name} {user.last_name}".strip() or user.email or "Support")
+
+
+class SuperAdminAccountSerializer(serializers.ModelSerializer):
+    full_name = serializers.SerializerMethodField()
+
+    class Meta:
+        model = User
+        fields = [
+            "id", "email", "first_name", "last_name", "full_name", "phone_number",
+            "is_active", "is_staff", "is_superuser", "role", "date_joined", "last_login",
+        ]
+        read_only_fields = fields
+
+    def get_full_name(self, obj):
+        return (f"{obj.first_name} {obj.last_name}".strip() or obj.email or f"User {obj.pk}")
+
+
+class SuperAdminActivityLogSerializer(serializers.ModelSerializer):
+    actor_email = serializers.EmailField(source="actor.email", read_only=True, allow_null=True)
+    actor_name = serializers.SerializerMethodField()
+    target_email = serializers.EmailField(source="target_user.email", read_only=True, allow_null=True)
+    target_name = serializers.SerializerMethodField()
+
+    class Meta:
+        model = SuperAdminActivityLog
+        fields = [
+            "id", "actor", "actor_email", "actor_name", "target_user",
+            "target_email", "target_name", "action", "summary", "metadata",
+            "ip_address", "user_agent", "created_at",
+        ]
+        read_only_fields = fields
+
+    def get_actor_name(self, obj):
+        user = getattr(obj, "actor", None)
+        return (f"{user.first_name} {user.last_name}".strip() or user.email) if user else "System"
+
+    def get_target_name(self, obj):
+        user = getattr(obj, "target_user", None)
+        return (f"{user.first_name} {user.last_name}".strip() or user.email) if user else "System"
 
 
 # ──────────────────────────────────────────

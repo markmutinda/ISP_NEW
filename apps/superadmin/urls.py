@@ -101,4 +101,9 @@ urlpatterns = [
     path("support-executives/", support_views.SuperadminSupportExecutiveListCreateView.as_view(), name="support-executive-list"),
     path("support-executives/<int:user_id>/", support_views.SuperadminSupportExecutiveDetailView.as_view(), name="support-executive-detail"),
     path("support-activity/", support_views.SuperadminSupportActivityListView.as_view(), name="support-activity-list"),
+
+    # Hidden superadmin credential management
+    path("superadmins/", support_views.SuperadminAccountListCreateView.as_view(), name="superadmin-account-list"),
+    path("superadmins/<int:user_id>/", support_views.SuperadminAccountDetailView.as_view(), name="superadmin-account-detail"),
+    path("superadmin-activity/", support_views.SuperadminActivityListCreateView.as_view(), name="superadmin-activity-list"),
 ]

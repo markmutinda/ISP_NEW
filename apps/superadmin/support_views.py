@@ -11,9 +11,14 @@ from rest_framework.views import APIView
 from rest_framework_simplejwt.tokens import RefreshToken
 
 from apps.core.models import Lead, Tenant, User
-from apps.superadmin.models import SupportActivityLog, SupportExecutiveProfile
+from apps.superadmin.models import SuperAdminActivityLog, SupportActivityLog, SupportExecutiveProfile
 from apps.superadmin.permissions import IsPlatformSupport, IsSuperAdmin
-from apps.superadmin.serializers import SupportActivityLogSerializer, SupportExecutiveSerializer
+from apps.superadmin.serializers import (
+    SuperAdminAccountSerializer,
+    SuperAdminActivityLogSerializer,
+    SupportActivityLogSerializer,
+    SupportExecutiveSerializer,
+)
 
 
 SUPPORT_PERMS = [IsAuthenticated, IsPlatformSupport]
@@ -42,6 +47,25 @@ def record_support_activity(request, action, summary, area="", metadata=None):
         ip_address=_client_ip(request),
         user_agent=request.META.get("HTTP_USER_AGENT", "")[:1000],
     )
+
+
+def record_superadmin_activity(request, action, summary, target_user=None, metadata=None):
+    SuperAdminActivityLog.objects.create(
+        actor=request.user if request.user.is_authenticated else None,
+        target_user=target_user,
+        action=action,
+        summary=summary[:255],
+        metadata=metadata or {},
+        ip_address=_client_ip(request),
+        user_agent=request.META.get("HTTP_USER_AGENT", "")[:1000],
+    )
+
+
+def _active_superadmin_count(exclude_user_id=None):
+    qs = User.objects.filter(is_superuser=True, is_active=True)
+    if exclude_user_id:
+        qs = qs.exclude(pk=exclude_user_id)
+    return qs.count()
 
 
 def _support_user_payload(user):
@@ -432,3 +456,163 @@ class SuperadminSupportActivityListView(APIView):
             "summary": list(summary),
             "results": SupportActivityLogSerializer(qs[:limit], many=True).data,
         })
+
+
+class SuperadminAccountListCreateView(APIView):
+    permission_classes = SUPERADMIN_PERMS
+
+    def get(self, request):
+        _ensure_public()
+        users = User.objects.filter(is_superuser=True).order_by("-is_active", "email")
+        return Response({
+            "active_count": User.objects.filter(is_superuser=True, is_active=True).count(),
+            "results": SuperAdminAccountSerializer(users, many=True).data,
+        })
+
+    def post(self, request):
+        _ensure_public()
+        email = (request.data.get("email") or "").strip().lower()
+        phone_number = (request.data.get("phone_number") or "").strip()
+        password = request.data.get("password") or ""
+        first_name = (request.data.get("first_name") or "").strip()
+        last_name = (request.data.get("last_name") or "").strip()
+
+        if not email or not phone_number or not password:
+            return Response(
+                {"detail": "Email, phone number, and password are required."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if User.objects.filter(email__iexact=email).exists():
+            return Response({"detail": "A user with this email already exists."}, status=status.HTTP_400_BAD_REQUEST)
+        if User.objects.filter(phone_number=phone_number).exists():
+            return Response({"detail": "A user with this phone number already exists."}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            user = User.objects.create_superuser(
+                email=email,
+                password=password,
+                phone_number=phone_number,
+                first_name=first_name,
+                last_name=last_name,
+            )
+        except IntegrityError:
+            return Response(
+                {"detail": "Could not create superadmin credentials. Check unique email and phone values."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        record_superadmin_activity(
+            request,
+            "superadmin_created",
+            f"Created superadmin credentials for {email}",
+            target_user=user,
+            metadata={"target_user_id": user.id},
+        )
+        return Response(SuperAdminAccountSerializer(user).data, status=status.HTTP_201_CREATED)
+
+
+class SuperadminAccountDetailView(APIView):
+    permission_classes = SUPERADMIN_PERMS
+
+    def patch(self, request, user_id):
+        _ensure_public()
+        try:
+            user = User.objects.get(pk=user_id, is_superuser=True)
+        except User.DoesNotExist:
+            return Response({"detail": "Superadmin account not found."}, status=status.HTTP_404_NOT_FOUND)
+
+        if "is_active" in request.data:
+            next_active = _as_bool(request.data.get("is_active"))
+            if not next_active and _active_superadmin_count(exclude_user_id=user.id) < 1:
+                return Response(
+                    {"detail": "At least one active superadmin must remain."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            user.is_active = next_active
+
+        if "email" in request.data:
+            email = (request.data.get("email") or "").strip().lower()
+            if email and User.objects.exclude(pk=user.pk).filter(email__iexact=email).exists():
+                return Response({"detail": "A user with this email already exists."}, status=status.HTTP_400_BAD_REQUEST)
+            user.email = email
+        if "phone_number" in request.data:
+            phone = (request.data.get("phone_number") or "").strip()
+            if phone and User.objects.exclude(pk=user.pk).filter(phone_number=phone).exists():
+                return Response({"detail": "A user with this phone number already exists."}, status=status.HTTP_400_BAD_REQUEST)
+            user.phone_number = phone
+        for field in ["first_name", "last_name"]:
+            if field in request.data:
+                setattr(user, field, (request.data.get(field) or "").strip())
+        if request.data.get("password"):
+            user.set_password(request.data["password"])
+
+        user.is_staff = True
+        user.is_superuser = True
+        user.role = "admin"
+        user.save()
+
+        record_superadmin_activity(
+            request,
+            "superadmin_updated",
+            f"Updated superadmin credentials for {user.email}",
+            target_user=user,
+            metadata={"target_user_id": user.id},
+        )
+        return Response(SuperAdminAccountSerializer(user).data)
+
+    def delete(self, request, user_id):
+        _ensure_public()
+        try:
+            user = User.objects.get(pk=user_id, is_superuser=True)
+        except User.DoesNotExist:
+            return Response({"detail": "Superadmin account not found."}, status=status.HTTP_404_NOT_FOUND)
+
+        if _active_superadmin_count(exclude_user_id=user.id) < 1:
+            return Response(
+                {"detail": "At least one active superadmin must remain."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        email = user.email
+        target_id = user.id
+        record_superadmin_activity(
+            request,
+            "superadmin_deleted",
+            f"Deleted superadmin credentials for {email}",
+            target_user=user,
+            metadata={"target_user_id": target_id, "email": email},
+        )
+        user.delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+class SuperadminActivityListCreateView(APIView):
+    permission_classes = SUPERADMIN_PERMS
+
+    def get(self, request):
+        _ensure_public()
+        limit = min(max(int(request.query_params.get("limit", 120)), 1), 500)
+        qs = SuperAdminActivityLog.objects.select_related("actor", "target_user")
+        actor = request.query_params.get("actor")
+        target_user = request.query_params.get("target_user")
+        action = request.query_params.get("action")
+        if actor:
+            qs = qs.filter(actor_id=actor)
+        if target_user:
+            qs = qs.filter(target_user_id=target_user)
+        if action:
+            qs = qs.filter(action=action)
+
+        summary = qs.values("actor__email").annotate(actions=Count("id")).order_by("-actions")[:10]
+        return Response({
+            "summary": list(summary),
+            "results": SuperAdminActivityLogSerializer(qs[:limit], many=True).data,
+        })
+
+    def post(self, request):
+        _ensure_public()
+        action = (request.data.get("action") or "superadmin_action").strip()[:80]
+        summary = (request.data.get("summary") or "Superadmin action recorded").strip()
+        metadata = request.data.get("metadata") if isinstance(request.data.get("metadata"), dict) else {}
+        record_superadmin_activity(request, action, summary, metadata=metadata)
+        return Response({"detail": "Superadmin activity recorded."}, status=status.HTTP_201_CREATED)

@@ -152,3 +152,40 @@ class SupportActivityLog(models.Model):
     def __str__(self):
         actor = getattr(self.support_user, "email", None) or "system"
         return f"{actor}: {self.action}"
+
+
+class SuperAdminActivityLog(models.Model):
+    """Immutable audit trail for platform-owner credential and access actions."""
+
+    actor = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="superadmin_actions_performed",
+    )
+    target_user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="superadmin_actions_received",
+    )
+    action = models.CharField(max_length=80)
+    summary = models.CharField(max_length=255)
+    metadata = models.JSONField(default=dict, blank=True)
+    ip_address = models.GenericIPAddressField(null=True, blank=True)
+    user_agent = models.TextField(blank=True, default="")
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        indexes = [
+            models.Index(fields=["actor", "created_at"], name="sadm_admin_actor_created_idx"),
+            models.Index(fields=["target_user", "created_at"], name="sadm_admin_target_created_idx"),
+            models.Index(fields=["action", "created_at"], name="sadm_admin_action_created_idx"),
+        ]
+
+    def __str__(self):
+        actor = getattr(self.actor, "email", None) or "system"
+        return f"{actor}: {self.action}"
