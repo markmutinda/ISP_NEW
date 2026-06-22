@@ -231,7 +231,6 @@ class TumaWebhookView(APIView):
                                 try:
                                     hotspot_session.refresh_from_db()
                                     from apps.messaging.services.notification_sender import SMSNotifier
-                                    from django_tenants.utils import schema_context
                                     with schema_context(payment_schema):
                                         SMSNotifier.hotspot_welcome(
                                             hotspot_session,
