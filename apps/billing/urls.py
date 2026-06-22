@@ -27,8 +27,8 @@ from .views.hotspot_admin_views import (
     HotspotClientViewSet,
     ActiveSubscriptionsView,
     RouterIncomeView,
-    HotspotSessionExtendView,  # ADDED: Import the extend view
-    HotspotClientDetailView,   # ADDED: Import the client detail view
+    HotspotSessionExtendView,
+    HotspotClientDetailView,
 )
 from .views.hotspot_voucher_admin_views import (
     HotspotVoucherGenerateView,
@@ -132,15 +132,21 @@ hotspot_admin_urlpatterns = [
     path('dashboard/', HotspotDashboardView.as_view(), name='hotspot-dashboard'),
     path('admin/plans/', GlobalHotspotPlanListView.as_view(), name='hotspot-admin-all-plans'),
     
-    # HOTSPOT CLIENTS
+    # ============================================================
+    # HOTSPOT CLIENTS - FIXED: HotspotClientDetailView handles both GET and DELETE
+    # ============================================================
     path('admin/clients/', 
          HotspotClientViewSet.as_view({'get': 'list'}), 
          name='hotspot-admin-clients'),
-    path('admin/clients/<int:pk>/', 
-         HotspotClientViewSet.as_view({'get': 'retrieve'}), 
+    
+    # This single URL handles both:
+    # - GET /admin/clients/<int:id>/  → returns client info + sessions
+    # - DELETE /admin/clients/<int:id>/ → deletes the client
+    path('admin/clients/<int:id>/', 
+         HotspotClientDetailView.as_view(), 
          name='hotspot-admin-client-detail'),
     
-    # HOTSPOT CLIENT SESSIONS (NEW - for RADIUS session history)
+    # Keep this for backward compatibility or remove if not needed
     path('admin/clients/<int:id>/sessions/',
          HotspotClientDetailView.as_view(),
          name='hotspot-client-sessions'),
