@@ -878,7 +878,7 @@ class CustomerRadiusCredentialsViewSet(viewsets.ModelViewSet):
         POST   /api/v1/radius/credentials/{id}/sync/    - Force sync to RADIUS
         POST   /api/v1/radius/credentials/{id}/enable/  - Enable account
         POST   /api/v1/radius/credentials/{id}/disable/ - Disable account
-        GET    /api/v1/radius/credentials/expired_count/ - Fast count of expired credentials  # NEW
+        GET    /api/v1/radius/credentials/expired_count/ - Fast count of expired credentials
     """
     
     permission_classes = [IsAuthenticated, HasCompanyAccess]
@@ -897,6 +897,15 @@ class CustomerRadiusCredentialsViewSet(viewsets.ModelViewSet):
         router_id = self.request.query_params.get('router')
         if router_id:
             qs = qs.filter(router_id=router_id)
+        
+        # FIX: Add expired_only filter for server-side filtering
+        expired_only = self.request.query_params.get('expired_only')
+        if expired_only and expired_only.lower() == 'true':
+            from django.utils import timezone
+            qs = qs.filter(
+                expiration_date__isnull=False,
+                expiration_date__lte=timezone.now()
+            )
         
         return qs
     
@@ -1074,7 +1083,6 @@ class CustomerRadiusCredentialsViewSet(viewsets.ModelViewSet):
         credentials.expiration_date = new_expiration
         credentials.is_enabled = True
         credentials.disabled_reason = ''
-        # ADDED: Stamp the activation time for renewal tracking
         credentials.subscription_activated_at = timezone.now()
         credentials.save()
         

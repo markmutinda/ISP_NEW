@@ -14,7 +14,7 @@ from .views import (
     SMSTopupInitiateView,
     SMSTopupCallbackView,
     CustomerSearchView,
-    CampaignSendToGroupView,  # ← ADDED
+    # CampaignSendToGroupView removed — use SMSCampaignViewSet.send_to_group instead
 )
 
 router = DefaultRouter()
@@ -48,8 +48,9 @@ urlpatterns = [
     path('campaigns/<int:pk>/start/', SMSCampaignViewSet.as_view({'post': 'start'}), name='campaign-start'),
     path('campaigns/<int:pk>/cancel/', SMSCampaignViewSet.as_view({'post': 'cancel'}), name='campaign-cancel'),
 
-    # NEW: send to group (pppoe / hotspot / all)
-    path('campaigns/send-to-group/', CampaignSendToGroupView.as_view(), name='campaign-send-to-group'),  # ← ADDED
+    # NOTE: campaigns/send-to-group/ is now handled by SMSCampaignViewSet.send_to_group
+    # via the router at campaigns/send-to-group/ (the router generates this from the @action decorator).
+    # The separate CampaignSendToGroupView has been removed to eliminate ambiguity.
 
     # Gateway CRUD + test + upsert
     path('gateway/<int:pk>/activate/', SMSGatewayConfigViewSet.as_view({'post': 'activate'}), name='gateway-activate'),
