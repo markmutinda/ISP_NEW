@@ -51,9 +51,20 @@ class PlanViewSet(viewsets.ModelViewSet):
             return [IsAuthenticated(), IsCompanyStaff()]
     
     def perform_create(self, serializer):
-        """Save plan with creator info"""
+        """Save plan with creator info and handle duplicate names politely."""
+        from django.db import IntegrityError
         user = self.request.user
-        serializer.save(created_by=user)
+        
+        try:
+            serializer.save(created_by=user)
+        except IntegrityError as e:
+            # Intercept the database unique constraint violation smoothly
+            if "billing_plan_code_key" in str(e):
+                raise serializers.ValidationError({
+                    "name": "A billing plan with this name or configuration already exists."
+                })
+            # Re-raise any unrelated database integrity issues
+            raise e
 
     def perform_update(self, serializer):
         serializer.save(updated_by=self.request.user)
