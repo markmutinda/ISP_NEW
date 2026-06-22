@@ -581,6 +581,9 @@ class HotspotClientDetailView(APIView):
     """
     GET /api/v1/hotspot/admin/clients/{id}/sessions/
     Returns RADIUS sessions for a hotspot client's canonical_username
+    
+    DELETE /api/v1/hotspot/admin/clients/{id}/
+    Deletes a hotspot client and revokes their RADIUS credentials
     """
     permission_classes = [IsAuthenticated, IsAdminOrStaff]
 
@@ -657,6 +660,29 @@ class HotspotClientDetailView(APIView):
             'page_size': page_size,
             'total_pages': (total + page_size - 1) // page_size,
         })
+
+    def delete(self, request, id):
+        """
+        Delete a hotspot client and revoke their RADIUS credentials.
+        
+        DELETE /api/v1/hotspot/admin/clients/{id}/
+        """
+        try:
+            client = HotspotClient.objects.get(id=id)
+        except HotspotClient.DoesNotExist:
+            return Response({'error': 'Client not found'}, status=404)
+        
+        # Clean up RADIUS credentials first
+        username = client.canonical_username
+        if username:
+            try:
+                from apps.billing.services.hotspot_radius_service import HotspotRadiusService
+                HotspotRadiusService().revoke_credentials(username)
+            except Exception as e:
+                logger.warning(f"Could not revoke RADIUS for {username}: {e}")
+        
+        client.delete()
+        return Response(status=204)
 
 
 class RouterIncomeView(APIView):
