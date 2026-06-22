@@ -23,6 +23,7 @@ from .frontend_contract_views import (
     AnalyticsCustomersView,
     AnalyticsRevenueView as AnalyticsRevenueContractView,
     AnalyticsUsageView,
+    RouterDailyRevenueView,  # ADD THIS
 )
 
 app_name = 'analytics'
@@ -59,4 +60,7 @@ urlpatterns = [
     path('customers/', AnalyticsCustomersView.as_view(), name='analytics-customers'),
     path('revenue-contract/', AnalyticsRevenueContractView.as_view(), name='analytics-revenue-contract'),
     path('usage/', AnalyticsUsageView.as_view(), name='analytics-usage'),
+    
+    # Router daily revenue endpoint
+    path('router-revenue/', RouterDailyRevenueView.as_view(), name='analytics-router-revenue'),
 ]

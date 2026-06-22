@@ -942,3 +942,87 @@ class AnalyticsUsageView(APIView, _RangeMixin):
         }
         cache.set(ck, payload, CACHE_TTL)
         return Response(payload)
+
+
+# ==========================================
+# ROUTER DAILY REVENUE VIEW
+# ==========================================
+
+class RouterDailyRevenueView(APIView, _RangeMixin):
+    """
+    GET /api/analytics/router-revenue/?time_range=7d|30d|90d&router_id=<id>
+    Returns daily hotspot revenue for a specific router.
+    """
+    permission_classes = [IsAuthenticated, IsAdminOrStaff]
+
+    def get(self, request):
+        time_range = request.query_params.get("time_range", "30d")
+        router_id = request.query_params.get("router_id")
+        start = self._start("reports", time_range)
+        if not start:
+            return Response({"error": "Invalid time_range. Use 7d, 30d, 90d."}, status=400)
+
+        from apps.billing.models.payment_models import Payment
+        from apps.network.models.router_models import Router
+        from django.db.models import Sum, Count
+        from django.db.models.functions import TruncDay
+
+        # Get all routers for dropdown
+        routers = Router.objects.filter(is_active=True).values("id", "name")
+        routers_list = [{"id": r["id"], "name": r["name"]} for r in routers]
+
+        if not router_id and routers_list:
+            router_id = routers_list[0]["id"]
+
+        if not router_id:
+            return Response({"routers": routers_list, "daily_revenue": [], "summary": {}})
+
+        # Daily hotspot revenue for selected router
+        qs = Payment.objects.filter(
+            status__iexact="completed",
+            payment_date__gte=start,
+            hotspot_sessions__router_id=router_id,
+        ).annotate(
+            day=TruncDay("payment_date")
+        ).values("day").annotate(
+            revenue=Sum("amount"),
+            transactions=Count("id"),
+        ).order_by("day")
+
+        # Build full date range (fill gaps with 0)
+        from datetime import timedelta
+        from django.utils import timezone as tz
+
+        day_map = {}
+        for r in qs:
+            day_map[r["day"].date()] = {
+                "revenue": _safe_float(r["revenue"]),
+                "transactions": r["transactions"],
+            }
+
+        result = []
+        cursor = start.date()
+        end = tz.now().date()
+        while cursor <= end:
+            vals = day_map.get(cursor, {"revenue": 0, "transactions": 0})
+            result.append({
+                "date": cursor.strftime("%b %d"),
+                "revenue": vals["revenue"],
+                "transactions": vals["transactions"],
+            })
+            cursor += timedelta(days=1)
+
+        total = sum(r["revenue"] for r in result)
+        peak = max(result, key=lambda x: x["revenue"]) if result else None
+
+        return Response({
+            "routers": routers_list,
+            "selected_router_id": router_id,
+            "daily_revenue": result,
+            "summary": {
+                "total_revenue": round(total, 2),
+                "avg_daily": round(total / max(len(result), 1), 2),
+                "peak_day": peak["date"] if peak else "-",
+                "peak_amount": peak["revenue"] if peak else 0,
+            },
+        })
