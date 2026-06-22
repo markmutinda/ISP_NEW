@@ -390,6 +390,7 @@ class ActiveSubscriptionsView(APIView):
     }
     
     UPDATED: Hotspot tab now shows ALL clients (not just active) with pagination.
+    FIXED: Return ALL hotspot clients — frontend handles pagination.
     """
     permission_classes = [IsAuthenticated, IsAdminOrStaff]
 
@@ -478,12 +479,9 @@ class ActiveSubscriptionsView(APIView):
                 seen_clients.add(cid)
                 unique_sessions.append(s)
 
-        # Also include pagination support via query params
-        page = int(request.query_params.get('hotspot_page', 1))
-        page_size = int(request.query_params.get('hotspot_page_size', 50))
+        # FIX 2: Return ALL hotspot clients — frontend handles pagination
         total_hotspot = len(unique_sessions)
-        start = (page - 1) * page_size
-        paginated_sessions = unique_sessions[start:start + page_size]
+        paginated_sessions = unique_sessions  # Return ALL, frontend handles pagination
 
         # Build radacct map for enrichment only (not for filtering)
         open_radacct_usernames = set(
@@ -561,8 +559,8 @@ class ActiveSubscriptionsView(APIView):
             "hotspot": hotspot_results,
             "total": len(pppoe_results) + len(hotspot_results),
             "hotspot_total": total_hotspot,
-            "hotspot_page": page,
-            "hotspot_page_size": page_size,
+            "hotspot_page": 1,  # Frontend handles pagination, always return page 1
+            "hotspot_page_size": total_hotspot,  # All items returned at once
         })
 
 
