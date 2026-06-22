@@ -180,13 +180,18 @@ def _record_migrations_applied(cursor, schema):
     import django.utils.timezone as tz
     now = tz.now()
     for migration_name in TOKEN_BLACKLIST_MIGRATIONS:
+        # Use WHERE NOT EXISTS instead of ON CONFLICT — django_migrations has no
+        # unique constraint on (app, name) in all PostgreSQL versions.
         cursor.execute(
             f"""
             INSERT INTO "{schema}".django_migrations (app, name, applied)
-            VALUES ('token_blacklist', %s, %s)
-            ON CONFLICT (app, name) DO NOTHING
+            SELECT 'token_blacklist', %s, %s
+            WHERE NOT EXISTS (
+                SELECT 1 FROM "{schema}".django_migrations
+                WHERE app = 'token_blacklist' AND name = %s
+            )
             """,
-            [migration_name, now],
+            [migration_name, now, migration_name],
         )
 
 
