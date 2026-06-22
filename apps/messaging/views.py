@@ -456,6 +456,23 @@ class SMSCampaignViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_400_BAD_REQUEST
             )
 
+        # ── CRITICAL FIX ─────────────────────────────────────────────────
+        # Capture the CURRENT tenant schema while we're still safely inside
+        # this tenant's own request context (set by TenantMainMiddleware).
+        # We hand this to the Celery task explicitly. SMSCampaign ids are
+        # NOT globally unique across tenants, so letting the task "search"
+        # for which tenant owns campaign_id is unsafe — it's exactly what
+        # caused Tenant A's SMS gateway/credentials to be used for
+        # Tenant B's campaign.
+        from django.db import connection as _conn
+        current_schema = _conn.schema_name
+        if not current_schema or current_schema == 'public':
+            return Response(
+                {'error': 'Cannot send a campaign from the public schema.'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        # ─────────────────────────────────────────────────────────────────
+
         campaign = SMSCampaign.objects.create(
             name=name,
             message=message,
@@ -466,7 +483,9 @@ class SMSCampaignViewSet(viewsets.ModelViewSet):
         )
 
         from apps.messaging.tasks import process_campaign_sms
-        process_campaign_sms.delay(campaign.id, phones, message)
+        # CRITICAL FIX: schema_name passed explicitly — the worker no
+        # longer has to guess (and risk grabbing another tenant's gateway).
+        process_campaign_sms.delay(campaign.id, phones, message, schema_name=current_schema)
 
         return Response({
             'campaign_id': campaign.id,

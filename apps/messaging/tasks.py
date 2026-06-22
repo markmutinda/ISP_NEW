@@ -762,57 +762,62 @@ def send_router_online_alert(self, router_name: str, schema_name: str = None):
 
 # FIX 5: Campaign bulk SMS — Celery task with tenant context
 @shared_task(bind=True, max_retries=2)
-def process_campaign_sms(self, campaign_id: int, phones: list, message: str):
+def process_campaign_sms(self, campaign_id: int, phones: list, message: str, schema_name: str = None):
     """
     Send bulk campaign SMS and update campaign stats.
-    Wrapped with tenant schema context to ensure correct database routing.
-    
+
+    CRITICAL: schema_name MUST be passed explicitly by the caller (the view
+    that created the campaign, while it is still inside the correct
+    tenant's own request context). SMSCampaign ids are PER-TENANT
+    auto-increment values (messaging is a TENANT_APP — every tenant has
+    its own table/sequence), so two different tenants can easily have a
+    campaign with the SAME id. Searching across tenants for "the first
+    schema that has a campaign with this id" is unsafe — it is exactly
+    what caused one tenant's SMS gateway/credentials to be used to send
+    another tenant's campaign. We never guess anymore: if schema_name is
+    missing, we refuse to run.
+
     Args:
-        campaign_id: ID of the SMSCampaign record
+        campaign_id: ID of the SMSCampaign record (per-tenant, NOT globally unique)
         phones: List of phone numbers to send to
         message: SMS content to send
+        schema_name: The tenant schema that owns this campaign (REQUIRED)
     """
     from apps.messaging.models import SMSCampaign
     from django.utils import timezone
-    from django_tenants.utils import schema_context, get_public_schema_name
-    from apps.core.models import Tenant
+    from django_tenants.utils import schema_context
     from .services.gateway_dispatcher import GatewayDispatcher
 
-    # Find which tenant owns this campaign
-    target_schema = None
-    with schema_context(get_public_schema_name()):
-        for tenant in Tenant.objects.filter(is_active=True).exclude(schema_name='public'):
-            with schema_context(tenant.schema_name):
-                try:
-                    if SMSCampaign.objects.filter(id=campaign_id).exists():
-                        target_schema = tenant.schema_name
-                        break
-                except Exception:
-                    continue
-
-    if not target_schema:
-        logger.error(f"[CAMPAIGN {campaign_id}] Could not find tenant schema")
+    if not schema_name or schema_name == 'public':
+        logger.error(
+            f"[CAMPAIGN {campaign_id}] Refusing to run — no valid schema_name "
+            f"was passed to process_campaign_sms. This task must always be "
+            f"queued with schema_name=<tenant schema> to avoid cross-tenant "
+            f"SMS gateway leakage."
+        )
         return
 
-    # Execute the campaign in the correct tenant schema
-    with schema_context(target_schema):
+    # Execute the campaign ONLY in the schema we were explicitly told about.
+    # No cross-tenant search, ever.
+    with schema_context(schema_name):
         try:
             campaign = SMSCampaign.objects.get(id=campaign_id)
         except SMSCampaign.DoesNotExist:
-            logger.warning(f"[CAMPAIGN {campaign_id}] Campaign not found in schema {target_schema}")
+            logger.warning(f"[CAMPAIGN {campaign_id}] Campaign not found in schema {schema_name}")
             return
 
         sent = 0
         failed = 0
 
-        logger.info(f"[CAMPAIGN {campaign_id}] Starting bulk send to {len(phones)} recipients in {target_schema}")
+        logger.info(f"[CAMPAIGN {campaign_id}] Starting bulk send to {len(phones)} recipients in {schema_name}")
 
         for idx, phone in enumerate(phones):
             try:
-                # CRITICAL: Pass schema_name explicitly to GatewayDispatcher
-                dispatcher = GatewayDispatcher(schema_name=target_schema)
+                # Pass schema_name explicitly — this is what loads the
+                # correct tenant's SMSGatewayConfig (inbuilt vs custom keys)
+                dispatcher = GatewayDispatcher(schema_name=schema_name)
                 result = dispatcher.send_sms(to=phone, message=message)
-                
+
                 if result.get('success', False):
                     sent += 1
                 else:
