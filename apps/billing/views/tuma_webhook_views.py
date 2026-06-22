@@ -224,6 +224,30 @@ class TumaWebhookView(APIView):
                                     f"🚀 Webhook Core: Successfully auto-activated session {hotspot_session.session_id} "
                                     f"and provisioned RADIUS profiles directly to disk."
                                 )
+
+                                # ── SEND WELCOME SMS ──────────────────────────────────
+                                # Re-fetch session so expires_at and access_code are up to date
+                                # after activate() updated them in DB
+                                try:
+                                    hotspot_session.refresh_from_db()
+                                    from apps.messaging.services.notification_sender import SMSNotifier
+                                    from django_tenants.utils import schema_context
+                                    with schema_context(payment_schema):
+                                        SMSNotifier.hotspot_welcome(
+                                            hotspot_session,
+                                            schema_name=payment_schema,
+                                        )
+                                    logger.info(
+                                        f"Welcome SMS sent for session {hotspot_session.session_id}"
+                                    )
+                                except Exception as sms_err:
+                                    # SMS failure must never break payment confirmation
+                                    logger.warning(
+                                        f"Hotspot welcome SMS failed for session "
+                                        f"{hotspot_session.session_id}: {sms_err}"
+                                    )
+                                # ─────────────────────────────────────────────────────
+
                             except Exception as radius_err:
                                 logger.error(
                                     f"❌ Webhook Core: RADIUS profile synchronization failed for session "

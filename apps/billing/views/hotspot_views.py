@@ -491,9 +491,6 @@ class HotspotPlansView(APIView):
         return Response(payload)
 
 
-# ... (rest of the file remains the same - HotspotPurchaseView, HotspotPurchaseStatusView, HotspotVoucherRedeemView, HotspotPhoneReconnectView)
-
-
 class HotspotPurchaseView(APIView):
     """
     Initiate hotspot purchase with REAL STK Push via Tuma.
@@ -1157,8 +1154,9 @@ class HotspotPurchaseStatusView(APIView):
                 
                 # ── SMS: welcome with access code ──
                 try:
+                    session.refresh_from_db()
                     from apps.messaging.services.notification_sender import SMSNotifier
-                    SMSNotifier.hotspot_welcome(session)
+                    SMSNotifier.hotspot_welcome(session, schema_name=tenant.schema_name)
                 except Exception as e:
                     logger.warning(f"Hotspot welcome SMS failed: {e}")
                 
@@ -1218,8 +1216,9 @@ class HotspotPurchaseStatusView(APIView):
                     
                     # ── SMS: welcome ──
                     try:
+                        session.refresh_from_db()
                         from apps.messaging.services.notification_sender import SMSNotifier
-                        SMSNotifier.hotspot_welcome(session)
+                        SMSNotifier.hotspot_welcome(session, schema_name=tenant.schema_name)
                     except Exception as e:
                         logger.warning(f"Hotspot welcome SMS failed: {e}")
                     
@@ -1459,7 +1458,7 @@ class HotspotVoucherRedeemView(APIView):
                 # ── SMS: welcome for voucher redemption ──
                 try:
                     from apps.messaging.services.notification_sender import SMSNotifier
-                    SMSNotifier.hotspot_welcome(session)
+                    SMSNotifier.hotspot_welcome(session, schema_name=tenant.schema_name)
                 except Exception as e:
                     logger.warning(f"Hotspot voucher welcome SMS failed: {e}")
                     
