@@ -60,11 +60,24 @@ class HotspotPlanViewSet(viewsets.ModelViewSet):
         return get_object_or_404(Router, id=router_id)
     
     def perform_create(self, serializer):
+        """Save hotspot plan with router context and handle duplicate constraints politely."""
+        from django.db import IntegrityError
+        from rest_framework import serializers
         router = self.get_router()
-        serializer.save(
-            router=router,
-            created_by=self.request.user
-        )
+        
+        try:
+            serializer.save(
+                router=router,
+                created_by=self.request.user
+            )
+        except IntegrityError as e:
+            # Catch the unique_together constraint violation for router + name
+            if "router" in str(e).lower() and "name" in str(e).lower():
+                raise serializers.ValidationError({
+                    "name": "A hotspot plan with this name already exists for this specific router."
+                })
+            # Re-raise any unrelated database integrity issues
+            raise e
     
     @action(detail=False, methods=['post'])
     def reorder(self, request, router_id=None):
