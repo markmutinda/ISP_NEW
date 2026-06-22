@@ -84,6 +84,8 @@ services:
              python manage.py migrate_schemas_resilient --shared &&
              python manage.py migrate_schemas_resilient --tenant &&
              echo 'Migrations complete.' &&
+             echo 'Repairing token-blacklist FK constraints...' &&
+             python manage.py fix_tenant_token_blacklist &&
              echo 'Syncing subscription plan pricing...' &&
              python manage.py seed_plans &&
              echo 'Setting up routes...' &&

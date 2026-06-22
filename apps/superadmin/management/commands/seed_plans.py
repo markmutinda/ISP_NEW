@@ -1,9 +1,11 @@
 """
 Seed the correct Netily platform subscription plans.
 
-Only two plans are managed: Starter and Enterprise.
-Metered and Professional are no longer offered; existing subscriptions on
-those plans are automatically migrated to Starter.
+Two plans are managed:
+  Starter   — metered/usage-based (KES 500 one-time activation, KES 25/PPPoE user,
+               3% hotspot revenue share, KES 500/month minimum). This is the plan
+               shown in the BillingCalculator on the homepage.
+  Enterprise — custom/contact-sales pricing for large ISPs.
 
 Usage:
     python manage.py seed_plans          # Create/update Starter + Enterprise
@@ -15,69 +17,77 @@ from decimal import Decimal
 
 PLANS = [
     {
+        # Starter = the metered / pay-as-you-grow plan shown in the BillingCalculator.
+        # Billing = KES 500 activation (one-time at trial end) +
+        #           KES 25 per active PPPoE user per month +
+        #           3% of hotspot revenue, minimum KES 500 / month.
         "name": "Starter",
         "code": "starter",
-        "tagline": "Everything you need to get started",
+        "tagline": "Perfect for growing ISPs who want to keep costs lean.",
         "description": (
-            "Flat KES 2,999/mo for growing ISPs. "
-            "Includes up to 200 subscribers, 10 routers, and 5 staff accounts."
+            "Pay only for what you use. KES 500 one-time activation after your free trial, "
+            "then KES 25 per active PPPoE subscriber + 3% of hotspot revenue each month. "
+            "Minimum monthly charge: KES 500."
         ),
-        "price_monthly": Decimal("2999.00"),
-        "price_yearly": Decimal("29990.00"),   # ~2 months free
-        "is_metered": False,
+        # price_monthly here represents the minimum / base floor shown in the UI;
+        # actual billing is metered and calculated at cycle end.
+        "price_monthly": Decimal("500.00"),
+        "price_yearly": Decimal("0.00"),   # metered — no annual flat rate
+        "is_metered": True,
         "activation_fee": Decimal("500.00"),
-        "base_license_fee": Decimal("500.00"),
-        "pppoe_unit_price": Decimal("25.00"),
-        "pppoe_min_clients": 20,
-        "hotspot_revenue_share_pct": Decimal("3.00"),
-        "max_subscribers": 200,
-        "max_routers": 10,
-        "max_staff": 5,
-        "features": [
-            "Up to 200 subscribers",
-            "Up to 10 routers",
-            "Up to 5 staff accounts",
-            "PPPoE & Hotspot billing",
-            "Standard analytics",
-            "Email & chat support",
-            "Network monitoring",
-        ],
-        "is_active": True,
-        "is_popular": False,
-        "sort_order": 0,
-    },
-    {
-        "name": "Enterprise",
-        "code": "enterprise",
-        "tagline": "Unlimited power for large ISPs",
-        "description": (
-            "Flat KES 19,999/mo — everything unlimited. "
-            "Dedicated account manager, API access, white-label options."
-        ),
-        "price_monthly": Decimal("19999.00"),
-        "price_yearly": Decimal("199990.00"),  # ~2 months free
-        "is_metered": False,
-        "activation_fee": Decimal("500.00"),
-        "base_license_fee": Decimal("500.00"),
-        "pppoe_unit_price": Decimal("25.00"),
-        "pppoe_min_clients": 20,
+        "base_license_fee": Decimal("500.00"),  # KES 500 minimum monthly floor
+        "pppoe_unit_price": Decimal("25.00"),   # KES 25 per active PPPoE user
+        "pppoe_min_clients": 0,                 # no PPPoE client floor; floor is base_license_fee
         "hotspot_revenue_share_pct": Decimal("3.00"),
         "max_subscribers": 0,   # unlimited
         "max_routers": 0,       # unlimited
         "max_staff": 0,         # unlimited
         "features": [
-            "Unlimited subscribers",
-            "Unlimited routers",
-            "Unlimited staff accounts",
+            "Free M-Pesa STK Push integration",
+            "MikroTik auto-provisioning",
+            "Unlimited routers & subscribers",
             "PPPoE & Hotspot billing",
-            "Advanced analytics & reports",
+            "Real-time bandwidth management",
+            "Analytics & reports",
+            "Email & chat support",
+        ],
+        "is_active": True,
+        "is_popular": True,
+        "sort_order": 0,
+    },
+    {
+        # Enterprise = custom / contact-sales plan for large ISPs.
+        # price_monthly is stored as 0 because pricing is agreed per-customer;
+        # the platform superadmin configures the actual rates manually.
+        "name": "Enterprise",
+        "code": "enterprise",
+        "tagline": "Scale without limits — pricing tailored to your ISP.",
+        "description": (
+            "White-label, SLA guarantee, and pricing built around your ISP. "
+            "Dedicated account manager, API access, and custom billing rates. "
+            "Contact the Netily team to get started."
+        ),
+        "price_monthly": Decimal("0.00"),   # custom — set per customer
+        "price_yearly": Decimal("0.00"),    # custom
+        "is_metered": True,                 # still usage-based; rates negotiated
+        "activation_fee": Decimal("500.00"),
+        "base_license_fee": Decimal("500.00"),
+        "pppoe_unit_price": Decimal("25.00"),   # default; overridden per tenant
+        "pppoe_min_clients": 0,
+        "hotspot_revenue_share_pct": Decimal("3.00"),
+        "max_subscribers": 0,   # unlimited
+        "max_routers": 0,       # unlimited
+        "max_staff": 0,         # unlimited
+        "features": [
+            "Everything in Starter",
+            "Unlimited subscribers & routers",
+            "Unlimited staff accounts",
             "Dedicated account manager",
             "24/7 priority support",
-            "Network monitoring",
-            "Bandwidth management",
-            "Custom branding",
-            "API access",
+            "Custom billing rates",
             "White-label options",
+            "API access",
+            "SLA guarantee",
         ],
         "is_active": True,
         "is_popular": False,
