@@ -28,6 +28,7 @@ from .views.hotspot_admin_views import (
     ActiveSubscriptionsView,
     RouterIncomeView,
     HotspotSessionExtendView,  # ADDED: Import the extend view
+    HotspotClientDetailView,   # ADDED: Import the client detail view
 )
 from .views.hotspot_voucher_admin_views import (
     HotspotVoucherGenerateView,
@@ -138,6 +139,11 @@ hotspot_admin_urlpatterns = [
     path('admin/clients/<int:pk>/', 
          HotspotClientViewSet.as_view({'get': 'retrieve'}), 
          name='hotspot-admin-client-detail'),
+    
+    # HOTSPOT CLIENT SESSIONS (NEW - for RADIUS session history)
+    path('admin/clients/<int:id>/sessions/',
+         HotspotClientDetailView.as_view(),
+         name='hotspot-client-sessions'),
     
     # ACTIVE SUBSCRIPTIONS
     path('admin/active-subscriptions/', 

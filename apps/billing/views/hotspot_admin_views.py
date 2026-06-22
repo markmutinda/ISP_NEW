@@ -389,9 +389,7 @@ class ActiveSubscriptionsView(APIView):
         "total": 42
     }
     
-    FIX: Hotspot tab now shows all sessions where status='active' and expires_at > now.
-    It no longer silently drops sessions just because radacct was swept by the ghost cleaner.
-    The online_source field lets the frontend optionally show a "confirmed online" indicator.
+    UPDATED: Hotspot tab now shows ALL clients (not just active) with pagination.
     """
     permission_classes = [IsAuthenticated, IsAdminOrStaff]
 
@@ -459,16 +457,33 @@ class ActiveSubscriptionsView(APIView):
                 "subscribed_at": cred.created_at.isoformat() if cred.created_at else None,
             })
 
-        # ── Hotspot active subscriptions (FIXED: No longer filters by radacct) ──
-        active_sessions = (
+        # ── Hotspot subscriptions — ALL clients, any session status ──
+        # We group by hotspot_client and show their most recent session
+        all_hotspot_sessions = (
             HotspotSession.objects
             .filter(
-                status='active',
-                expires_at__gt=now,
+                status__in=['active', 'paid', 'expired', 'pending'],
+                hotspot_client__isnull=False,
             )
             .select_related('plan', 'router', 'hotspot_client')
             .order_by('-activated_at')
         )
+
+        # De-duplicate: one entry per client (most recent session wins)
+        seen_clients = set()
+        unique_sessions = []
+        for s in all_hotspot_sessions:
+            cid = s.hotspot_client_id
+            if cid not in seen_clients:
+                seen_clients.add(cid)
+                unique_sessions.append(s)
+
+        # Also include pagination support via query params
+        page = int(request.query_params.get('hotspot_page', 1))
+        page_size = int(request.query_params.get('hotspot_page_size', 50))
+        total_hotspot = len(unique_sessions)
+        start = (page - 1) * page_size
+        paginated_sessions = unique_sessions[start:start + page_size]
 
         # Build radacct map for enrichment only (not for filtering)
         open_radacct_usernames = set(
@@ -476,7 +491,7 @@ class ActiveSubscriptionsView(APIView):
         )
 
         hotspot_results = []
-        for session in active_sessions:
+        for session in paginated_sessions:
             # Determine online status for display purposes only — don't use it to filter
             has_open_radacct = bool(session.access_code and session.access_code in open_radacct_usernames)
             is_within_startup_grace = (
@@ -505,6 +520,10 @@ class ActiveSubscriptionsView(APIView):
                 0, int((session.expires_at - now).total_seconds() / 3600)
             ) if session.expires_at else 0
 
+            # Subscription status
+            subscription_status = session.status  # 'active', 'expired', etc.
+            is_active_sub = session.status == 'active' and (session.expires_at and session.expires_at > now)
+
             hotspot_results.append({
                 "type": "hotspot",
                 "username": session.access_code,           # e.g. "MXA-BKCS"
@@ -531,12 +550,101 @@ class ActiveSubscriptionsView(APIView):
                 # Lifetime analytics for this client
                 "client_total_sessions": client.total_sessions if client else 1,
                 "client_total_spend": float(client.total_spend) if client else float(session.amount),
+                # ADDED: Subscription status fields
+                "subscription_status": subscription_status,  # 'active', 'expired', etc.
+                "is_active_sub": is_active_sub,
+                "client_id": session.hotspot_client_id,  # ADD THIS LINE for client detail fetch
             })
 
         return Response({
             "pppoe": pppoe_results,
             "hotspot": hotspot_results,
             "total": len(pppoe_results) + len(hotspot_results),
+            "hotspot_total": total_hotspot,
+            "hotspot_page": page,
+            "hotspot_page_size": page_size,
+        })
+
+
+class HotspotClientDetailView(APIView):
+    """
+    GET /api/v1/hotspot/admin/clients/{id}/sessions/
+    Returns RADIUS sessions for a hotspot client's canonical_username
+    """
+    permission_classes = [IsAuthenticated, IsAdminOrStaff]
+
+    def get(self, request, id):
+        from apps.radius.models import RadAcct
+        try:
+            client = HotspotClient.objects.get(id=id)
+        except HotspotClient.DoesNotExist:
+            return Response({'error': 'Client not found'}, status=404)
+
+        username = client.canonical_username
+        if not username:
+            return Response({'sessions': [], 'count': 0})
+
+        sessions_qs = RadAcct.objects.filter(
+            username=username
+        ).select_related('router').order_by('-acctstarttime')
+
+        # Pagination
+        page = int(request.query_params.get('page', 1))
+        page_size = int(request.query_params.get('page_size', 20))
+        total = sessions_qs.count()
+        start = (page - 1) * page_size
+        sessions = sessions_qs[start:start + page_size]
+
+        def fmt_bytes(b):
+            if not b: return '0 B'
+            b = int(b)
+            for unit in ['B', 'KB', 'MB', 'GB']:
+                if b < 1024: return f'{b:.2f} {unit}'
+                b /= 1024
+            return f'{b:.2f} TB'
+
+        data = []
+        for s in sessions:
+            total_bytes = (s.acctinputoctets or 0) + (s.acctoutputoctets or 0)
+            duration_secs = s.acctsessiontime or 0
+            if not duration_secs and s.acctstarttime and s.acctstoptime:
+                duration_secs = int((s.acctstoptime - s.acctstarttime).total_seconds())
+            h, rem = divmod(duration_secs, 3600)
+            m, sec = divmod(rem, 60)
+            duration_fmt = f'{h:02d}:{m:02d}:{sec:02d}'
+
+            data.append({
+                'id': s.radacctid,
+                'mac_address': s.callingstationid or '',
+                'ip_address': s.framedipaddress or '',
+                'router': s.router.name if s.router else (s.nasipaddress or ''),
+                'nas_ip': s.nasipaddress or '',
+                'start_time': s.acctstarttime.isoformat() if s.acctstarttime else None,
+                'stop_time': s.acctstoptime.isoformat() if s.acctstoptime else None,
+                'duration': duration_fmt,
+                'duration_seconds': duration_secs,
+                'data_total': fmt_bytes(total_bytes),
+                'data_upload': fmt_bytes(s.acctinputoctets or 0),
+                'data_download': fmt_bytes(s.acctoutputoctets or 0),
+                'terminate_cause': s.acctterminatecause or '',
+                'is_active': s.acctstoptime is None,
+            })
+
+        return Response({
+            'client': {
+                'id': client.id,
+                'canonical_username': client.canonical_username,
+                'canonical_phone': client.canonical_phone,
+                'total_sessions': client.total_sessions,
+                'total_spend': float(client.total_spend),
+                'first_seen_at': client.first_seen_at.isoformat() if client.first_seen_at else None,
+                'last_seen_at': client.last_seen_at.isoformat() if client.last_seen_at else None,
+            },
+            'sessions': data,
+            'count': total,
+            'page': page,
+            'page_size': page_size,
+            'total_pages': (total + page_size - 1) // page_size,
         })
 
 
