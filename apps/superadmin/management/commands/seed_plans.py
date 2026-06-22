@@ -1,46 +1,19 @@
 """
 Seed the correct Netily platform subscription plans.
 
+Only two plans are managed: Starter and Enterprise.
+Metered and Professional are no longer offered; existing subscriptions on
+those plans are automatically migrated to Starter.
+
 Usage:
-    python manage.py seed_plans          # Create/update all 4 plans
-    python manage.py seed_plans --force  # Delete existing plans and recreate
+    python manage.py seed_plans          # Create/update Starter + Enterprise
+    python manage.py seed_plans --force  # Delete all plans and recreate
 """
 from django.core.management.base import BaseCommand
 from decimal import Decimal
 
 
 PLANS = [
-    {
-        "name": "Metered",
-        "code": "metered",
-        "tagline": "Pay as you grow — perfect for new ISPs",
-        "description": (
-            "Usage-based pricing that scales with your business. "
-            "A KES 500 monthly minimum applies; usage is KES 25 per active "
-            "PPPoE client plus 3% of hotspot revenue."
-        ),
-        "price_monthly": Decimal("500.00"),   # base only; actual bill is metered
-        "price_yearly": Decimal("5400.00"),    # ~10% discount on base
-        "is_metered": True,
-        "base_license_fee": Decimal("500.00"),
-        "pppoe_unit_price": Decimal("25.00"),
-        "pppoe_min_clients": 20,
-        "hotspot_revenue_share_pct": Decimal("3.00"),
-        "max_subscribers": 0,   # unlimited
-        "max_routers": 0,       # unlimited
-        "max_staff": 5,
-        "features": [
-            "Unlimited subscribers",
-            "Unlimited routers",
-            "Up to 5 staff accounts",
-            "PPPoE & Hotspot billing",
-            "Basic analytics",
-            "Email support",
-        ],
-        "is_active": True,
-        "is_popular": False,
-        "sort_order": 0,
-    },
     {
         "name": "Starter",
         "code": "starter",
@@ -52,6 +25,7 @@ PLANS = [
         "price_monthly": Decimal("2999.00"),
         "price_yearly": Decimal("29990.00"),   # ~2 months free
         "is_metered": False,
+        "activation_fee": Decimal("500.00"),
         "base_license_fee": Decimal("500.00"),
         "pppoe_unit_price": Decimal("25.00"),
         "pppoe_min_clients": 20,
@@ -70,41 +44,7 @@ PLANS = [
         ],
         "is_active": True,
         "is_popular": False,
-        "sort_order": 1,
-    },
-    {
-        "name": "Professional",
-        "code": "professional",
-        "tagline": "Scale with confidence",
-        "description": (
-            "Flat KES 7,999/mo for established ISPs. "
-            "Up to 1,000 subscribers, 50 routers, unlimited staff. "
-            "Includes advanced analytics and priority support."
-        ),
-        "price_monthly": Decimal("7999.00"),
-        "price_yearly": Decimal("79990.00"),   # ~2 months free
-        "is_metered": False,
-        "base_license_fee": Decimal("500.00"),
-        "pppoe_unit_price": Decimal("25.00"),
-        "pppoe_min_clients": 20,
-        "hotspot_revenue_share_pct": Decimal("3.00"),
-        "max_subscribers": 1000,
-        "max_routers": 50,
-        "max_staff": 0,   # unlimited
-        "features": [
-            "Up to 1,000 subscribers",
-            "Up to 50 routers",
-            "Unlimited staff accounts",
-            "PPPoE & Hotspot billing",
-            "Advanced analytics & reports",
-            "Priority support",
-            "Network monitoring",
-            "Bandwidth management",
-            "Custom branding",
-        ],
-        "is_active": True,
-        "is_popular": True,
-        "sort_order": 2,
+        "sort_order": 0,
     },
     {
         "name": "Enterprise",
@@ -117,6 +57,7 @@ PLANS = [
         "price_monthly": Decimal("19999.00"),
         "price_yearly": Decimal("199990.00"),  # ~2 months free
         "is_metered": False,
+        "activation_fee": Decimal("500.00"),
         "base_license_fee": Decimal("500.00"),
         "pppoe_unit_price": Decimal("25.00"),
         "pppoe_min_clients": 20,
@@ -140,26 +81,26 @@ PLANS = [
         ],
         "is_active": True,
         "is_popular": False,
-        "sort_order": 3,
+        "sort_order": 1,
     },
 ]
 
 
 class Command(BaseCommand):
-    help = "Seed the 4 Netily subscription plans (Metered, Starter, Professional, Enterprise)"
+    help = "Seed the 2 Netily subscription plans (Starter, Enterprise)"
 
-    # Mapping: old plan name fragments → target new plan code
-    # Key is a lowercase substring of the old plan name, value is the new code.
+    # Mapping: old plan name fragments → target new plan code.
+    # Metered and Professional no longer exist; their subscriptions move to Starter.
     OLD_PLAN_MIGRATION_MAP = {
-        'starter':      'metered',   # Netily Starters → Metered (pay-as-you-grow)
-        'basic':        'metered',
-        'free':         'metered',
-        'professional': 'professional',
-        'pro':          'professional',
+        'metered':      'starter',
+        'starter':      'starter',
+        'basic':        'starter',
+        'free':         'starter',
+        'professional': 'starter',
+        'pro':          'starter',
         'enterprise':   'enterprise',
-        'metered':      'metered',
     }
-    DEFAULT_MIGRATION_TARGET = 'metered'  # Fallback for unrecognised old plan names
+    DEFAULT_MIGRATION_TARGET = 'starter'  # Fallback for unrecognised old plan names
 
     def add_arguments(self, parser):
         parser.add_argument(
@@ -181,7 +122,7 @@ class Command(BaseCommand):
     def handle(self, *args, **options):
         from apps.subscriptions.models import BillingCycle, NetilyPlan, CompanySubscription
 
-        # ── STEP 1: Create/update the 4 canonical plans first ─────────────────
+        # ── STEP 1: Create/update the 2 canonical plans first ─────────────────
         created = 0
         updated = 0
         for plan_data in PLANS:

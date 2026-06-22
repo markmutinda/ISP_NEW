@@ -35,6 +35,7 @@ class NetilyPlanSerializer(serializers.ModelSerializer):
             'price_yearly',
             'currency',
             'is_metered',
+            'activation_fee',
             'base_license_fee',
             'pppoe_unit_price',
             'pppoe_min_clients',

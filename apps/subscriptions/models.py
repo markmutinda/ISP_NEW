@@ -31,10 +31,12 @@ class NetilyPlan(models.Model):
     """
     
     PLAN_CODES = (
-        ('metered', 'Metered'),
         ('starter', 'Starter'),
-        ('professional', 'Professional'),
         ('enterprise', 'Enterprise'),
+        # Legacy codes kept for backward-compatibility with existing DB rows;
+        # no new plans with these codes should be created.
+        ('metered', 'Metered (legacy)'),
+        ('professional', 'Professional (legacy)'),
     )
     
     # Basic Info
@@ -54,6 +56,12 @@ class NetilyPlan(models.Model):
         help_text="If True, uses dynamic metered billing instead of flat price_monthly"
     )
     base_license_fee = models.DecimalField(max_digits=10, decimal_places=2, default=Decimal('500.00'))
+    activation_fee = models.DecimalField(
+        max_digits=10,
+        decimal_places=2,
+        default=Decimal('500.00'),
+        help_text="One-time fee charged when a trial converts to a paid subscription (KES)"
+    )
     pppoe_unit_price = models.DecimalField(max_digits=10, decimal_places=2, default=Decimal('25.00'))
     pppoe_min_clients = models.PositiveIntegerField(
         default=20,
@@ -411,10 +419,10 @@ class CompanySubscription(models.Model):
         now = timezone.now()
         trial_end = now + timedelta(days=cls.TRIAL_DURATION_DAYS)
         
-        # Default to Metered plan for trials (pay-as-you-go, lowest barrier)
+        # Default to Starter plan for trials.
         if plan is None:
             try:
-                plan = NetilyPlan.objects.get(code='metered', is_active=True)
+                plan = NetilyPlan.objects.get(code='starter', is_active=True)
             except NetilyPlan.DoesNotExist:
                 # Fallback to any active plan
                 plan = NetilyPlan.objects.filter(is_active=True).first()

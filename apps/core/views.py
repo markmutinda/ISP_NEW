@@ -98,7 +98,11 @@ def _resolve_cross_tenant_platform_admin(request, email: str, password: str):
         tenant_user = User.objects.filter(email__iexact=normalized_email).first()
         if not tenant_user:
             if not public_user.is_active:
-                return public_user
+                # Inactive public user, no tenant mirror — return None so the
+                # caller correctly issues a 403 (Account disabled) rather than
+                # accidentally handing a public-schema User object to a tenant
+                # context where its user_id doesn't exist in the tenant core_user.
+                return None
 
             phone_number = _platform_admin_phone(public_user, tenant_scope)
             collision_counter = 1

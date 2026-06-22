@@ -78,7 +78,12 @@ SHARED_APPS = (
     'apps.core',                       # Tenant & Domain models go here - MUST be in BOTH
     'apps.subscriptions',              # Netily platform subscriptions (public schema only)
     'apps.superadmin',
-    'rest_framework_simplejwt.token_blacklist', # Required to instantly revoke deactivated admin tokens
+    # NOTE: token_blacklist is intentionally NOT in SHARED_APPS.
+    # It must live only in TENANT_APPS so each tenant schema has its own
+    # token_blacklist_outstandingtoken table with an FK that correctly
+    # references that tenant's core_user table (not the public schema's).
+    # Having it in SHARED_APPS causes FK violations on login because
+    # tenant user IDs don't exist in the public core_user table.
 ) + CELERY_APPS  # Add Celery apps to SHARED_APPS
 
 TENANT_APPS = (

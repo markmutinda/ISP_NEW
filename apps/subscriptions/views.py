@@ -183,6 +183,7 @@ class CurrentSubscriptionView(APIView):
                     data['trial_message'] = "Your free trial has expired."
                     data['trial_warning'] = "Please subscribe to continue using Netily."
                     data['access_restricted'] = True
+                    data['activation_fee'] = str(subscription.plan.activation_fee)
             
             return Response(data)
             
