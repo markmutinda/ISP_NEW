@@ -15,8 +15,7 @@ from .views.cloud_portal_views import (
     HotspotReturnTripView,
     HotspotDeviceAuthView,
     HotspotDeviceAuthStatusView,
-    GenerateTVCodeView,
-    VerifyTVCodeView,
+    # REMOVED: GenerateTVCodeView, VerifyTVCodeView
 )
 from .views.hotspot_admin_views import (
     HotspotPlanViewSet,
@@ -29,6 +28,7 @@ from .views.hotspot_admin_views import (
     RouterIncomeView,
     HotspotSessionExtendView,
     HotspotClientDetailView,
+    HotspotNetworkScanView,  # ADDED: New network scan view
 )
 from .views.hotspot_voucher_admin_views import (
     HotspotVoucherGenerateView,
@@ -115,8 +115,10 @@ hotspot_urlpatterns = [
     path('device-auth/status/', HotspotDeviceAuthStatusView.as_view(), name='hotspot-device-auth-status'),
     path('voucher-redeem/', HotspotVoucherRedeemView.as_view(), name='hotspot-voucher-redeem'),
     path('phone-reconnect/', HotspotPhoneReconnectView.as_view(), name='hotspot-phone-reconnect'),
-    path('tv/generate-code/', GenerateTVCodeView.as_view(), name='hotspot-tv-generate-code'),
-    path('tv/verify-code/', VerifyTVCodeView.as_view(), name='hotspot-tv-verify-code'),
+    # REMOVED: path('tv/generate-code/', GenerateTVCodeView.as_view(), name='hotspot-tv-generate-code'),
+    # REMOVED: path('tv/verify-code/', VerifyTVCodeView.as_view(), name='hotspot-tv-verify-code'),
+    # ADDED: Network scan for TV MAC detection
+    path('scan-devices/', HotspotNetworkScanView.as_view(), name='hotspot-scan-devices'),
     path('ads/serve/', HotspotAdServeView.as_view(), name='hotspot-ad-serve'),
     path('ads/grant-access/', HotspotAdGrantView.as_view(), name='hotspot-ad-grant'),
     path('ads/media/<int:pk>/', HotspotAdMediaView.as_view(), name='hotspot-ad-media'),

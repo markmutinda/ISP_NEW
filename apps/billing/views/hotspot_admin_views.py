@@ -8,7 +8,7 @@ import logging
 from rest_framework import viewsets, status, filters, generics
 from rest_framework.decorators import action
 from rest_framework.response import Response
-from rest_framework.permissions import IsAuthenticated
+from rest_framework.permissions import IsAuthenticated, AllowAny
 from rest_framework.views import APIView
 from django_filters.rest_framework import DjangoFilterBackend
 from django.shortcuts import get_object_or_404
@@ -890,3 +890,133 @@ class HotspotSessionExtendView(APIView):
             'extension': extension_display,
             'message': f'Session extended to {new_expiry.strftime("%b %d %Y %H:%M")}',
         })
+
+
+# ============================================================
+# HOTSPOT NETWORK SCAN VIEW (PUBLIC - for TV MAC detection)
+# ============================================================
+
+def _guess_device_label(mac: str, hostname: str) -> str:
+    """
+    Make a friendly guess at device type from MAC OUI or hostname.
+    """
+    if hostname and hostname.strip():
+        return hostname.strip()
+    
+    # Common TV/streaming device OUI prefixes (first 3 octets)
+    tv_ouis = {
+        'B8:BC:1B': 'Samsung TV',
+        'A4:C0:E1': 'Samsung TV',
+        'F0:25:B7': 'LG TV',
+        '78:5D:C8': 'LG TV',
+        'C8:63:F1': 'Sony TV',
+        '00:13:A9': 'Sony TV',
+        'BC:9F:EF': 'Roku',
+        'D4:E8:80': 'Amazon Fire TV',
+        'FC:65:DE': 'Amazon Fire TV',
+        '78:8A:20': 'Apple TV',
+        'F4:F1:5A': 'Apple TV',
+        '88:6B:0F': 'Apple TV',
+        '00:23:DF': 'Apple TV',
+        '00:1E:52': 'Apple TV',
+        '50:03:8B': 'Xiaomi TV',
+        '34:42:3C': 'Xiaomi TV',
+        'A8:8A:3F': 'Xiaomi TV',
+        'CC:7F:52': 'Google TV',
+        'D8:5D:4C': 'Google TV',
+        '7C:2E:0D': 'Google TV',
+        '00:17:88': 'Nvidia Shield',
+        '8C:5D:34': 'Nvidia Shield',
+        '08:00:27': 'Virtual Device',
+        '52:54:00': 'Virtual Device',
+    }
+    
+    # Extract OUI (first 8 characters, e.g., "B8:BC:1B")
+    mac_clean = mac.replace(':', '').replace('-', '').upper()
+    if len(mac_clean) >= 6:
+        oui = ':'.join([mac_clean[i:i+2] for i in range(0, 6, 2)])
+        if oui in tv_ouis:
+            return tv_ouis[oui]
+    
+    return 'Unknown device'
+
+
+class HotspotNetworkScanView(APIView):
+    """
+    GET /api/v1/hotspot/scan-devices/?router_id=...&tenant=...
+    
+    PUBLIC — scans router DHCP leases to find devices on same network.
+    Used by captive portal to help user identify TV's MAC address.
+    
+    This endpoint requires no authentication because it's called from
+    the public hotspot login page.
+    """
+    permission_classes = [AllowAny]
+    authentication_classes = []
+
+    def get(self, request):
+        from django_tenants.utils import schema_context, get_public_schema_name
+        from django.db.models import Q
+
+        router_id = request.query_params.get('router_id')
+        tenant_subdomain = request.query_params.get('tenant')
+
+        if not router_id or not tenant_subdomain:
+            return Response({'devices': []})
+
+        # Find tenant by subdomain or schema_name
+        try:
+            from apps.core.models import Tenant
+            with schema_context(get_public_schema_name()):
+                tenant = Tenant.objects.filter(
+                    Q(subdomain=tenant_subdomain) | Q(schema_name=tenant_subdomain),
+                    is_active=True
+                ).first()
+            
+            if not tenant:
+                logger.warning(f"HotspotNetworkScanView: Tenant not found for {tenant_subdomain}")
+                return Response({'devices': []})
+        except Exception as e:
+            logger.warning(f"HotspotNetworkScanView: Tenant lookup error: {e}")
+            return Response({'devices': []})
+
+        # Switch to tenant schema
+        with schema_context(tenant.schema_name):
+            try:
+                router = Router.objects.get(id=router_id, is_active=True)
+            except (Router.DoesNotExist, ValueError) as e:
+                logger.warning(f"HotspotNetworkScanView: Router {router_id} not found: {e}")
+                return Response({'devices': []})
+
+            devices = []
+            try:
+                # Import MikroTik API integration
+                from apps.network.integrations.mikrotik_api import MikrotikAPI
+                
+                # Create API client and fetch DHCP leases
+                api = MikrotikAPI(router)
+                leases = api.get_dhcp_leases()  # returns list of dicts with 'mac-address', 'address', 'host-name'
+                
+                for lease in leases:
+                    mac = lease.get('mac-address', '')
+                    ip = lease.get('address', '')
+                    hostname = lease.get('host-name', '') or lease.get('comment', '')
+                    
+                    if not mac or not ip:
+                        continue
+                    
+                    # Build a human-readable label
+                    label = _guess_device_label(mac, hostname)
+                    
+                    devices.append({
+                        'mac': mac.upper(),
+                        'ip': ip,
+                        'label': label,
+                    })
+                    
+            except Exception as e:
+                logger.warning(f"HotspotNetworkScanView: DHCP scan failed for router {router_id}: {e}")
+                # Return empty list gracefully — frontend handles this
+            
+            # Cap at 30 devices to avoid overwhelming the frontend
+            return Response({'devices': devices[:30]})
