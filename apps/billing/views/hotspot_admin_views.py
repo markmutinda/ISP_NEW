@@ -1008,10 +1008,16 @@ class HotspotNetworkScanView(APIView):
                     # Build a human-readable label
                     label = _guess_device_label(mac, hostname)
                     
+                    # MASK last 4 characters of MAC address for privacy
+                    # Example: AA:BB:CC:DD:EE:FF -> AA:BB:CC:DD:EE:****
+                    mac_upper = mac.upper()
+                    mac_masked = mac_upper[:-4] + '****' if len(mac_upper) >= 4 else mac_upper
+                    
                     devices.append({
-                        'mac': mac.upper(),
+                        'mac': mac_upper,
                         'ip': ip,
                         'label': label,
+                        'mac_masked': mac_masked,  # Masked version for display
                     })
                     
             except Exception as e:

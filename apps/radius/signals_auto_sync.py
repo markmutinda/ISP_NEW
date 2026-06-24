@@ -411,9 +411,18 @@ def _get_or_create_bandwidth_profile(service_connection):
     if not plan:
         return None
     
-    # Convert Mbps to kbps
-    download_kbps = (plan.download_speed or service_connection.download_speed or 10) * 1000
-    upload_kbps = (plan.upload_speed or service_connection.upload_speed or 5) * 1000
+    # 🟢 FIXED: Handle speed unit conversion properly
+    speed_unit = getattr(plan, 'speed_unit', 'MBPS') or 'MBPS'
+    
+    if speed_unit == 'KBPS':
+        download_kbps = plan.download_speed or 10
+        upload_kbps = plan.upload_speed or 5
+    elif speed_unit == 'GBPS':
+        download_kbps = (plan.download_speed or 1) * 1_000_000  # Gbps → Kbps
+        upload_kbps = (plan.upload_speed or 1) * 1_000_000
+    else:  # MBPS default
+        download_kbps = (plan.download_speed or 10) * 1000
+        upload_kbps = (plan.upload_speed or 5) * 1000
     
     profile_name = f"plan_{plan.id}_{plan.code or 'auto'}"
     
@@ -426,10 +435,17 @@ def _get_or_create_bandwidth_profile(service_connection):
         'is_active': True,
     }
     
-    # Propagate burst settings if enabled on the plan
+    # 🟢 FIXED: Propagate burst settings with proper unit conversion
     if getattr(plan, 'burst_enabled', False) and plan.burst_download and plan.burst_upload:
         speed_unit = getattr(plan, 'speed_unit', 'MBPS') or 'MBPS'
-        multiplier = 1000 if speed_unit == 'MBPS' else 1
+        
+        if speed_unit == 'KBPS':
+            multiplier = 1
+        elif speed_unit == 'GBPS':
+            multiplier = 1_000_000  # Gbps → Kbps
+        else:  # MBPS
+            multiplier = 1000
+        
         defaults['burst_download'] = plan.burst_download * multiplier
         defaults['burst_upload'] = plan.burst_upload * multiplier
         defaults['burst_threshold'] = (plan.burst_threshold or 0) * multiplier
@@ -453,9 +469,17 @@ def _get_or_create_bandwidth_profile(service_connection):
             profile.priority = plan_priority
             needs_update = True
         
+        # 🟢 FIXED: Update burst settings with proper unit conversion
         if getattr(plan, 'burst_enabled', False) and plan.burst_download and plan.burst_upload:
             speed_unit = getattr(plan, 'speed_unit', 'MBPS') or 'MBPS'
-            multiplier = 1000 if speed_unit == 'MBPS' else 1
+            
+            if speed_unit == 'KBPS':
+                multiplier = 1
+            elif speed_unit == 'GBPS':
+                multiplier = 1_000_000  # Gbps → Kbps
+            else:  # MBPS
+                multiplier = 1000
+            
             new_burst_dl = plan.burst_download * multiplier
             new_burst_ul = plan.burst_upload * multiplier
             if profile.burst_download != new_burst_dl or profile.burst_upload != new_burst_ul:
@@ -526,9 +550,20 @@ def sync_plan_bandwidth_to_radius(sender, instance, created, **kwargs):
         if created:
             return
         
+        # 🟢 FIXED: Handle plan bandwidth update with proper unit conversion
+        speed_unit = getattr(instance, 'speed_unit', 'MBPS') or 'MBPS'
+        
+        if speed_unit == 'KBPS':
+            download_kbps = instance.download_speed or 10
+            upload_kbps = instance.upload_speed or 5
+        elif speed_unit == 'GBPS':
+            download_kbps = (instance.download_speed or 1) * 1_000_000  # Gbps → Kbps
+            upload_kbps = (instance.upload_speed or 1) * 1_000_000
+        else:  # MBPS default
+            download_kbps = (instance.download_speed or 10) * 1000
+            upload_kbps = (instance.upload_speed or 5) * 1000
+        
         profile_name = f"plan_{instance.id}_{instance.code or 'auto'}"
-        download_kbps = (instance.download_speed or 10) * 1000
-        upload_kbps = (instance.upload_speed or 5) * 1000
         
         profile, _ = RadiusBandwidthProfile.objects.update_or_create(
             name=profile_name,

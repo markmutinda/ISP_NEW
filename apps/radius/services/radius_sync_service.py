@@ -350,10 +350,14 @@ class RadiusSyncService:
         if plan.download_speed and plan.upload_speed:
             speed_unit = getattr(plan, 'speed_unit', 'MBPS')
             
+            # 🟢 FIXED: Handle GBPS conversion properly
             if speed_unit == 'KBPS':
                 dl_kbps = plan.download_speed
                 ul_kbps = plan.upload_speed
-            else:
+            elif speed_unit == 'GBPS':
+                dl_kbps = plan.download_speed * 1_000_000  # Gbps → Kbps
+                ul_kbps = plan.upload_speed * 1_000_000
+            else:  # MBPS default
                 dl_kbps = plan.download_speed * 1000
                 ul_kbps = plan.upload_speed * 1000
             
@@ -365,9 +369,13 @@ class RadiusSyncService:
             burst_time = getattr(plan, 'burst_time', None)
             
             if burst_dl and burst_ul and burst_thresh and burst_time:
+                # 🟢 FIXED: Handle burst speed unit conversion properly
                 if speed_unit == 'KBPS':
                     burst_dl_k, burst_ul_k = burst_dl, burst_ul
-                else:
+                elif speed_unit == 'GBPS':
+                    burst_dl_k = burst_dl * 1_000_000  # Gbps → Kbps
+                    burst_ul_k = burst_ul * 1_000_000
+                else:  # MBPS default
                     burst_dl_k = burst_dl * 1000
                     burst_ul_k = burst_ul * 1000
                 

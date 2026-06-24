@@ -37,6 +37,7 @@ class Plan(models.Model):
     SPEED_UNIT_CHOICES = [
         ('MBPS', 'Mbps'),
         ('KBPS', 'Kbps'),
+        ('GBPS', 'Gbps'),
     ]
     
     # Basic Information
@@ -196,7 +197,9 @@ class Plan(models.Model):
     def speed_display(self):
         """Human-readable speed string"""
         unit = self.speed_unit or 'MBPS'
-        unit_str = 'Mbps' if unit == 'MBPS' else 'Kbps'
+        unit_map = {'MBPS': 'Mbps', 'KBPS': 'Kbps', 'GBPS': 'Gbps'}
+        unit_str = unit_map.get(unit, 'Mbps')
+        
         if self.download_speed and self.upload_speed:
             if self.download_speed == self.upload_speed:
                 return f'{self.download_speed} {unit_str}'

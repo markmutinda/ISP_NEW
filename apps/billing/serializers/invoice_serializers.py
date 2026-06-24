@@ -103,12 +103,32 @@ class PlanCreateSerializer(serializers.ModelSerializer):
     
     def validate(self, data):
         """Validate plan data with cross-field validity checks."""
-        # Validate download/upload speeds
-        if data.get('download_speed') and data['download_speed'] <= 0:
-            raise serializers.ValidationError({"download_speed": "Download speed must be greater than zero"})
+        speed_unit = data.get('speed_unit', 'MBPS')
         
-        if data.get('upload_speed') and data['upload_speed'] <= 0:
-            raise serializers.ValidationError({"upload_speed": "Upload speed must be greater than zero"})
+        # Validate download/upload speeds with unit awareness
+        if data.get('download_speed'):
+            if data['download_speed'] <= 0:
+                raise serializers.ValidationError(
+                    {"download_speed": "Download speed must be greater than zero"}
+                )
+            # Optional: Add unit-specific validation if needed
+            # For example, enforce reasonable limits based on unit
+            if speed_unit == 'MBPS' and data['download_speed'] > 10000:
+                # Warn but don't block - some ISPs offer 10Gbps+
+                pass
+            elif speed_unit == 'KBPS' and data['download_speed'] > 10000000:
+                pass
+        
+        if data.get('upload_speed'):
+            if data['upload_speed'] <= 0:
+                raise serializers.ValidationError(
+                    {"upload_speed": "Upload speed must be greater than zero"}
+                )
+            # Optional: Unit-specific upload validation
+            if speed_unit == 'MBPS' and data['upload_speed'] > 10000:
+                pass
+            elif speed_unit == 'KBPS' and data['upload_speed'] > 10000000:
+                pass
         
         # Validate data limit if provided
         if data.get('data_limit') and data['data_limit'] <= 0:
