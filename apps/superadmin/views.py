@@ -11,6 +11,7 @@ import logging
 from datetime import timedelta
 from decimal import Decimal
 
+import requests as _requests  # For external API calls
 from django.conf import settings
 from django.core.exceptions import ValidationError as DjangoValidationError
 from django.core.management import call_command
@@ -45,6 +46,9 @@ from apps.core.serializers import ChangelogSerializer, FeatureRequestSerializer
 from django_tenants.utils import schema_context, get_public_schema_name
 from django.shortcuts import get_object_or_404
 from .tasks import queue_changelog_notifications, queue_tenant_deletion
+
+# ── NEW: SMS models for cross-schema overview ──
+from apps.messaging.models import SMSGatewayConfig, TenantSMSWallet, SMSUnitTopup
 
 logger = logging.getLogger(__name__)
 
@@ -3677,3 +3681,145 @@ class LeadDetailView(APIView):
             "contacted_at": lead.contacted_at.isoformat() if lead.contacted_at else None,
             "created_at": lead.created_at.isoformat(),
         })
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  SMS OVERVIEW (Superadmin)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+
+class SuperadminSMSOverviewView(APIView):
+    """
+    GET /api/v1/superadmin/sms/overview/
+    Returns all tenants using inbuilt SMS, their wallet balances,
+    SMS topup payment history, and the master Bytewave provider balance.
+    """
+    permission_classes = SUPERADMIN_PERMS
+
+    def get(self, request):
+        _ensure_public()
+        tenants = (
+            Tenant.objects.select_related("company")
+            .exclude(schema_name__in=PROTECTED_SCHEMAS)
+            .filter(is_active=True)
+        )
+
+        tenant_rows = []
+        total_inbuilt_units = Decimal("0.00")
+
+        for tenant in tenants:
+            try:
+                with schema_context(tenant.schema_name):
+                    from apps.messaging.models import SMSGatewayConfig, TenantSMSWallet, SMSUnitTopup
+
+                    gateway = SMSGatewayConfig.objects.filter(
+                        is_active=True, use_inbuilt_system=True
+                    ).first()
+
+                    if not gateway:
+                        continue  # skip tenants not using inbuilt
+
+                    wallet = TenantSMSWallet.objects.filter(is_active=True).first()
+                    units = wallet.sms_units if wallet else Decimal("0.00")
+                    total_inbuilt_units += units
+
+                    # Recent topups
+                    topups = list(
+                        SMSUnitTopup.objects.order_by("-created_at")[:5].values(
+                            "id", "units_purchased", "amount_paid",
+                            "status", "payment_method", "created_at",
+                        )
+                    )
+                    for t in topups:
+                        t["created_at"] = t["created_at"].isoformat()
+                        t["amount_paid"] = str(t["amount_paid"])
+
+                    tenant_rows.append({
+                        "tenant_id": str(tenant.id),
+                        "tenant_name": tenant.company.name if tenant.company else tenant.subdomain,
+                        "tenant_subdomain": tenant.subdomain,
+                        "sms_units": str(units),
+                        "sell_price_per_unit": str(wallet.sell_price_per_unit) if wallet else "0.40",
+                        "recent_topups": topups,
+                    })
+            except Exception as exc:
+                logger.warning("SMS overview error for %s: %s", tenant.schema_name, exc)
+
+        # Fetch master Bytewave balance
+        provider_balance = self._get_bytewave_balance()
+
+        # All topup history across tenants (for the payments tab)
+        all_topups = self._get_all_topup_history(tenants)
+
+        return Response({
+            "total_inbuilt_units": str(total_inbuilt_units),
+            "inbuilt_tenant_count": len(tenant_rows),
+            "provider_balance": provider_balance,
+            "tenants": tenant_rows,
+            "all_topups": all_topups,
+        })
+
+    def _get_bytewave_balance(self) -> dict:
+        import requests as _requests
+        from django.conf import settings as _settings
+
+        api_token = getattr(_settings, "BYTEWAVE_API_TOKEN", "")
+        base_url = getattr(_settings, "BYTEWAVE_BASE_URL", "https://portal.bytewavenetworks.com/api/v3").rstrip("/")
+
+        if not api_token:
+            return {"success": False, "error": "BYTEWAVE_API_TOKEN not configured", "balance": 0}
+
+        try:
+            resp = _requests.get(
+                f"{base_url}/balance",
+                headers={
+                    "Authorization": f"Bearer {api_token}",
+                    "Content-Type": "application/json",
+                    "Accept": "application/json",
+                },
+                timeout=10,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            if data.get("status") == "success":
+                raw = data.get("data", {})
+                # data.data can be a dict or a number depending on Bytewave version
+                if isinstance(raw, dict):
+                    units = raw.get("sms_unit") or raw.get("units") or raw.get("balance") or 0
+                else:
+                    units = raw
+                return {"success": True, "balance": float(units), "currency": "SMS_UNITS"}
+            return {"success": False, "error": data.get("message", "Unknown error"), "balance": 0}
+        except Exception as exc:
+            logger.error("Bytewave balance fetch failed: %s", exc)
+            return {"success": False, "error": str(exc), "balance": 0}
+
+    def _get_all_topup_history(self, tenants, limit_per_tenant: int = 50) -> list:
+        rows = []
+        for tenant in tenants:
+            try:
+                with schema_context(tenant.schema_name):
+                    from apps.messaging.models import SMSUnitTopup, SMSGatewayConfig
+
+                    if not SMSGatewayConfig.objects.filter(
+                        is_active=True, use_inbuilt_system=True
+                    ).exists():
+                        continue
+
+                    for t in SMSUnitTopup.objects.order_by("-created_at")[:limit_per_tenant].values(
+                        "id", "units_purchased", "amount_paid",
+                        "status", "payment_method", "payment_reference",
+                        "checkout_request_id", "created_at",
+                    ):
+                        rows.append({
+                            **t,
+                            "created_at": t["created_at"].isoformat(),
+                            "amount_paid": str(t["amount_paid"]),
+                            "tenant_name": tenant.company.name if tenant.company else tenant.subdomain,
+                            "tenant_subdomain": tenant.subdomain,
+                        })
+            except Exception as exc:
+                logger.warning("Topup history error for %s: %s", tenant.schema_name, exc)
+
+        rows.sort(key=lambda x: x["created_at"], reverse=True)
+        return rows
