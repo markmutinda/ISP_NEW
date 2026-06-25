@@ -106,44 +106,18 @@ def expire_stale_pending_payments():
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# HOTSPOT EXPIRY WARNINGS (SMS)
+# HOTSPOT EXPIRY WARNINGS (SMS) — TEMPORARILY DISABLED
 # ═══════════════════════════════════════════════════════════════════════════
 
 @shared_task(name='apps.billing.tasks.send_hotspot_expiry_warnings')
 def send_hotspot_expiry_warnings():
     """
     Send expiry warning SMS to hotspot users whose sessions are about
-    to expire (based on SMSNotificationSettings.hotspot_expiry_minutes_before).
-    Runs every 5 minutes via Celery Beat.
+    to expire. (Temporarily disabled due to missing model fields).
     """
     def _warn(tenant):
-        from apps.billing.models.hotspot_models import HotspotSession
-        from apps.messaging.models import SMSNotificationSettings
-        from apps.messaging.services.notification_sender import SMSNotifier
-        
-        s = SMSNotificationSettings.get_settings()
-        if not s.hotspot_session_expiry:
-            return {'warned': 0}
-
-        mins = s.hotspot_expiry_minutes_before
-        now = timezone.now()
-        warn_at = now + timedelta(minutes=mins)
-        # Only warn sessions expiring in the next window (avoid repeat warnings)
-        lower = now + timedelta(minutes=mins - 2)
-
-        sessions = HotspotSession.objects.filter(
-            status='active',
-            expires_at__gte=lower,
-            expires_at__lte=warn_at,
-        )
-        count = 0
-        for session in sessions:
-            try:
-                SMSNotifier.hotspot_expiry_warning(session)
-                count += 1
-            except Exception as e:
-                logger.warning(f"Expiry warning SMS failed for {session.session_id}: {e}")
-        return {'warned': count}
+        # Hotspot expiry minutes logic removed/disabled
+        return {'warned': 0}
 
     try:
         return _for_each_tenant(_warn)
