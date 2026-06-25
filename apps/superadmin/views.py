@@ -3764,7 +3764,7 @@ class SuperadminSMSOverviewView(APIView):
         from django.conf import settings as _settings
 
         api_token = getattr(_settings, "BYTEWAVE_API_TOKEN", "")
-        base_url = getattr(_settings, "BYTEWAVE_BASE_URL", "https://portal.bytewavenetworks.com/api/v3").rstrip("/")
+        base_url = "https://portal.bytewavenetworks.com/api/http"
 
         if not api_token:
             return {"success": False, "error": "BYTEWAVE_API_TOKEN not configured", "balance": 0}
@@ -3773,23 +3773,45 @@ class SuperadminSMSOverviewView(APIView):
             resp = _requests.get(
                 f"{base_url}/balance",
                 headers={
-                    "Authorization": f"Bearer {api_token}",
                     "Content-Type": "application/json",
                     "Accept": "application/json",
                 },
+                json={"api_token": api_token},
                 timeout=10,
             )
             resp.raise_for_status()
             data = resp.json()
+
             if data.get("status") == "success":
                 raw = data.get("data", {})
-                # data.data can be a dict or a number depending on Bytewave version
+                # data can be dict or scalar depending on Bytewave version
                 if isinstance(raw, dict):
-                    units = raw.get("sms_unit") or raw.get("units") or raw.get("balance") or 0
-                else:
+                    units = (
+                        raw.get("sms_unit")
+                        or raw.get("sms_units")
+                        or raw.get("units")
+                        or raw.get("balance")
+                        or raw.get("remaining")
+                        or 0
+                    )
+                elif isinstance(raw, (int, float, str)):
                     units = raw
-                return {"success": True, "balance": float(units), "currency": "SMS_UNITS"}
-            return {"success": False, "error": data.get("message", "Unknown error"), "balance": 0}
+                else:
+                    units = 0
+
+                return {
+                    "success": True,
+                    "balance": float(units),
+                    "currency": "SMS_UNITS",
+                    "raw": raw,  # include raw so you can debug what fields come back
+                }
+
+            return {
+                "success": False,
+                "error": data.get("message", "Unknown error from Bytewave"),
+                "balance": 0,
+            }
+
         except Exception as exc:
             logger.error("Bytewave balance fetch failed: %s", exc)
             return {"success": False, "error": str(exc), "balance": 0}
