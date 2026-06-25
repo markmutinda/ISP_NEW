@@ -6,6 +6,7 @@ These tasks handle:
 2. Cleaning up stale sessions in radacct across all tenants
 3. Syncing RADIUS users across all tenants
 4. Session monitoring and alerting
+5. Closing duplicate open sessions (ghost session safety net)
 """
 
 import logging
@@ -14,7 +15,7 @@ from datetime import timedelta, datetime, timezone as dt_timezone
 from celery import shared_task
 from django.utils import timezone
 from django.db import connection, IntegrityError, transaction as db_transaction
-from django.db.models import Q
+from django.db.models import Q, Count
 from django.conf import settings
 from django_tenants.utils import schema_context, get_tenant_model
 
@@ -404,6 +405,72 @@ def force_close_expired_sessions(self):
 
     logger.info(f"[FORCE CLOSE] Kicked {kicked} sessions, closed {closed} records")
     return {'kicked': kicked, 'closed': closed}
+
+
+@shared_task(bind=True, max_retries=2)
+def close_duplicate_open_sessions(self):
+    """
+    Closes OLD duplicate open radacct rows per username, keeping only the
+    most-recently-active row open.
+
+    Protects by per-row staleness (not subscription validity, unlike
+    cleanup_stale_sessions) -- so a customer with genuinely concurrent
+    devices (Simultaneous-Use > 1, still receiving interim updates) is
+    never touched, but a row orphaned by a NAS reboot / tunnel blip /
+    container restart is closed even though their subscription is active.
+    """
+    from django_tenants.utils import get_tenant_model, schema_context
+    from django.db.models import Count
+    from django.conf import settings
+    from datetime import timedelta
+
+    stale_minutes = int(getattr(settings, "RADIUS_GHOST_MINUTES", 30))
+    now = timezone.now()
+    threshold = now - timedelta(minutes=stale_minutes)
+
+    TenantModel = get_tenant_model()
+    total_closed = 0
+
+    for tenant in TenantModel.objects.exclude(schema_name='public'):
+        try:
+            with schema_context(tenant.schema_name):
+                # Need to import RadAcct inside the tenant context
+                from apps.radius.models import RadAcct
+                
+                open_qs = RadAcct.objects.filter(acctstoptime__isnull=True)
+                dupes = open_qs.values('username').annotate(n=Count('radacctid')).filter(n__gt=1)
+
+                ids_to_close = []
+                for d in dupes:
+                    uname = d['username']
+                    rows = list(open_qs.filter(username=uname))
+
+                    def activity(r):
+                        return r.acctupdatetime or r.acctstarttime
+
+                    rows.sort(key=activity, reverse=True)
+                    for r in rows[1:]:  # never touch the most-recently-active row
+                        act = activity(r)
+                        if act and act < threshold:
+                            ids_to_close.append(r.radacctid)
+
+                if ids_to_close:
+                    updated = RadAcct.objects.filter(
+                        radacctid__in=ids_to_close,
+                        acctstoptime__isnull=True,
+                    ).update(
+                        acctstoptime=now,
+                        acctterminatecause='Stale-Ghost-Cleanup',
+                    )
+                    total_closed += updated
+                    logger.info(
+                        f"[GHOST CLEANUP] {tenant.schema_name}: closed {updated} stale duplicate session(s)"
+                    )
+        except Exception as e:
+            logger.error(f"[GHOST CLEANUP] Error in {tenant.schema_name}: {e}")
+
+    logger.info(f"[GHOST CLEANUP] Complete: {total_closed} rows closed across all tenants")
+    return {'closed': total_closed}
 
 
 @shared_task

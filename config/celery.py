@@ -84,6 +84,18 @@ app.conf.beat_schedule = {
     },
     
     # ────────────────────────────────────────────────────────────────
+    # Close duplicate open sessions - Every 15 minutes
+    # Safety net: Closes stale duplicate open radacct rows per username,
+    # keeping only the most-recently-active row open.
+    # Protects against ghost sessions from NAS reboots/tunnel blips.
+    # ────────────────────────────────────────────────────────────────
+    'close-duplicate-open-sessions-every-15-min': {
+        'task': 'apps.radius.tasks.close_duplicate_open_sessions',
+        'schedule': crontab(minute='*/15'),
+        'options': {'queue': 'radius'}
+    },
+    
+    # ────────────────────────────────────────────────────────────────
     # Process Alert Rules - Every 15 minutes
     # ────────────────────────────────────────────────────────────────
     'process-alert-rules-every-15-min': {

@@ -60,8 +60,18 @@ def handle_router_lifecycle(sender, instance, created, **kwargs):
     3. Assign HAProxy remote ports after VPN provisioning.
     4. Trigger RADIUS client reload after commit.
     """
+    update_fields = kwargs.get('update_fields')
+
     # 1. Prevent infinite loops during provisioning saves
-    if kwargs.get('update_fields') and 'vpn_provisioned' in kwargs.get('update_fields'):
+    if update_fields and 'vpn_provisioned' in update_fields:
+        return
+
+    # 1b. Ignore routine status-ping saves from refresh_router_statuses()
+    # (Router.sync_status() only ever touches these 3 fields). Without this
+    # guard, the 5-minute Celery Beat health-check rebuilds the NAS table
+    # and restarts the shared FreeRADIUS container EVERY cycle, for ALL
+    # tenants -- which is what caused the mass ghost-session incident.
+    if update_fields and set(update_fields).issubset({'status', 'last_seen', 'updated_at'}):
         return
 
     # 2. AUTO-PROVISION VPN
@@ -345,6 +355,14 @@ def upsert_router_tenant_index(sender, instance, **kwargs):
     - router_id is tenant-local and can repeat across schemas.
     - RouterTenantIndex must be written in public schema.
     """
+    update_fields = kwargs.get('update_fields')
+
+    # Skip routine status pings -- nothing this index cares about changes
+    # on a sync_status() call, and this runs across every router every
+    # 5 minutes, so this avoids needless public-schema writes.
+    if update_fields and set(update_fields).issubset({'status', 'last_seen', 'updated_at'}):
+        return
+
     try:
         from apps.core.models import RouterTenantIndex
     except ImportError:
