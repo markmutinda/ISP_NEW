@@ -99,9 +99,10 @@ class CustomerViewSet(viewsets.ModelViewSet):
         return CustomerListSerializer
     
     def get_permissions(self):
+        # FIX: Added 'retrieve', 'list', 'dashboard' to admin-accessible actions
         if self.action in ['create', 'update', 'partial_update', 'destroy',
                            'toggle_radius', 'change_status', 'available_plans',
-                           'change_plan']:
+                           'change_plan', 'retrieve', 'list', 'dashboard']:
             permission_classes = [IsAuthenticated, IsAdminOrStaff]
         else:
             permission_classes = [IsAuthenticated, CustomerAccessPermission]
