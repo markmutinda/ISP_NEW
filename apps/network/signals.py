@@ -57,8 +57,7 @@ def handle_router_lifecycle(sender, instance, created, **kwargs):
     Orchestrates the Router lifecycle:
     1. Provision VPN (IP, Certs, CCD) if needed.
     2. Sync to RADIUS NAS whitelist ONLY if an IP exists.
-    3. Assign HAProxy remote ports after VPN provisioning.
-    4. Trigger RADIUS client reload after commit.
+    3. Trigger RADIUS client reload after commit.
     """
     update_fields = kwargs.get('update_fields')
 
@@ -115,38 +114,7 @@ def handle_router_lifecycle(sender, instance, created, **kwargs):
         )
         logger.info(f"[RADIUS AUTO-SYNC] Added {instance.name} ({nas_ip}) to {connection.schema_name} NAS table.")
         
-        # 4. HAPROXY REMOTE PORT ASSIGNMENT
-        # After VPN is provisioned, assign remote ports for Winbox/API access
-        if instance.vpn_ip_address and not instance.winbox_remote_port:
-            try:
-                from apps.network.services.haproxy_manager import (
-                    sync_haproxy_config, 
-                    get_router_winbox_port, 
-                    get_router_api_port
-                )
-                
-                # Get unique ports for this router
-                instance.winbox_remote_port = get_router_winbox_port(instance.id)
-                instance.api_remote_port = get_router_api_port(instance.id)
-                
-                # Update the router with assigned ports
-                Router.objects.filter(pk=instance.pk).update(
-                    winbox_remote_port=instance.winbox_remote_port,
-                    api_remote_port=instance.api_remote_port,
-                )
-                
-                logger.info(
-                    f"[HAPROXY] Assigned ports to {instance.name}: "
-                    f"Winbox={instance.winbox_remote_port}, API={instance.api_remote_port}"
-                )
-                
-                # Sync HAProxy configuration in background after commit succeeds
-                transaction.on_commit(lambda: sync_haproxy_config())
-                
-            except Exception as e:
-                logger.error(f"[HAPROXY] Port assignment failed for {instance.name}: {e}")
-        
-        # 5. Trigger RADIUS client reload after DB commit succeeds
+        # Trigger RADIUS client reload after DB commit succeeds
         transaction.on_commit(reload_radius_clients_now)
         
     except Exception as e:
