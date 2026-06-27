@@ -2841,7 +2841,11 @@ def _get_or_create_subscription_invoice(cycle, *, create=False):
         )
 
         now_ts = timezone.now()
-        due_date = cycle.grace_ends_at.date() if cycle.grace_ends_at else (now_ts + timedelta(days=5)).date()
+        due_date = (
+            cycle.grace_ends_at.date()
+            if cycle.grace_ends_at
+            else max(cycle.end_date, now_ts + timedelta(days=1)).date()
+        )
 
         invoice = Invoice.objects.create(
             invoice_number=f'NET-BILL-{now_ts.strftime("%y%m%d%H%M%S")}',
@@ -2890,7 +2894,7 @@ def _get_or_create_subscription_invoice(cycle, *, create=False):
     if cycle.status == "active":
         update_fields["status"] = "invoiced"
     if not cycle.grace_ends_at:
-        update_fields["grace_ends_at"] = timezone.now() + timedelta(days=5)
+        update_fields["grace_ends_at"] = max(cycle.end_date, timezone.now() + timedelta(days=1))
     cycle.__class__.objects.filter(pk=cycle.pk).update(**update_fields)
     for field, value in update_fields.items():
         setattr(cycle, field, value)
@@ -2901,6 +2905,7 @@ def _subscription_invoice_payload(cycle, *, include_recipients=False):
     tenant = cycle.tenant
     company = getattr(tenant, "company", None)
     invoice_snapshot = None
+    receipt_snapshot = None
 
     try:
         actual_hotspot_revenue = _decimal_money(cycle.refresh_actual_hotspot_revenue())
@@ -2920,6 +2925,12 @@ def _subscription_invoice_payload(cycle, *, include_recipients=False):
     except Exception as exc:
         logger.warning("Failed to load linked tenant invoice for cycle %s: %s", cycle.id, exc)
         invoice = None
+    try:
+        from apps.subscriptions.billing_lifecycle import latest_subscription_receipt
+
+        receipt_snapshot = latest_subscription_receipt(cycle.subscription)
+    except Exception as exc:
+        logger.warning("Failed loading subscription receipt for cycle %s: %s", cycle.id, exc)
     effective_total = calculated_total
     if invoice:
         with schema_context(tenant.schema_name):
@@ -2944,10 +2955,13 @@ def _subscription_invoice_payload(cycle, *, include_recipients=False):
                     "manual_adjustment_amount": str(_decimal_money(manual_adjustment)),
                     "manual_adjustment_description": manual_adjustment_item.description if manual_adjustment_item else "",
                     "total_amount": str(_decimal_money(tenant_invoice.total_amount)),
+                    "amount_paid": str(_decimal_money(tenant_invoice.amount_paid)),
                     "balance": str(_decimal_money(tenant_invoice.balance)),
                     "due_date": tenant_invoice.due_date.isoformat() if tenant_invoice.due_date else None,
+                    "paid_at": tenant_invoice.paid_at.isoformat() if tenant_invoice.paid_at else None,
                     "notes": tenant_invoice.notes or "",
                     "internal_notes": tenant_invoice.internal_notes or "",
+                    "receipt": receipt_snapshot,
                 }
                 effective_total = _decimal_money(tenant_invoice.total_amount)
 
@@ -2978,6 +2992,7 @@ def _subscription_invoice_payload(cycle, *, include_recipients=False):
         "calculated_total": str(calculated_total),
         "effective_total": str(effective_total),
         "invoice": invoice_snapshot,
+        "receipt": receipt_snapshot,
         "recipients": recipients,
     }
 
@@ -3155,15 +3170,32 @@ class SubscriptionInvoiceSendView(APIView):
             return Response({"detail": "channel must be email, sms, in_app or all."}, status=status.HTTP_400_BAD_REQUEST)
 
         payload = _subscription_invoice_payload(cycle, include_recipients=True)
-        subject = f"Netily invoice for {payload['tenant_name']} - KES {payload['invoice']['total_amount']}"
-        message = (
-            "Your Netily subscription invoice is ready.\n\n"
-            f"Invoice: {payload['invoice']['invoice_number']}\n"
-            f"Amount due: KES {payload['invoice']['total_amount']}\n"
-            f"Period: {cycle.start_date.date()} to {cycle.end_date.date()}\n"
-            f"Due date: {payload['invoice']['due_date'] or 'Pending'}\n\n"
-            "Please open your Netily admin billing page to review and settle it."
-        )
+        invoice_payload = payload.get("invoice") or {}
+        receipt_payload = payload.get("receipt") or invoice_payload.get("receipt") or {}
+        invoice_status = str(invoice_payload.get("status") or "").upper()
+        invoice_is_paid = cycle.status == "paid" or invoice_status == "PAID" or _decimal_money(invoice_payload.get("balance")) <= 0
+
+        if invoice_is_paid:
+            subject = f"Netily payment receipt for {payload['tenant_name']} - {invoice_payload.get('invoice_number')}"
+            message = (
+                "Your Netily subscription payment has been received.\n\n"
+                f"Invoice: {invoice_payload.get('invoice_number')}\n"
+                f"Paid amount: KES {invoice_payload.get('amount_paid') or invoice_payload.get('total_amount')}\n"
+                f"Receipt: {receipt_payload.get('receipt_number') or 'Payment confirmed'}\n"
+                f"Paid at: {receipt_payload.get('completed_at') or invoice_payload.get('paid_at') or 'Confirmed'}\n"
+                f"Period: {cycle.start_date.date()} to {cycle.end_date.date()}\n\n"
+                "Your account is active. This is your payment confirmation and receipt record."
+            )
+        else:
+            subject = f"Netily invoice for {payload['tenant_name']} - KES {invoice_payload['total_amount']}"
+            message = (
+                "Your Netily subscription invoice is ready.\n\n"
+                f"Invoice: {invoice_payload['invoice_number']}\n"
+                f"Amount due: KES {invoice_payload['total_amount']}\n"
+                f"Period: {cycle.start_date.date()} to {cycle.end_date.date()}\n"
+                f"Due date: {invoice_payload['due_date'] or 'Pending'}\n\n"
+                "Please open your Netily admin billing page to review and settle it."
+            )
         recipients = payload["recipients"]
         email_count = 0
         notification_count = 0
@@ -3212,9 +3244,17 @@ class SubscriptionInvoiceSendView(APIView):
                         notification_type="sms",
                         subject=subject,
                         message=(
-                            f"Netily invoice {payload['invoice']['invoice_number']}: "
-                            f"KES {payload['invoice']['total_amount']} due {payload['invoice']['due_date'] or 'soon'}. "
-                            "Open admin billing to pay."
+                            (
+                                f"Netily receipt {invoice_payload.get('invoice_number')}: "
+                                f"KES {invoice_payload.get('amount_paid') or invoice_payload.get('total_amount')} paid. "
+                                f"Receipt {receipt_payload.get('receipt_number') or 'confirmed'}."
+                            )
+                            if invoice_is_paid
+                            else (
+                                f"Netily invoice {invoice_payload['invoice_number']}: "
+                                f"KES {invoice_payload['total_amount']} due {invoice_payload['due_date'] or 'soon'}. "
+                                "Open admin billing to pay."
+                            )
                         ),
                         recipient_phone=phone,
                         priority=4,
@@ -3227,7 +3267,7 @@ class SubscriptionInvoiceSendView(APIView):
                     notification_manager.send_notification(notification)
                     sms_count += 1
 
-            if invoice.status in {"DRAFT", "ISSUED"}:
+            if not invoice_is_paid and invoice.status in {"DRAFT", "ISSUED"}:
                 invoice.status = "SENT"
                 invoice.save(update_fields=["status", "updated_at"])
 
@@ -3242,7 +3282,7 @@ class SubscriptionInvoiceSendView(APIView):
         )
 
         return Response({
-            "detail": "Invoice send action completed.",
+            "detail": "Receipt send action completed." if invoice_is_paid else "Invoice send action completed.",
             "channel": channel,
             "email_count": email_count,
             "notification_count": notification_count,
@@ -3383,6 +3423,20 @@ class SubscriptionStkCallbackView(APIView):
                     else:
                         sub.extend_subscription()
 
+                try:
+                    from apps.subscriptions.billing_lifecycle import sync_subscription_invoice_payment
+
+                    invoice = sync_subscription_invoice_payment(payment, notify=True)
+                    if invoice:
+                        logger.info(
+                            "Subscription invoice %s marked paid for %s (receipt: %s)",
+                            invoice.invoice_number,
+                            sub.company.name,
+                            receipt,
+                        )
+                except Exception as sync_err:
+                    logger.warning("Failed to sync subscription invoice for %s: %s", sub.company_id, sync_err)
+
                 # ── Mark NET-BILL invoices as paid in tenant schema ──
                 # (outside atomic to avoid cross-schema transaction issues)
                 try:
@@ -3412,8 +3466,10 @@ class SubscriptionStkCallbackView(APIView):
                                 status__in=['ISSUED', 'issued', 'pending', 'overdue'],
                             ).order_by('created_at')
                             updated = unpaid.update(
-                                status='paid',
-                                paid_date=timezone.now().date(),
+                                status='PAID',
+                                amount_paid=F('total_amount'),
+                                balance=Decimal('0.00'),
+                                paid_at=timezone.now(),
                             )
                             if updated:
                                 logger.info(
@@ -3423,17 +3479,22 @@ class SubscriptionStkCallbackView(APIView):
 
                             # If no prior NET-BILL invoice existed (e.g. trial→paid first payment),
                             # create a subscription activation invoice so it appears in the invoices tab.
-                            if updated == 0:
+                            if updated == 0 and not Invoice.objects.filter(invoice_number__startswith='NET-BILL').exists():
                                 plan_name = sub.plan.name if sub.plan else "Netily Platform"
                                 now_ts = timezone.now()
                                 new_inv = Invoice.objects.create(
                                     invoice_number=f'NET-BILL-{now_ts.strftime("%y%m%d%H%M%S")}',
                                     customer=sys_customer,
+                                    subtotal=payment.amount,
                                     total_amount=payment.amount,
-                                    status='paid',
-                                    paid_date=now_ts.date(),
+                                    amount_paid=payment.amount,
+                                    balance=Decimal('0.00'),
+                                    status='PAID',
+                                    paid_at=now_ts,
                                     due_date=now_ts.date(),
                                     billing_date=now_ts.date(),
+                                    service_period_start=(sub.current_period_start or now_ts).date(),
+                                    service_period_end=(sub.current_period_end or now_ts).date(),
                                 )
                                 InvoiceItem.objects.create(
                                     invoice=new_inv,

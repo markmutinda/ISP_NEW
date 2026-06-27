@@ -37,10 +37,10 @@ def _trial_duration_days(subscription) -> int:
 def generate_metered_invoices():
     now = timezone.now()
     
-    # 1. Find all active cycles that have ended
+    # 1. Find active cycles that are due soon enough to notify before lockout.
     ended_cycles = BillingCycle.objects.filter(
         status='active',
-        end_date__lte=now
+        end_date__lte=now + timedelta(days=5)
     ).exclude(
         subscription__status='trialing'
     ).select_related('tenant', 'subscription', 'subscription__plan')
@@ -130,7 +130,7 @@ def generate_metered_invoices():
                     # Set grace_ends_at to 4 days from now. The separate
                     # enforce_billing_grace_period task will lock the account
                     # only after the grace period expires.
-                    grace_deadline = now + timedelta(days=4)
+                    grace_deadline = max(cycle.end_date, now + timedelta(days=1))
                     
                 # ─── CREATE INVOICE IN TENANT SCHEMA ───
                 with schema_context(tenant.schema_name):
@@ -154,7 +154,7 @@ def generate_metered_invoices():
                         status='ISSUED',
                         service_period_start=cycle.start_date.date(),
                         service_period_end=cycle.end_date.date(),
-                        due_date=(now + timedelta(days=4)).date(),  # 4-day grace period
+                        due_date=grace_deadline.date(),
                         billing_date=now.date(),
                     )
 
@@ -229,9 +229,9 @@ def generate_metered_invoices():
                                 'usage_subtotal': usage_subtotal,
                                 'minimum_adjustment': minimum_adjustment,
                                 'total_due': total_due,
-                                'due_date': (now + timedelta(days=4)).date(),
-                                'grace_days': 4,
-                                'days_before_due': max(((now + timedelta(days=4)).date() - now.date()).days, 0),
+                                'due_date': grace_deadline.date(),
+                                'grace_days': max((grace_deadline.date() - now.date()).days, 0),
+                                'days_before_due': max((grace_deadline.date() - now.date()).days, 0),
                                 'cycle_start': cycle.start_date.date(),
                                 'cycle_end': cycle.end_date.date(),
                             }

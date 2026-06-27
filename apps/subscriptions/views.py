@@ -961,6 +961,10 @@ class SubscriptionPaymentViewSet(viewsets.ReadOnlyModelViewSet):
 
                                 payment = locked_payment
 
+                        from .billing_lifecycle import sync_subscription_invoice_payment
+
+                        sync_subscription_invoice_payment(payment, notify=True)
+
                         return Response({
                             'payment_id': str(payment.id),
                             'status': 'completed',
