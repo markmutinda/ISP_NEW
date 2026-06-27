@@ -48,13 +48,18 @@ class CustomerCreateSerializer(serializers.ModelSerializer):
         else:
             data['email'] = email
         
-        # Email uniqueness check — only if email is actually provided
+        # Email uniqueness check — check against ALL users, with role-specific messaging
         if email:
-            # Check against customer-role users only (not admin/staff)
-            if User.objects.filter(email=email, role='customer').exists():
-                raise serializers.ValidationError(
-                    {"email": "A customer with this email already exists."}
-                )
+            existing = User.objects.filter(email=email).first()
+            if existing:
+                if existing.role == 'customer':
+                    raise serializers.ValidationError(
+                        {"email": "A customer with this email already exists."}
+                    )
+                else:
+                    raise serializers.ValidationError(
+                        {"email": "This email is already used by a staff account. Leave the email blank for this customer, or use a different email."}
+                    )
         
         # Validate and format phone number first
         try:
