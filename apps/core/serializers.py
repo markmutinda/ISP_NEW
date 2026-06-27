@@ -212,6 +212,45 @@ class UserUpdateSerializer(serializers.ModelSerializer):
         return instance
 
 
+# ============================================================
+# NEW: AdminUserUpdateSerializer - Admin-only user updates
+# ============================================================
+
+class AdminUserUpdateSerializer(serializers.ModelSerializer):
+    """Admin-only serializer: can change email, role, and reset password without current_password"""
+    
+    new_password = serializers.CharField(write_only=True, required=False, allow_blank=True)
+
+    class Meta:
+        model = User
+        fields = ['email', 'role', 'new_password', 'is_active']
+
+    def validate_email(self, value):
+        if value in (None, ""):
+            return value
+        normalized = User.objects.normalize_email(value).strip().lower()
+        qs = User.objects.filter(email__iexact=normalized)
+        if self.instance and self.instance.pk:
+            qs = qs.exclude(pk=self.instance.pk)
+        if qs.exists():
+            raise serializers.ValidationError("A user with this email already exists.")
+        return normalized
+
+    def validate_new_password(self, value):
+        if value:
+            validate_password(value)
+        return value
+
+    def update(self, instance, validated_data):
+        new_password = validated_data.pop('new_password', None)
+        for attr, value in validated_data.items():
+            setattr(instance, attr, value)
+        if new_password:
+            instance.set_password(new_password)
+        instance.save()
+        return instance
+
+
 class LoginSerializer(serializers.Serializer):
     """Serializer for user login"""
     

@@ -460,12 +460,8 @@ class Router(AuditMixin):
         during concurrent cross-tenant port allocation. Works with ANY cache backend.
         """
         from django.utils.text import slugify
-        from django.core.cache import cache
-        from django_tenants.utils import get_tenant_model, schema_context
-        from django.db.models import Max
         import secrets
         import logging
-        import time
 
         logger = logging.getLogger(__name__)
 
@@ -506,76 +502,21 @@ class Router(AuditMixin):
             self.radius_server = "10.8.0.1"
 
         # ────────────────────────────────────────────────────────────────
-        # 🔒 CROSS-TENANT UNIVERSAL ATOMIC PORT ALLOCATION SPIN-LOCK
-        # ────────────────────────────────────────────────────────────────
+        # ── CROSS-TENANT ATOMIC PORT ALLOCATION ──────────────────────────────
         _needs_port_allocation = (
             not self.winbox_remote_port
             or not self.api_remote_port
-            or int(self.winbox_remote_port) == 40001
-            or int(self.api_remote_port) == 50001
         )
 
         if _needs_port_allocation:
-            TenantModel = get_tenant_model()
-            lock_key = "lock:global_port_allocation"
+            from apps.network.services.port_allocator import allocate_ports
+            self.winbox_remote_port, self.api_remote_port = allocate_ports()
+            logger.info(
+                "[PORT ALLOC] Assigned to %s: winbox=%s api=%s",
+                self.name, self.winbox_remote_port, self.api_remote_port,
+            )
 
-            lock_acquired = False
-            blocking_timeout = 8.0
-            lock_expiry = 10
-            start_time = time.time()
-
-            while time.time() - start_time < blocking_timeout:
-                if cache.add(lock_key, "acquired", lock_expiry):
-                    lock_acquired = True
-                    break
-                time.sleep(0.2)
-
-            if not lock_acquired:
-                logger.error(f"[HAPROXY] Could not acquire port lock for {self.name} within timeout.")
-                raise RuntimeError("System busy allocating backend routing ports, please retry in a second.")
-
-            try:
-                # Re-read from DB to get the freshest state (handles race after lock acquired)
-                if self.pk:
-                    fresh = Router.objects.filter(pk=self.pk).values('winbox_remote_port', 'api_remote_port').first()
-                    if fresh:
-                        already_has_valid_winbox = fresh['winbox_remote_port'] and int(fresh['winbox_remote_port']) != 40001
-                        already_has_valid_api = fresh['api_remote_port'] and int(fresh['api_remote_port']) != 50001
-                        if already_has_valid_winbox and already_has_valid_api:
-                            self.winbox_remote_port = fresh['winbox_remote_port']
-                            self.api_remote_port = fresh['api_remote_port']
-                            _needs_port_allocation = False
-
-                if _needs_port_allocation:
-                    highest_winbox = 40000
-                    highest_api = 50000
-
-                    for tenant in TenantModel.objects.exclude(schema_name='public'):
-                        try:
-                            with schema_context(tenant.schema_name):
-                                res = Router.objects.exclude(pk=self.pk).aggregate(
-                                    max_w=Max('winbox_remote_port'),
-                                    max_a=Max('api_remote_port')
-                                )
-                                if res['max_w'] and int(res['max_w']) > highest_winbox:
-                                    highest_winbox = int(res['max_w'])
-                                if res['max_a'] and int(res['max_a']) > highest_api:
-                                    highest_api = int(res['max_a'])
-                        except Exception as tenant_err:
-                            logger.warning(f"[HAPROXY] Could not scan tenant {tenant.schema_name}: {tenant_err}")
-
-                    self.winbox_remote_port = highest_winbox + 1
-                    self.api_remote_port = highest_api + 1
-
-                    logger.info(
-                        f"[HAPROXY] Atomic port allocation for {self.name}: "
-                        f"Winbox={self.winbox_remote_port}, API={self.api_remote_port}"
-                    )
-
-            finally:
-                cache.delete(lock_key)
-
-            # Ensure ports are included in partial saves
+            # Ensure partial saves also include the port fields
             if 'update_fields' in kwargs and kwargs['update_fields'] is not None:
                 fields = list(kwargs['update_fields'])
                 if 'winbox_remote_port' not in fields:
@@ -583,6 +524,7 @@ class Router(AuditMixin):
                 if 'api_remote_port' not in fields:
                     fields.append('api_remote_port')
                 kwargs['update_fields'] = fields
+        # ─────────────────────────────────────────────────────────────────────
 
         # ── Native save ──
         super().save(*args, **kwargs)

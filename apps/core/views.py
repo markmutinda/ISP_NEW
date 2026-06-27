@@ -33,6 +33,7 @@ from .email_delivery import send_transactional_email
 from .models import User, Company, SystemSettings, AuditLog, Tenant, Changelog, FeatureRequest, FeatureUpvote  # Add FeatureRequest and FeatureUpvote here
 from .serializers import (
     CustomTokenRefreshSerializer, UserSerializer, LoginSerializer, UserCreateSerializer, UserUpdateSerializer,
+    AdminUserUpdateSerializer,  # ADD THIS
     ProfileSerializer, PasswordChangeSerializer,
     CompanySerializer, TenantSerializer, SystemSettingsSerializer, AuditLogSerializer,
     CustomTokenObtainPairSerializer, DashboardStatsSerializer, ChangelogSerializer,
@@ -461,6 +462,10 @@ class UserViewSet(viewsets.ModelViewSet):
         if self.action == 'create':
             return UserCreateSerializer
         elif self.action in ['update', 'partial_update']:
+            # Superusers and admins updating other users get the admin serializer
+            # (no current_password required, role can be changed)
+            if self.request.user.is_superuser or self.request.user.role == 'admin':
+                return AdminUserUpdateSerializer
             return UserUpdateSerializer
         return UserSerializer
     
