@@ -58,6 +58,7 @@ def handle_router_lifecycle(sender, instance, created, **kwargs):
     1. Provision VPN (IP, Certs, CCD) if needed.
     2. Sync to RADIUS NAS whitelist ONLY if an IP exists.
     3. Trigger RADIUS client reload after commit.
+    4. Auto-sync HAProxy config after commit.
     """
     update_fields = kwargs.get('update_fields')
 
@@ -120,6 +121,17 @@ def handle_router_lifecycle(sender, instance, created, **kwargs):
     except Exception as e:
         logger.error(f"RADIUS NAS sync failed for {instance.name}: {e}")
 
+    # ── AUTO-SYNC HAPROXY after every router save ──────────────────
+    def _sync_haproxy():
+        try:
+            from apps.network.services.haproxy_manager import sync_haproxy_config
+            sync_haproxy_config()
+        except Exception as e:
+            logger.error("[HAPROXY AUTO-SYNC] Failed: %s", e)
+
+    transaction.on_commit(_sync_haproxy)
+    # ───────────────────────────────────────────────────────────────
+
 
 @receiver(post_delete, sender=Router)
 def cleanup_router_radius_nas(sender, instance, **kwargs):
@@ -135,6 +147,17 @@ def cleanup_router_radius_nas(sender, instance, **kwargs):
             
             # Trigger RADIUS client reload after DB commit succeeds
             transaction.on_commit(reload_radius_clients_now)
+            
+            # ── AUTO-SYNC HAPROXY after router delete ──────────────────
+            def _sync_haproxy_on_delete():
+                try:
+                    from apps.network.services.haproxy_manager import sync_haproxy_config
+                    sync_haproxy_config()
+                except Exception as e:
+                    logger.error("[HAPROXY DELETE-SYNC] Failed: %s", e)
+            
+            transaction.on_commit(_sync_haproxy_on_delete)
+            # ───────────────────────────────────────────────────────────────
     except Exception as e:
         logger.error(f"Failed to cleanup RADIUS NAS for {instance.name}: {e}")
 
