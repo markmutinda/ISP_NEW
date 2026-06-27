@@ -239,6 +239,66 @@ class RadiusActiveSessionsView(APIView):
 
 
 # ────────────────────────────────────────────────────────────────
+# NEW: Fast Online Usernames Endpoint
+# ────────────────────────────────────────────────────────────────
+
+class RadiusOnlineUsernamesView(APIView):
+    """
+    GET /api/v1/radius/sessions/online-usernames/
+    
+    Returns just the set of currently-online usernames + their usage string.
+    Fast: no serializer overhead, raw values query only.
+    
+    Returns:
+        {
+            "online": {
+                "username1": {
+                    "usage": "1.23 GB",
+                    "ip": "192.168.1.100",
+                    "mac": "aa:bb:cc:dd:ee:ff",
+                    "router_ip": "10.0.0.1"
+                },
+                "username2": {
+                    "usage": "456.78 MB",
+                    "ip": "192.168.1.101",
+                    "mac": "11:22:33:44:55:66",
+                    "router_ip": "10.0.0.1"
+                }
+            },
+            "count": 2
+        }
+    """
+    permission_classes = [IsAuthenticated, HasCompanyAccess]
+
+    def get(self, request):
+        from django.db.models import Sum
+
+        sessions = (
+            RadAcct.objects
+            .filter(acctstoptime__isnull=True)
+            .values('username', 'acctinputoctets', 'acctoutputoctets',
+                    'framedipaddress', 'callingstationid', 'nasipaddress')
+        )
+
+        result = {}
+        for s in sessions:
+            uname = s['username']
+            if not uname:
+                continue
+            total = (s['acctinputoctets'] or 0) + (s['acctoutputoctets'] or 0)
+            mb = total / (1024 * 1024)
+            usage = f"{mb/1024:.2f} GB" if mb >= 1024 else f"{mb:.2f} MB"
+            result[uname] = {
+                'usage': usage,
+                'ip': s['framedipaddress'] or '',
+                'mac': s['callingstationid'] or '',
+                'router_ip': s['nasipaddress'] or '',
+            }
+
+        return Response({'online': result, 'count': len(result)})
+
+
+# ────────────────────────────────────────────────────────────────
 # RADIUS USER MANAGEMENT
 # ────────────────────────────────────────────────────────────────
 

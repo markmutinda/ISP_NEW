@@ -6,6 +6,7 @@ from rest_framework.routers import DefaultRouter
 from .views import (
     RadiusDashboardView,
     RadiusActiveSessionsView,
+    RadiusOnlineUsernamesView,  # NEW: Import the new view
     RadiusUserView,
     RadiusUserActionView,
     RadAcctViewSet,
@@ -29,6 +30,9 @@ urlpatterns = [
     # Dashboard
     path('dashboard/', RadiusDashboardView.as_view(), name='radius-dashboard'),
     path('sessions/active/', RadiusActiveSessionsView.as_view(), name='radius-active-sessions'),
+    
+    # NEW: Fast online usernames endpoint (no serializer overhead)
+    path('sessions/online-usernames/', RadiusOnlineUsernamesView.as_view(), name='radius-online-usernames'),
     
     # User management
     path('users/', RadiusUserView.as_view(), name='radius-user-list'),
