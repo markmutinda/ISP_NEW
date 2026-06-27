@@ -47,6 +47,9 @@ from .serializers import (
 )
 from .services import RadiusSyncService
 
+# Import pagination classes
+from utils.pagination import LargeResultsSetPagination
+
 logger = logging.getLogger(__name__)
 
 
@@ -882,6 +885,8 @@ class CustomerRadiusCredentialsViewSet(viewsets.ModelViewSet):
     """
     
     permission_classes = [IsAuthenticated, HasCompanyAccess]
+    # FIX: Use LargeResultsSetPagination to allow larger page sizes (up to 1000)
+    pagination_class = LargeResultsSetPagination
     
     def get_queryset(self):
         qs = CustomerRadiusCredentials.objects.select_related(
