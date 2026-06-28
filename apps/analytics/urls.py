@@ -24,6 +24,7 @@ from .frontend_contract_views import (
     AnalyticsRevenueView as AnalyticsRevenueContractView,
     AnalyticsUsageView,
     RouterDailyRevenueView,  # ADD THIS
+    AnalyticsNetworkDeepView,  # NEW: Add this import
 )
 
 app_name = 'analytics'
@@ -52,7 +53,7 @@ urlpatterns = [
     path('export/', AnalyticsExportView.as_view(), name='analytics-export'),
     
     # ============================================================
-    # NEW: Frontend Contract Endpoints
+    # Frontend Contract Endpoints
     # These endpoints follow the exact contract expected by the frontend
     # ============================================================
     path('reports-contract/', AnalyticsReportsView.as_view(), name='analytics-reports-contract'),
@@ -63,4 +64,9 @@ urlpatterns = [
     
     # Router daily revenue endpoint
     path('router-revenue/', RouterDailyRevenueView.as_view(), name='analytics-router-revenue'),
+    
+    # ============================================================
+    # NEW: Enhanced Network Analytics Endpoint
+    # ============================================================
+    path('network-deep/', AnalyticsNetworkDeepView.as_view(), name='analytics-network-deep'),
 ]

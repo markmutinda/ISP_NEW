@@ -3,10 +3,10 @@ from datetime import timedelta, datetime
 from dateutil.relativedelta import relativedelta
 
 from django.core.cache import cache
-from django.db import connection  # ADDED: For schema_name access
+from django.db import connection
 from django.db import models
-from django.db.models import Sum, Count, Avg, Q, F, DecimalField, ExpressionWrapper
-from django.db.models.functions import Coalesce, TruncDay, TruncHour, TruncMonth
+from django.db.models import Sum, Count, Avg, Q, F, DecimalField, ExpressionWrapper, BigIntegerField
+from django.db.models.functions import Coalesce, TruncDay, TruncHour, TruncMonth, ExtractHour, ExtractWeekDay
 from django.utils import timezone
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
@@ -190,6 +190,7 @@ class _RangeMixin:
         "customers": {"7d", "30d", "90d", "12m"},
         "revenue": {"7d", "30d", "90d", "12m"},
         "usage": {"24h", "7d", "30d"},
+        "network_deep": {"7d", "30d", "90d"},
     }
 
     def _start(self, key, time_range):
@@ -1026,3 +1027,266 @@ class RouterDailyRevenueView(APIView, _RangeMixin):
                 "peak_amount": peak["revenue"] if peak else 0,
             },
         })
+
+
+# ================================================================
+# NEW: AnalyticsNetworkDeepView - Enhanced Network Analytics
+# ================================================================
+
+class AnalyticsNetworkDeepView(APIView, _RangeMixin):
+    """
+    GET /api/analytics/network-deep/?time_range=7d|30d|90d
+    Rich network analytics for the enhanced Network tab.
+    """
+    permission_classes = [IsAuthenticated, IsAdminOrStaff]
+
+    def get(self, request):
+        tr = request.query_params.get("time_range", "7d")
+        start = self._start("network_deep", tr)
+        if not start:
+            return Response({"error": "Invalid time_range."}, status=400)
+
+        ck = self._cache_key(request, "network_deep", tr)
+        if (cached := cache.get(ck)):
+            return Response(cached)
+
+        payload = {
+            "session_heatmap": self._session_heatmap(start),
+            "router_health": self._router_health(start),
+            "auth_trend": self._auth_trend(start),
+            "top_bandwidth_users": self._top_bandwidth(start),
+            "protocol_distribution": self._protocol_dist(start),
+            "hourly_sessions": self._hourly_sessions(start),
+            "termination_causes": self._termination_causes(start),
+            "new_vs_returning": self._new_vs_returning(start),
+        }
+        cache.set(ck, payload, CACHE_TTL)
+        return Response(payload)
+
+    def _session_heatmap(self, start):
+        """
+        7x24 heatmap: sessions per (weekday, hour).
+        Returns list of {day: 0-6, hour: 0-23, value: count}
+        """
+        from apps.radius.models import RadAcct
+        from django.db.models.functions import ExtractHour, ExtractWeekDay
+
+        qs = (
+            RadAcct.objects
+            .filter(acctstarttime__gte=start)
+            .annotate(
+                hour=ExtractHour("acctstarttime"),
+                weekday=ExtractWeekDay("acctstarttime"),
+            )
+            .values("hour", "weekday")
+            .annotate(count=Count("radacctid"))
+        )
+
+        # weekday: Django returns 1=Sunday...7=Saturday, remap to 0=Mon..6=Sun
+        REMAP = {1: 6, 2: 0, 3: 1, 4: 2, 5: 3, 6: 4, 7: 5}
+        result = []
+        for r in qs:
+            result.append({
+                "day": REMAP.get(r["weekday"], 0),
+                "hour": r["hour"],
+                "value": r["count"],
+            })
+        return result
+
+    def _router_health(self, start):
+        """
+        Per-router: session count, avg session time, total GB, auth failures.
+        """
+        from apps.radius.models import RadAcct, RadPostAuth
+        from apps.network.models.router_models import Router
+
+        routers = Router.objects.filter(is_active=True).values("id", "name", "status", "vpn_ip_address", "ip_address")
+
+        result = []
+        for r in routers:
+            ip = r["vpn_ip_address"] or r["ip_address"]
+            if not ip:
+                continue
+            acct = RadAcct.objects.filter(
+                nasipaddress=ip,
+                acctstarttime__gte=start,
+            ).aggregate(
+                sessions=Count("radacctid"),
+                avg_time=Avg("acctsessiontime"),
+                total_in=Sum("acctinputoctets"),
+                total_out=Sum("acctoutputoctets"),
+            )
+            auth_fails = RadPostAuth.objects.filter(
+                nasipaddress=ip,
+                authdate__gte=start,
+                reply="Access-Reject",
+            ).count()
+
+            total_gb = _bytes_to_gb((acct["total_in"] or 0) + (acct["total_out"] or 0))
+            avg_minutes = round((acct["avg_time"] or 0) / 60, 1)
+            result.append({
+                "id": r["id"],
+                "name": r["name"],
+                "status": r["status"],
+                "sessions": acct["sessions"] or 0,
+                "avg_session_minutes": avg_minutes,
+                "total_gb": total_gb,
+                "auth_failures": auth_fails,
+                "health_score": min(100, max(0, 100 - (auth_fails * 2))),
+            })
+
+        return sorted(result, key=lambda x: x["sessions"], reverse=True)
+
+    def _auth_trend(self, start):
+        """Daily auth success vs failure counts."""
+        from apps.radius.models import RadPostAuth
+
+        qs = (
+            RadPostAuth.objects
+            .filter(authdate__gte=start)
+            .annotate(day=TruncDay("authdate"))
+            .values("day", "reply")
+            .annotate(count=Count("id"))
+            .order_by("day")
+        )
+
+        day_map = {}
+        for r in qs:
+            d = r["day"].date().isoformat()
+            if d not in day_map:
+                day_map[d] = {"date": d, "success": 0, "failure": 0}
+            if r["reply"] == "Access-Accept":
+                day_map[d]["success"] += r["count"]
+            else:
+                day_map[d]["failure"] += r["count"]
+
+        return sorted(day_map.values(), key=lambda x: x["date"])
+
+    def _top_bandwidth(self, start):
+        """Top 15 usernames by total bytes (in + out) in the period."""
+        from apps.radius.models import RadAcct
+        from django.db.models import BigIntegerField, ExpressionWrapper as EW, F
+
+        qs2 = (
+            RadAcct.objects
+            .filter(acctstarttime__gte=start)
+            .values("username")
+            .annotate(
+                bytes_in=Coalesce(Sum("acctinputoctets"), 0),
+                bytes_out=Coalesce(Sum("acctoutputoctets"), 0),
+            )
+            .annotate(
+                total=EW(F("bytes_in") + F("bytes_out"), output_field=BigIntegerField())
+            )
+            .order_by("-total")[:15]
+        )
+
+        return [{
+            "username": r["username"],
+            "download_gb": _bytes_to_gb(r["bytes_out"]),
+            "upload_gb": _bytes_to_gb(r["bytes_in"]),
+            "total_gb": _bytes_to_gb(r["total"]),
+        } for r in qs2]
+
+    def _protocol_dist(self, start):
+        """PPPoE vs Hotspot session counts and data volume."""
+        from apps.radius.models import RadAcct
+
+        pppoe = RadAcct.objects.filter(
+            acctstarttime__gte=start,
+            framedprotocol="PPP",
+        ).aggregate(sessions=Count("radacctid"), bytes_in=Sum("acctinputoctets"), bytes_out=Sum("acctoutputoctets"))
+
+        hotspot = RadAcct.objects.filter(
+            acctstarttime__gte=start,
+        ).exclude(framedprotocol="PPP").aggregate(
+            sessions=Count("radacctid"), bytes_in=Sum("acctinputoctets"), bytes_out=Sum("acctoutputoctets")
+        )
+
+        return {
+            "pppoe": {
+                "sessions": pppoe["sessions"] or 0,
+                "total_gb": _bytes_to_gb((pppoe["bytes_in"] or 0) + (pppoe["bytes_out"] or 0)),
+            },
+            "hotspot": {
+                "sessions": hotspot["sessions"] or 0,
+                "total_gb": _bytes_to_gb((hotspot["bytes_in"] or 0) + (hotspot["bytes_out"] or 0)),
+            },
+        }
+
+    def _hourly_sessions(self, start):
+        """Average concurrent sessions per hour-of-day (aggregated across all days)."""
+        from apps.radius.models import RadAcct
+        from django.db.models.functions import ExtractHour
+
+        qs = (
+            RadAcct.objects
+            .filter(acctstarttime__gte=start)
+            .annotate(hour=ExtractHour("acctstarttime"))
+            .values("hour")
+            .annotate(session_count=Count("radacctid"))
+            .order_by("hour")
+        )
+        hour_map = {r["hour"]: r["session_count"] for r in qs}
+        return [{"hour": f"{h:02d}:00", "sessions": hour_map.get(h, 0)} for h in range(24)]
+
+    def _termination_causes(self, start):
+        """Top disconnect reasons."""
+        from apps.radius.models import RadAcct
+
+        qs = (
+            RadAcct.objects
+            .filter(acctstarttime__gte=start, acctstoptime__isnull=False)
+            .exclude(acctterminatecause="")
+            .exclude(acctterminatecause__isnull=True)
+            .values("acctterminatecause")
+            .annotate(count=Count("radacctid"))
+            .order_by("-count")[:10]
+        )
+        total = sum(r["count"] for r in qs) or 1
+        return [{
+            "cause": r["acctterminatecause"],
+            "count": r["count"],
+            "percentage": round((r["count"] / total) * 100, 1),
+        } for r in qs]
+
+    def _new_vs_returning(self, start):
+        """
+        Daily: new unique usernames seen for first time vs returning ones.
+        """
+        from apps.radius.models import RadAcct
+        from collections import defaultdict
+
+        all_before = set(
+            RadAcct.objects
+            .filter(acctstarttime__lt=start)
+            .values_list("username", flat=True)
+            .distinct()
+        )
+
+        day_qs = (
+            RadAcct.objects
+            .filter(acctstarttime__gte=start)
+            .annotate(day=TruncDay("acctstarttime"))
+            .values("day", "username")
+            .distinct()
+            .order_by("day")
+        )
+
+        day_buckets = defaultdict(set)
+        for r in day_qs:
+            day_buckets[r["day"].date().isoformat()].add(r["username"])
+
+        seen_so_far = set(all_before)
+        result = []
+        for day in sorted(day_buckets):
+            users = day_buckets[day]
+            new_users = users - seen_so_far
+            returning = users & seen_so_far
+            seen_so_far |= users
+            result.append({
+                "date": day,
+                "new": len(new_users),
+                "returning": len(returning),
+            })
+        return result
