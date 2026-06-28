@@ -1,3 +1,5 @@
+from .online_status_view import CustomerOnlineStatusView
+
 # Re-export all views from the sub-modules so they can be imported as "from .views import ..."
 
 from .customer_dashboard import CustomerDashboardView
@@ -79,4 +81,6 @@ __all__ = [
     'CustomerTicketListView',
     'CustomerTicketDetailView',
     'CustomerTicketReplyView',
+    # Online Status
+    'CustomerOnlineStatusView',
 ]
