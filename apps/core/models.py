@@ -178,7 +178,7 @@ class User(AbstractUser, AuditMixin):
         ordering = ['-created_at']
         verbose_name = 'User'
         verbose_name_plural = 'Users'
-        
+
     def __str__(self):
         return f"{self.get_full_name()} ({self.email or 'No Email'})"
     
@@ -225,6 +225,25 @@ class User(AbstractUser, AuditMixin):
     def is_company_staff(self):
         """Check if user is staff of their company"""
         return self.role in ['admin', 'staff', 'accountant', 'support', 'technician']
+
+
+class RoleAccessPolicy(AuditMixin):
+    """Tenant-scoped dashboard route access policy for a staff role."""
+
+    role = models.CharField(max_length=20, choices=User.USER_ROLES)
+    allowed_paths = models.JSONField(default=list, blank=True)
+
+    class Meta:
+        app_label = 'core'
+        ordering = ['role']
+        verbose_name = 'Role Access Policy'
+        verbose_name_plural = 'Role Access Policies'
+        constraints = [
+            models.UniqueConstraint(fields=['role'], name='unique_role_access_policy_role'),
+        ]
+
+    def __str__(self):
+        return f"{self.role}: {len(self.allowed_paths or [])} route(s)"
 
 
 class BaseModel(models.Model):

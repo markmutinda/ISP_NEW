@@ -30,14 +30,14 @@ from django.shortcuts import get_object_or_404  # Add this import
 from .otp_service import OTPService, OTPError, OTPRateLimitedError
 from .email_delivery import send_transactional_email
 
-from .models import User, Company, SystemSettings, AuditLog, Tenant, Changelog, FeatureRequest, FeatureUpvote  # Add FeatureRequest and FeatureUpvote here
+from .models import User, Company, SystemSettings, AuditLog, Tenant, Changelog, FeatureRequest, FeatureUpvote, RoleAccessPolicy  # Add FeatureRequest and FeatureUpvote here
 from .serializers import (
     CustomTokenRefreshSerializer, UserSerializer, LoginSerializer, UserCreateSerializer, UserUpdateSerializer,
     AdminUserUpdateSerializer,  # ADD THIS
     ProfileSerializer, PasswordChangeSerializer,
     CompanySerializer, TenantSerializer, SystemSettingsSerializer, AuditLogSerializer,
     CustomTokenObtainPairSerializer, DashboardStatsSerializer, ChangelogSerializer,
-    FeatureRequestSerializer, CompanyBrandingSerializer  # Add FeatureRequestSerializer here
+    FeatureRequestSerializer, CompanyBrandingSerializer, RoleAccessPolicySerializer  # Add FeatureRequestSerializer here
 )
 from .permissions import IsAdmin, IsAdminOrStaff, IsCustomer, IsTechnician
 
@@ -524,7 +524,8 @@ class UserViewSet(viewsets.ModelViewSet):
         serializer.save(**save_kwargs)
         
         logger.info(f"UserViewSet: Created {role} user {serializer.instance.email}. is_staff={is_staff_status}")
-    
+
+
     @action(detail=False, methods=['get', 'patch', 'put'])
     def me(self, request):
         """Get or update current user profile."""
@@ -632,6 +633,57 @@ class UserViewSet(viewsets.ModelViewSet):
             return Response({'message': 'Password updated successfully'})
         
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+
+class RoleAccessPolicyViewSet(viewsets.ModelViewSet):
+    """Manage tenant dashboard route access per staff role."""
+
+    serializer_class = RoleAccessPolicySerializer
+    permission_classes = [IsAuthenticated, IsAdminOrStaff]
+    lookup_field = "role"
+
+    editable_roles = ("staff", "technician", "accountant", "support")
+
+    default_paths_by_role = {
+        "staff": [
+            "/admin/users", "/admin/dispatch", "/admin/inventory", "/admin/tickets",
+            "/admin/leads", "/admin/loyalty", "/admin/sms", "/admin/ads",
+        ],
+        "technician": [
+            "/admin/olt", "/admin/onu", "/admin/routers", "/admin/networks", "/admin/radius",
+            "/admin/fup", "/admin/usage", "/admin/dispatch", "/admin/inventory", "/admin/tickets",
+        ],
+        "accountant": [
+            "/admin/users", "/admin/invoices", "/admin/payments", "/admin/receipts",
+            "/admin/vouchers", "/admin/payment-methods", "/admin/analytics",
+            "/admin/settings/billing", "/admin/sms",
+        ],
+        "support": [
+            "/admin/users", "/admin/dispatch", "/admin/tickets", "/admin/leads",
+            "/admin/loyalty", "/admin/sms", "/admin/ads", "/admin/inventory",
+        ],
+    }
+
+    def get_queryset(self):
+        return RoleAccessPolicy.objects.filter(role__in=self.editable_roles)
+
+    def _ensure_defaults(self):
+        for role, paths in self.default_paths_by_role.items():
+            RoleAccessPolicy.objects.get_or_create(role=role, defaults={"allowed_paths": paths})
+
+    def list(self, request, *args, **kwargs):
+        self._ensure_defaults()
+        queryset = self.get_queryset()
+        return Response(RoleAccessPolicySerializer(queryset, many=True).data)
+
+    def get_object(self):
+        self._ensure_defaults()
+        return get_object_or_404(self.get_queryset(), role=self.kwargs.get(self.lookup_field))
+
+    def get_permissions(self):
+        if self.action in ["update", "partial_update", "create", "destroy"]:
+            return [IsAuthenticated(), IsAdmin()]
+        return [IsAuthenticated(), IsAdminOrStaff()]
 
 
 class CompanyViewSet(viewsets.ModelViewSet):

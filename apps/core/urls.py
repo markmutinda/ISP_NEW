@@ -13,6 +13,7 @@ router.register(r'companies', views.CompanyViewSet, basename='company')
 router.register(r'tenants', views.TenantViewSet, basename='tenant')
 router.register(r'settings', views.SystemSettingsViewSet, basename='setting')
 router.register(r'audit-logs', views.AuditLogViewSet, basename='auditlog')
+router.register(r'role-access', views.RoleAccessPolicyViewSet, basename='role-access')
 
 urlpatterns = [
     # Authentication endpoints

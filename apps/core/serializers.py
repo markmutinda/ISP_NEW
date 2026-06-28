@@ -11,7 +11,7 @@ from rest_framework_simplejwt.exceptions import InvalidToken  # Add this
 from rest_framework_simplejwt.serializers import TokenRefreshSerializer  # Already there or add
 from django.utils import timezone
 from django.contrib.auth.password_validation import validate_password
-from .models import User, Company, Tenant, SystemSettings, AuditLog, Changelog, FeatureRequest, FeatureUpvote  # Add FeatureRequest and FeatureUpvote here
+from .models import User, Company, Tenant, SystemSettings, AuditLog, Changelog, FeatureRequest, FeatureUpvote, RoleAccessPolicy  # Add FeatureRequest and FeatureUpvote here
 
 logger = logging.getLogger(__name__)
 
@@ -249,6 +249,30 @@ class AdminUserUpdateSerializer(serializers.ModelSerializer):
             instance.set_password(new_password)
         instance.save()
         return instance
+
+
+class RoleAccessPolicySerializer(serializers.ModelSerializer):
+    class Meta:
+        model = RoleAccessPolicy
+        fields = ["id", "role", "allowed_paths", "created_at", "updated_at"]
+        read_only_fields = ["id", "created_at", "updated_at"]
+
+    def validate_role(self, value):
+        editable_roles = {"staff", "technician", "accountant", "support"}
+        if value not in editable_roles:
+            raise serializers.ValidationError("Only staff, technician, accountant, and support roles can be customized.")
+        return value
+
+    def validate_allowed_paths(self, value):
+        if not isinstance(value, list):
+            raise serializers.ValidationError("Allowed paths must be a list.")
+        cleaned = []
+        for path in value:
+            if not isinstance(path, str) or not path.startswith("/admin/"):
+                raise serializers.ValidationError("Each allowed path must be an admin route path.")
+            if path not in cleaned:
+                cleaned.append(path)
+        return cleaned
 
 
 class LoginSerializer(serializers.Serializer):
