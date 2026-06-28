@@ -1920,3 +1920,244 @@ class TenantLeadDetailView(APIView):
         lead = get_object_or_404(Lead, pk=pk)
         lead.delete()
         return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+# ============================================================
+# NEW: Unified Dashboard View - Single endpoint replacing 8+ calls
+# ============================================================
+class UnifiedDashboardView(APIView):
+    """
+    Single endpoint returning all dashboard data.
+    Replaces 8+ separate API calls with one.
+    
+    GET /api/v1/core/dashboard/unified/
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        from django.db.models import Sum, Count, Q
+        from django.utils import timezone
+        from datetime import timedelta
+        import concurrent.futures
+
+        now = timezone.now()
+        today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        yesterday_start = today_start - timedelta(days=1)
+        week_start = today_start - timedelta(days=7)
+        month_start = today_start.replace(day=1)
+        prev_month_start = (month_start - timedelta(days=1)).replace(day=1)
+
+        def get_customer_stats():
+            try:
+                from apps.customers.models import Customer
+                return Customer.objects.aggregate(
+                    total=Count('id'),
+                    active=Count('id', filter=Q(status='ACTIVE')),
+                )
+            except Exception:
+                return {'total': 0, 'active': 0}
+
+        def get_revenue_stats():
+            try:
+                from apps.billing.models.payment_models import Payment
+                pay = Payment.objects.filter(status='completed').aggregate(
+                    today=Sum('amount', filter=Q(payment_date__gte=today_start)),
+                    yesterday=Sum('amount', filter=Q(payment_date__gte=yesterday_start, payment_date__lt=today_start)),
+                    week=Sum('amount', filter=Q(payment_date__gte=week_start)),
+                    month=Sum('amount', filter=Q(payment_date__gte=month_start)),
+                    prev_month=Sum('amount', filter=Q(payment_date__gte=prev_month_start, payment_date__lt=month_start)),
+                    today_tx=Count('id', filter=Q(payment_date__gte=today_start)),
+                )
+                return pay
+            except Exception:
+                return {}
+
+        def get_router_stats():
+            try:
+                from apps.network.models import Router
+                stats = Router.objects.filter(is_active=True).aggregate(
+                    total=Count('id'),
+                    online=Count('id', filter=Q(status='online')),
+                    offline=Count('id', filter=Q(status='offline')),
+                    warning=Count('id', filter=Q(status='warning')),
+                    maintenance=Count('id', filter=Q(status='maintenance')),
+                )
+                # connected users
+                from apps.radius.models import RadAcct
+                connected = RadAcct.objects.filter(acctstoptime__isnull=True).count()
+                stats['total_connected_users'] = connected
+                return stats
+            except Exception:
+                return {'total': 0, 'online': 0, 'offline': 0, 'warning': 0, 'maintenance': 0, 'total_connected_users': 0}
+
+        def get_ticket_stats():
+            try:
+                from apps.support.models import Ticket
+                return Ticket.objects.aggregate(
+                    total=Count('id'),
+                    open=Count('id', filter=Q(status='open')),
+                    in_progress=Count('id', filter=Q(status='in_progress')),
+                    resolved=Count('id', filter=Q(status='resolved')),
+                )
+            except Exception:
+                return {'total': 0, 'open': 0, 'in_progress': 0, 'resolved': 0}
+
+        def get_expired_count():
+            try:
+                from apps.radius.models import CustomerRadiusCredentials
+                return CustomerRadiusCredentials.objects.filter(
+                    expiration_date__isnull=False,
+                    expiration_date__lte=now,
+                ).count()
+            except Exception:
+                return 0
+
+        def get_active_subscriptions():
+            try:
+                from apps.radius.models import CustomerRadiusCredentials
+                from apps.billing.models.hotspot_models import HotspotSession
+
+                pppoe_count = CustomerRadiusCredentials.objects.filter(
+                    is_enabled=True,
+                ).filter(
+                    Q(expiration_date__isnull=True) | Q(expiration_date__gt=now)
+                ).count()
+
+                hotspot_active = HotspotSession.objects.filter(
+                    status='active',
+                    expires_at__gt=now,
+                ).values('hotspot_client_id').distinct().count()
+
+                return {'pppoe': pppoe_count, 'hotspot': hotspot_active, 'total': pppoe_count + hotspot_active}
+            except Exception:
+                return {'pppoe': 0, 'hotspot': 0, 'total': 0}
+
+        def get_online_count():
+            try:
+                from apps.radius.models import RadAcct
+                return RadAcct.objects.filter(acctstoptime__isnull=True).count()
+            except Exception:
+                return 0
+
+        def get_recent_activity():
+            try:
+                from apps.core.models import AuditLog
+                return list(AuditLog.objects.filter(
+                    tenant=getattr(request, 'tenant', None)
+                ).order_by('-timestamp')[:10].values(
+                    'id', 'user__email', 'action', 'model_name', 'object_repr', 'timestamp'
+                ))
+            except Exception:
+                return []
+
+        def get_weekly_income():
+            try:
+                from apps.billing.models.payment_models import Payment
+                days_to_monday = now.weekday()
+                week_start_dt = today_start - timedelta(days=days_to_monday)
+                payments = Payment.objects.filter(
+                    status__iexact='completed',
+                    payment_date__gte=week_start_dt,
+                    payment_date__lt=now,
+                )
+                weekday_map = {i: 0 for i in range(7)}
+                for p in payments:
+                    weekday_map[p.payment_date.weekday()] += float(p.amount or 0)
+                labels = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']
+                return [{'day': labels[i], 'amount': round(weekday_map[i], 2)} for i in range(7)]
+            except Exception:
+                return []
+
+        def get_monthly_earnings():
+            try:
+                from apps.billing.models.payment_models import Payment
+                from datetime import datetime
+                current_year = now.year
+                current_month = now.month
+                labels = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec']
+                result = []
+                for month in range(1, current_month + 1):
+                    ms = datetime(current_year, month, 1, tzinfo=timezone.get_current_timezone())
+                    me = datetime(current_year, month + 1, 1, tzinfo=timezone.get_current_timezone()) if month < 12 else datetime(current_year + 1, 1, 1, tzinfo=timezone.get_current_timezone())
+                    total = float(Payment.objects.filter(
+                        status__iexact='completed', payment_date__gte=ms, payment_date__lt=me
+                    ).aggregate(v=Sum('amount'))['v'] or 0)
+                    result.append({'month': labels[month - 1], 'amount': round(total, 2)})
+                return result
+            except Exception:
+                return []
+
+        # Run all queries in parallel using threads
+        with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
+            futures = {
+                'customers': executor.submit(get_customer_stats),
+                'revenue': executor.submit(get_revenue_stats),
+                'routers': executor.submit(get_router_stats),
+                'tickets': executor.submit(get_ticket_stats),
+                'expired': executor.submit(get_expired_count),
+                'subscriptions': executor.submit(get_active_subscriptions),
+                'online': executor.submit(get_online_count),
+                'activity': executor.submit(get_recent_activity),
+                'weekly_income': executor.submit(get_weekly_income),
+                'monthly_earnings': executor.submit(get_monthly_earnings),
+            }
+            results = {k: f.result() for k, f in futures.items()}
+
+        rev = results['revenue']
+        today_rev = float(rev.get('today') or 0)
+        yesterday_rev = float(rev.get('yesterday') or 0)
+        week_rev = float(rev.get('week') or 0)
+        month_rev = float(rev.get('month') or 0)
+        prev_month_rev = float(rev.get('prev_month') or 0)
+
+        def pct_change(cur, prev):
+            if not prev:
+                return 0.0
+            return round(((cur - prev) / prev) * 100, 1)
+
+        r = results['routers']
+        subs = results['subscriptions']
+
+        return Response({
+            'total_customers': results['customers'].get('total', 0),
+            'active_customers': results['customers'].get('active', 0),
+            'expired_customers': results['expired'],
+            'active_subscriptions': subs,
+            'online_count': results['online'],
+            'routers': {
+                'total_routers': r.get('total', 0),
+                'online_routers': r.get('online', 0),
+                'offline_routers': r.get('offline', 0),
+                'warning_routers': r.get('warning', 0),
+                'maintenance_routers': r.get('maintenance', 0),
+                'total_connected_users': r.get('total_connected_users', 0),
+            },
+            'revenue': {
+                'today': today_rev,
+                'today_change': pct_change(today_rev, yesterday_rev),
+                'week': week_rev,
+                'month': month_rev,
+                'month_change': pct_change(month_rev, prev_month_rev),
+                'transactions_today': int(rev.get('today_tx') or 0),
+            },
+            'tickets': {
+                'total': results['tickets'].get('total', 0),
+                'open': results['tickets'].get('open', 0),
+                'in_progress': results['tickets'].get('in_progress', 0),
+                'resolved': results['tickets'].get('resolved', 0),
+                'avg_response_time': '—',
+            },
+            'recent_activity': results['activity'],
+            'overview': {
+                'today_revenue': today_rev,
+                'today_change': pct_change(today_rev, yesterday_rev),
+                'week_revenue': week_rev,
+                'month_revenue': month_rev,
+                'month_change': pct_change(month_rev, prev_month_rev),
+                'total_transactions_today': int(rev.get('today_tx') or 0),
+                'weekly_income': results['weekly_income'],
+                'last_week_income': [],
+                'monthly_earnings': results['monthly_earnings'],
+                'last_year_earnings': [],
+            },
+        })

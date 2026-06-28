@@ -38,6 +38,11 @@ urlpatterns = [
     # Dashboard
     path('dashboard/', views.DashboardView.as_view(), name='dashboard'),
     
+    # ============================================================
+    # NEW: Unified Dashboard - Single endpoint replacing 8+ calls
+    # ============================================================
+    path('dashboard/unified/', views.UnifiedDashboardView.as_view(), name='dashboard-unified'),
+    
     # Health check
     path('health/', views.health_check, name='health_check'),
     
