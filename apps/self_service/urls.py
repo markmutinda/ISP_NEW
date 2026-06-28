@@ -33,6 +33,9 @@ from .views import (
     CustomerTicketReplyView,
 )
 
+# Import the online status view
+from .views.online_status_view import CustomerOnlineStatusView
+
 urlpatterns = [
     # ==========================================================================
     # PUBLIC ENDPOINTS (No Authentication Required)
@@ -55,6 +58,9 @@ urlpatterns = [
     path('dashboard/', CustomerDashboardView.as_view(), name='customer-dashboard'),
     path('profile/', CustomerProfileView.as_view(), name='customer-profile'),
     path('usage/', UsageView.as_view(), name='customer-usage'),  # <--- ADDED THIS
+    
+    # Online Status - Check if customer is online/connected
+    path('online-status/', CustomerOnlineStatusView.as_view(), name='customer-online-status'),
     
     # Invoices
     path('invoices/', CustomerInvoicesView.as_view(), name='customer-invoices'),
