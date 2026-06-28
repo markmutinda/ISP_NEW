@@ -2,6 +2,8 @@
 Core views for ISP Management System
 """
 
+import json
+
 from rest_framework import viewsets, status, generics, permissions
 from rest_framework.response import Response
 from rest_framework.decorators import action, api_view, permission_classes
@@ -26,7 +28,9 @@ from django.template.loader import render_to_string  # For email template
 from django.utils.html import strip_tags  # For plain text email
 from .models import Domain   # ← This is your custom Domain in core/models.
 import logging
+from django.http import Http404
 from django.shortcuts import get_object_or_404  # Add this import
+from django.db import DatabaseError
 from .otp_service import OTPService, OTPError, OTPRateLimitedError
 from .email_delivery import send_transactional_email
 
@@ -648,6 +652,8 @@ class UserViewSet(viewsets.ModelViewSet):
 class RoleAccessPolicyViewSet(viewsets.ModelViewSet):
     """Manage tenant dashboard route access per staff role."""
 
+    fallback_setting_key = "staff_role_access_policies"
+
     serializer_class = RoleAccessPolicySerializer
     permission_classes = [IsAuthenticated, IsAdminOrStaff]
     lookup_field = "role"
@@ -681,14 +687,60 @@ class RoleAccessPolicyViewSet(viewsets.ModelViewSet):
         for role, paths in self.default_paths_by_role.items():
             RoleAccessPolicy.objects.get_or_create(role=role, defaults={"allowed_paths": paths})
 
+    def _fallback_map(self):
+        raw_value = SystemSettings.get_setting(self.fallback_setting_key, default={}) or {}
+        if isinstance(raw_value, dict):
+            return {
+                role: list(paths) if isinstance(paths, list) else []
+                for role, paths in raw_value.items()
+                if role in self.editable_roles
+            }
+        return {}
+
+    def _persist_fallback_map(self, policies: dict[str, list[str]]):
+        SystemSettings.objects.update_or_create(
+            key=self.fallback_setting_key,
+            defaults={
+                "name": "Staff role access policies",
+                "value": json.dumps(policies),
+                "setting_type": "security",
+                "data_type": "json",
+                "description": "Tenant-scoped route access rules for dashboard staff roles.",
+                "is_public": False,
+                "updated_by": self.request.user,
+            },
+        )
+
+    def _build_fallback_payload(self):
+        saved_map = self._fallback_map()
+        payload = []
+        for index, role in enumerate(self.editable_roles, start=1):
+            payload.append({
+                "id": index,
+                "role": role,
+                "allowed_paths": saved_map.get(role) or self.default_paths_by_role.get(role, []),
+                "created_at": None,
+                "updated_at": None,
+            })
+        return payload
+
     def list(self, request, *args, **kwargs):
-        self._ensure_defaults()
-        queryset = self.get_queryset()
-        return Response(RoleAccessPolicySerializer(queryset, many=True).data)
+        try:
+            self._ensure_defaults()
+            queryset = self.get_queryset()
+            return Response(RoleAccessPolicySerializer(queryset, many=True).data)
+        except DatabaseError:
+            return Response(self._build_fallback_payload())
 
     def get_object(self):
         self._ensure_defaults()
-        return get_object_or_404(self.get_queryset(), role=self.kwargs.get(self.lookup_field))
+        queryset = self.get_queryset().filter(role=self.kwargs.get(self.lookup_field)).order_by("id")
+        instance = queryset.first()
+        if not instance:
+            raise Http404
+        if queryset.count() > 1:
+            queryset.exclude(id=instance.id).delete()
+        return instance
 
     def get_permissions(self):
         if self.action in ["update", "partial_update", "create", "destroy"]:
@@ -700,6 +752,36 @@ class RoleAccessPolicyViewSet(viewsets.ModelViewSet):
 
     def perform_update(self, serializer):
         serializer.save(updated_by=self.request.user)
+
+    def partial_update(self, request, *args, **kwargs):
+        role = kwargs.get(self.lookup_field)
+        serializer = self.get_serializer(data={
+            "role": role,
+            "allowed_paths": request.data.get("allowed_paths", []),
+        })
+        serializer.is_valid(raise_exception=True)
+
+        try:
+            instance = self.get_object()
+            instance.allowed_paths = serializer.validated_data["allowed_paths"]
+            instance.updated_by = request.user
+            instance.save(update_fields=["allowed_paths", "updated_by", "updated_at"])
+            return Response(RoleAccessPolicySerializer(instance).data)
+        except DatabaseError:
+            policies = self._fallback_map()
+            policies[role] = serializer.validated_data["allowed_paths"]
+            self._persist_fallback_map(policies)
+            payload = next((item for item in self._build_fallback_payload() if item["role"] == role), None)
+            return Response(payload or {
+                "id": 0,
+                "role": role,
+                "allowed_paths": serializer.validated_data["allowed_paths"],
+                "created_at": None,
+                "updated_at": None,
+            })
+
+    def update(self, request, *args, **kwargs):
+        return self.partial_update(request, *args, **kwargs)
 
 
 class CompanyViewSet(viewsets.ModelViewSet):

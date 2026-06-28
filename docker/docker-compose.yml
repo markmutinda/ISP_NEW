@@ -278,9 +278,13 @@ services:
       dockerfile: Dockerfile
     container_name: netily_frontend
     restart: unless-stopped
+    env_file: ../.env
     environment:
       - NODE_ENV=production
       - NEXT_TELEMETRY_DISABLED=1
+      - GEMINI_API_KEY=${GEMINI_API_KEY:-}
+      - GOOGLE_API_KEY=${GOOGLE_API_KEY:-}
+      - GEMINI_MODEL=${GEMINI_MODEL:-}
     depends_on:
       - web
     deploy:
