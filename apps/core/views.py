@@ -489,13 +489,23 @@ class UserViewSet(viewsets.ModelViewSet):
             if company_id:
                 return qs.filter(company_id=company_id)
             return qs
-        
-        # Company users only see their own company
-        if hasattr(self.request.user, 'company') and self.request.user.company:
-            return qs.filter(company=self.request.user.company)
-        
-        # Fallback: nothing
-        return qs.none()
+
+        company, _tenant = get_current_public_company_and_tenant(self.request)
+        if company:
+            qs = qs.filter(company=company)
+        elif hasattr(self.request.user, 'company') and self.request.user.company:
+            qs = qs.filter(company=self.request.user.company)
+        else:
+            return qs.none()
+
+        staff_only = str(self.request.query_params.get("staff_only", "")).lower() in {"1", "true", "yes"}
+        if staff_only:
+            qs = qs.filter(
+                role__in=["admin", "staff", "support", "technician", "accountant"],
+                is_staff=True,
+            ).exclude(is_superuser=True)
+
+        return qs
     
     def perform_create(self, serializer):
         """
@@ -684,6 +694,12 @@ class RoleAccessPolicyViewSet(viewsets.ModelViewSet):
         if self.action in ["update", "partial_update", "create", "destroy"]:
             return [IsAuthenticated(), IsAdmin()]
         return [IsAuthenticated(), IsAdminOrStaff()]
+
+    def perform_create(self, serializer):
+        serializer.save(created_by=self.request.user, updated_by=self.request.user)
+
+    def perform_update(self, serializer):
+        serializer.save(updated_by=self.request.user)
 
 
 class CompanyViewSet(viewsets.ModelViewSet):
