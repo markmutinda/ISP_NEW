@@ -322,9 +322,11 @@ class SubscriptionEnforcementMiddleware(MiddlewareMixin):
         #    and checking payment status are allowed.
         ALLOWED_PATHS = [
             '/api/v1/subscriptions/current/',  # View their locked status
+            '/api/v1/subscriptions/usage/',    # Load billing-cycle usage breakdown for the payment wall
             '/api/v1/subscriptions/pay/',      # Initiate M-Pesa payment
             '/api/v1/subscriptions/payments/', # Poll payment status
             '/api/v1/subscriptions/plans/',    # View available plans (to select & pay)
+            '/api/v1/billing/invoices/',       # Load the NET-BILL invoice and line items for payment
             '/api/v1/core/auth/',              # Login/Logout/OTP/Token refresh
             '/api/v1/core/users/me/',          # Identity check (needed after login for auth context)
         ]
@@ -401,10 +403,13 @@ class SubscriptionEnforcementMiddleware(MiddlewareMixin):
                             'trial_expired': sub.trial_expired,
                             'allowed_endpoints': [
                                 '/api/v1/subscriptions/current/',
+                                '/api/v1/subscriptions/usage/',
                                 '/api/v1/subscriptions/pay/',
                                 '/api/v1/subscriptions/payments/',
                                 '/api/v1/subscriptions/plans/',
-                                '/api/v1/auth/',
+                                '/api/v1/billing/invoices/',
+                                '/api/v1/core/auth/',
+                                '/api/v1/core/users/me/',
                             ]
                         }, status=402)  # HTTP 402 Payment Required
                         
