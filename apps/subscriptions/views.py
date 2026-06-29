@@ -311,6 +311,10 @@ class SubscriptionUsageView(APIView):
             'hotspot_revenue_share_amount': Decimal('0.00'),
             'hotspot_minimum_charge': Decimal('0.00'),
             'hotspot_billable_charge': Decimal('0.00'),
+            'pppoe_count': 0,
+            'billable_pppoe': 0,
+            'pppoe_unit_price': Decimal(str(plan.pppoe_unit_price or 25)) if plan.is_metered else Decimal('0.00'),
+            'pppoe_charge': Decimal('0.00'),
             'usage_subtotal': Decimal('0.00'),
             'minimum_charge': Decimal(str(plan.base_license_fee or 500)) if plan.is_metered else Decimal('0.00'),
             'minimum_adjustment': Decimal(str(plan.base_license_fee or 500)) if plan.is_metered else Decimal('0.00'),
@@ -332,13 +336,26 @@ class SubscriptionUsageView(APIView):
                 ).select_related('tenant', 'subscription__plan').order_by('-start_date').first()
 
                 if not active_cycle:
-                    active_cycle = BillingCycle.objects.create(
+                    active_cycle = BillingCycle.objects.filter(
                         tenant=tenant,
                         subscription=subscription,
-                        start_date=subscription.current_period_start or timezone.now(),
-                        end_date=subscription.current_period_end or (timezone.now() + timedelta(days=30)),
-                        status='active',
-                    )
+                    ).select_related('tenant', 'subscription__plan').order_by('-end_date').first()
+
+                if not active_cycle:
+                    if subscription.status in ['active', 'trial']:
+                        active_cycle = BillingCycle.objects.create(
+                            tenant=tenant,
+                            subscription=subscription,
+                            start_date=subscription.current_period_start or timezone.now(),
+                            end_date=subscription.current_period_end or (timezone.now() + timedelta(days=30)),
+                            status='active',
+                        )
+                    else:
+                        logger.warning(
+                            "No billing cycle found for expired subscription company=%s tenant=%s",
+                            company.id,
+                            tenant.schema_name,
+                        )
 
                 if active_cycle:
                     fallback_pct = Decimal(str(plan.hotspot_revenue_share_pct or 0)) or Decimal('3.00')
@@ -357,9 +374,8 @@ class SubscriptionUsageView(APIView):
 
                     actual_hotspot_revenue = active_cycle.refresh_actual_hotspot_revenue()
                     hotspot_share = active_cycle.calculate_hotspot_revenue_share(actual_hotspot_revenue)
-                    pppoe_charge = (
-                        Decimal(str(current_subscribers)) * active_cycle.snapshot_pppoe_price
-                    ).quantize(Decimal('0.01'))
+                    billable_pppoe = active_cycle.calculate_total_pppoe()
+                    pppoe_charge = active_cycle.calculate_pppoe_charge()
                     usage_subtotal = (pppoe_charge + hotspot_share).quantize(Decimal('0.01'))
                     minimum_charge = active_cycle.snapshot_base_fee or Decimal('500.00')
                     minimum_adjustment = max(
@@ -404,6 +420,10 @@ class SubscriptionUsageView(APIView):
                         'hotspot_revenue_share_amount': hotspot_share,
                         'hotspot_minimum_charge': hotspot_share,
                         'hotspot_billable_charge': hotspot_share,
+                        'pppoe_count': billable_pppoe,
+                        'billable_pppoe': billable_pppoe,
+                        'pppoe_unit_price': active_cycle.snapshot_pppoe_price,
+                        'pppoe_charge': pppoe_charge,
                         'usage_subtotal': usage_subtotal,
                         'minimum_charge': minimum_charge,
                         'minimum_adjustment': minimum_adjustment,
