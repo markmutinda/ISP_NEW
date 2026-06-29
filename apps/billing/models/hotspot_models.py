@@ -221,16 +221,14 @@ class HotspotPlan(models.Model):
     sort_order = models.PositiveIntegerField(default=0)
     
     # ════════════════════════════════════════════════════════════════
-    # FREE TRIAL FIELDS
+    # FREE TRIAL FIELD
     # ════════════════════════════════════════════════════════════════
     is_free_trial = models.BooleanField(
         default=False,
         help_text="If True, this plan is free — no payment required. One claim per device (MAC) ever."
     )
-    trial_duration_minutes = models.PositiveIntegerField(
-        default=30,
-        help_text="Duration in minutes for the free trial session"
-    )
+    # Note: trial duration is determined by the plan's validity_type/validity_value
+    # No separate trial_duration_minutes field needed
     
     # Metadata
     created_by = models.ForeignKey(

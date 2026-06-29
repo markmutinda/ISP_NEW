@@ -68,7 +68,7 @@ class HotspotPlanSerializer(serializers.ModelSerializer):
             # Timestamps
             'created_at', 'updated_at',
             # NEW FREE TRIAL FIELDS
-            'is_free_trial', 'trial_duration_minutes',
+            'is_free_trial',
         ]
         read_only_fields = [
             'id', 'router_id', 

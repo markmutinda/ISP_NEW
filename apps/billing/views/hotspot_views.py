@@ -140,7 +140,6 @@ def _serialize_hotspot_plan(plan):
         'is_popular': plan.is_popular,
         # NEW FREE TRIAL FIELDS
         'is_free_trial': getattr(plan, 'is_free_trial', False),
-        'trial_duration_minutes': getattr(plan, 'trial_duration_minutes', 30),
     }
 
 
@@ -332,7 +331,7 @@ class CaptivePortalView(APIView):
                             'download_speed', 'upload_speed', 'speed_unit',
                             'limitation_type', 'data_limit_value', 'data_limit_unit',
                             'simultaneous_devices', 'is_popular', 'duration_minutes', 'data_limit_mb',
-                            'is_free_trial', 'trial_duration_minutes'  # NEW FREE TRIAL FIELDS
+                            'is_free_trial' # NEW FREE TRIAL FIELDS
                         ).order_by('sort_order', 'price')
                         plans_data = [_serialize_hotspot_plan(p) for p in hotspot_plans]
                     except ProgrammingError:
@@ -415,7 +414,7 @@ class HotspotPlansView(APIView):
             'download_speed', 'upload_speed', 'speed_unit', 'description',
             'is_popular', 'validity_type', 'validity_value',
             'limitation_type', 'data_limit_value', 'data_limit_unit',
-            'is_free_trial', 'trial_duration_minutes'  # NEW FREE TRIAL FIELDS
+            'is_free_trial'
         ).order_by('sort_order', 'price')
 
         try:
@@ -440,8 +439,7 @@ class HotspotPlansView(APIView):
                 'speed_limit': f"{plan.speed_limit_mbps}Mbps",
                 'description': plan.description,
                 'is_popular': plan.is_popular,
-                'is_free_trial': plan.is_free_trial,  # NEW
-                'trial_duration_minutes': plan.trial_duration_minutes,  # NEW
+                'is_free_trial': plan.is_free_trial,  
             }
             for plan in plans
         ]
