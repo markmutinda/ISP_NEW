@@ -256,6 +256,34 @@ class HotspotPlan(models.Model):
         return f"{self.router.name} - {self.name} (KES {self.price})"
     
     def save(self, *args, **kwargs):
+        """
+        Save method with validation:
+        - Ensures only one free trial plan exists per router
+        - Handles both create and update scenarios via exclude(pk=self.pk)
+        - Syncs new fields to legacy fields for backward compatibility
+        """
+        # ════════════════════════════════════════════════════════════════
+        # FREE TRIAL VALIDATION - Only one free trial allowed per router
+        # ════════════════════════════════════════════════════════════════
+        if self.is_free_trial:
+            # Check for existing free trial plans on the same router
+            existing = HotspotPlan.objects.filter(
+                router=self.router, 
+                is_free_trial=True
+            )
+            
+            # If this is an update (existing plan), exclude itself from the check
+            if self.pk:
+                existing = existing.exclude(pk=self.pk)
+            
+            # If any other free trial exists, raise validation error
+            if existing.exists():
+                from django.core.exceptions import ValidationError
+                raise ValidationError(
+                    "A free trial plan already exists for this router. "
+                    "Only one free trial plan is allowed per router."
+                )
+        
         # Sync new fields to legacy fields for backward compatibility
         self._sync_legacy_fields()
         super().save(*args, **kwargs)

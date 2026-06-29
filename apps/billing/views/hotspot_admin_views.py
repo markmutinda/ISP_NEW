@@ -60,9 +60,17 @@ class HotspotPlanViewSet(viewsets.ModelViewSet):
         return get_object_or_404(Router, id=router_id)
     
     def perform_create(self, serializer):
-        """Save hotspot plan with router context and handle duplicate constraints politely."""
+        """
+        Save hotspot plan with router context and handle validation errors politely.
+        
+        Catches:
+        - ValidationError from model's save() method (e.g., duplicate free trial)
+        - IntegrityError from database unique constraint (duplicate router+name)
+        """
         from django.db import IntegrityError
+        from django.core.exceptions import ValidationError
         from rest_framework import serializers
+        
         router = self.get_router()
         
         try:
@@ -70,9 +78,25 @@ class HotspotPlanViewSet(viewsets.ModelViewSet):
                 router=router,
                 created_by=self.request.user
             )
+        except ValidationError as e:
+            # Catch validation errors from model.save() - primarily free trial duplicate
+            # Extract the error message from ValidationError
+            error_messages = {}
+            if hasattr(e, 'message'):
+                # If it's a single message
+                error_messages["is_free_trial"] = str(e.message)
+            elif hasattr(e, 'messages'):
+                # If it's a dict of field errors
+                error_messages = e.messages
+            else:
+                # Fallback
+                error_messages["non_field_errors"] = str(e)
+            
+            raise serializers.ValidationError(error_messages)
         except IntegrityError as e:
             # Catch the unique_together constraint violation for router + name
-            if "router" in str(e).lower() and "name" in str(e).lower():
+            error_str = str(e).lower()
+            if "router" in error_str and "name" in error_str:
                 raise serializers.ValidationError({
                     "name": "A hotspot plan with this name already exists for this specific router."
                 })
