@@ -29,7 +29,7 @@ from django_tenants.utils import schema_context, get_public_schema_name
 
 from apps.billing.models.hotspot_models import (
     HotspotPlan, HotspotSession, HotspotBranding,
-    HotspotClient, HotspotClientDevice
+    HotspotClient, HotspotClientDevice, HotspotFreeTrialUsage
 )
 from apps.billing.models.billing_models import Plan
 from apps.billing.models.payment_models import Payment, TenantTumaConfig, InvoiceItemPayment
@@ -138,6 +138,9 @@ def _serialize_hotspot_plan(plan):
         'data_limit_display': plan.data_limit_display,
         'simultaneous_devices': plan.simultaneous_devices,
         'is_popular': plan.is_popular,
+        # NEW FREE TRIAL FIELDS
+        'is_free_trial': getattr(plan, 'is_free_trial', False),
+        'trial_duration_minutes': getattr(plan, 'trial_duration_minutes', 30),
     }
 
 
@@ -256,7 +259,7 @@ class CaptivePortalView(APIView):
                         'announcement_text': '',
                         'gateway_ip': '',
                         'router_logo_url': None,
-                        'hide_plan_speed': False,  # ← ADDED
+                        'hide_plan_speed': False,
                     }
                     branding_data = None
                 else:
@@ -275,7 +278,7 @@ class CaptivePortalView(APIView):
                         'announcement_text': router.announcement_text or '',
                         'gateway_ip': router.gateway_ip,
                         'router_logo_url': router_logo_url,
-                        'hide_plan_speed': getattr(router, 'hide_plan_speed', False),  # ← ADDED
+                        'hide_plan_speed': getattr(router, 'hide_plan_speed', False),
                     }
 
                     branding_data = None
@@ -328,7 +331,8 @@ class CaptivePortalView(APIView):
                             'validity_type', 'validity_value',
                             'download_speed', 'upload_speed', 'speed_unit',
                             'limitation_type', 'data_limit_value', 'data_limit_unit',
-                            'simultaneous_devices', 'is_popular', 'duration_minutes', 'data_limit_mb'
+                            'simultaneous_devices', 'is_popular', 'duration_minutes', 'data_limit_mb',
+                            'is_free_trial', 'trial_duration_minutes'  # NEW FREE TRIAL FIELDS
                         ).order_by('sort_order', 'price')
                         plans_data = [_serialize_hotspot_plan(p) for p in hotspot_plans]
                     except ProgrammingError:
@@ -391,7 +395,7 @@ class HotspotPlansView(APIView):
 
         router_qs = Router.objects.filter(is_active=True).only(
             'id', 'name', 'location', 'template_id', 'hotspot_name',
-            'support_phone', 'announcement_text', 'hide_plan_speed'  # ← ADDED hide_plan_speed
+            'support_phone', 'announcement_text', 'hide_plan_speed'
         )
 
         try:
@@ -410,7 +414,8 @@ class HotspotPlansView(APIView):
             'id', 'name', 'price', 'currency', 'duration_minutes', 'data_limit_mb',
             'download_speed', 'upload_speed', 'speed_unit', 'description',
             'is_popular', 'validity_type', 'validity_value',
-            'limitation_type', 'data_limit_value', 'data_limit_unit'
+            'limitation_type', 'data_limit_value', 'data_limit_unit',
+            'is_free_trial', 'trial_duration_minutes'  # NEW FREE TRIAL FIELDS
         ).order_by('sort_order', 'price')
 
         try:
@@ -435,6 +440,8 @@ class HotspotPlansView(APIView):
                 'speed_limit': f"{plan.speed_limit_mbps}Mbps",
                 'description': plan.description,
                 'is_popular': plan.is_popular,
+                'is_free_trial': plan.is_free_trial,  # NEW
+                'trial_duration_minutes': plan.trial_duration_minutes,  # NEW
             }
             for plan in plans
         ]
@@ -473,7 +480,7 @@ class HotspotPlansView(APIView):
             'support_phone': router.support_phone or (branding.support_phone if branding else ''),
             'announcement_text': router.announcement_text or '',
             'router_logo_url': router_logo_url,
-            'hide_plan_speed': getattr(router, 'hide_plan_speed', False),  # ← ADDED
+            'hide_plan_speed': getattr(router, 'hide_plan_speed', False),
         }
 
         payload = {
@@ -2085,3 +2092,113 @@ class HotspotPhoneReconnectView(APIView):
                 'device_limit': plan_device_limit,
                 'credentials': {'username': new_access_code, 'password': new_access_code},
             })
+
+
+# ============================================================
+# NEW: Hotspot Free Trial View
+# ============================================================
+
+class HotspotFreeTrialView(APIView):
+    """
+    POST /api/v1/hotspot/free-trial/
+    Claim free trial for a device. One claim per MAC address, ever.
+    """
+    permission_classes = [AllowAny]
+    authentication_classes = []
+
+    @transaction.atomic
+    def post(self, request):
+        tenant_subdomain = request.data.get('tenant') or request.query_params.get('tenant')
+        router_id = request.data.get('router_id')
+        plan_id = request.data.get('plan_id')
+        mac_address = _normalize_mac(request.data.get('mac_address', ''))
+
+        if not all([tenant_subdomain, router_id, plan_id]):
+            return Response({'error': 'tenant, router_id, and plan_id are required'}, status=400)
+
+        if not mac_address or mac_address == '00:00:00:00:00:00':
+            return Response({'error': 'Valid MAC address is required'}, status=400)
+
+        try:
+            from apps.core.models import Tenant
+            with schema_context(get_public_schema_name()):
+                tenant = Tenant.objects.get(subdomain=tenant_subdomain, is_active=True)
+        except Exception:
+            return Response({'error': 'Invalid tenant'}, status=400)
+
+        with schema_context(tenant.schema_name):
+            # Check if this MAC already claimed a trial
+            if HotspotFreeTrialUsage.objects.filter(mac_address=mac_address).exists():
+                return Response({
+                    'error': 'This device has already used the free trial.',
+                    'already_claimed': True,
+                }, status=400)
+
+            try:
+                router = Router.objects.get(id=router_id, is_active=True)
+            except (Router.DoesNotExist, ValueError):
+                return Response({'error': 'Router not found'}, status=404)
+
+            try:
+                plan = HotspotPlan.objects.get(id=plan_id, router=router, is_active=True, is_free_trial=True)
+            except HotspotPlan.DoesNotExist:
+                return Response({'error': 'Free trial plan not found'}, status=404)
+
+            # Resolve or create hotspot client
+            hotspot_client = HotspotClient.get_or_create_by_mac(
+                schema_name=tenant.schema_name,
+                mac_address=mac_address,
+            )
+            if hotspot_client and mac_address:
+                HotspotClientDevice.record_device(client=hotspot_client, mac_address=mac_address)
+
+            # Determine access code (canonical username or generated)
+            if hotspot_client and hotspot_client.canonical_username:
+                access_code = hotspot_client.canonical_username
+            else:
+                access_code = HotspotSession.generate_access_code()
+
+            # Create and activate the session immediately (no payment)
+            session_id = HotspotSession.generate_session_id()
+            session = HotspotSession.objects.create(
+                session_id=session_id,
+                router=router,
+                plan=plan,
+                phone_number='FREE_TRIAL',
+                mac_address=mac_address,
+                amount=0,
+                status='paid',
+                access_code=access_code,
+                hotspot_client=hotspot_client,
+            )
+            session.activate(access_code)
+
+            # Record the trial claim (atomic with session creation)
+            HotspotFreeTrialUsage.objects.create(
+                mac_address=mac_address,
+                router=router,
+                access_code=access_code,
+            )
+
+            # Provision RADIUS
+            try:
+                from apps.billing.services.hotspot_radius_service import HotspotRadiusService
+                HotspotRadiusService().create_hotspot_credentials(
+                    username=access_code,
+                    password=access_code,
+                    router=router,
+                    plan=plan,
+                    expires_at=session.expires_at,
+                    mac_address=mac_address,
+                )
+            except Exception as e:
+                logger.error(f"Free trial RADIUS provisioning failed: {e}")
+
+            return Response({
+                'status': 'success',
+                'access_code': access_code,
+                'expires_at': session.expires_at,
+                'duration_display': plan.duration_display,
+                'plan_name': plan.name,
+                'message': f'Enjoy your free {plan.duration_display} of internet!',
+            }, status=201)

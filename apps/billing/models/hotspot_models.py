@@ -220,6 +220,18 @@ class HotspotPlan(models.Model):
     )
     sort_order = models.PositiveIntegerField(default=0)
     
+    # ════════════════════════════════════════════════════════════════
+    # FREE TRIAL FIELDS
+    # ════════════════════════════════════════════════════════════════
+    is_free_trial = models.BooleanField(
+        default=False,
+        help_text="If True, this plan is free — no payment required. One claim per device (MAC) ever."
+    )
+    trial_duration_minutes = models.PositiveIntegerField(
+        default=30,
+        help_text="Duration in minutes for the free trial session"
+    )
+    
     # Metadata
     created_by = models.ForeignKey(
         'core.User',
@@ -338,6 +350,25 @@ class HotspotPlan(models.Model):
         elif self.validity_type == 'DAYS':
             return self.validity_value * 1440
         return self.duration_minutes
+
+
+# ═══════════════════════════════════════════════════════════════════
+# FREE TRIAL USAGE TRACKING
+# ═══════════════════════════════════════════════════════════════════
+
+class HotspotFreeTrialUsage(models.Model):
+    """Tracks which MAC addresses have claimed the free trial. One claim per MAC, ever."""
+    mac_address = models.CharField(max_length=17, unique=True, db_index=True)
+    claimed_at = models.DateTimeField(auto_now_add=True)
+    router = models.ForeignKey('network.Router', on_delete=models.SET_NULL, null=True)
+    access_code = models.CharField(max_length=25, blank=True)
+
+    class Meta:
+        verbose_name = 'Free Trial Usage'
+        verbose_name_plural = 'Free Trial Usages'
+
+    def __str__(self):
+        return f"{self.mac_address} claimed at {self.claimed_at}"
 
 
 # ═══════════════════════════════════════════════════════════════════

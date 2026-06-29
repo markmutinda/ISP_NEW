@@ -66,7 +66,9 @@ class HotspotPlanSerializer(serializers.ModelSerializer):
             # ADD THIS: Subscriber count field
             'subscriber_count',
             # Timestamps
-            'created_at', 'updated_at'
+            'created_at', 'updated_at',
+            # NEW FREE TRIAL FIELDS
+            'is_free_trial', 'trial_duration_minutes',
         ]
         read_only_fields = [
             'id', 'router_id', 
