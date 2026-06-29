@@ -911,6 +911,46 @@ class SubscriptionPaymentViewSet(viewsets.ReadOnlyModelViewSet):
             return SubscriptionPayment.objects.filter(
                 subscription__company=user.company
             ).select_related('subscription__plan').order_by('-created_at')
+
+    def _billing_cycle_payload(self, payment):
+        subscription = payment.subscription
+        company = subscription.company
+        tenant = getattr(company, 'tenant', None)
+        if not tenant and hasattr(company, 'tenant_set'):
+            tenant = company.tenant_set.first()
+        if not tenant:
+            return {}
+
+        cycle = BillingCycle.objects.filter(
+            tenant=tenant,
+            subscription=subscription,
+        ).order_by('-start_date', '-end_date').first()
+        if not cycle:
+            return {}
+
+        payload = {
+            'billing_cycle_id': str(cycle.id),
+            'billing_cycle_start': cycle.start_date,
+            'billing_cycle_end': cycle.end_date,
+            'billing_cycle_status': cycle.status,
+            'invoice_reference': cycle.invoice_reference,
+        }
+
+        if cycle.invoice_reference:
+            try:
+                with schema_context(tenant.schema_name):
+                    from apps.billing.models import Invoice
+                    invoice = Invoice.objects.filter(pk=cycle.invoice_reference).first()
+                    if invoice:
+                        payload['invoice_number'] = invoice.invoice_number
+            except Exception as exc:
+                logger.warning(
+                    "Failed loading invoice metadata for subscription payment %s: %s",
+                    payment.id,
+                    exc,
+                )
+
+        return payload
     
     @action(detail=True, methods=['get'])
     def status(self, request, pk=None):
@@ -936,6 +976,7 @@ class SubscriptionPaymentViewSet(viewsets.ReadOnlyModelViewSet):
                     'message': self._get_status_message(payment),
                     'mpesa_receipt': payment.mpesa_receipt,
                     'completed_at': payment.completed_at,
+                    **self._billing_cycle_payload(payment),
                 })
             
             # If pending with Tuma, check status via Tuma query API
@@ -991,6 +1032,7 @@ class SubscriptionPaymentViewSet(viewsets.ReadOnlyModelViewSet):
                             'message': 'Payment successful! Your subscription is now active.',
                             'mpesa_receipt': payment.mpesa_receipt,
                             'completed_at': payment.completed_at,
+                            **self._billing_cycle_payload(payment),
                         })
 
                     elif is_failed:

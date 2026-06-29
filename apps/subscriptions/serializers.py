@@ -245,6 +245,12 @@ class SubscriptionPaymentStatusSerializer(serializers.Serializer):
     message = serializers.CharField()
     mpesa_receipt = serializers.CharField(allow_null=True)
     completed_at = serializers.DateTimeField(allow_null=True)
+    billing_cycle_id = serializers.CharField(required=False, allow_null=True)
+    billing_cycle_start = serializers.DateTimeField(required=False, allow_null=True)
+    billing_cycle_end = serializers.DateTimeField(required=False, allow_null=True)
+    billing_cycle_status = serializers.CharField(required=False, allow_blank=True, allow_null=True)
+    invoice_reference = serializers.CharField(required=False, allow_blank=True, allow_null=True)
+    invoice_number = serializers.CharField(required=False, allow_blank=True, allow_null=True)
 
 
 # ─────────────────────────────────────────────────────────────
