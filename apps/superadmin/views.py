@@ -3118,8 +3118,13 @@ def _subscription_invoice_payload(cycle, *, include_recipients=False):
                     "total_amount": str(_decimal_money(tenant_invoice.total_amount)),
                     "amount_paid": str(_decimal_money(tenant_invoice.amount_paid)),
                     "balance": str(_decimal_money(tenant_invoice.balance)),
+                    "billing_date": tenant_invoice.billing_date.isoformat() if tenant_invoice.billing_date else None,
                     "due_date": tenant_invoice.due_date.isoformat() if tenant_invoice.due_date else None,
                     "paid_at": tenant_invoice.paid_at.isoformat() if tenant_invoice.paid_at else None,
+                    "created_at": tenant_invoice.created_at.isoformat() if tenant_invoice.created_at else None,
+                    "updated_at": tenant_invoice.updated_at.isoformat() if tenant_invoice.updated_at else None,
+                    "is_overdue": tenant_invoice.is_overdue,
+                    "overdue_days": tenant_invoice.overdue_days,
                     "notes": tenant_invoice.notes or "",
                     "internal_notes": tenant_invoice.internal_notes or "",
                     "receipt": receipt_snapshot,
@@ -3137,6 +3142,9 @@ def _subscription_invoice_payload(cycle, *, include_recipients=False):
         "company_email": getattr(company, "email", ""),
         "company_phone": getattr(company, "phone_number", ""),
         "status": cycle.status,
+        "subscription_status": cycle.subscription.status,
+        "plan_name": getattr(cycle.subscription.plan, "name", ""),
+        "billing_period": cycle.subscription.billing_period,
         "start_date": cycle.start_date.isoformat() if cycle.start_date else None,
         "end_date": cycle.end_date.isoformat() if cycle.end_date else None,
         "grace_ends_at": cycle.grace_ends_at.isoformat() if cycle.grace_ends_at else None,
@@ -3217,11 +3225,28 @@ class SubscriptionInvoiceListView(APIView):
             )
 
         deduped_cycles = self._dedupe_cycles(list(qs))
-        total = len(deduped_cycles)
+        all_rows = [_subscription_invoice_payload(cycle) for cycle in deduped_cycles]
+        if status_filter in {"partial", "overdue", "outstanding", "past_due"}:
+            def matches(row):
+                invoice = row.get("invoice") or {}
+                invoice_status = str(invoice.get("status") or "").upper()
+                balance = _decimal_money(invoice.get("balance") or row.get("effective_total") or row.get("calculated_total") or 0)
+                if status_filter == "partial":
+                    return invoice_status == "PARTIAL"
+                if status_filter == "overdue":
+                    return invoice_status == "OVERDUE" or bool(invoice.get("is_overdue"))
+                if status_filter == "outstanding":
+                    return balance > 0 and invoice_status != "PAID"
+                if status_filter == "past_due":
+                    return row.get("subscription_status") == "past_due"
+                return True
+
+            all_rows = [row for row in all_rows if matches(row)]
+
+        total = len(all_rows)
         start = (page - 1) * page_size
-        cycles = deduped_cycles[start:start + page_size]
-        results = [_subscription_invoice_payload(cycle) for cycle in cycles]
-        summary_rows = [_subscription_invoice_payload(cycle) for cycle in deduped_cycles]
+        results = all_rows[start:start + page_size]
+        summary_rows = all_rows
 
         return Response({
             "count": total,
@@ -3229,9 +3254,16 @@ class SubscriptionInvoiceListView(APIView):
             "page_size": page_size,
             "summary": {
                 "count": total,
-                "active": sum(1 for cycle in deduped_cycles if cycle.status == "active"),
-                "invoiced": sum(1 for cycle in deduped_cycles if cycle.status == "invoiced"),
-                "paid": sum(1 for cycle in deduped_cycles if cycle.status == "paid"),
+                "active": sum(1 for row in all_rows if row["status"] == "active"),
+                "invoiced": sum(1 for row in all_rows if row["status"] == "invoiced"),
+                "paid": sum(1 for row in all_rows if row["status"] == "paid"),
+                "partial": sum(1 for row in all_rows if str((row.get("invoice") or {}).get("status") or "").upper() == "PARTIAL"),
+                "past_due": sum(1 for row in all_rows if row.get("subscription_status") == "past_due"),
+                "outstanding_total": str(_decimal_money(sum(
+                    _decimal_money((row.get("invoice") or {}).get("balance") or 0)
+                    for row in all_rows
+                    if str((row.get("invoice") or {}).get("status") or "").upper() != "PAID"
+                ))),
                 "calculated_total": str(_decimal_money(sum(Decimal(row.get("effective_total") or row["calculated_total"]) for row in summary_rows))),
                 "hotspot_revenue": str(_decimal_money(sum(Decimal(row["hotspot_revenue"]) for row in summary_rows))),
                 "duplicates_hidden": qs.count() - total,
@@ -3359,6 +3391,77 @@ class SubscriptionInvoiceDetailView(APIView):
             },
             request=request,
         )
+        cycle.refresh_from_db()
+        return Response(_subscription_invoice_payload(cycle, include_recipients=True))
+
+
+class SubscriptionInvoiceHoldView(APIView):
+    permission_classes = SUPERADMIN_PERMS
+
+    def post(self, request, pk):
+        _ensure_public()
+        from apps.subscriptions.models import BillingCycle
+
+        cycle = get_object_or_404(
+            BillingCycle.objects.select_related("tenant", "tenant__company", "subscription", "subscription__plan"),
+            pk=pk,
+        )
+        amount_paid = _decimal_money(request.data.get("amount_paid", "0"))
+        reason = (request.data.get("reason") or "").strip()
+        if amount_paid < 0:
+            return Response({"detail": "amount_paid cannot be negative."}, status=status.HTTP_400_BAD_REQUEST)
+
+        invoice = _get_or_create_subscription_invoice(cycle, create=True)
+        with schema_context(cycle.tenant.schema_name):
+            from apps.billing.models import Invoice
+
+            invoice = Invoice.objects.get(pk=invoice.pk)
+            total_amount = _decimal_money(invoice.total_amount)
+            if amount_paid > total_amount:
+                return Response({"detail": "amount_paid cannot exceed invoice total."}, status=status.HTTP_400_BAD_REQUEST)
+
+            balance = _decimal_money(total_amount - amount_paid)
+            invoice.amount_paid = amount_paid
+            invoice.balance = balance
+            invoice.status = "PAID" if balance <= 0 else "PARTIAL"
+            invoice.paid_at = timezone.now() if balance <= 0 else None
+            note = (
+                f"Superadmin account hold applied by {getattr(request.user, 'email', request.user)}. "
+                f"Recorded payment KES {amount_paid}; remaining balance KES {balance}."
+            )
+            if reason:
+                note = f"{note} Reason: {reason}"
+            invoice.internal_notes = f"{invoice.internal_notes or ''}\n{note}".strip()
+            invoice.save(update_fields=["amount_paid", "balance", "status", "paid_at", "internal_notes", "updated_at"])
+            if balance > 0 and invoice.status != "PARTIAL":
+                Invoice.objects.filter(pk=invoice.pk).update(status="PARTIAL")
+                invoice.status = "PARTIAL"
+
+        update_fields = {"status": "invoiced"}
+        if not cycle.grace_ends_at:
+            update_fields["grace_ends_at"] = timezone.now()
+        BillingCycle.objects.filter(pk=cycle.pk).update(**update_fields)
+
+        subscription = cycle.subscription
+        if amount_paid < _decimal_money(invoice.total_amount):
+            subscription.status = "past_due"
+            subscription.save(update_fields=["status", "updated_at"])
+
+        _log_action(
+            request.user,
+            "update",
+            "SubscriptionInvoice",
+            object_repr=f"{cycle.tenant.subdomain} invoice partial hold",
+            object_id=cycle.id,
+            changes={
+                "amount_paid": str(amount_paid),
+                "balance": str(_decimal_money(invoice.total_amount) - amount_paid),
+                "subscription_status": subscription.status,
+                "reason": reason,
+            },
+            request=request,
+        )
+
         cycle.refresh_from_db()
         return Response(_subscription_invoice_payload(cycle, include_recipients=True))
 

@@ -81,6 +81,7 @@ urlpatterns = [
     path("subscription-invoices/", views.SubscriptionInvoiceListView.as_view(), name="subscription-invoice-list"),
     path("subscription-invoices/reminder-settings/", views.SubscriptionInvoiceReminderSettingsView.as_view(), name="subscription-invoice-reminder-settings"),
     path("subscription-invoices/<uuid:pk>/", views.SubscriptionInvoiceDetailView.as_view(), name="subscription-invoice-detail"),
+    path("subscription-invoices/<uuid:pk>/hold/", views.SubscriptionInvoiceHoldView.as_view(), name="subscription-invoice-hold"),
     path("subscription-invoices/<uuid:pk>/send/", views.SubscriptionInvoiceSendView.as_view(), name="subscription-invoice-send"),
 
     # Tenant User Ledger (Immutable Audit Trail)
