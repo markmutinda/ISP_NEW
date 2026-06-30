@@ -39,6 +39,7 @@ from .serializers import (
     NetilyPlanSerializer,
     CompanySubscriptionSerializer,
     SubscriptionUsageSerializer,
+    BillingCycleBreakdownSerializer,
     InitiateSubscriptionPaymentSerializer,
     SubscriptionPaymentSerializer,
     SubscriptionPaymentStatusSerializer,
@@ -594,6 +595,163 @@ class MeteredBillingEstimateView(APIView):
         }
         cache.set(cache_key, data, timeout=60 * 60 * 8)  # 8-hour TTL
         return Response(data)
+
+
+class BillingCycleBreakdownHistoryView(APIView):
+    """
+    Return previous Netily billing cycle breakdowns for the current tenant.
+
+    This is intentionally separate from the live estimate endpoint. Closed
+    cycles should be audit/history data, while the estimate may change as usage
+    is reconciled during the active cycle.
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    def _get_company(self, request):
+        tenant = getattr(request, 'tenant', None)
+        if tenant:
+            company = getattr(tenant, 'company', None)
+            if company:
+                return company
+        user = request.user
+        if hasattr(user, 'company') and user.company:
+            return user.company
+        return None
+
+    def _get_tenant(self, request, company):
+        tenant = getattr(request, 'tenant', None)
+        if tenant:
+            return tenant
+        tenant = getattr(company, 'tenant', None)
+        if tenant:
+            return tenant
+        if hasattr(company, 'tenant_set'):
+            return company.tenant_set.first()
+        return None
+
+    def _invoice_payload(self, tenant, cycle):
+        payload = {
+            'invoice_id': None,
+            'invoice_number': '',
+            'invoice_status': '',
+            'invoice_total': None,
+            'invoice_amount_paid': None,
+            'invoice_balance': None,
+            'invoice_items': [],
+        }
+        if not tenant or not cycle.invoice_reference:
+            return payload
+
+        try:
+            with schema_context(tenant.schema_name):
+                from apps.billing.models import Invoice
+
+                invoice = Invoice.objects.filter(pk=cycle.invoice_reference).first()
+                if not invoice:
+                    return payload
+
+                payload.update({
+                    'invoice_id': str(invoice.id),
+                    'invoice_number': invoice.invoice_number or '',
+                    'invoice_status': invoice.status or '',
+                    'invoice_total': invoice.total_amount,
+                    'invoice_amount_paid': invoice.amount_paid,
+                    'invoice_balance': invoice.balance,
+                })
+                items = []
+                for item in invoice.items.all().order_by('id'):
+                    quantity = item.quantity or Decimal('0')
+                    unit_price = item.unit_price or Decimal('0')
+                    amount = getattr(item, 'total', None) or (quantity * unit_price)
+                    items.append({
+                        'description': item.description or '',
+                        'quantity': quantity,
+                        'unit_price': unit_price,
+                        'amount': amount,
+                    })
+                payload['invoice_items'] = items
+        except Exception as exc:
+            logger.warning(
+                "Failed loading invoice breakdown for billing cycle %s tenant=%s: %s",
+                cycle.id,
+                getattr(tenant, 'schema_name', None),
+                exc,
+            )
+        return payload
+
+    def _cycle_payload(self, tenant, cycle):
+        hotspot_revenue = cycle.hotspot_revenue_accumulated or Decimal('0.00')
+        pppoe_count = cycle.calculate_total_pppoe()
+        pppoe_charge = cycle.calculate_pppoe_charge()
+        hotspot_share_amount = cycle.calculate_hotspot_revenue_share(hotspot_revenue)
+        usage_subtotal = cycle.calculate_usage_subtotal(hotspot_revenue)
+        minimum_adjustment = cycle.calculate_minimum_adjustment(hotspot_revenue)
+        total_charge = cycle.calculate_total_charge()
+
+        payload = {
+            'id': str(cycle.id),
+            'status': cycle.status,
+            'start_date': cycle.start_date,
+            'end_date': cycle.end_date,
+            'is_first_paid_cycle': cycle.is_first_paid_cycle,
+            'minimum_charge': cycle.snapshot_base_fee or Decimal('0.00'),
+            'pppoe_count': pppoe_count,
+            'pppoe_unit_price': cycle.snapshot_pppoe_price or Decimal('0.00'),
+            'pppoe_charge': pppoe_charge,
+            'hotspot_revenue': hotspot_revenue,
+            'hotspot_share_pct': cycle.snapshot_hotspot_share_pct or Decimal('0.00'),
+            'hotspot_share_amount': hotspot_share_amount,
+            'usage_subtotal': usage_subtotal,
+            'minimum_adjustment': minimum_adjustment,
+            'total_charge': total_charge,
+        }
+        payload.update(self._invoice_payload(tenant, cycle))
+        if payload['invoice_total'] is not None:
+            payload['total_charge'] = payload['invoice_total']
+        return payload
+
+    def get(self, request):
+        company = self._get_company(request)
+        if not company:
+            return Response(
+                {'error': 'No company associated with your account'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        tenant = self._get_tenant(request, company)
+        if not tenant:
+            return Response(
+                {'error': 'No tenant associated with your account'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        limit = request.query_params.get('limit', '12')
+        try:
+            limit = max(1, min(int(limit), 36))
+        except (TypeError, ValueError):
+            limit = 12
+
+        with schema_context('public'):
+            try:
+                subscription = CompanySubscription.objects.select_related('plan').get(
+                    company=company
+                )
+            except CompanySubscription.DoesNotExist:
+                return Response({'error': 'No active subscription'}, status=status.HTTP_404_NOT_FOUND)
+
+            cycles = list(
+                BillingCycle.objects.filter(
+                    tenant=tenant,
+                    subscription=subscription,
+                )
+                .select_related('tenant', 'subscription', 'subscription__plan')
+                .order_by('-start_date', '-end_date')[:limit]
+            )
+            data = [self._cycle_payload(tenant, cycle) for cycle in cycles]
+
+        serializer = BillingCycleBreakdownSerializer(data, many=True)
+        return Response({'count': len(data), 'results': serializer.data})
 
 
 class InitiateSubscriptionPaymentView(APIView):

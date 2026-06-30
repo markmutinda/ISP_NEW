@@ -12,6 +12,7 @@ from .views import (
     CurrentSubscriptionView,
     SubscriptionUsageView,
     MeteredBillingEstimateView,
+    BillingCycleBreakdownHistoryView,
     InitiateSubscriptionPaymentView,
     SubscriptionPaymentViewSet,
     CancelSubscriptionView,
@@ -35,6 +36,7 @@ urlpatterns = [
     # Subscription management
     path('current/', CurrentSubscriptionView.as_view(), name='current'),
     path('usage/', SubscriptionUsageView.as_view(), name='usage'),
+    path('billing-cycles/breakdowns/', BillingCycleBreakdownHistoryView.as_view(), name='billing-cycle-breakdowns'),
     path('metered-estimate/', MeteredBillingEstimateView.as_view(), name='metered-estimate'),
     path('pay/', InitiateSubscriptionPaymentView.as_view(), name='pay'),
     path('cancel/', CancelSubscriptionView.as_view(), name='cancel'),

@@ -166,6 +166,38 @@ class SubscriptionUsageSerializer(serializers.Serializer):
     subscription_status = serializers.CharField()
 
 
+class BillingCycleInvoiceItemSerializer(serializers.Serializer):
+    description = serializers.CharField(allow_blank=True)
+    quantity = serializers.DecimalField(max_digits=12, decimal_places=2)
+    unit_price = serializers.DecimalField(max_digits=12, decimal_places=2)
+    amount = serializers.DecimalField(max_digits=12, decimal_places=2)
+
+
+class BillingCycleBreakdownSerializer(serializers.Serializer):
+    id = serializers.CharField()
+    status = serializers.CharField()
+    start_date = serializers.DateTimeField()
+    end_date = serializers.DateTimeField()
+    is_first_paid_cycle = serializers.BooleanField()
+    minimum_charge = serializers.DecimalField(max_digits=12, decimal_places=2)
+    pppoe_count = serializers.IntegerField()
+    pppoe_unit_price = serializers.DecimalField(max_digits=12, decimal_places=2)
+    pppoe_charge = serializers.DecimalField(max_digits=12, decimal_places=2)
+    hotspot_revenue = serializers.DecimalField(max_digits=12, decimal_places=2)
+    hotspot_share_pct = serializers.DecimalField(max_digits=5, decimal_places=2)
+    hotspot_share_amount = serializers.DecimalField(max_digits=12, decimal_places=2)
+    usage_subtotal = serializers.DecimalField(max_digits=12, decimal_places=2)
+    minimum_adjustment = serializers.DecimalField(max_digits=12, decimal_places=2)
+    total_charge = serializers.DecimalField(max_digits=12, decimal_places=2)
+    invoice_id = serializers.CharField(required=False, allow_blank=True, allow_null=True)
+    invoice_number = serializers.CharField(required=False, allow_blank=True)
+    invoice_status = serializers.CharField(required=False, allow_blank=True)
+    invoice_total = serializers.DecimalField(max_digits=12, decimal_places=2, required=False, allow_null=True)
+    invoice_amount_paid = serializers.DecimalField(max_digits=12, decimal_places=2, required=False, allow_null=True)
+    invoice_balance = serializers.DecimalField(max_digits=12, decimal_places=2, required=False, allow_null=True)
+    invoice_items = BillingCycleInvoiceItemSerializer(many=True, required=False)
+
+
 class InitiateSubscriptionPaymentSerializer(serializers.Serializer):
     """Serializer for initiating subscription payment"""
     
