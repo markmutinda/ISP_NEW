@@ -224,6 +224,11 @@ app.conf.beat_schedule = {
         'schedule': crontab(hour=0, minute=15),  # Daily at 12:15 AM
         'options': {'queue': 'billing'}
     },
+    'send-subscription-invoice-reminders-daily': {
+        'task': 'apps.subscriptions.tasks.send_subscription_invoice_reminders',
+        'schedule': crontab(hour=9, minute=30),  # Daily at 9:30 AM
+        'options': {'queue': 'billing'}
+    },
     'reconcile-hotspot-accumulators': {
         'task': 'apps.subscriptions.tasks.reconcile_hotspot_accumulators',
         'schedule': crontab(hour=6, minute=0),  # Daily at 6:00 AM

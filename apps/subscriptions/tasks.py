@@ -1,5 +1,6 @@
 # apps/subscriptions/tasks.py
 import logging
+import json
 from itertools import islice
 from datetime import timedelta
 from decimal import Decimal
@@ -13,8 +14,6 @@ from django_tenants.utils import schema_context, get_public_schema_name
 from apps.subscriptions.models import BillingCycle, BillableClientRecord
 from apps.billing.models import Invoice, InvoiceItem
 from apps.customers.models import Customer
-# Import RadAcct for True Usage sweeping
-from apps.radius.models import RadAcct
 
 logger = logging.getLogger(__name__)
 User = get_user_model()
@@ -23,6 +22,127 @@ def batched(iterable, n):
     it = iter(iterable)
     while batch := tuple(islice(it, n)):
         yield batch
+
+
+def _decimal_money(value):
+    return Decimal(str(value or '0')).quantize(Decimal('0.01'))
+
+
+def _existing_net_bill_invoice_for_cycle(cycle):
+    """Return an existing tenant NET-BILL invoice for this cycle period, if any."""
+    with schema_context(cycle.tenant.schema_name):
+        return (
+            Invoice.objects.filter(
+                invoice_number__startswith='NET-BILL',
+                service_period_start=cycle.start_date.date(),
+                service_period_end=cycle.end_date.date(),
+            )
+            .exclude(status__in=['VOIDED', 'CANCELLED', 'WRITTEN_OFF'])
+            .order_by('-created_at', '-id')
+            .first()
+        )
+
+
+def _subscription_invoice_reminder_settings():
+    from apps.core.models import SystemSettings
+
+    raw = SystemSettings.get_setting("subscription_invoice_reminders", default={
+        "enabled": True,
+        "days_before": [3, 1],
+        "channels": ["email", "in_app"],
+    })
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except json.JSONDecodeError:
+            raw = {}
+    if not isinstance(raw, dict):
+        raw = {}
+
+    def clean_days(values):
+        days = set()
+        for value in values:
+            try:
+                day = int(value)
+            except (TypeError, ValueError):
+                continue
+            if day > 0:
+                days.add(day)
+        return sorted(days, reverse=True)
+
+    channels = [ch for ch in raw.get("channels", ["email", "in_app"]) if ch in {"email", "sms", "in_app"}]
+    return {
+        "enabled": bool(raw.get("enabled", True)),
+        "days_before": clean_days(raw.get("days_before", [3, 1])) or [3, 1],
+        "channels": channels or ["email", "in_app"],
+    }
+
+
+def _tenant_invoice_admins(tenant):
+    with schema_context(tenant.schema_name):
+        admin_roles = ["admin", "super_admin", "superadmin", "accountant", "support"]
+        return list(User.objects.filter(
+            is_active=True,
+            role__in=admin_roles,
+        ).values("id", "email", "phone_number", "first_name", "last_name"))
+
+
+def _sync_net_bill_invoice_usage_items(cycle, invoice, *, actual_hotspot_revenue=None):
+    if not invoice or str(invoice.status).upper() == 'PAID':
+        return invoice
+
+    actual_hotspot_revenue = (
+        _decimal_money(actual_hotspot_revenue)
+        if actual_hotspot_revenue is not None
+        else _decimal_money(cycle.refresh_actual_hotspot_revenue())
+    )
+    pppoe_count = cycle.calculate_total_pppoe()
+    pppoe_charge = _decimal_money(cycle.calculate_pppoe_charge())
+    hotspot_share = _decimal_money(cycle.calculate_hotspot_revenue_share(actual_hotspot_revenue))
+    minimum_adjustment = _decimal_money(cycle.calculate_minimum_adjustment(actual_hotspot_revenue))
+
+    with schema_context(cycle.tenant.schema_name):
+        invoice = Invoice.objects.get(pk=invoice.pk)
+        invoice.items.filter(
+            Q(description__istartswith='PPPoE Client Footprint')
+            | Q(description__istartswith='Hotspot Revenue Share')
+            | Q(description__istartswith='Monthly Minimum Charge Adjustment')
+        ).exclude(service_type='netily_manual_adjustment').delete()
+
+        if pppoe_charge > 0:
+            InvoiceItem.objects.create(
+                invoice=invoice,
+                description=f'PPPoE Client Footprint ({pppoe_count} users @ KES {cycle.snapshot_pppoe_price} each)',
+                quantity=pppoe_count,
+                unit_price=cycle.snapshot_pppoe_price,
+                tax_rate=0,
+                tax_amount=0,
+                total=pppoe_charge,
+            )
+        if hotspot_share > 0:
+            InvoiceItem.objects.create(
+                invoice=invoice,
+                description=f'Hotspot Revenue Share ({cycle.snapshot_hotspot_share_pct}% of KES {actual_hotspot_revenue:,.2f})',
+                quantity=1,
+                unit_price=hotspot_share,
+                tax_rate=0,
+                tax_amount=0,
+                total=hotspot_share,
+            )
+        if minimum_adjustment > 0:
+            InvoiceItem.objects.create(
+                invoice=invoice,
+                description=f'Monthly Minimum Charge Adjustment (minimum KES {cycle.snapshot_base_fee or Decimal("500.00"):,.2f})',
+                quantity=1,
+                unit_price=minimum_adjustment,
+                tax_rate=0,
+                tax_amount=0,
+                total=minimum_adjustment,
+            )
+
+        invoice.calculate_totals()
+        invoice.refresh_from_db()
+        return invoice
 
 
 def _trial_duration_days(subscription) -> int:
@@ -61,15 +181,10 @@ def generate_metered_invoices():
                 # This prevents Hotspot logins from being incorrectly counted as PPPoE users.
                 # Standard MikroTik PPPoE sessions log Framed-Protocol = PPP.
                 with schema_context(tenant.schema_name):
-                    # Find all unique usernames that had an active PPPoE session during this specific cycle
-                    active_usernames = list(RadAcct.objects.filter(
-                        acctstarttime__lt=cycle.end_date,
-                        framedprotocol='PPP'  # CRITICAL: Only count PPPoE sessions, not Hotspot
-                    ).filter(
-                        Q(acctstoptime__isnull=True) | Q(acctstoptime__gt=cycle.start_date)
-                    ).values_list('username', flat=True).distinct())
+                    # Find unique PPPoE usernames with positive byte usage in this cycle.
+                    active_usernames = cycle.get_billable_pppoe_usernames()
                     
-                    logger.info(f"[{tenant.name}] Found {len(active_usernames)} unique PPPoE users with active sessions during cycle")
+                    logger.info(f"[{tenant.name}] Found {len(active_usernames)} unique PPPoE users with positive usage during cycle")
 
                     # ─── ACTUAL HOTSPOT REVENUE FROM DATABASE ───
                     # Query the REAL paid sessions instead of trusting the accumulator.
@@ -146,20 +261,33 @@ def generate_metered_invoices():
                         defaults={'user': user, 'status': 'active'}
                     )
 
-                    # Create Invoice
-                    new_invoice = Invoice.objects.create(
-                        invoice_number=f'NET-BILL-{now.strftime("%y%m%d%H%M%S")}',
-                        customer=sys_customer,
-                        total_amount=total_due,
-                        status='ISSUED',
-                        service_period_start=cycle.start_date.date(),
-                        service_period_end=cycle.end_date.date(),
-                        due_date=grace_deadline.date(),
-                        billing_date=now.date(),
-                    )
+                    # Reuse a tenant NET-BILL invoice for the same period if it already exists.
+                    new_invoice = _existing_net_bill_invoice_for_cycle(cycle)
+                    invoice_was_reused = bool(new_invoice)
+                    if not new_invoice:
+                        new_invoice = Invoice.objects.create(
+                            invoice_number=f'NET-BILL-{now.strftime("%y%m%d%H%M%S")}',
+                            customer=sys_customer,
+                            total_amount=total_due,
+                            status='ISSUED',
+                            service_period_start=cycle.start_date.date(),
+                            service_period_end=cycle.end_date.date(),
+                            due_date=grace_deadline.date(),
+                            billing_date=now.date(),
+                        )
+                    else:
+                        logger.warning(
+                            f"[{tenant.name}] Reusing existing NET-BILL invoice #{new_invoice.id} "
+                            f"for cycle {cycle.start_date.date()} - {cycle.end_date.date()}"
+                        )
+                        new_invoice = _sync_net_bill_invoice_usage_items(
+                            cycle,
+                            new_invoice,
+                            actual_hotspot_revenue=actual_hotspot_revenue,
+                        )
 
                     # Create exact line items (usage breakdown).
-                    if pppoe_fee > 0:
+                    if not invoice_was_reused and pppoe_fee > 0:
                         InvoiceItem.objects.create(
                             invoice=new_invoice, 
                             description=f'PPPoE Client Footprint ({pppoe_count} users @ KES {cycle.snapshot_pppoe_price} each)',
@@ -169,7 +297,7 @@ def generate_metered_invoices():
                             tax_amount=0, 
                             total=pppoe_fee
                         )
-                    if hotspot_share > 0:
+                    if not invoice_was_reused and hotspot_share > 0:
                         InvoiceItem.objects.create(
                             invoice=new_invoice, 
                             description=f'Hotspot Revenue Share ({cycle.snapshot_hotspot_share_pct}% of KES {actual_hotspot_revenue:,.0f})',
@@ -180,7 +308,7 @@ def generate_metered_invoices():
                             tax_amount=0, 
                             total=hotspot_share
                         )
-                    if minimum_adjustment > 0:
+                    if not invoice_was_reused and minimum_adjustment > 0:
                         InvoiceItem.objects.create(
                             invoice=new_invoice,
                             description=f'Monthly Minimum Charge Adjustment (minimum KES {minimum_charge:,.2f})',
@@ -243,6 +371,140 @@ def generate_metered_invoices():
             logger.error(f"Failed to process billing cycle for tenant {tenant.name}: {str(e)}", exc_info=True)
 
     return f"Processed {ended_cycles.count()} billing cycles."
+
+
+@shared_task
+def send_subscription_invoice_reminders():
+    """
+    Send platform subscription invoice reminders before tenant invoice due dates.
+
+    Defaults are controlled by SystemSettings key `subscription_invoice_reminders`.
+    Each invoice/day is marked in internal_notes to avoid duplicate sends.
+    """
+    from apps.core.email_delivery import send_transactional_email
+
+    settings_payload = _subscription_invoice_reminder_settings()
+    if not settings_payload["enabled"]:
+        return "Subscription invoice reminders disabled."
+
+    today = timezone.localdate()
+    target_days = set(settings_payload["days_before"])
+    channels = set(settings_payload["channels"])
+    cycles = BillingCycle.objects.filter(status="invoiced").select_related(
+        "tenant",
+        "tenant__company",
+        "subscription",
+        "subscription__plan",
+    )
+
+    sent = {"email": 0, "sms": 0, "in_app": 0, "cycles": 0}
+    for cycle in cycles:
+        try:
+            invoice = None
+            if cycle.invoice_reference:
+                with schema_context(cycle.tenant.schema_name):
+                    invoice = Invoice.objects.filter(pk=cycle.invoice_reference).first()
+            if not invoice:
+                invoice = _existing_net_bill_invoice_for_cycle(cycle)
+                if invoice:
+                    BillingCycle.objects.filter(pk=cycle.pk).update(invoice_reference=str(invoice.id))
+
+            if not invoice or not invoice.due_date:
+                continue
+            if str(invoice.status).upper() == "PAID":
+                continue
+
+            days_before = (invoice.due_date - today).days
+            if days_before not in target_days:
+                continue
+
+            marker = f"[auto_reminder:{days_before}:{today.isoformat()}]"
+            if marker in (invoice.internal_notes or ""):
+                continue
+
+            amount_due = invoice.balance or invoice.total_amount
+            tenant_name = getattr(getattr(cycle.tenant, "company", None), "name", None) or cycle.tenant.subdomain
+            subject = f"Reminder: Netily invoice {invoice.invoice_number} due in {days_before} day{'s' if days_before != 1 else ''}"
+            message = (
+                f"Your Netily subscription invoice is due in {days_before} day{'s' if days_before != 1 else ''}.\n\n"
+                f"Invoice: {invoice.invoice_number}\n"
+                f"Amount due: KES {amount_due}\n"
+                f"Tenant: {tenant_name}\n"
+                f"Period: {cycle.start_date.date()} to {cycle.end_date.date()}\n"
+                f"Due date: {invoice.due_date}\n\n"
+                "Please open your Netily admin billing page to settle it before access is affected."
+            )
+            recipients = _tenant_invoice_admins(cycle.tenant)
+
+            with schema_context(cycle.tenant.schema_name):
+                from apps.notifications.models import Notification
+                from apps.notifications.services.notification_manager import NotificationManager
+
+                manager = NotificationManager()
+                for recipient in recipients:
+                    email = recipient.get("email")
+                    phone = recipient.get("phone_number")
+                    user_id = recipient.get("id")
+
+                    if "email" in channels and email:
+                        result = send_transactional_email(
+                            subject=subject,
+                            recipient=email,
+                            plain_message=message,
+                            html_message=message.replace("\n", "<br>"),
+                        )
+                        if result.get("sent"):
+                            sent["email"] += 1
+
+                    if "in_app" in channels:
+                        notification = Notification.objects.create(
+                            user_id=user_id,
+                            notification_type="in_app",
+                            subject=subject,
+                            message=message,
+                            priority=4,
+                            metadata={
+                                "source": "subscription_invoice_auto_reminder",
+                                "billing_cycle_id": str(cycle.id),
+                                "invoice_id": invoice.id,
+                                "days_before": days_before,
+                            },
+                        )
+                        manager.send_notification(notification)
+                        sent["in_app"] += 1
+
+                    if "sms" in channels and phone:
+                        notification = Notification.objects.create(
+                            user_id=user_id,
+                            notification_type="sms",
+                            subject=subject,
+                            message=(
+                                f"Netily invoice {invoice.invoice_number}: KES {amount_due} "
+                                f"due in {days_before} day{'s' if days_before != 1 else ''}. "
+                                "Open admin billing to pay."
+                            ),
+                            recipient_phone=phone,
+                            priority=4,
+                            metadata={
+                                "source": "subscription_invoice_auto_reminder",
+                                "billing_cycle_id": str(cycle.id),
+                                "invoice_id": invoice.id,
+                                "days_before": days_before,
+                            },
+                        )
+                        manager.send_notification(notification)
+                        sent["sms"] += 1
+
+                invoice.internal_notes = f"{invoice.internal_notes or ''}\n{marker}".strip()
+                invoice.save(update_fields=["internal_notes", "updated_at"])
+                sent["cycles"] += 1
+        except Exception as exc:
+            logger.exception("Failed sending subscription invoice reminder for cycle %s: %s", cycle.id, exc)
+
+    return (
+        f"Subscription invoice reminders sent for {sent['cycles']} cycle(s): "
+        f"email={sent['email']}, sms={sent['sms']}, in_app={sent['in_app']}."
+    )
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -476,13 +738,7 @@ def sweep_pppoe_ghost_records():
     total_created = 0
     for cycle in active_cycles:
         try:
-            with schema_context(cycle.tenant.schema_name):
-                active_usernames = list(RadAcct.objects.filter(
-                    acctstarttime__lt=now,
-                    framedprotocol='PPP',
-                ).filter(
-                    Q(acctstoptime__isnull=True) | Q(acctstoptime__gt=cycle.start_date)
-                ).values_list('username', flat=True).distinct())
+            active_usernames = cycle.get_billable_pppoe_usernames()
 
             with schema_context(get_public_schema_name()):
                 records = [

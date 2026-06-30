@@ -990,16 +990,66 @@ class BillingCycle(models.Model):
 
     def get_raw_pppoe_count(self):
         """
-        Returns the actual number of unique physical users tracked this month.
+        Returns the actual number of unique PPPoE users with positive usage.
         """
-        return self.billable_clients.count()
+        return len(self.get_billable_pppoe_usernames())
+
+    def get_billable_pppoe_usernames(self):
+        """
+        Return distinct PPPoE usernames that used data during this billing cycle.
+
+        Billing should follow real usage, not merely account existence. A user is
+        billable only when a PPP accounting session overlaps the cycle and the
+        session has transferred at least one byte.
+        """
+        from django.db.models import Q, Sum
+        from django_tenants.utils import schema_context
+
+        if not self.tenant_id or not self.start_date or not self.end_date:
+            return []
+
+        with schema_context(self.tenant.schema_name):
+            from apps.radius.models import CustomerRadiusCredentials, RadAcct
+
+            pppoe_usernames = set(
+                CustomerRadiusCredentials.objects.filter(
+                    connection_type__in=["PPPOE", "BOTH"],
+                ).values_list("username", flat=True)
+            )
+            service_pppoe_usernames = set(
+                CustomerRadiusCredentials.objects.filter(
+                    customer__services__auth_connection_type="PPPOE",
+                    customer__services__status__in=["ACTIVE", "SUSPENDED"],
+                ).values_list("username", flat=True)
+            )
+            pppoe_usernames.update(service_pppoe_usernames)
+
+            usage_qs = (
+                RadAcct.objects.filter(
+                    acctstarttime__lt=self.end_date,
+                    framedprotocol="PPP",
+                )
+                .filter(Q(acctstoptime__isnull=True) | Q(acctstoptime__gt=self.start_date))
+                .values("username")
+                .annotate(
+                    input_total=Sum("acctinputoctets"),
+                    output_total=Sum("acctoutputoctets"),
+                )
+                .filter(Q(input_total__gt=0) | Q(output_total__gt=0))
+            )
+
+            usernames = [row["username"] for row in usage_qs if row.get("username")]
+            if pppoe_usernames:
+                usernames = [username for username in usernames if username in pppoe_usernames]
+
+        return sorted(set(usernames))
 
     def calculate_total_pppoe(self):
         """
         Billable PPPoE client count for this cycle.
-        Counts every PPPoE client with a footprint in the 30-day cycle.
+        Counts PPPoE clients with positive data usage in the cycle.
         """
-        return self.billable_clients.count()
+        return len(self.get_billable_pppoe_usernames())
 
     def calculate_pppoe_charge(self):
         """

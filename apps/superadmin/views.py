@@ -7,6 +7,7 @@ Cross-schema reads use raw SQL to peek into tenant schemas.
 
 import csv
 import io
+import json
 import logging
 from datetime import timedelta
 from decimal import Decimal
@@ -27,7 +28,7 @@ from rest_framework.permissions import IsAuthenticated, IsAdminUser
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from apps.core.models import Tenant, Company, Domain, User, AuditLog, GlobalSystemSettings, Changelog, FeatureRequest
+from apps.core.models import Tenant, Company, Domain, User, AuditLog, GlobalSystemSettings, SystemSettings, Changelog, FeatureRequest
 from .permissions import IsSuperAdmin
 from .models import TenantDeletionJob
 from .serializers import (
@@ -2806,6 +2807,154 @@ def _subscription_invoice_admins(tenant):
         return list(admins)
 
 
+SUBSCRIPTION_INVOICE_REMINDER_KEY = "subscription_invoice_reminders"
+DEFAULT_SUBSCRIPTION_INVOICE_REMINDERS = {
+    "enabled": True,
+    "days_before": [3, 1],
+    "channels": ["email", "in_app"],
+}
+
+
+def _subscription_invoice_reminder_settings():
+    raw = SystemSettings.get_setting(
+        SUBSCRIPTION_INVOICE_REMINDER_KEY,
+        default=DEFAULT_SUBSCRIPTION_INVOICE_REMINDERS,
+    )
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except json.JSONDecodeError:
+            raw = {}
+    if not isinstance(raw, dict):
+        raw = {}
+
+    def clean_days(values):
+        cleaned = set()
+        for value in values:
+            try:
+                day = int(value)
+            except (TypeError, ValueError):
+                continue
+            if day > 0:
+                cleaned.add(day)
+        return sorted(cleaned, reverse=True)
+
+    days = raw.get("days_before", DEFAULT_SUBSCRIPTION_INVOICE_REMINDERS["days_before"])
+    channels = raw.get("channels", DEFAULT_SUBSCRIPTION_INVOICE_REMINDERS["channels"])
+    return {
+        "enabled": bool(raw.get("enabled", DEFAULT_SUBSCRIPTION_INVOICE_REMINDERS["enabled"])),
+        "days_before": clean_days(days) or DEFAULT_SUBSCRIPTION_INVOICE_REMINDERS["days_before"],
+        "channels": [ch for ch in channels if ch in {"email", "sms", "in_app"}],
+    }
+
+
+def _save_subscription_invoice_reminder_settings(data):
+    def clean_days(values):
+        cleaned = set()
+        for value in values:
+            try:
+                day = int(value)
+            except (TypeError, ValueError):
+                continue
+            if day > 0:
+                cleaned.add(day)
+        return sorted(cleaned, reverse=True)
+
+    settings_payload = {
+        "enabled": bool(data.get("enabled", True)),
+        "days_before": clean_days(data.get("days_before", [3, 1])),
+        "channels": [ch for ch in data.get("channels", ["email", "in_app"]) if ch in {"email", "sms", "in_app"}],
+    }
+    if not settings_payload["days_before"]:
+        settings_payload["days_before"] = [3, 1]
+    if not settings_payload["channels"]:
+        settings_payload["channels"] = ["email", "in_app"]
+    SystemSettings.objects.update_or_create(
+        key=SUBSCRIPTION_INVOICE_REMINDER_KEY,
+        defaults={
+            "name": "Subscription invoice reminders",
+            "value": json.dumps(settings_payload),
+            "setting_type": "billing",
+            "data_type": "json",
+            "is_public": False,
+            "description": "Controls automatic tenant subscription invoice reminders.",
+        },
+    )
+    return settings_payload
+
+
+def _find_existing_subscription_invoice(cycle):
+    with schema_context(cycle.tenant.schema_name):
+        from apps.billing.models import Invoice
+
+        return (
+            Invoice.objects.filter(
+                invoice_number__startswith="NET-BILL",
+                service_period_start=cycle.start_date.date(),
+                service_period_end=cycle.end_date.date(),
+            )
+            .exclude(status__in=["VOIDED", "CANCELLED", "WRITTEN_OFF"])
+            .order_by("-created_at", "-id")
+            .first()
+        )
+
+
+def _sync_subscription_invoice_usage_items(cycle, invoice):
+    if not invoice or str(invoice.status).upper() == "PAID":
+        return invoice
+
+    actual_hotspot_revenue = _decimal_money(cycle.refresh_actual_hotspot_revenue())
+    pppoe_count = cycle.calculate_total_pppoe()
+    pppoe_charge = _decimal_money(cycle.calculate_pppoe_charge())
+    hotspot_share = _decimal_money(cycle.calculate_hotspot_revenue_share(actual_hotspot_revenue))
+    minimum_adjustment = _decimal_money(cycle.calculate_minimum_adjustment(actual_hotspot_revenue))
+
+    with schema_context(cycle.tenant.schema_name):
+        from apps.billing.models import Invoice, InvoiceItem
+
+        invoice = Invoice.objects.get(pk=invoice.pk)
+        invoice.items.filter(
+            Q(description__istartswith="PPPoE Client Footprint")
+            | Q(description__istartswith="Hotspot Revenue Share")
+            | Q(description__istartswith="Monthly Minimum Charge Adjustment")
+        ).exclude(service_type="netily_manual_adjustment").delete()
+
+        if pppoe_charge > 0:
+            InvoiceItem.objects.create(
+                invoice=invoice,
+                description=f"PPPoE Client Footprint ({pppoe_count} users @ KES {cycle.snapshot_pppoe_price} each)",
+                quantity=pppoe_count,
+                unit_price=cycle.snapshot_pppoe_price,
+                tax_rate=0,
+                tax_amount=0,
+                total=pppoe_charge,
+            )
+        if hotspot_share > 0:
+            InvoiceItem.objects.create(
+                invoice=invoice,
+                description=f"Hotspot Revenue Share ({cycle.snapshot_hotspot_share_pct}% of KES {actual_hotspot_revenue:,.2f})",
+                quantity=1,
+                unit_price=hotspot_share,
+                tax_rate=0,
+                tax_amount=0,
+                total=hotspot_share,
+            )
+        if minimum_adjustment > 0:
+            InvoiceItem.objects.create(
+                invoice=invoice,
+                description=f"Monthly Minimum Charge Adjustment (minimum KES {cycle.snapshot_base_fee or Decimal('500.00'):,.2f})",
+                quantity=1,
+                unit_price=minimum_adjustment,
+                tax_rate=0,
+                tax_amount=0,
+                total=minimum_adjustment,
+            )
+
+        invoice.calculate_totals()
+        invoice.refresh_from_db()
+        return invoice
+
+
 def _get_or_create_subscription_invoice(cycle, *, create=False):
     invoice_id = cycle.invoice_reference
     invoice = None
@@ -2826,6 +2975,13 @@ def _get_or_create_subscription_invoice(cycle, *, create=False):
                 invoice = Invoice.objects.filter(pk=invoice_id).first()
             except (TypeError, ValueError):
                 invoice = None
+        if not invoice:
+            invoice = _find_existing_subscription_invoice(cycle)
+            if invoice:
+                cycle.__class__.objects.filter(pk=cycle.pk).update(invoice_reference=str(invoice.id))
+                cycle.invoice_reference = str(invoice.id)
+        if invoice and create:
+            invoice = _sync_subscription_invoice_usage_items(cycle, invoice)
         if invoice or not create:
             return invoice
 
@@ -2937,6 +3093,7 @@ def _subscription_invoice_payload(cycle, *, include_recipients=False):
         logger.warning("Failed loading subscription receipt for cycle %s: %s", cycle.id, exc)
     effective_total = calculated_total
     if invoice:
+        invoice = _sync_subscription_invoice_usage_items(cycle, invoice)
         with schema_context(tenant.schema_name):
             from apps.billing.models import Invoice
 
@@ -3004,6 +3161,31 @@ def _subscription_invoice_payload(cycle, *, include_recipients=False):
 class SubscriptionInvoiceListView(APIView):
     permission_classes = SUPERADMIN_PERMS
 
+    def _dedupe_cycles(self, cycles):
+        seen = {}
+        status_rank = {"paid": 3, "invoiced": 2, "active": 1}
+        for cycle in cycles:
+            key = (
+                cycle.tenant_id,
+                cycle.subscription_id,
+                cycle.start_date.date() if cycle.start_date else None,
+                cycle.end_date.date() if cycle.end_date else None,
+            )
+            existing = seen.get(key)
+            if not existing:
+                seen[key] = cycle
+                continue
+
+            existing_rank = status_rank.get(existing.status, 0)
+            cycle_rank = status_rank.get(cycle.status, 0)
+            if (
+                cycle_rank > existing_rank
+                or (cycle_rank == existing_rank and cycle.invoice_reference and not existing.invoice_reference)
+                or (cycle_rank == existing_rank and cycle.start_date > existing.start_date)
+            ):
+                seen[key] = cycle
+        return sorted(seen.values(), key=lambda c: c.start_date or timezone.now(), reverse=True)
+
     def get(self, request):
         _ensure_public()
         from apps.subscriptions.models import BillingCycle
@@ -3034,10 +3216,12 @@ class SubscriptionInvoiceListView(APIView):
                 | Q(invoice_reference__icontains=search)
             )
 
-        total = qs.count()
+        deduped_cycles = self._dedupe_cycles(list(qs))
+        total = len(deduped_cycles)
         start = (page - 1) * page_size
-        cycles = list(qs[start:start + page_size])
+        cycles = deduped_cycles[start:start + page_size]
         results = [_subscription_invoice_payload(cycle) for cycle in cycles]
+        summary_rows = [_subscription_invoice_payload(cycle) for cycle in deduped_cycles]
 
         return Response({
             "count": total,
@@ -3045,14 +3229,37 @@ class SubscriptionInvoiceListView(APIView):
             "page_size": page_size,
             "summary": {
                 "count": total,
-                "active": qs.filter(status="active").count(),
-                "invoiced": qs.filter(status="invoiced").count(),
-                "paid": qs.filter(status="paid").count(),
-                "calculated_total": str(_decimal_money(sum(Decimal(row.get("effective_total") or row["calculated_total"]) for row in results))),
-                "hotspot_revenue": str(_decimal_money(sum(Decimal(row["hotspot_revenue"]) for row in results))),
+                "active": sum(1 for cycle in deduped_cycles if cycle.status == "active"),
+                "invoiced": sum(1 for cycle in deduped_cycles if cycle.status == "invoiced"),
+                "paid": sum(1 for cycle in deduped_cycles if cycle.status == "paid"),
+                "calculated_total": str(_decimal_money(sum(Decimal(row.get("effective_total") or row["calculated_total"]) for row in summary_rows))),
+                "hotspot_revenue": str(_decimal_money(sum(Decimal(row["hotspot_revenue"]) for row in summary_rows))),
+                "duplicates_hidden": qs.count() - total,
             },
             "results": results,
         })
+
+
+class SubscriptionInvoiceReminderSettingsView(APIView):
+    permission_classes = SUPERADMIN_PERMS
+
+    def get(self, request):
+        _ensure_public()
+        return Response(_subscription_invoice_reminder_settings())
+
+    def patch(self, request):
+        _ensure_public()
+        payload = _save_subscription_invoice_reminder_settings(request.data)
+        _log_action(
+            request.user,
+            "update",
+            "SystemSettings",
+            object_repr="Subscription invoice reminders",
+            object_id=SUBSCRIPTION_INVOICE_REMINDER_KEY,
+            changes=payload,
+            request=request,
+        )
+        return Response(payload)
 
 
 class SubscriptionInvoiceDetailView(APIView):
