@@ -19,29 +19,29 @@ from rest_framework import generics
 from rest_framework.parsers import MultiPartParser, FormParser, JSONParser
 from datetime import timedelta
 from hashlib import sha1
-from django_tenants.utils import schema_context, get_public_schema_name  # Add this import
-from .models import GlobalSystemSettings  # Add this
-from .serializers import GlobalSystemSettingsSerializer, CustomTokenRefreshSerializer  # Add this
-from rest_framework_simplejwt.exceptions import InvalidToken  # Already needed for token fix
+from django_tenants.utils import schema_context, get_public_schema_name
+from .models import GlobalSystemSettings
+from .serializers import GlobalSystemSettingsSerializer, CustomTokenRefreshSerializer
+from rest_framework_simplejwt.exceptions import InvalidToken
 from .serializers import CompanyRegisterSerializer
-from django.template.loader import render_to_string  # For email template
-from django.utils.html import strip_tags  # For plain text email
-from .models import Domain   # ← This is your custom Domain in core/models.
+from django.template.loader import render_to_string
+from django.utils.html import strip_tags
+from .models import Domain
 import logging
 from django.http import Http404
-from django.shortcuts import get_object_or_404  # Add this import
+from django.shortcuts import get_object_or_404
 from django.db import DatabaseError
 from .otp_service import OTPService, OTPError, OTPRateLimitedError
 from .email_delivery import send_transactional_email
 
-from .models import User, Company, SystemSettings, AuditLog, Tenant, Changelog, FeatureRequest, FeatureUpvote, RoleAccessPolicy  # Add FeatureRequest and FeatureUpvote here
+from .models import User, Company, SystemSettings, AuditLog, Tenant, Changelog, FeatureRequest, FeatureUpvote, RoleAccessPolicy
 from .serializers import (
     CustomTokenRefreshSerializer, UserSerializer, LoginSerializer, UserCreateSerializer, UserUpdateSerializer,
-    AdminUserUpdateSerializer,  # ADD THIS
+    AdminUserUpdateSerializer,
     ProfileSerializer, PasswordChangeSerializer,
     CompanySerializer, TenantSerializer, SystemSettingsSerializer, AuditLogSerializer,
     CustomTokenObtainPairSerializer, DashboardStatsSerializer, ChangelogSerializer,
-    FeatureRequestSerializer, CompanyBrandingSerializer, RoleAccessPolicySerializer  # Add FeatureRequestSerializer here
+    FeatureRequestSerializer, CompanyBrandingSerializer, RoleAccessPolicySerializer
 )
 from .permissions import IsAdmin, IsAdminOrStaff, IsCustomer, IsTechnician
 
@@ -103,10 +103,6 @@ def _resolve_cross_tenant_platform_admin(request, email: str, password: str):
         tenant_user = User.objects.filter(email__iexact=normalized_email).first()
         if not tenant_user:
             if not public_user.is_active:
-                # Inactive public user, no tenant mirror — return None so the
-                # caller correctly issues a 403 (Account disabled) rather than
-                # accidentally handing a public-schema User object to a tenant
-                # context where its user_id doesn't exist in the tenant core_user.
                 return None
 
             phone_number = _platform_admin_phone(public_user, tenant_scope)
@@ -408,7 +404,6 @@ class ResendLoginOTPView(APIView):
             "max_resends": int(getattr(settings, "OTP_LOGIN_MAX_RESENDS", 5)),
         }, status=status.HTTP_200_OK)
 
-# In RegisterView class, update the create method:
 
 class RegisterView(generics.CreateAPIView):
     """View for user registration"""
@@ -418,22 +413,13 @@ class RegisterView(generics.CreateAPIView):
     def create(self, request, *args, **kwargs):
         serializer = self.get_serializer(data=request.data)
         if serializer.is_valid():
-            # Check if company/tenant should be assigned automatically
-            # For now, we'll allow it to be set via request data
-            # Later, we can add logic to auto-assign based on domain or other criteria
-            
             user = serializer.save()
             
-            # If no company was set, try to assign based on registration context
             if not user.company and not user.tenant:
-                # Placeholder for auto-assignment logic
-                # Example: Get company from subdomain, invite code, etc.
                 pass
             
-            # Generate JWT tokens
             refresh = RefreshToken.for_user(user)
             
-            # Log the action
             AuditLog.log_action(
                 user=user,
                 action='create',
@@ -466,8 +452,6 @@ class UserViewSet(viewsets.ModelViewSet):
         if self.action == 'create':
             return UserCreateSerializer
         elif self.action in ['update', 'partial_update']:
-            # Superusers and admins updating other users get the admin serializer
-            # (no current_password required, role can be changed)
             if self.request.user.is_superuser or self.request.user.role == 'admin':
                 return AdminUserUpdateSerializer
             return UserUpdateSerializer
@@ -481,14 +465,9 @@ class UserViewSet(viewsets.ModelViewSet):
         return [IsAuthenticated(), IsAdminOrStaff()]
     
     def get_queryset(self):
-        """
-        Superuser sees all users.
-        Company admins/staff see only users in their company.
-        """
         qs = super().get_queryset().select_related('company')
         
         if self.request.user.is_superuser:
-            # Optional: allow filtering by company via query param
             company_id = self.request.query_params.get('company_id')
             if company_id:
                 return qs.filter(company_id=company_id)
@@ -512,33 +491,21 @@ class UserViewSet(viewsets.ModelViewSet):
         return qs
     
     def perform_create(self, serializer):
-        """
-        Automatically determine staff status and company context based on the assigned role.
-        """
-        # 1. Get the role from the request
         role = self.request.data.get('role')
-        
-        # 2. Define roles that should automatically have dashboard (staff) access
         staff_roles = ['admin', 'support', 'technician', 'accountant', 'staff']
         is_staff_status = role in staff_roles
         
-        # 3. Prepare the save arguments
-        # We auto-verify staff so they don't get stuck at a 'Verify Email' screen
         save_kwargs = {
             'is_staff': is_staff_status,
             'is_verified': True if is_staff_status else False
         }
         
-        # 4. Handle Company assignment (if not a superuser)
         if not self.request.user.is_superuser:
             if hasattr(self.request.user, 'company') and self.request.user.company:
                 save_kwargs['company'] = self.request.user.company
         
-        # 5. Save the user with these calculated flags
         serializer.save(**save_kwargs)
-        
         logger.info(f"UserViewSet: Created {role} user {serializer.instance.email}. is_staff={is_staff_status}")
-
 
     @action(detail=False, methods=['get', 'patch', 'put'])
     def me(self, request):
@@ -633,7 +600,6 @@ class UserViewSet(viewsets.ModelViewSet):
             user.set_password(serializer.validated_data['new_password'])
             user.save()
             
-            # Log the action
             AuditLog.log_action(
                 user=request.user,
                 action='password_change',
@@ -1003,9 +969,6 @@ class LogoutView(APIView):
     permission_classes = [IsAuthenticated]
 
     def post(self, request):
-        # In JWT, logout is handled client-side by removing tokens
-        # We can blacklist the refresh token if using token blacklist app
-        # For now, just return success
         return Response(
             {'message': 'Successfully logged out. Please remove tokens client-side.'},
             status=status.HTTP_200_OK
@@ -1022,7 +985,6 @@ class PasswordChangeView(generics.GenericAPIView):
         if serializer.is_valid():
             serializer.save()
             
-            # Log the action
             AuditLog.log_action(
                 user=request.user,
                 action='password_change',
@@ -1037,12 +999,12 @@ class PasswordChangeView(generics.GenericAPIView):
         
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
+
 class VerifyEmailView(APIView):
     """Verify email view"""
     permission_classes = [AllowAny]
 
     def get(self, request, token):
-        # Placeholder implementation - you need to implement email verification logic
         return Response(
             {'message': 'Email verification endpoint. Implement verification logic.'},
             status=status.HTTP_200_OK
@@ -1054,7 +1016,6 @@ class ResendVerificationView(APIView):
     permission_classes = [IsAuthenticated]
 
     def post(self, request):
-        # Placeholder implementation
         return Response(
             {'message': 'Resend verification endpoint. Implement resend logic.'},
             status=status.HTTP_200_OK
@@ -1070,8 +1031,6 @@ class ProfileView(generics.RetrieveUpdateAPIView):
         return self.request.user
 
 
-# In DashboardView class, update the get method:
-
 class DashboardView(APIView):
     """Dashboard view (class-based version)"""
     permission_classes = [IsAuthenticated]
@@ -1079,13 +1038,10 @@ class DashboardView(APIView):
     def get(self, request):
         user = request.user
         
-        # Check if user has a company
         if hasattr(user, 'company') and user.company:
-            # User belongs to a company - filter data by company
             company = user.company
             
             if user.role == 'admin' or user.is_superuser:
-                # Company admin sees company-specific data
                 stats = {
                     'total_users': User.objects.filter(company=company).count(),
                     'total_customers': User.objects.filter(company=company, role='customer').count(),
@@ -1105,7 +1061,6 @@ class DashboardView(APIView):
                     )),
                 }
             elif user.role == 'staff':
-                # Staff sees limited company data
                 stats = {
                     'total_customers': User.objects.filter(company=company, role='customer').count(),
                     'company_info': {
@@ -1118,7 +1073,6 @@ class DashboardView(APIView):
                     )),
                 }
             else:
-                # Customer sees only their info
                 stats = {
                     'user_info': ProfileSerializer(user).data,
                     'company_info': {
@@ -1126,7 +1080,6 @@ class DashboardView(APIView):
                     },
                 }
         else:
-            # Superuser or user without company (global view)
             if user.is_superuser:
                 stats = {
                     'total_users': User.objects.count(),
@@ -1140,7 +1093,6 @@ class DashboardView(APIView):
                     )),
                 }
             else:
-                # Regular user without company assignment
                 stats = {
                     'user_info': ProfileSerializer(user).data,
                     'warning': 'No company assigned. Please contact administrator.',
@@ -1149,7 +1101,7 @@ class DashboardView(APIView):
         serializer = DashboardStatsSerializer(stats)
         return Response(serializer.data)
 
-# Keep the function-based views as well for compatibility
+
 @api_view(['POST'])
 @permission_classes([AllowAny])
 def register_user(request):
@@ -1160,10 +1112,8 @@ def register_user(request):
     if serializer.is_valid():
         user = serializer.save()
         
-        # Generate JWT tokens
         refresh = RefreshToken.for_user(user)
         
-        # Log the action
         AuditLog.log_action(
             user=user,
             action='create',
@@ -1193,7 +1143,6 @@ def dashboard(request):
     user = request.user
     
     if user.role == 'admin' or user.is_superuser:
-        # Admin dashboard
         stats = {
             'total_users': User.objects.count(),
             'total_companies': Company.objects.count(),
@@ -1204,7 +1153,6 @@ def dashboard(request):
             ),
         }
     elif user.role == 'staff':
-        # Staff dashboard
         stats = {
             'total_customers': User.objects.filter(role='customer').count(),
             'recent_activity': AuditLog.objects.all().order_by('-timestamp')[:10].values(
@@ -1212,7 +1160,6 @@ def dashboard(request):
             ),
         }
     else:
-        # Customer dashboard
         stats = {
             'user_info': ProfileSerializer(user).data,
         }
@@ -1245,7 +1192,6 @@ class AuditLogViewSet(viewsets.ReadOnlyModelViewSet):
     def get_queryset(self):
         queryset = super().get_queryset()
         
-        # Apply filters from query parameters
         user_id = self.request.query_params.get('user_id')
         if user_id:
             queryset = queryset.filter(user_id=user_id)
@@ -1294,6 +1240,7 @@ class CustomTokenRefreshView(TokenRefreshView):
     """Fix: Return 401 instead of 500 when user is deleted"""
     serializer_class = CustomTokenRefreshSerializer
 
+
 class CompanyRegisterView(generics.CreateAPIView):
     """Public endpoint to register a new ISP/company + first admin user"""
     permission_classes = [AllowAny]
@@ -1323,7 +1270,6 @@ class CompanyRegisterView(generics.CreateAPIView):
                 data.get('company_name', '?'),
                 _traceback.format_exc(),
             )
-            # Clean up any partial records so re-registration works
             try:
                 from django.db import connection as _conn
                 _conn.set_schema_to_public()
@@ -1339,29 +1285,25 @@ class CompanyRegisterView(generics.CreateAPIView):
             )
 
     def _create_company(self, request, data, _log):
-        # Start in public schema
         from django.db import connection
         connection.set_schema_to_public()
         request_id = request.headers.get("X-Request-ID", "")
         company = None
         tenant = None
         
-        # 1. Generate Slug BEFORE creating the object
         from django.utils.text import slugify
         slug = slugify(data['company_name']) or 'company'
         
-        # 2. Ensure Slug Uniqueness (Handle duplicates like "Blue Net" vs "Blue Net")
         original_slug = slug
         counter = 1
         while Company.objects.filter(slug=slug).exists():
             slug = f"{original_slug}-{counter}"
             counter += 1
 
-        # 3. Create company in public schema (With the slug!)
         try:
             company = Company.objects.create(
                 name=data['company_name'],
-                slug=slug,  # Use the generated unique slug
+                slug=slug,
                 email=data['company_email'],
                 phone_number=data.get('company_phone', ''),
                 address=data.get('company_address', ''),
@@ -1375,7 +1317,6 @@ class CompanyRegisterView(generics.CreateAPIView):
                 is_active=True
             )
             
-            # Create Tenant in public schema
             trial_end = timezone.now() + timedelta(days=14)
             schema_name = f"tenant_{company.slug.replace('-', '_')}"
             if self._schema_exists(schema_name):
@@ -1399,9 +1340,6 @@ class CompanyRegisterView(generics.CreateAPIView):
                 subscription_expiry=trial_end.date()
             )
             
-            # 4. Create Domain in public schema
-            # In production use the real base domain (e.g. acme.netily.co.ke),
-            # in local dev fall back to subdomain.localhost:8000
             base_domain = getattr(settings, 'TENANT_BASE_DOMAIN', None)
             if base_domain:
                 domain_name = f"{tenant.subdomain}.{base_domain}"
@@ -1418,8 +1356,6 @@ class CompanyRegisterView(generics.CreateAPIView):
 
             self._create_schema(tenant.schema_name)
 
-            # Run tenant migrations in a subprocess so an OOM kill of the child
-            # process does not kill the gunicorn worker and reset the client connection.
             import subprocess, sys, os as _os
             migrate_env = _os.environ.copy()
             migrate_env['DJANGO_SETTINGS_MODULE'] = 'config.settings.production'
@@ -1431,7 +1367,7 @@ class CompanyRegisterView(generics.CreateAPIView):
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
-                timeout=240,   # hard cap — gunicorn timeout is 300s
+                timeout=240,
             )
             if result.returncode != 0:
                 self._drop_schema_if_exists(tenant.schema_name)
@@ -1442,7 +1378,6 @@ class CompanyRegisterView(generics.CreateAPIView):
 
             try:
                 from apps.radius.services.tenant_radius_service import tenant_radius_service
-
                 tenant_radius_service.configure_tenant_radius(
                     schema_name=tenant.schema_name,
                     tenant_name=company.name,
@@ -1453,20 +1388,16 @@ class CompanyRegisterView(generics.CreateAPIView):
                     tenant.schema_name,
                 )
 
-            # Switch to tenant schema
             connection.set_tenant(tenant)
         
-            # Create user with all necessary information
             user = User.objects.create(
                email=data['admin_email'],
                first_name=data['admin_first_name'],
                last_name=data['admin_last_name'],
                phone_number=data['admin_phone'],
                role='admin',
-               # Foreign keys remain None (can't reference public schema from tenant schema)
                company=None,
                tenant=None,
-                # Store denormalized info
                 company_name=company.name,
                 tenant_subdomain=tenant.subdomain,
                 is_active=True,
@@ -1494,25 +1425,20 @@ class CompanyRegisterView(generics.CreateAPIView):
             )
             raise
     
-        # Removed sensitive debug print line
-        
-        # Switch back to public schema
         connection.set_schema_to_public()
         
-        # Generate tokens
         refresh = RefreshToken.for_user(user)
         
         response_payload = {
             'message': 'Company created successfully',
             'company': company.name,
             'tenant': tenant.subdomain,
-            'subdomain': tenant.subdomain,       # alias expected by frontend
+            'subdomain': tenant.subdomain,
             'tenant_domain': domain_name,
             'login_url': f'{domain_protocol}://{domain_name}/admin/login/',
             'dashboard_url': f'{domain_protocol}://{domain_name}/admin/',
             'email': user.email,
             'access': str(refresh.access_token),
-            # 'user' object expected by frontend for token storage
             'user': {
                 'id': user.id,
                 'email': user.email,
@@ -1630,11 +1556,10 @@ class CompanyRegisterView(generics.CreateAPIView):
             'company': tenant.company,
             'subdomain_url': f"https://{domain_name}/admin/login/",
             'username': user.email,
-            'password': password,  # Note: Sending plain password is insecure - consider reset link instead
+            'password': password,
             'expiry': tenant.subscription_expiry,
         }
         
-        # Render HTML message from template (create this file later)
         html_message = render_to_string('emails/welcome_email.html', context)
         plain_message = strip_tags(html_message)
         
@@ -1721,11 +1646,8 @@ class PlatformChangelogView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        # Temporarily switch to the public schema to read the global changelogs
         with schema_context(get_public_schema_name()):
-            # Only fetch published changelogs
             changelogs = Changelog.objects.filter(is_published=True)
-            # Evaluate the queryset immediately inside the public context using list()
             serializer = ChangelogSerializer(list(changelogs), many=True)
             return Response(serializer.data)
 
@@ -1739,16 +1661,13 @@ class CommunityFeatureRequestView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        """Get all feature requests with upvote status for current ISP"""
         with schema_context(get_public_schema_name()):
             requests = FeatureRequest.objects.all()
             serializer = FeatureRequestSerializer(requests, many=True, context={'request': request})
             return Response(serializer.data)
 
     def post(self, request):
-        """Create a new feature request as the current ISP"""
         with schema_context(get_public_schema_name()):
-            # Assign the request to the current ISP (tenant)
             serializer = FeatureRequestSerializer(data=request.data, context={'request': request})
             if serializer.is_valid():
                 serializer.save(requested_by_tenant=request.tenant)
@@ -1764,7 +1683,6 @@ class ToggleUpvoteView(APIView):
     permission_classes = [IsAuthenticated]
 
     def post(self, request, pk):
-        """Toggle upvote status for a feature request"""
         with schema_context(get_public_schema_name()):
             feature = get_object_or_404(FeatureRequest, pk=pk)
             upvote_qs = FeatureUpvote.objects.filter(feature_request=feature, tenant=request.tenant)
@@ -1870,6 +1788,7 @@ class VerifyOTPView(APIView):
             "verified": True,
         })
 
+
 class SubmitLeadView(APIView):
     """
     Public endpoint for capturing leads from the landing page.
@@ -1889,7 +1808,6 @@ class SubmitLeadView(APIView):
         if not name or not email:
             return Response({"error": "Name and email are required."}, status=status.HTTP_400_BAD_REQUEST)
 
-        # Store lead in the public schema
         with schema_context(get_public_schema_name()):
             from .models import Lead
             Lead.objects.create(
@@ -1902,10 +1820,10 @@ class SubmitLeadView(APIView):
                 message=message,
             )
 
-        # Send notification email to admin (in background thread to avoid blocking response)
         import threading
         def _send_lead_email():
             try:
+                from django.core.mail import send_mail
                 send_mail(
                     subject=f"New Lead: {name} ({company or 'No company'})",
                     message=(
@@ -2090,6 +2008,15 @@ class UnifiedDashboardView(APIView):
         from datetime import timedelta
         import concurrent.futures
 
+        # ============================================================
+        # FIX: Capture tenant schema BEFORE spawning threads
+        # Each worker thread gets its own fresh DB connection that does
+        # NOT inherit django-tenants' schema/search_path. Without this,
+        # every query in the thread runs against the public schema.
+        # ============================================================
+        from django.db import connection
+        tenant_schema = connection.schema_name
+
         now = timezone.now()
         today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
         yesterday_start = today_start - timedelta(days=1)
@@ -2098,144 +2025,153 @@ class UnifiedDashboardView(APIView):
         prev_month_start = (month_start - timedelta(days=1)).replace(day=1)
 
         def get_customer_stats():
-            try:
-                from apps.customers.models import Customer
-                return Customer.objects.aggregate(
-                    total=Count('id'),
-                    active=Count('id', filter=Q(status='ACTIVE')),
-                )
-            except Exception:
-                return {'total': 0, 'active': 0}
+            with schema_context(tenant_schema):
+                try:
+                    from apps.customers.models import Customer
+                    return Customer.objects.aggregate(
+                        total=Count('id'),
+                        active=Count('id', filter=Q(status='ACTIVE')),
+                    )
+                except Exception:
+                    return {'total': 0, 'active': 0}
 
         def get_revenue_stats():
-            try:
-                from apps.billing.models.payment_models import Payment
-                pay = Payment.objects.filter(status='completed').aggregate(
-                    today=Sum('amount', filter=Q(payment_date__gte=today_start)),
-                    yesterday=Sum('amount', filter=Q(payment_date__gte=yesterday_start, payment_date__lt=today_start)),
-                    week=Sum('amount', filter=Q(payment_date__gte=week_start)),
-                    month=Sum('amount', filter=Q(payment_date__gte=month_start)),
-                    prev_month=Sum('amount', filter=Q(payment_date__gte=prev_month_start, payment_date__lt=month_start)),
-                    today_tx=Count('id', filter=Q(payment_date__gte=today_start)),
-                )
-                return pay
-            except Exception:
-                return {}
+            with schema_context(tenant_schema):
+                try:
+                    from apps.billing.models.payment_models import Payment
+                    pay = Payment.objects.filter(status='completed').aggregate(
+                        today=Sum('amount', filter=Q(payment_date__gte=today_start)),
+                        yesterday=Sum('amount', filter=Q(payment_date__gte=yesterday_start, payment_date__lt=today_start)),
+                        week=Sum('amount', filter=Q(payment_date__gte=week_start)),
+                        month=Sum('amount', filter=Q(payment_date__gte=month_start)),
+                        prev_month=Sum('amount', filter=Q(payment_date__gte=prev_month_start, payment_date__lt=month_start)),
+                        today_tx=Count('id', filter=Q(payment_date__gte=today_start)),
+                    )
+                    return pay
+                except Exception:
+                    return {}
 
         def get_router_stats():
-            try:
-                from apps.network.models import Router
-                stats = Router.objects.filter(is_active=True).aggregate(
-                    total=Count('id'),
-                    online=Count('id', filter=Q(status='online')),
-                    offline=Count('id', filter=Q(status='offline')),
-                    warning=Count('id', filter=Q(status='warning')),
-                    maintenance=Count('id', filter=Q(status='maintenance')),
-                )
-                # connected users
-                from apps.radius.models import RadAcct
-                connected = RadAcct.objects.filter(acctstoptime__isnull=True).count()
-                stats['total_connected_users'] = connected
-                return stats
-            except Exception:
-                return {'total': 0, 'online': 0, 'offline': 0, 'warning': 0, 'maintenance': 0, 'total_connected_users': 0}
+            with schema_context(tenant_schema):
+                try:
+                    from apps.network.models import Router
+                    stats = Router.objects.filter(is_active=True).aggregate(
+                        total=Count('id'),
+                        online=Count('id', filter=Q(status='online')),
+                        offline=Count('id', filter=Q(status='offline')),
+                        warning=Count('id', filter=Q(status='warning')),
+                        maintenance=Count('id', filter=Q(status='maintenance')),
+                    )
+                    from apps.radius.models import RadAcct
+                    connected = RadAcct.objects.filter(acctstoptime__isnull=True).count()
+                    stats['total_connected_users'] = connected
+                    return stats
+                except Exception:
+                    return {'total': 0, 'online': 0, 'offline': 0, 'warning': 0, 'maintenance': 0, 'total_connected_users': 0}
 
         def get_ticket_stats():
-            try:
-                from apps.support.models import Ticket
-                return Ticket.objects.aggregate(
-                    total=Count('id'),
-                    open=Count('id', filter=Q(status='open')),
-                    in_progress=Count('id', filter=Q(status='in_progress')),
-                    resolved=Count('id', filter=Q(status='resolved')),
-                )
-            except Exception:
-                return {'total': 0, 'open': 0, 'in_progress': 0, 'resolved': 0}
+            with schema_context(tenant_schema):
+                try:
+                    from apps.support.models import Ticket
+                    return Ticket.objects.aggregate(
+                        total=Count('id'),
+                        open=Count('id', filter=Q(status='open')),
+                        in_progress=Count('id', filter=Q(status='in_progress')),
+                        resolved=Count('id', filter=Q(status='resolved')),
+                    )
+                except Exception:
+                    return {'total': 0, 'open': 0, 'in_progress': 0, 'resolved': 0}
 
         def get_expired_count():
-            try:
-                from apps.radius.models import CustomerRadiusCredentials
-                return CustomerRadiusCredentials.objects.filter(
-                    expiration_date__isnull=False,
-                    expiration_date__lte=now,
-                ).count()
-            except Exception:
-                return 0
+            with schema_context(tenant_schema):
+                try:
+                    from apps.radius.models import CustomerRadiusCredentials
+                    return CustomerRadiusCredentials.objects.filter(
+                        expiration_date__isnull=False,
+                        expiration_date__lte=now,
+                    ).count()
+                except Exception:
+                    return 0
 
         def get_active_subscriptions():
-            try:
-                from apps.radius.models import CustomerRadiusCredentials
-                from apps.billing.models.hotspot_models import HotspotSession
+            with schema_context(tenant_schema):
+                try:
+                    from apps.radius.models import CustomerRadiusCredentials
+                    from apps.billing.models.hotspot_models import HotspotSession
 
-                pppoe_count = CustomerRadiusCredentials.objects.filter(
-                    is_enabled=True,
-                ).filter(
-                    Q(expiration_date__isnull=True) | Q(expiration_date__gt=now)
-                ).count()
+                    pppoe_count = CustomerRadiusCredentials.objects.filter(
+                        is_enabled=True,
+                    ).filter(
+                        Q(expiration_date__isnull=True) | Q(expiration_date__gt=now)
+                    ).count()
 
-                hotspot_active = HotspotSession.objects.filter(
-                    status='active',
-                    expires_at__gt=now,
-                ).values('hotspot_client_id').distinct().count()
+                    hotspot_active = HotspotSession.objects.filter(
+                        status='active',
+                        expires_at__gt=now,
+                    ).values('hotspot_client_id').distinct().count()
 
-                return {'pppoe': pppoe_count, 'hotspot': hotspot_active, 'total': pppoe_count + hotspot_active}
-            except Exception:
-                return {'pppoe': 0, 'hotspot': 0, 'total': 0}
+                    return {'pppoe': pppoe_count, 'hotspot': hotspot_active, 'total': pppoe_count + hotspot_active}
+                except Exception:
+                    return {'pppoe': 0, 'hotspot': 0, 'total': 0}
 
         def get_online_count():
-            try:
-                from apps.radius.models import RadAcct
-                return RadAcct.objects.filter(acctstoptime__isnull=True).count()
-            except Exception:
-                return 0
+            with schema_context(tenant_schema):
+                try:
+                    from apps.radius.models import RadAcct
+                    return RadAcct.objects.filter(acctstoptime__isnull=True).count()
+                except Exception:
+                    return 0
 
         def get_recent_activity():
-            try:
-                from apps.core.models import AuditLog
-                return list(AuditLog.objects.filter(
-                    tenant=getattr(request, 'tenant', None)
-                ).order_by('-timestamp')[:10].values(
-                    'id', 'user__email', 'action', 'model_name', 'object_repr', 'timestamp'
-                ))
-            except Exception:
-                return []
+            with schema_context(tenant_schema):
+                try:
+                    from apps.core.models import AuditLog
+                    return list(AuditLog.objects.filter(
+                        tenant=getattr(request, 'tenant', None)
+                    ).order_by('-timestamp')[:10].values(
+                        'id', 'user__email', 'action', 'model_name', 'object_repr', 'timestamp'
+                    ))
+                except Exception:
+                    return []
 
         def get_weekly_income():
-            try:
-                from apps.billing.models.payment_models import Payment
-                days_to_monday = now.weekday()
-                week_start_dt = today_start - timedelta(days=days_to_monday)
-                payments = Payment.objects.filter(
-                    status__iexact='completed',
-                    payment_date__gte=week_start_dt,
-                    payment_date__lt=now,
-                )
-                weekday_map = {i: 0 for i in range(7)}
-                for p in payments:
-                    weekday_map[p.payment_date.weekday()] += float(p.amount or 0)
-                labels = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']
-                return [{'day': labels[i], 'amount': round(weekday_map[i], 2)} for i in range(7)]
-            except Exception:
-                return []
+            with schema_context(tenant_schema):
+                try:
+                    from apps.billing.models.payment_models import Payment
+                    days_to_monday = now.weekday()
+                    week_start_dt = today_start - timedelta(days=days_to_monday)
+                    payments = Payment.objects.filter(
+                        status__iexact='completed',
+                        payment_date__gte=week_start_dt,
+                        payment_date__lt=now,
+                    )
+                    weekday_map = {i: 0 for i in range(7)}
+                    for p in payments:
+                        weekday_map[p.payment_date.weekday()] += float(p.amount or 0)
+                    labels = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']
+                    return [{'day': labels[i], 'amount': round(weekday_map[i], 2)} for i in range(7)]
+                except Exception:
+                    return []
 
         def get_monthly_earnings():
-            try:
-                from apps.billing.models.payment_models import Payment
-                from datetime import datetime
-                current_year = now.year
-                current_month = now.month
-                labels = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec']
-                result = []
-                for month in range(1, current_month + 1):
-                    ms = datetime(current_year, month, 1, tzinfo=timezone.get_current_timezone())
-                    me = datetime(current_year, month + 1, 1, tzinfo=timezone.get_current_timezone()) if month < 12 else datetime(current_year + 1, 1, 1, tzinfo=timezone.get_current_timezone())
-                    total = float(Payment.objects.filter(
-                        status__iexact='completed', payment_date__gte=ms, payment_date__lt=me
-                    ).aggregate(v=Sum('amount'))['v'] or 0)
-                    result.append({'month': labels[month - 1], 'amount': round(total, 2)})
-                return result
-            except Exception:
-                return []
+            with schema_context(tenant_schema):
+                try:
+                    from apps.billing.models.payment_models import Payment
+                    from datetime import datetime
+                    current_year = now.year
+                    current_month = now.month
+                    labels = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec']
+                    result = []
+                    for month in range(1, current_month + 1):
+                        ms = datetime(current_year, month, 1, tzinfo=timezone.get_current_timezone())
+                        me = datetime(current_year, month + 1, 1, tzinfo=timezone.get_current_timezone()) if month < 12 else datetime(current_year + 1, 1, 1, tzinfo=timezone.get_current_timezone())
+                        total = float(Payment.objects.filter(
+                            status__iexact='completed', payment_date__gte=ms, payment_date__lt=me
+                        ).aggregate(v=Sum('amount'))['v'] or 0)
+                        result.append({'month': labels[month - 1], 'amount': round(total, 2)})
+                    return result
+                except Exception:
+                    return []
 
         # Run all queries in parallel using threads
         with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
