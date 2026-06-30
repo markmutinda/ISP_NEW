@@ -653,6 +653,25 @@ class InitiateSubscriptionPaymentView(APIView):
         phone_number = serializer.validated_data.get('phone_number')
         amount_override = serializer.validated_data.get('amount')
         defer_billing = serializer.validated_data.get('defer_billing_to_trial_end', False)
+        outstanding_invoice_balance = Decimal('0.00')
+        outstanding_invoice_number = ''
+
+        try:
+            with schema_context(tenant.schema_name):
+                from apps.billing.models import Invoice
+                invoice = (
+                    Invoice.objects.filter(invoice_number__startswith='NET-BILL')
+                    .exclude(status__iexact='PAID')
+                    .exclude(status__in=['VOIDED', 'WRITTEN_OFF', 'CANCELLED'])
+                    .filter(balance__gt=0)
+                    .order_by('created_at', 'id')
+                    .first()
+                )
+                if invoice:
+                    outstanding_invoice_balance = Decimal(str(invoice.balance or invoice.total_amount or '0')).quantize(Decimal('0.01'))
+                    outstanding_invoice_number = invoice.invoice_number
+        except Exception as invoice_err:
+            logger.warning("Could not resolve outstanding NET-BILL balance for %s: %s", tenant.schema_name, invoice_err)
         
         # ─────────────────────────────────────────────────────────────
         # Amount priority:
@@ -660,7 +679,16 @@ class InitiateSubscriptionPaymentView(APIView):
         # 2. base_license_fee (metered plans — first payment / trial conversion)
         # 3. price_yearly / price_monthly (flat-rate plans)
         # ─────────────────────────────────────────────────────────────
-        if amount_override:
+        if outstanding_invoice_balance > 0:
+            amount = outstanding_invoice_balance
+            logger.info(
+                "Using outstanding NET-BILL balance KES %s for %s (%s); requested override was %s",
+                amount,
+                tenant.schema_name,
+                outstanding_invoice_number,
+                amount_override,
+            )
+        elif amount_override:
             amount = amount_override
         elif plan.is_metered:
             amount = plan.base_license_fee
@@ -951,6 +979,13 @@ class SubscriptionPaymentViewSet(viewsets.ReadOnlyModelViewSet):
                 )
 
         return payload
+
+    def _subscription_is_current(self, subscription):
+        return bool(
+            subscription.status == 'active'
+            and subscription.current_period_end
+            and subscription.current_period_end > timezone.now()
+        )
     
     @action(detail=True, methods=['get'])
     def status(self, request, pk=None):
@@ -970,12 +1005,18 @@ class SubscriptionPaymentViewSet(viewsets.ReadOnlyModelViewSet):
             
             # If already completed or failed, return current status
             if payment.status in ['completed', 'failed', 'cancelled']:
+                subscription_activated = self._subscription_is_current(payment.subscription)
                 return Response({
                     'payment_id': str(payment.id),
                     'status': payment.status,
-                    'message': self._get_status_message(payment),
+                    'message': (
+                        self._get_status_message(payment)
+                        if payment.status != 'completed' or subscription_activated
+                        else 'Payment received, but the subscription invoice still has an outstanding balance.'
+                    ),
                     'mpesa_receipt': payment.mpesa_receipt,
                     'completed_at': payment.completed_at,
+                    'subscription_activated': subscription_activated,
                     **self._billing_cycle_payload(payment),
                 })
             
@@ -1002,8 +1043,16 @@ class SubscriptionPaymentViewSet(viewsets.ReadOnlyModelViewSet):
 
                             if locked_payment.status in ['pending', 'processing']:
                                 locked_payment.mark_completed(mpesa_receipt=receipt)
+                                payment = locked_payment
 
-                                # Apply intended plan (only on successful payment)
+                        from .billing_lifecycle import sync_subscription_invoice_payment, subscription_invoice_is_fully_paid
+
+                        invoice = sync_subscription_invoice_payment(payment, notify=True)
+                        invoice_fully_paid = subscription_invoice_is_fully_paid(invoice)
+
+                        if invoice_fully_paid:
+                            with transaction.atomic():
+                                locked_payment = SubscriptionPayment.objects.select_for_update().get(id=payment.id)
                                 locked_payment.apply_intended_plan()
 
                                 subscription = locked_payment.subscription
@@ -1021,17 +1070,26 @@ class SubscriptionPaymentViewSet(viewsets.ReadOnlyModelViewSet):
                                 send_cycle_activated_email.delay(subscription.company_id)
 
                                 payment = locked_payment
-
-                        from .billing_lifecycle import sync_subscription_invoice_payment
-
-                        sync_subscription_invoice_payment(payment, notify=True)
+                        else:
+                            logger.warning(
+                                "Subscription payment %s completed but invoice %s has remaining balance %s; subscription not extended.",
+                                payment.id,
+                                getattr(invoice, 'invoice_number', None),
+                                getattr(invoice, 'balance', None),
+                            )
 
                         return Response({
                             'payment_id': str(payment.id),
                             'status': 'completed',
-                            'message': 'Payment successful! Your subscription is now active.',
+                            'message': (
+                                'Payment successful! Your subscription is now active.'
+                                if invoice_fully_paid
+                                else f"Payment received, but invoice balance remains KES {getattr(invoice, 'balance', '0.00')}. Please settle the remaining balance to reactivate."
+                            ),
                             'mpesa_receipt': payment.mpesa_receipt,
                             'completed_at': payment.completed_at,
+                            'subscription_activated': invoice_fully_paid,
+                            'invoice_balance_remaining': str(getattr(invoice, 'balance', '0.00') or '0.00'),
                             **self._billing_cycle_payload(payment),
                         })
 

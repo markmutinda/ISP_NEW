@@ -251,6 +251,8 @@ class SubscriptionPaymentStatusSerializer(serializers.Serializer):
     billing_cycle_status = serializers.CharField(required=False, allow_blank=True, allow_null=True)
     invoice_reference = serializers.CharField(required=False, allow_blank=True, allow_null=True)
     invoice_number = serializers.CharField(required=False, allow_blank=True, allow_null=True)
+    subscription_activated = serializers.BooleanField(required=False)
+    invoice_balance_remaining = serializers.CharField(required=False, allow_blank=True, allow_null=True)
 
 
 # ─────────────────────────────────────────────────────────────

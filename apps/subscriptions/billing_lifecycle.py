@@ -1,7 +1,6 @@
 import logging
 from decimal import Decimal
 
-from django.db.models import F
 from django.utils import timezone
 from django_tenants.utils import get_public_schema_name, schema_context
 
@@ -68,23 +67,32 @@ def sync_subscription_invoice_payment(payment, *, notify=True):
             defaults={"user": billing_user, "status": "active"},
         )
 
-        unpaid = Invoice.objects.filter(invoice_number__startswith="NET-BILL").exclude(
-            status__iexact="PAID"
-        ).exclude(status__in=["VOIDED", "WRITTEN_OFF"]).order_by("created_at")
-
-        updated = unpaid.update(
-            status="PAID",
-            amount_paid=F("total_amount"),
-            balance=Decimal("0.00"),
-            paid_at=paid_at,
-            internal_notes=F("internal_notes"),
-            updated_at=timezone.now(),
+        unpaid = (
+            Invoice.objects.filter(invoice_number__startswith="NET-BILL")
+            .exclude(status__iexact="PAID")
+            .exclude(status__in=["VOIDED", "WRITTEN_OFF", "CANCELLED"])
+            .order_by("created_at", "id")
         )
 
-        if updated:
-            invoice = Invoice.objects.filter(invoice_number__startswith="NET-BILL", status="PAID").order_by("-updated_at").first()
-        else:
-            invoice = Invoice.objects.filter(invoice_number__startswith="NET-BILL", status__iexact="PAID").order_by("-updated_at").first()
+        amount_remaining = money(payment.amount)
+        for candidate in unpaid:
+            candidate_balance = money(candidate.balance if candidate.balance is not None else candidate.total_amount)
+            if candidate_balance <= 0:
+                continue
+
+            applied = min(amount_remaining, candidate_balance)
+            candidate.amount_paid = money((candidate.amount_paid or Decimal("0.00")) + applied)
+            candidate.balance = money(max(candidate_balance - applied, Decimal("0.00")))
+            if candidate.balance <= 0:
+                candidate.status = "PAID"
+                candidate.paid_at = paid_at
+            else:
+                candidate.status = "PARTIAL"
+            candidate.save(update_fields=["amount_paid", "balance", "status", "paid_at", "updated_at"])
+            invoice = candidate
+            amount_remaining = money(amount_remaining - applied)
+            if amount_remaining <= 0:
+                break
 
         if not invoice:
             plan_name = subscription.plan.name if subscription.plan else "Netily Platform"
@@ -113,16 +121,26 @@ def sync_subscription_invoice_payment(payment, *, notify=True):
                 total=money(payment.amount),
             )
 
-        note = f"Subscription payment received. Receipt: {receipt_number}"
+        note = (
+            f"Subscription payment received. Receipt: {receipt_number}. "
+            f"Amount: KES {money(payment.amount)}. Balance: KES {money(invoice.balance)}"
+        )
         existing_notes = invoice.internal_notes or ""
         if receipt_number not in existing_notes:
             invoice.internal_notes = f"{existing_notes}\n{note}".strip()
             invoice.save(update_fields=["internal_notes", "updated_at"])
 
         if notify:
-            notify_subscription_payment_received(tenant, payment, invoice)
+            if money(invoice.balance) <= 0:
+                notify_subscription_payment_received(tenant, payment, invoice)
+            else:
+                notify_subscription_partial_payment_received(tenant, payment, invoice)
 
     return invoice
+
+
+def subscription_invoice_is_fully_paid(invoice):
+    return bool(invoice and money(getattr(invoice, "balance", 0)) <= 0 and str(getattr(invoice, "status", "")).upper() == "PAID")
 
 
 def notify_subscription_payment_received(tenant, payment, invoice):
@@ -167,6 +185,56 @@ def notify_subscription_payment_received(tenant, payment, invoice):
                     "payment_id": str(payment.id),
                     "invoice_id": invoice.id,
                     "receipt_number": receipt_number,
+                },
+            )
+            notification_manager.send_notification(notification)
+
+
+def notify_subscription_partial_payment_received(tenant, payment, invoice):
+    """Send receipt feedback without claiming the subscription is active."""
+    subject = f"Partial payment received - {invoice.invoice_number}"
+    receipt_number = subscription_receipt_number(payment)
+    amount = money(payment.amount)
+    balance = money(invoice.balance)
+    paid_at = payment.completed_at or timezone.now()
+    message = (
+        f"Your Netily subscription payment of KES {amount:,.2f} has been received.\n\n"
+        f"Invoice: {invoice.invoice_number}\n"
+        f"Receipt: {receipt_number}\n"
+        f"Paid at: {paid_at.strftime('%Y-%m-%d %H:%M')}\n"
+        f"Remaining balance: KES {balance:,.2f}\n\n"
+        "Your account will reactivate once the remaining invoice balance is settled."
+    )
+
+    with schema_context(tenant.schema_name):
+        from apps.core.models import User
+        from apps.notifications.models import Notification
+        from apps.notifications.services.notification_manager import NotificationManager
+
+        admins = list(User.objects.filter(is_active=True, role__in=["admin", "super_admin", "superadmin", "owner", "accountant", "support"]))
+        notification_manager = NotificationManager()
+
+        for admin in admins:
+            if admin.email:
+                send_transactional_email(
+                    subject=subject,
+                    recipient=admin.email,
+                    plain_message=message,
+                    html_message=message.replace("\n", "<br>"),
+                )
+
+            notification = Notification.objects.create(
+                user=admin,
+                notification_type="in_app",
+                subject=subject,
+                message=message,
+                priority=4,
+                metadata={
+                    "source": "subscription_partial_payment_receipt",
+                    "payment_id": str(payment.id),
+                    "invoice_id": invoice.id,
+                    "receipt_number": receipt_number,
+                    "remaining_balance": str(balance),
                 },
             )
             notification_manager.send_notification(notification)

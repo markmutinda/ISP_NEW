@@ -3629,21 +3629,34 @@ class SubscriptionStkCallbackView(APIView):
                     sub = payment.subscription
                     # Convert trial → paid if the subscription was in any trial/pending state.
                     # Handles: trialing, expired (missed the window), pending (first-ever payment)
-                    if sub.is_trial or sub.status in ('trialing', 'expired', 'pending'):
-                        sub.convert_from_trial(billing_period=sub.billing_period or 'monthly')
-                    else:
-                        sub.extend_subscription()
+                    # Subscription activation is deferred until the linked invoice is fully settled.
 
                 try:
-                    from apps.subscriptions.billing_lifecycle import sync_subscription_invoice_payment
+                    from apps.subscriptions.billing_lifecycle import sync_subscription_invoice_payment, subscription_invoice_is_fully_paid
 
                     invoice = sync_subscription_invoice_payment(payment, notify=True)
-                    if invoice:
+                    invoice_fully_paid = subscription_invoice_is_fully_paid(invoice)
+                    if invoice_fully_paid:
+                        with transaction.atomic():
+                            payment = SubscriptionPayment.objects.select_for_update().get(id=payment.id)
+                            sub = payment.subscription
+                            if sub.is_trial or sub.status in ('trialing', 'expired', 'pending'):
+                                sub.convert_from_trial(billing_period=sub.billing_period or 'monthly')
+                            else:
+                                sub.extend_subscription()
                         logger.info(
-                            "Subscription invoice %s marked paid for %s (receipt: %s)",
+                            "Subscription invoice %s settled and subscription activated for %s (receipt: %s)",
                             invoice.invoice_number,
                             sub.company.name,
                             receipt,
+                        )
+                    elif invoice:
+                        logger.warning(
+                            "Subscription payment %s received for %s but invoice %s still has balance %s; not activating.",
+                            payment.id,
+                            sub.company.name,
+                            invoice.invoice_number,
+                            invoice.balance,
                         )
                 except Exception as sync_err:
                     logger.warning("Failed to sync subscription invoice for %s: %s", sub.company_id, sync_err)
@@ -3655,7 +3668,7 @@ class SubscriptionStkCallbackView(APIView):
                     tenant = getattr(company, 'tenant', None)
                     if not tenant and hasattr(company, 'tenant_set'):
                         tenant = company.tenant_set.first()
-                    if tenant:
+                    if False and tenant:
                         with schema_context(tenant.schema_name):
                             from apps.billing.models import Invoice, InvoiceItem
                             from django.contrib.auth import get_user_model
