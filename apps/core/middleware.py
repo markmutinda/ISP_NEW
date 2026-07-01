@@ -10,6 +10,7 @@ from django.db import connection
 from django.conf import settings
 from django.http import HttpResponseForbidden, HttpResponse, JsonResponse
 from django.core.exceptions import PermissionDenied
+from django.utils import timezone
 
 from .models import AuditLog, Tenant, Domain, Company
 
@@ -323,6 +324,7 @@ class SubscriptionEnforcementMiddleware(MiddlewareMixin):
         ALLOWED_PATHS = [
             '/api/v1/subscriptions/current/',  # View their locked status
             '/api/v1/subscriptions/usage/',    # Load billing-cycle usage breakdown for the payment wall
+            '/api/v1/subscriptions/billing-cycles/breakdowns/', # Load previous Netily billing cycles while locked
             '/api/v1/subscriptions/pay/',      # Initiate M-Pesa payment
             '/api/v1/subscriptions/payments/', # Poll payment status
             '/api/v1/subscriptions/plans/',    # View available plans (to select & pay)
@@ -372,18 +374,97 @@ class SubscriptionEnforcementMiddleware(MiddlewareMixin):
                     lock_reason = None
                     
                     if sub.status == 'past_due':
-                        is_locked = True
-                        lock_reason = 'Your subscription payment is past due. Please settle your invoice to restore access.'
+                        has_outstanding_net_bill = True
+                        try:
+                            with schema_context(tenant.schema_name):
+                                from apps.billing.models import Invoice
+
+                                has_outstanding_net_bill = (
+                                    Invoice.objects.filter(invoice_number__startswith='NET-BILL')
+                                    .exclude(status__in=['PAID', 'VOIDED', 'CANCELLED', 'WRITTEN_OFF'])
+                                    .filter(balance__gt=0)
+                                    .exists()
+                                )
+                        except Exception as exc:
+                            logger.warning(
+                                "Could not verify outstanding NET-BILL invoices for %s: %s",
+                                request.company.name,
+                                exc,
+                            )
+                        if not has_outstanding_net_bill and sub.current_period_end and sub.current_period_end > timezone.now():
+                            sub.status = 'active'
+                            if sub.is_trial:
+                                sub.is_trial = False
+                                sub.converted_from_trial_at = sub.converted_from_trial_at or timezone.now()
+                                sub.save(update_fields=['status', 'is_trial', 'converted_from_trial_at'])
+                            else:
+                                sub.save(update_fields=['status'])
+                        else:
+                            is_locked = True
+                            lock_reason = 'Your subscription payment is past due. Please settle your invoice to restore access.'
                     elif sub.status == 'active':
                         # ── Fallback: catch overdue billing cycles the beat task missed ──
                         from django.utils import timezone as tz
-                        overdue_cycle = BillingCycle.objects.filter(
+                        overdue_cycles = BillingCycle.objects.filter(
                             tenant=tenant,
                             subscription=sub,
                             status='invoiced',
                             grace_ends_at__lt=tz.now(),
-                        ).exists()
-                        if overdue_cycle:
+                        )
+                        has_unpaid_overdue_cycle = False
+                        for cycle in overdue_cycles:
+                            invoice_is_settled = False
+                            if cycle.invoice_reference:
+                                try:
+                                    with schema_context(tenant.schema_name):
+                                        from apps.billing.models import Invoice
+
+                                        invoice = Invoice.objects.filter(pk=cycle.invoice_reference).first()
+                                        if invoice:
+                                            invoice_status = str(invoice.status or '').upper()
+                                            balance = invoice.balance if invoice.balance is not None else invoice.total_amount
+                                            invoice_is_settled = invoice_status == 'PAID' and balance <= 0
+                                except Exception as exc:
+                                    logger.warning(
+                                        "Could not verify overdue subscription invoice %s for %s: %s",
+                                        cycle.invoice_reference,
+                                        request.company.name,
+                                        exc,
+                                    )
+                            else:
+                                try:
+                                    with schema_context(tenant.schema_name):
+                                        from apps.billing.models import Invoice
+
+                                        invoice = (
+                                            Invoice.objects.filter(
+                                                invoice_number__startswith='NET-BILL',
+                                                service_period_start=cycle.start_date.date(),
+                                                service_period_end=cycle.end_date.date(),
+                                            )
+                                            .exclude(status__in=['VOIDED', 'CANCELLED', 'WRITTEN_OFF'])
+                                            .order_by('-created_at', '-id')
+                                            .first()
+                                        )
+                                        if invoice:
+                                            invoice_status = str(invoice.status or '').upper()
+                                            balance = invoice.balance if invoice.balance is not None else invoice.total_amount
+                                            invoice_is_settled = invoice_status == 'PAID' and balance <= 0
+                                            if invoice_is_settled:
+                                                BillingCycle.objects.filter(pk=cycle.pk).update(invoice_reference=str(invoice.id))
+                                except Exception as exc:
+                                    logger.warning(
+                                        "Could not resolve overdue subscription invoice for cycle %s (%s): %s",
+                                        cycle.id,
+                                        request.company.name,
+                                        exc,
+                                    )
+                            if invoice_is_settled:
+                                BillingCycle.objects.filter(pk=cycle.pk).update(status='paid')
+                                continue
+                            has_unpaid_overdue_cycle = True
+                            break
+                        if has_unpaid_overdue_cycle:
                             sub.status = 'past_due'
                             sub.save(update_fields=['status'])
                             is_locked = True

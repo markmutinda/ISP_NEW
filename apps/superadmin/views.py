@@ -3630,12 +3630,49 @@ class SubscriptionInvoiceReconcileView(APIView):
         subscription = cycle.subscription
         if subscription_status:
             subscription.status = subscription_status
-            subscription.save(update_fields=["status", "updated_at"])
+            update_fields = ["status", "updated_at"]
+            if subscription_status == "active":
+                now = timezone.now()
+                if subscription.is_trial:
+                    subscription.is_trial = False
+                    subscription.converted_from_trial_at = subscription.converted_from_trial_at or now
+                    update_fields.extend(["is_trial", "converted_from_trial_at"])
+                if not subscription.current_period_end or subscription.current_period_end <= now:
+                    subscription.current_period_start = now
+                    subscription.current_period_end = now + timedelta(days=365 if subscription.billing_period == "yearly" else 30)
+                    update_fields.extend(["current_period_start", "current_period_end"])
+            subscription.save(update_fields=list(dict.fromkeys(update_fields)))
         elif sync_tenant_access:
             current_balance = _decimal_money(getattr(tenant_invoice, "balance", 0))
             current_invoice_status = str(getattr(tenant_invoice, "status", "")).upper()
             subscription.status = "active" if current_invoice_status == "PAID" and current_balance <= 0 else "past_due"
-            subscription.save(update_fields=["status", "updated_at"])
+            update_fields = ["status", "updated_at"]
+            if subscription.status == "active":
+                now = timezone.now()
+                if subscription.is_trial:
+                    subscription.is_trial = False
+                    subscription.converted_from_trial_at = subscription.converted_from_trial_at or now
+                    update_fields.extend(["is_trial", "converted_from_trial_at"])
+                if not subscription.current_period_end or subscription.current_period_end <= now:
+                    subscription.current_period_start = now
+                    subscription.current_period_end = now + timedelta(days=365 if subscription.billing_period == "yearly" else 30)
+                    update_fields.extend(["current_period_start", "current_period_end"])
+            subscription.save(update_fields=list(dict.fromkeys(update_fields)))
+
+        if (
+            str(getattr(tenant_invoice, "status", "")).upper() == "PAID"
+            and _decimal_money(getattr(tenant_invoice, "balance", 0)) <= 0
+        ):
+            matching_cycles = BillingCycle.objects.filter(
+                tenant=cycle.tenant,
+                subscription=subscription,
+                start_date__date=cycle.start_date.date(),
+                end_date__date=cycle.end_date.date(),
+                status="invoiced",
+            )
+            matching_cycles.update(status="paid")
+            if cycle.status == "invoiced":
+                cycle.status = "paid"
 
         _log_action(
             request.user,
