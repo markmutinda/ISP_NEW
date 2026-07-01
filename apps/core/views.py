@@ -2139,19 +2139,27 @@ class UnifiedDashboardView(APIView):
                 try:
                     from apps.billing.models.payment_models import Payment
                     days_to_monday = now.weekday()
-                    week_start_dt = today_start - timedelta(days=days_to_monday)
-                    payments = Payment.objects.filter(
-                        status__iexact='completed',
-                        payment_date__gte=week_start_dt,
-                        payment_date__lt=now,
-                    )
-                    weekday_map = {i: 0 for i in range(7)}
-                    for p in payments:
-                        weekday_map[p.payment_date.weekday()] += float(p.amount or 0)
-                    labels = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']
-                    return [{'day': labels[i], 'amount': round(weekday_map[i], 2)} for i in range(7)]
+                    this_week_start = today_start - timedelta(days=days_to_monday)
+                    last_week_start = this_week_start - timedelta(days=7)
+
+                    def week_buckets(start_dt, end_dt):
+                        payments = Payment.objects.filter(
+                            status__iexact='completed',
+                            payment_date__gte=start_dt,
+                            payment_date__lt=end_dt,
+                        )
+                        weekday_map = {i: 0 for i in range(7)}
+                        for p in payments:
+                            weekday_map[p.payment_date.weekday()] += float(p.amount or 0)
+                        labels = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']
+                        return [{'day': labels[i], 'amount': round(weekday_map[i], 2)} for i in range(7)]
+
+                    return {
+                        'this_week': week_buckets(this_week_start, now),
+                        'last_week': week_buckets(last_week_start, this_week_start),
+                    }
                 except Exception:
-                    return []
+                    return {'this_week': [], 'last_week': []}
 
         def get_monthly_earnings():
             with schema_context(tenant_schema):
@@ -2161,17 +2169,24 @@ class UnifiedDashboardView(APIView):
                     current_year = now.year
                     current_month = now.month
                     labels = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec']
-                    result = []
-                    for month in range(1, current_month + 1):
-                        ms = datetime(current_year, month, 1, tzinfo=timezone.get_current_timezone())
-                        me = datetime(current_year, month + 1, 1, tzinfo=timezone.get_current_timezone()) if month < 12 else datetime(current_year + 1, 1, 1, tzinfo=timezone.get_current_timezone())
-                        total = float(Payment.objects.filter(
-                            status__iexact='completed', payment_date__gte=ms, payment_date__lt=me
-                        ).aggregate(v=Sum('amount'))['v'] or 0)
-                        result.append({'month': labels[month - 1], 'amount': round(total, 2)})
-                    return result
+
+                    def year_buckets(year, max_month):
+                        result = []
+                        for month in range(1, max_month + 1):
+                            ms = datetime(year, month, 1, tzinfo=timezone.get_current_timezone())
+                            me = datetime(year, month + 1, 1, tzinfo=timezone.get_current_timezone()) if month < 12 else datetime(year + 1, 1, 1, tzinfo=timezone.get_current_timezone())
+                            total = float(Payment.objects.filter(
+                                status__iexact='completed', payment_date__gte=ms, payment_date__lt=me
+                            ).aggregate(v=Sum('amount'))['v'] or 0)
+                            result.append({'month': labels[month - 1], 'amount': round(total, 2)})
+                        return result
+
+                    return {
+                        'this_year': year_buckets(current_year, current_month),
+                        'last_year': year_buckets(current_year - 1, 12),
+                    }
                 except Exception:
-                    return []
+                    return {'this_year': [], 'last_year': []}
 
         # Run all queries in parallel using threads
         with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
@@ -2203,6 +2218,8 @@ class UnifiedDashboardView(APIView):
 
         r = results['routers']
         subs = results['subscriptions']
+        income = results['weekly_income']
+        earnings = results['monthly_earnings']
 
         return Response({
             'total_customers': results['customers'].get('total', 0),
@@ -2241,9 +2258,9 @@ class UnifiedDashboardView(APIView):
                 'month_revenue': month_rev,
                 'month_change': pct_change(month_rev, prev_month_rev),
                 'total_transactions_today': int(rev.get('today_tx') or 0),
-                'weekly_income': results['weekly_income'],
-                'last_week_income': [],
-                'monthly_earnings': results['monthly_earnings'],
-                'last_year_earnings': [],
+                'weekly_income': income.get('this_week', []),
+                'last_week_income': income.get('last_week', []),
+                'monthly_earnings': earnings.get('this_year', []),
+                'last_year_earnings': earnings.get('last_year', []),
             },
         })
