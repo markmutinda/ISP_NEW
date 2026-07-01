@@ -2039,7 +2039,7 @@ class UnifiedDashboardView(APIView):
             with schema_context(tenant_schema):
                 try:
                     from apps.billing.models.payment_models import Payment
-                    pay = Payment.objects.filter(status='completed').aggregate(
+                    pay = Payment.objects.filter(status__iexact='completed').aggregate(
                         today=Sum('amount', filter=Q(payment_date__gte=today_start)),
                         yesterday=Sum('amount', filter=Q(payment_date__gte=yesterday_start, payment_date__lt=today_start)),
                         week=Sum('amount', filter=Q(payment_date__gte=week_start)),
@@ -2075,9 +2075,9 @@ class UnifiedDashboardView(APIView):
                     from apps.support.models import Ticket
                     return Ticket.objects.aggregate(
                         total=Count('id'),
-                        open=Count('id', filter=Q(status='open')),
-                        in_progress=Count('id', filter=Q(status='in_progress')),
-                        resolved=Count('id', filter=Q(status='resolved')),
+                        open=Count('id', filter=Q(status__iexact='open')),
+                        in_progress=Count('id', filter=Q(status__iexact='in_progress')),
+                        resolved=Count('id', filter=Q(status__iexact='resolved')),
                     )
                 except Exception:
                     return {'total': 0, 'open': 0, 'in_progress': 0, 'resolved': 0}
