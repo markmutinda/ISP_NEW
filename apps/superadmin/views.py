@@ -9,7 +9,7 @@ import csv
 import io
 import json
 import logging
-from datetime import timedelta
+from datetime import datetime, time, timedelta
 from decimal import Decimal
 
 import requests as _requests  # For external API calls
@@ -21,6 +21,7 @@ from django.db import connection, transaction
 from django.db.models import Sum, Count, Q, F
 from django.http import HttpResponse
 from django.utils import timezone
+from django.utils.dateparse import parse_date, parse_datetime
 from django.utils.text import slugify
 from rest_framework import status
 from rest_framework.generics import ListAPIView, RetrieveUpdateDestroyAPIView
@@ -2797,6 +2798,29 @@ def _decimal_money(value):
     return Decimal(str(value or "0")).quantize(Decimal("0.01"))
 
 
+def _parse_admin_date(value, field_name):
+    if value in (None, ""):
+        return None
+    parsed = parse_date(str(value))
+    if not parsed:
+        raise ValueError(f"{field_name} must be a valid date in YYYY-MM-DD format.")
+    return parsed
+
+
+def _parse_admin_datetime(value, field_name, *, end_of_day=False):
+    if value in (None, ""):
+        return None
+    raw = str(value)
+    parsed_dt = parse_datetime(raw)
+    if parsed_dt:
+        return timezone.make_aware(parsed_dt) if timezone.is_naive(parsed_dt) else parsed_dt
+    parsed_date = parse_date(raw)
+    if parsed_date:
+        clock = time.max if end_of_day else time.min
+        return timezone.make_aware(datetime.combine(parsed_date, clock))
+    raise ValueError(f"{field_name} must be a valid date or datetime.")
+
+
 def _subscription_invoice_admins(tenant):
     with schema_context(tenant.schema_name):
         admin_roles = ["admin", "super_admin", "superadmin", "accountant", "support"]
@@ -2900,7 +2924,10 @@ def _find_existing_subscription_invoice(cycle):
 
 
 def _sync_subscription_invoice_usage_items(cycle, invoice):
-    if not invoice or str(invoice.status).upper() == "PAID":
+    if not invoice:
+        return invoice
+    stable_statuses = {"PAID", "PARTIAL", "OVERDUE", "VOIDED", "CANCELLED", "WRITTEN_OFF"}
+    if str(invoice.status).upper() in stable_statuses or _decimal_money(getattr(invoice, "amount_paid", 0)) > 0:
         return invoice
 
     actual_hotspot_revenue = _decimal_money(cycle.refresh_actual_hotspot_revenue())
@@ -3211,7 +3238,8 @@ class SubscriptionInvoiceListView(APIView):
             "subscription__plan",
         ).order_by("-start_date")
 
-        if status_filter and status_filter != "all":
+        derived_status_filters = {"partial", "overdue", "outstanding", "past_due"}
+        if status_filter and status_filter != "all" and status_filter not in derived_status_filters:
             qs = qs.filter(status=status_filter)
         if tenant_id:
             qs = qs.filter(tenant_id=tenant_id)
@@ -3458,6 +3486,181 @@ class SubscriptionInvoiceHoldView(APIView):
                 "balance": str(_decimal_money(invoice.total_amount) - amount_paid),
                 "subscription_status": subscription.status,
                 "reason": reason,
+            },
+            request=request,
+        )
+
+        cycle.refresh_from_db()
+        return Response(_subscription_invoice_payload(cycle, include_recipients=True))
+
+
+class SubscriptionInvoiceReconcileView(APIView):
+    permission_classes = SUPERADMIN_PERMS
+
+    INVOICE_STATUSES = {"DRAFT", "ISSUED", "SENT", "PARTIAL", "PAID", "OVERDUE", "VOIDED", "WRITTEN_OFF"}
+    CYCLE_STATUSES = {"active", "invoiced", "paid"}
+    SUBSCRIPTION_STATUSES = {"active", "past_due", "cancelled", "expired", "trialing"}
+
+    def post(self, request, pk):
+        _ensure_public()
+        from apps.subscriptions.models import BillingCycle
+
+        reason = (request.data.get("reason") or "").strip()
+        if not reason:
+            return Response({"detail": "reason is required for manual reconciliation."}, status=status.HTTP_400_BAD_REQUEST)
+
+        cycle = get_object_or_404(
+            BillingCycle.objects.select_related("tenant", "tenant__company", "subscription", "subscription__plan"),
+            pk=pk,
+        )
+        invoice = _get_or_create_subscription_invoice(cycle, create=True)
+
+        invoice_status = (request.data.get("invoice_status") or "").strip().upper()
+        cycle_status = (request.data.get("cycle_status") or "").strip().lower()
+        subscription_status = (request.data.get("subscription_status") or "").strip().lower()
+        sync_raw = request.data.get("sync_tenant_access", False)
+        sync_tenant_access = sync_raw if isinstance(sync_raw, bool) else str(sync_raw).lower() in {"1", "true", "yes", "on"}
+
+        if invoice_status and invoice_status not in self.INVOICE_STATUSES:
+            return Response({"detail": f"invoice_status must be one of {sorted(self.INVOICE_STATUSES)}."}, status=status.HTTP_400_BAD_REQUEST)
+        if cycle_status and cycle_status not in self.CYCLE_STATUSES:
+            return Response({"detail": f"cycle_status must be one of {sorted(self.CYCLE_STATUSES)}."}, status=status.HTTP_400_BAD_REQUEST)
+        if subscription_status and subscription_status not in self.SUBSCRIPTION_STATUSES:
+            return Response({"detail": f"subscription_status must be one of {sorted(self.SUBSCRIPTION_STATUSES)}."}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            billing_date = _parse_admin_date(request.data.get("billing_date"), "billing_date")
+            due_date = _parse_admin_date(request.data.get("due_date"), "due_date")
+            start_date = _parse_admin_datetime(request.data.get("start_date"), "start_date")
+            end_date = _parse_admin_datetime(request.data.get("end_date"), "end_date", end_of_day=True)
+        except ValueError as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+
+        amount_paid_supplied = "amount_paid" in request.data and request.data.get("amount_paid") not in (None, "")
+        balance_supplied = "balance" in request.data and request.data.get("balance") not in (None, "")
+        amount_paid = _decimal_money(request.data.get("amount_paid")) if amount_paid_supplied else None
+        balance = _decimal_money(request.data.get("balance")) if balance_supplied else None
+        if amount_paid is not None and amount_paid < 0:
+            return Response({"detail": "amount_paid cannot be negative."}, status=status.HTTP_400_BAD_REQUEST)
+        if balance is not None and balance < 0:
+            return Response({"detail": "balance cannot be negative."}, status=status.HTTP_400_BAD_REQUEST)
+
+        with schema_context(cycle.tenant.schema_name):
+            from apps.billing.models import Invoice
+
+            tenant_invoice = Invoice.objects.get(pk=invoice.pk)
+            total_amount = _decimal_money(tenant_invoice.total_amount)
+            before_invoice = {
+                "status": tenant_invoice.status,
+                "amount_paid": str(_decimal_money(tenant_invoice.amount_paid)),
+                "balance": str(_decimal_money(tenant_invoice.balance)),
+                "billing_date": tenant_invoice.billing_date.isoformat() if tenant_invoice.billing_date else None,
+                "due_date": tenant_invoice.due_date.isoformat() if tenant_invoice.due_date else None,
+            }
+
+            if amount_paid is None and balance is not None:
+                amount_paid = _decimal_money(total_amount - balance)
+            if amount_paid is not None:
+                if amount_paid > total_amount:
+                    return Response({"detail": "amount_paid cannot exceed invoice total."}, status=status.HTTP_400_BAD_REQUEST)
+                tenant_invoice.amount_paid = amount_paid
+                tenant_invoice.balance = _decimal_money(total_amount - amount_paid)
+            elif balance is not None:
+                if balance > total_amount:
+                    return Response({"detail": "balance cannot exceed invoice total."}, status=status.HTTP_400_BAD_REQUEST)
+                tenant_invoice.balance = balance
+                tenant_invoice.amount_paid = _decimal_money(total_amount - balance)
+
+            if billing_date:
+                tenant_invoice.billing_date = billing_date
+            if due_date:
+                tenant_invoice.due_date = due_date
+
+            if invoice_status:
+                tenant_invoice.status = invoice_status
+                if invoice_status == "PAID":
+                    tenant_invoice.amount_paid = total_amount
+                    tenant_invoice.balance = Decimal("0.00")
+                    tenant_invoice.paid_at = timezone.now()
+                elif invoice_status in {"PARTIAL", "OVERDUE"}:
+                    if _decimal_money(tenant_invoice.balance) <= 0:
+                        tenant_invoice.balance = _decimal_money(total_amount - _decimal_money(tenant_invoice.amount_paid))
+                    tenant_invoice.paid_at = None
+                elif invoice_status in {"ISSUED", "SENT", "DRAFT"} and not amount_paid_supplied and not balance_supplied:
+                    tenant_invoice.paid_at = None
+
+            note = (
+                f"Manual subscription invoice reconciliation by {getattr(request.user, 'email', request.user)}. "
+                f"Reason: {reason}"
+            )
+            tenant_invoice.internal_notes = f"{tenant_invoice.internal_notes or ''}\n{note}".strip()
+            tenant_invoice.save()
+            if invoice_status:
+                overdue_days = 0
+                is_overdue = invoice_status == "OVERDUE"
+                if is_overdue and tenant_invoice.due_date:
+                    overdue_days = max((timezone.now().date() - tenant_invoice.due_date).days, 0)
+                Invoice.objects.filter(pk=tenant_invoice.pk).update(
+                    status=invoice_status,
+                    is_overdue=is_overdue,
+                    overdue_days=overdue_days,
+                )
+                tenant_invoice.status = invoice_status
+                tenant_invoice.is_overdue = is_overdue
+                tenant_invoice.overdue_days = overdue_days
+
+        before_cycle = {
+            "status": cycle.status,
+            "start_date": cycle.start_date.isoformat() if cycle.start_date else None,
+            "end_date": cycle.end_date.isoformat() if cycle.end_date else None,
+            "subscription_status": cycle.subscription.status,
+        }
+        cycle_updates = {}
+        if cycle_status:
+            cycle_updates["status"] = cycle_status
+        if start_date:
+            cycle_updates["start_date"] = start_date
+        if end_date:
+            cycle_updates["end_date"] = end_date
+        if cycle_updates:
+            BillingCycle.objects.filter(pk=cycle.pk).update(**cycle_updates)
+            for field, value in cycle_updates.items():
+                setattr(cycle, field, value)
+
+        subscription = cycle.subscription
+        if subscription_status:
+            subscription.status = subscription_status
+            subscription.save(update_fields=["status", "updated_at"])
+        elif sync_tenant_access:
+            current_balance = _decimal_money(getattr(tenant_invoice, "balance", 0))
+            current_invoice_status = str(getattr(tenant_invoice, "status", "")).upper()
+            subscription.status = "active" if current_invoice_status == "PAID" and current_balance <= 0 else "past_due"
+            subscription.save(update_fields=["status", "updated_at"])
+
+        _log_action(
+            request.user,
+            "update",
+            "SubscriptionInvoice",
+            object_repr=f"{cycle.tenant.subdomain} invoice reconciliation",
+            object_id=cycle.id,
+            changes={
+                "reason": reason,
+                "sync_tenant_access": sync_tenant_access,
+                "before_invoice": before_invoice,
+                "after_invoice": {
+                    "status": getattr(tenant_invoice, "status", None),
+                    "amount_paid": str(_decimal_money(getattr(tenant_invoice, "amount_paid", 0))),
+                    "balance": str(_decimal_money(getattr(tenant_invoice, "balance", 0))),
+                    "billing_date": tenant_invoice.billing_date.isoformat() if tenant_invoice.billing_date else None,
+                    "due_date": tenant_invoice.due_date.isoformat() if tenant_invoice.due_date else None,
+                },
+                "before_cycle": before_cycle,
+                "after_cycle": {
+                    "status": cycle_updates.get("status", cycle.status),
+                    "start_date": cycle_updates.get("start_date", cycle.start_date).isoformat() if (cycle_updates.get("start_date", cycle.start_date)) else None,
+                    "end_date": cycle_updates.get("end_date", cycle.end_date).isoformat() if (cycle_updates.get("end_date", cycle.end_date)) else None,
+                    "subscription_status": subscription.status,
+                },
             },
             request=request,
         )
