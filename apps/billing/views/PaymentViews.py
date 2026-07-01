@@ -70,12 +70,81 @@ class MpesaConfigurationViewSet(viewsets.ModelViewSet):
             return MpesaConfigurationDetailSerializer
         return MpesaConfigurationSerializer
 
+    # ============================================================
+    # FIX: Auto-activate payment method on create
+    # ============================================================
     def perform_create(self, serializer):
-        """Create a new M-Pesa configuration for the current tenant"""
-        serializer.save(
+        """
+        Create a new M-Pesa configuration for the current tenant.
+        If the config is created active, auto-link/activate the payment method
+        so hotspot/PPPoE checkout picks this gateway up immediately.
+        """
+        config = serializer.save(
             created_by=self.request.user,
             schema_name=connection.schema_name  # Always use active connection
         )
+        
+        # NEW: auto-link/activate the payment method so hotspot/PPPoE checkout
+        # picks this gateway up immediately — no manual "Activate as Primary" needed.
+        if config.is_active:
+            self._sync_payment_method_for_config(config)
+
+    # ============================================================
+    # NEW: Shared helper method for payment method sync
+    # ============================================================
+    def _sync_payment_method_for_config(self, config):
+        """
+        Ensure an InvoiceItemPayment exists, is linked to this Daraja config,
+        and is the sole active/default method for the tenant.
+        Mirrors the logic in activate_as_primary() but is safe to call on create.
+        """
+        from ..models.payment_models import InvoiceItemPayment, TenantTumaConfig
+
+        schema = connection.schema_name
+        method_type = 'MPESA_STK' if config.shortcode_type == 'PAYBILL' else 'MPESA_TILL'
+
+        # Reuse a method already linked to this config, if any
+        method = InvoiceItemPayment.objects.filter(
+            schema_name=schema, mpesa_configuration=config
+        ).first()
+
+        # Otherwise, reuse an existing M-Pesa-type method not tied to another gateway
+        if not method:
+            method = InvoiceItemPayment.objects.filter(
+                schema_name=schema,
+                method_type__in=['MPESA_STK', 'MPESA_TILL', 'MPESA_PAYBILL'],
+                mpesa_configuration__isnull=True,
+            ).first()
+
+        # Otherwise create a fresh one
+        if not method:
+            method = InvoiceItemPayment.objects.create(
+                schema_name=schema,
+                mpesa_configuration=config,
+                name=f'M-Pesa {config.shortcode_type} (Daraja)',
+                code=f'DRJ_{config.business_shortcode}',
+                method_type=method_type,
+                is_active=True,
+                is_default=True,
+            )
+
+        # Only one active method per tenant
+        InvoiceItemPayment.objects.filter(
+            schema_name=schema
+        ).exclude(pk=method.pk).update(is_active=False, is_default=False)
+
+        method.mpesa_configuration = config
+        method.tuma_configuration = None
+        method.is_active = True
+        method.is_default = True
+        method.save(update_fields=[
+            'mpesa_configuration', 'tuma_configuration',
+            'is_active', 'is_default', 'updated_at',
+        ])
+
+        TenantTumaConfig.objects.filter(schema_name=schema).update(is_active=False)
+
+        return method
 
     @action(detail=True, methods=['post'])
     def test_connection(self, request, pk=None):
@@ -341,38 +410,8 @@ class MpesaConfigurationViewSet(viewsets.ModelViewSet):
             schema_name=connection.schema_name
         ).update(is_active=False)
 
-        # 3. Find or create a Daraja-linked InvoiceItemPayment
-        method_type = 'MPESA_STK' if config.shortcode_type == 'PAYBILL' else 'MPESA_TILL'
-        
-        # Deactivate all existing methods first
-        InvoiceItemPayment.objects.filter(
-            schema_name=connection.schema_name
-        ).update(is_active=False)
-
-        # Get or create the Daraja method
-        method, _ = InvoiceItemPayment.objects.get_or_create(
-            schema_name=connection.schema_name,
-            mpesa_configuration=config,
-            defaults={
-                'name': f'M-Pesa {config.shortcode_type} (Daraja)',
-                'code': f'DRJ_{config.business_shortcode}',
-                'method_type': method_type,
-                'is_active': True,
-                'is_default': True,
-            }
-        )
-        
-        # ============================================================
-        # FIX: Clear the Tuma FK so the branch check is unambiguous
-        # ============================================================
-        method.mpesa_configuration = config
-        method.tuma_configuration = None   # ← clear the Tuma FK
-        method.is_active = True
-        method.is_default = True
-        method.save(update_fields=[
-            'mpesa_configuration', 'tuma_configuration',
-            'is_active', 'is_default', 'updated_at',
-        ])
+        # 3. Use the shared helper to sync payment method
+        method = self._sync_payment_method_for_config(config)
 
         # Check if other configs still have registered URLs (they'll still receive C2B)
         other_registered = MpesaConfiguration.objects.filter(
