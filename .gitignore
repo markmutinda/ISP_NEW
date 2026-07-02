@@ -64,7 +64,6 @@ htmlcov/
 local_settings.py
 config/settings/local.py
 
-# Migrations are version controlled — do NOT ignore them
 
 # Jupyter Notebooks
 .ipynb_checkpoints/

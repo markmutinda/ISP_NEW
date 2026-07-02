@@ -3422,6 +3422,59 @@ class SubscriptionInvoiceDetailView(APIView):
         cycle.refresh_from_db()
         return Response(_subscription_invoice_payload(cycle, include_recipients=True))
 
+    def delete(self, request, pk):
+        cycle = self.get_cycle(pk)
+        reason = (request.data.get("reason") if hasattr(request, "data") else None) or "Duplicate/unissued subscription invoice cleanup"
+        invoice = _get_or_create_subscription_invoice(cycle, create=False)
+
+        invoice_snapshot = None
+        if invoice:
+            with schema_context(cycle.tenant.schema_name):
+                from apps.billing.models import Invoice
+
+                tenant_invoice = Invoice.objects.filter(pk=invoice.pk).first()
+                if tenant_invoice:
+                    status_upper = str(tenant_invoice.status or "").upper()
+                    amount_paid = _decimal_money(tenant_invoice.amount_paid)
+                    if status_upper in {"PAID", "PARTIAL"} or amount_paid > 0:
+                        return Response(
+                            {"detail": "Paid or partially paid subscription invoices cannot be deleted. Use reconciliation instead."},
+                            status=status.HTTP_400_BAD_REQUEST,
+                        )
+                    invoice_snapshot = {
+                        "id": tenant_invoice.id,
+                        "invoice_number": tenant_invoice.invoice_number,
+                        "status": tenant_invoice.status,
+                        "total_amount": str(_decimal_money(tenant_invoice.total_amount)),
+                        "balance": str(_decimal_money(tenant_invoice.balance)),
+                    }
+                    tenant_invoice.delete()
+
+        cycle_snapshot = {
+            "id": str(cycle.id),
+            "tenant": cycle.tenant.schema_name,
+            "status": cycle.status,
+            "start_date": cycle.start_date.isoformat() if cycle.start_date else None,
+            "end_date": cycle.end_date.isoformat() if cycle.end_date else None,
+            "invoice_reference": cycle.invoice_reference,
+        }
+        cycle.delete()
+
+        _log_action(
+            request.user,
+            "delete",
+            "SubscriptionInvoice",
+            object_repr=f"{cycle_snapshot['tenant']} duplicate invoice cleanup",
+            object_id=cycle_snapshot["id"],
+            changes={
+                "reason": reason,
+                "cycle": cycle_snapshot,
+                "invoice": invoice_snapshot,
+            },
+            request=request,
+        )
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
 
 class SubscriptionInvoiceHoldView(APIView):
     permission_classes = SUPERADMIN_PERMS
@@ -3673,6 +3726,32 @@ class SubscriptionInvoiceReconcileView(APIView):
             matching_cycles.update(status="paid")
             if cycle.status == "invoiced":
                 cycle.status = "paid"
+
+            period_days = 365 if subscription.billing_period == "yearly" else 30
+            next_start = cycle.end_date
+            next_end = next_start + timedelta(days=period_days)
+            subscription.current_period_start = next_start
+            subscription.current_period_end = next_end
+            subscription.status = "active"
+            subscription.save(update_fields=["current_period_start", "current_period_end", "status", "updated_at"])
+
+            BillingCycle.objects.filter(
+                tenant=cycle.tenant,
+                subscription=subscription,
+                status="active",
+                start_date__lt=cycle.end_date,
+            ).exclude(pk=cycle.pk).update(status="paid")
+
+            BillingCycle.objects.get_or_create(
+                tenant=cycle.tenant,
+                subscription=subscription,
+                status="active",
+                defaults={
+                    "start_date": next_start,
+                    "end_date": next_end,
+                    "is_first_paid_cycle": False,
+                },
+            )
 
         _log_action(
             request.user,
