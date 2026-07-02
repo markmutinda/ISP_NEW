@@ -2072,7 +2072,7 @@ class UnifiedDashboardView(APIView):
         def get_ticket_stats():
             with schema_context(tenant_schema):
                 try:
-                    from apps.support.models import Ticket
+                    from apps.support.models import SupportTicket as Ticket
                     return Ticket.objects.aggregate(
                         total=Count('id'),
                         open=Count('id', filter=Q(status__iexact='open')),
