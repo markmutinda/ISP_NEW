@@ -25,6 +25,7 @@ from .frontend_contract_views import (
     AnalyticsUsageView,
     RouterDailyRevenueView,  # ADD THIS
     AnalyticsNetworkDeepView,  # NEW: Add this import
+    DailyRevenueSplitView,  # ADD THIS - PPPoE vs Hotspot revenue split
 )
 
 app_name = 'analytics'
@@ -69,4 +70,9 @@ urlpatterns = [
     # NEW: Enhanced Network Analytics Endpoint
     # ============================================================
     path('network-deep/', AnalyticsNetworkDeepView.as_view(), name='analytics-network-deep'),
+    
+    # ============================================================
+    # NEW: PPPoE vs Hotspot Daily Revenue Split Endpoint
+    # ============================================================
+    path('revenue-split/', DailyRevenueSplitView.as_view(), name='analytics-revenue-split'),
 ]
