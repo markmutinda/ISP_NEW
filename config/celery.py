@@ -183,6 +183,16 @@ app.conf.beat_schedule = {
     },
 
     # ════════════════════════════════════════════════════════════════
+    # HOTSPOT CLIENT PRUNING — Daily at 3:30 AM
+    # Removes stale hotspot clients based on per-tenant settings
+    # ════════════════════════════════════════════════════════════════
+    'prune-stale-hotspot-clients-daily': {
+        'task': 'apps.billing.tasks.prune_stale_hotspot_clients',
+        'schedule': crontab(hour=3, minute=30),  # Daily at 3:30 AM
+        'options': {'queue': 'billing'}
+    },
+
+    # ════════════════════════════════════════════════════════════════
     # CLOUD CONTROLLER — VPN Tunnel Monitoring
     # ════════════════════════════════════════════════════════════════
     'monitor-vpn-tunnels-every-2-min': {

@@ -14,6 +14,7 @@ Supported providers:
   7. Hubtel
   8. Bytewave
   9. BlessedTexts
+  10. Texin
 """
 import logging
 import requests
@@ -249,6 +250,54 @@ class BlessedTextsBackend:
         raise RuntimeError(f"Balance check failed: {data}")
 
 
+class TexinBackend:
+    """
+    Texin SMS API backend
+    Docs: https://texin.co.ke/api/
+    Auth: api_key in JSON body
+    """
+    BASE_URL = 'https://texin.co.ke/api'
+
+    def __init__(self, api_key: str, sender_id: str = '', **kw):
+        self.api_key = api_key
+        self.sender_id = sender_id or 'Texin'
+
+    def send(self, to: str, message: str) -> Tuple[bool, str, Decimal]:
+        phone = to.lstrip('+')
+        resp = requests.post(
+            f'{self.BASE_URL}/send_sms',
+            json={
+                'api_key': self.api_key,
+                'recipient': phone,
+                'message': message,
+                'sender_id': self.sender_id,
+            },
+            timeout=20,
+        )
+        data = resp.json()
+
+        if data.get('success'):
+            return True, str(data.get('message_id', '')), Decimal(str(data.get('cost', '0')))
+
+        raise RuntimeError(data.get('message', f'HTTP {resp.status_code}'))
+
+    def get_balance(self) -> Dict[str, Any]:
+        resp = requests.post(
+            f'{self.BASE_URL}/get_balance',
+            json={'api_key': self.api_key},
+            timeout=15,
+        )
+        data = resp.json()
+
+        if data.get('success'):
+            return {
+                'balance': float(data.get('sms_balance', 0)),
+                'currency': 'KES',
+                'unit_cost': Decimal(str(data.get('sms_cost_per_unit', '0.29'))),
+            }
+        raise RuntimeError(f"Balance check failed: {data}")
+
+
 class HubtelBackend:
     def __init__(self, api_key: str, api_secret: str, sender_id: str = '', **kw):
         self.client_id = api_key
@@ -341,6 +390,7 @@ BACKENDS = {
     'hubtel': HubtelBackend,
     'bytewave': BytewaveBackend,
     'blessedtexts': BlessedTextsBackend,
+    'texin': TexinBackend,
 }
 
 # Human-readable field labels per provider
@@ -354,6 +404,7 @@ PROVIDER_FIELDS = {
     'hubtel':         {'api_key': 'Client ID', 'api_secret': 'Client Secret', 'sender_id': 'Sender ID'},
     'bytewave':       {'api_key': 'API Token', 'sender_id': 'Sender ID'},
     'blessedtexts':   {'api_key': 'API Key', 'sender_id': 'Sender ID'},
+    'texin':          {'api_key': 'API Key', 'sender_id': 'Sender ID'},
 }
 
 

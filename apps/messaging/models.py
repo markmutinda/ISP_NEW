@@ -183,7 +183,8 @@ class SMSGatewayConfig(models.Model):
         ('advanta', 'Advanta SMS'),
         ('hubtel', 'Hubtel'),
         ('bytewave', 'Bytewave'),
-        ('blessedtexts', 'BlessedTexts'),  # ← ADDED
+        ('blessedtexts', 'BlessedTexts'),
+        ('texin', 'Texin'),  # ← ADDED
     )
 
     provider = models.CharField(max_length=30, choices=PROVIDER_CHOICES)

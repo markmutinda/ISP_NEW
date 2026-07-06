@@ -9,6 +9,7 @@ Periodic tasks for:
 - Sending hotspot expiry warnings
 - Notifying expired hotspot sessions
 - Auto-generating invoices for PPPoE subscribers
+- Pruning stale hotspot clients
 
 NOTE: billing models live in TENANT_APPS, so every query must
 run inside the correct tenant schema.  We iterate over all tenants
@@ -434,4 +435,87 @@ def auto_generate_pppoe_invoices():
         return _for_each_tenant(_generate)
     except Exception as e:
         logger.error(f"Auto invoice generation task failed: {e}", exc_info=True)
+        return {'error': str(e)}
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# HOTSPOT CLIENT PRUNING TASK
+# ═══════════════════════════════════════════════════════════════════════════
+
+@shared_task(name='apps.billing.tasks.prune_stale_hotspot_clients')
+def prune_stale_hotspot_clients():
+    """
+    Deletes hotspot clients (cascading to their sessions + devices) and revokes
+    RADIUS credentials for clients whose most recent session expired more than
+    the tenant's configured prune window ago. Respects per-tenant
+    HotspotPruneSettings (default 30 days).
+    """
+    def _prune(tenant):
+        from apps.billing.models.hotspot_models import (
+            HotspotPruneSettings, HotspotClient, HotspotSession,
+        )
+        from apps.billing.services.hotspot_radius_service import HotspotRadiusService
+        from apps.radius.services.radius_sync_service import RadiusSyncService
+
+        settings_obj = HotspotPruneSettings.get_settings(tenant.schema_name)
+        if not settings_obj.is_enabled:
+            return {'pruned': 0, 'skipped_disabled': 1}
+
+        cutoff = timezone.now() - timedelta(days=settings_obj.prune_window_days)
+        radius_service = HotspotRadiusService()
+        sync_service = RadiusSyncService()
+        pruned = 0
+
+        for client in HotspotClient.objects.filter(schema_name=tenant.schema_name).iterator():
+            # Never touch a client with a currently active/paid session
+            still_active = HotspotSession.objects.filter(
+                hotspot_client=client,
+                status__in=('active', 'paid'),
+                expires_at__gt=timezone.now(),
+            ).exists()
+            if still_active:
+                continue
+
+            last_session = HotspotSession.objects.filter(
+                hotspot_client=client
+            ).order_by('-expires_at').first()
+
+            reference_time = (
+                last_session.expires_at
+                if last_session and last_session.expires_at
+                else client.last_seen_at
+            )
+            if not reference_time or reference_time >= cutoff:
+                continue
+
+            access_codes = (
+                HotspotSession.objects.filter(hotspot_client=client)
+                .exclude(access_code__isnull=True)
+                .values_list('access_code', flat=True)
+                .distinct()
+            )
+            for code in access_codes:
+                try:
+                    radius_service.revoke_credentials(code)
+                    sync_service.delete_radius_user(code)
+                except Exception as e:
+                    logger.warning(f"[{tenant.schema_name}] RADIUS cleanup failed for {code}: {e}")
+
+            client.delete()  # cascades to HotspotSession + HotspotClientDevice
+            pruned += 1
+
+        settings_obj.last_pruned_at = timezone.now()
+        settings_obj.save(update_fields=['last_pruned_at'])
+
+        if pruned:
+            logger.info(
+                f"[{tenant.schema_name}] Pruned {pruned} stale hotspot clients "
+                f"(window={settings_obj.prune_window_days}d)"
+            )
+        return {'pruned': pruned}
+
+    try:
+        return _for_each_tenant(_prune)
+    except Exception as e:
+        logger.error(f"Hotspot client pruning task failed: {e}", exc_info=True)
         return {'error': str(e)}
