@@ -411,8 +411,9 @@ class HotspotClient(models.Model):
     schema_name = models.SlugField(max_length=63, db_index=True, editable=False)
     
     # Primary identity - phone number is the stable identifier
+    # FIX 1: Widen field from 15 to 20 to accommodate "MAC-" + 12 hex chars + headroom
     canonical_phone = models.CharField(
-        max_length=15, 
+        max_length=20,  # was 15 — "MAC-" + 12 hex chars = 16, plus headroom
         blank=True, 
         null=True, 
         db_index=True,
@@ -538,7 +539,9 @@ class HotspotClient(models.Model):
             return cls.get_or_create_by_phone(schema_name, phone_number)
 
         # 3. Truly anonymous: key by MAC (e.g. Smart TV with no SIM)
-        anon_phone = f"MAC-{mac_address.replace(':', '').upper()}"
+        # FIX 2: Defensive truncation to ensure field never overflows
+        clean_mac = mac_address.replace(':', '').upper()
+        anon_phone = f"MAC-{clean_mac}"[:20]  # match new field max_length
         return cls.get_or_create_by_phone(schema_name, anon_phone)
 
 

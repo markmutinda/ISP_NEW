@@ -163,18 +163,10 @@ app.conf.beat_schedule = {
     # },
 
     # ════════════════════════════════════════════════════════════════
-    # PPPOE INVOICE GENERATION — Auto-renewal invoices 5 days before expiry
-    # Runs daily at 7 AM for customers expiring in 5 days
-    # ════════════════════════════════════════════════════════════════
-    'generate-pppoe-expiry-invoices-daily': {
-        'task': 'apps.radius.tasks.generate_pppoe_expiry_invoices',
-        'schedule': crontab(hour=7, minute=0),  # Daily at 7:00 AM
-        'options': {'queue': 'radius'}
-    },
-
-    # ════════════════════════════════════════════════════════════════
-    # PPPOE AUTO-INVOICE GENERATION — NEW using billing.tasks
-    # Runs daily at 6:30 AM, respects per-tenant toggle
+    # PPPOE AUTO-INVOICE GENERATION — Runs daily at 6:30 AM
+    # Replaces old generate-pppoe-expiry-invoices-daily task
+    # Uses billing.tasks.auto_generate_pppoe_invoices which respects
+    # per-tenant InvoiceSettings.auto_generate_enabled toggle
     # ════════════════════════════════════════════════════════════════
     'auto-generate-pppoe-invoices-daily': {
         'task': 'apps.billing.tasks.auto_generate_pppoe_invoices',
