@@ -14,9 +14,9 @@ DEFAULTS = [
     # ── PPPOE / STATIC TEMPLATES ────────────────────────────────────────
     ('pppoe_welcome',
      'PPPoE — Welcome',
-     'Welcome {customer_name}! Your internet service is now active. Username: {username} / Password: {password}. '
-     'Contact support if you need help.',
-     ['{customer_name}', '{username}', '{password}']),
+     'Welcome {customer_name}! Your account number is {account_number}. '
+     'Contact us on {phone_number} if you need help.',
+     ['{customer_name}', '{account_number}', '{phone_number}']),
 
     ('pppoe_payment',
      'PPPoE — Payment / Renewal Confirmation',

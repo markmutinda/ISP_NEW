@@ -373,6 +373,20 @@ def auto_create_radius_for_service(sender, instance, created, **kwargs):
                 logger.warning(f"IPAddress {radius_assigned_ip_id} not found for RADIUS cred creation")
         
         creds = CustomerRadiusCredentials.objects.create(**create_kwargs)
+
+        # ─── WELCOME SMS FIX ───────────────────────────────────────────────
+        # Send welcome SMS only if the service is ACTIVE (not PENDING)
+        if instance.status == 'ACTIVE':
+            try:
+                from apps.messaging.services.notification_sender import SMSNotifier
+                SMSNotifier.pppoe_welcome(
+                    customer=customer,
+                    username=creds.username,
+                    password=creds.password,
+                )
+            except Exception as e:
+                logger.warning(f"Welcome SMS failed for {creds.username}: {e}")
+        # ──────────────────────────────────────────────────────────────────
         
         # Log activation timestamp if set
         if create_kwargs.get('subscription_activated_at'):
