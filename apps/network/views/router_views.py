@@ -18,10 +18,20 @@ import socket
 from apps.network.models.router_models import Router, RouterEvent
 from apps.network.serializers.router_serializers import RouterSerializer, RouterEventSerializer
 from apps.network.services.mikrotik_bridge_sync import sync_bridge_ports_to_router
-from apps.core.permissions import HasCompanyAccess
+from apps.core.permissions import HasCompanyAccess, HasRoleAccessPolicy
 import apps.network.integrations.mikrotik_api as mikrotik_api_module
 
 logger = logging.getLogger(__name__)
+
+
+class RouterRBACMixin:
+    required_rbac_path = "/admin/routers"
+
+    def get_permissions(self):
+        permission_classes = list(self.permission_classes)
+        if HasRoleAccessPolicy not in permission_classes:
+            permission_classes.append(HasRoleAccessPolicy)
+        return [permission() for permission in permission_classes]
 
 
 # ===================================================================
@@ -247,12 +257,19 @@ def download_router_cert(request, router_id, cert_type):
 
 class RouterViewSet(viewsets.ModelViewSet):
     serializer_class = RouterSerializer
-    permission_classes = [IsAuthenticated, HasCompanyAccess]
+    permission_classes = [IsAuthenticated, HasCompanyAccess, HasRoleAccessPolicy]
+    required_rbac_path = "/admin/routers"
     filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
     filterset_fields = ['router_type', 'status', 'is_active', 'config_type']
     search_fields = ['name', 'ip_address', 'model', 'location', 'tags']
     ordering_fields = ['name', 'last_seen', 'created_at', 'status']
     queryset = Router.objects.all()
+
+    def get_permissions(self):
+        permission_classes = list(self.permission_classes)
+        if HasRoleAccessPolicy not in permission_classes:
+            permission_classes.append(HasRoleAccessPolicy)
+        return [permission() for permission in permission_classes]
 
     def get_object(self):
         """
@@ -2116,7 +2133,7 @@ mute 20
 # (UPDATED TO USE TENANT-SAFE RESOLVER)
 # ────────────────────────────────────────────────────────────────
 
-class RouterPortScanView(APIView):
+class RouterPortScanView(RouterRBACMixin, APIView):
     """
     GET /api/v1/network/routers/{id}/scan/
 
@@ -2148,7 +2165,7 @@ class RouterPortScanView(APIView):
             }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
-class RouterPortsView(APIView):
+class RouterPortsView(RouterRBACMixin, APIView):
     """
     GET /api/v1/network/routers/{id}/ports/
    
@@ -2186,7 +2203,7 @@ class RouterPortsView(APIView):
             }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
-class RouterHotspotConfigView(APIView):
+class RouterHotspotConfigView(RouterRBACMixin, APIView):
     """
     GET /api/v1/network/routers/{id}/hotspot/config/
    
@@ -2272,7 +2289,7 @@ class RouterHotspotConfigView(APIView):
             }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
-class RouterHotspotConfigureView(APIView):
+class RouterHotspotConfigureView(RouterRBACMixin, APIView):
     """
     POST /api/v1/network/routers/{id}/hotspot/configure/
    
@@ -2377,7 +2394,7 @@ class RouterHotspotConfigureView(APIView):
             }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
-class RouterHotspotDisableView(APIView):
+class RouterHotspotDisableView(RouterRBACMixin, APIView):
     """
     POST /api/v1/network/routers/{id}/hotspot/disable/
    
@@ -2428,7 +2445,7 @@ class RouterHotspotDisableView(APIView):
             }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
-class RouterHotspotEnableView(APIView):
+class RouterHotspotEnableView(RouterRBACMixin, APIView):
     """
     POST /api/v1/network/routers/{id}/hotspot/enable/
 
@@ -2478,7 +2495,7 @@ class RouterHotspotEnableView(APIView):
             }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
-class RouterHotspotUpdateView(APIView):
+class RouterHotspotUpdateView(RouterRBACMixin, APIView):
     """
     POST /api/v1/network/routers/{id}/hotspot/update/
 
@@ -2539,7 +2556,7 @@ class RouterHotspotUpdateView(APIView):
             }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
-class RouterBridgePortView(APIView):
+class RouterBridgePortView(RouterRBACMixin, APIView):
     """
     POST /api/v1/network/routers/{id}/bridge/port/
 
@@ -2691,7 +2708,7 @@ def _rebind_services_to_bridge(api, router):
 
 # ─── PORT MANAGER VIEW (UPDATED WITH REBIND AND hEX S FIX) ───────────────────────────
 
-class RouterPortManagerView(APIView):
+class RouterPortManagerView(RouterRBACMixin, APIView):
     """
     GET  — scan live router interfaces and return which are on netily-bridge.
     POST — sync selected interfaces to netily-bridge and rebind services.
@@ -2999,7 +3016,7 @@ class RouterHeartbeatView(APIView):
 # HOTSPOT IPAM CONFIGURATION (IP Address + Subnet)
 # ════════════════════════════════════════════════════════════════
 
-class RouterHotspotIPAMView(APIView):
+class RouterHotspotIPAMView(RouterRBACMixin, APIView):
     """
     GET  /api/v1/routers/{id}/hotspot/ipam/  → Current IPAM config + calculated network
     POST /api/v1/routers/{id}/hotspot/ipam/  → Preview only (dry run)
@@ -3086,7 +3103,7 @@ class RouterHotspotIPAMView(APIView):
         })
 
 
-class RouterHotspotIPAMApplyView(APIView):
+class RouterHotspotIPAMApplyView(RouterRBACMixin, APIView):
     """
     POST /api/v1/routers/{id}/hotspot/ipam/apply/
 

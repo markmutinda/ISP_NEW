@@ -42,7 +42,8 @@ class MpesaConfigurationViewSet(viewsets.ModelViewSet):
     """
     ViewSet for managing tenant-specific M-Pesa configurations
     """
-    permission_classes = [IsAuthenticated, IsCompanyAdmin]
+    permission_classes = [IsAuthenticated, IsCompanyAdmin, HasRoleAccessPolicy]
+    required_rbac_path = "/admin/payment-methods"
     filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
     filterset_fields = ['is_active', 'is_default', 'is_sandbox', 'shortcode_type', 'c2b_urls_registered']
     search_fields = ['business_shortcode', 'shortcode_type']
@@ -495,7 +496,8 @@ class MpesaTransactionViewSet(viewsets.ReadOnlyModelViewSet):
     """
     ViewSet for viewing M-Pesa transactions (read-only)
     """
-    permission_classes = [IsAuthenticated, IsCompanyStaff]
+    permission_classes = [IsAuthenticated, IsCompanyStaff, HasRoleAccessPolicy]
+    required_rbac_path = "/admin/payments"
     filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
     filterset_fields = ['status', 'transaction_type', 'configuration']
     search_fields = [
@@ -570,7 +572,8 @@ class PaymentMethodViewSet(viewsets.ModelViewSet):
     """
     ViewSet for managing payment methods (M-Pesa and Bank Transfers only)
     """
-    permission_classes = [IsAuthenticated, IsCompanyAdmin]
+    permission_classes = [IsAuthenticated, IsCompanyAdmin, HasRoleAccessPolicy]
+    required_rbac_path = "/admin/payment-methods"
     filter_backends = [DjangoFilterBackend, filters.SearchFilter]
     filterset_fields = ['method_type', 'is_active', 'status']  # REMOVED: 'is_payhero_enabled'
     search_fields = ['name', 'code', 'description']  # REMOVED: 'channel_id'

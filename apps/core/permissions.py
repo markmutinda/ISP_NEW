@@ -342,6 +342,34 @@ class HasRoleAccessPolicy(permissions.BasePermission):
         "refund": "edit",
         "issue": "edit",
         "share": "view_details",
+        "activate": "edit",
+        "activate_as_primary": "edit",
+        "deactivate_daraja": "edit",
+        "test_connection": "edit",
+        "set_default": "edit",
+        "bulk": "add",
+        "retry": "edit",
+        "start": "edit",
+        "cancel": "edit",
+        "send_to_group": "add",
+        "save": "edit",
+        "providers": "view",
+        "assign": "edit",
+        "update_status": "edit",
+        "notify_technician": "edit",
+        "check_in": "add",
+        "check_out": "edit",
+        "approve": "edit",
+        "reject": "edit",
+        "process_payroll": "edit",
+        "sync_all": "edit",
+        "sync_from_router": "edit",
+        "disconnect": "edit",
+        "disable": "edit",
+        "enable": "edit",
+        "reset_password": "edit",
+        "suspend": "edit",
+        "reactivate": "edit",
     }
 
     admin_roles = {"admin", "super_admin", "superadmin"}
@@ -375,7 +403,14 @@ class HasRoleAccessPolicy(permissions.BasePermission):
         if role in self.admin_roles or access_level in self.admin_roles:
             return True
 
-        required_path = getattr(view, "required_rbac_path", None)
+        resolver = getattr(view, "get_required_rbac_path", None)
+        if callable(resolver):
+            try:
+                required_path = resolver(request)
+            except TypeError:
+                required_path = resolver()
+        else:
+            required_path = getattr(view, "required_rbac_path", None)
         if not required_path:
             return True
 

@@ -11,7 +11,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework.permissions import IsAuthenticated
 
-from apps.core.permissions import HasCompanyAccess
+from apps.core.permissions import HasCompanyAccess, HasRoleAccessPolicy
 from .models import (
     RadCheck,
     RadReply,
@@ -63,7 +63,8 @@ class RadiusDashboardView(APIView):
     
     RADIUS Dashboard statistics and overview.
     """
-    permission_classes = [IsAuthenticated, HasCompanyAccess]
+    permission_classes = [IsAuthenticated, HasCompanyAccess, HasRoleAccessPolicy]
+    required_rbac_path = "/admin/radius"
     
     def get(self, request):
         now = timezone.now()
@@ -156,7 +157,8 @@ class RadiusActiveSessionsView(APIView):
             "previous": URL for previous page (if pagination)
         }
     """
-    permission_classes = [IsAuthenticated, HasCompanyAccess]
+    permission_classes = [IsAuthenticated, HasCompanyAccess, HasRoleAccessPolicy]
+    required_rbac_path = "/admin/radius"
 
     def get(self, request):
         # ── Real RADIUS sessions only (users with open radacct rows = truly online) ──
@@ -268,7 +270,8 @@ class RadiusOnlineUsernamesView(APIView):
             "count": 2
         }
     """
-    permission_classes = [IsAuthenticated, HasCompanyAccess]
+    permission_classes = [IsAuthenticated, HasCompanyAccess, HasRoleAccessPolicy]
+    required_rbac_path = "/admin/radius"
 
     def get(self, request):
         from django.db.models import Sum
@@ -311,7 +314,8 @@ class RadiusUserView(APIView):
     PUT /api/v1/radius/users/{username}/ - Update user
     DELETE /api/v1/radius/users/{username}/ - Delete user
     """
-    permission_classes = [IsAuthenticated, HasCompanyAccess]
+    permission_classes = [IsAuthenticated, HasCompanyAccess, HasRoleAccessPolicy]
+    required_rbac_path = "/admin/radius"
     
     def post(self, request):
         """Create a new RADIUS user"""
@@ -578,7 +582,8 @@ class RadiusUserActionView(APIView):
     POST /api/v1/radius/users/{username}/enable/
     POST /api/v1/radius/users/{username}/disable/
     """
-    permission_classes = [IsAuthenticated, HasCompanyAccess]
+    permission_classes = [IsAuthenticated, HasCompanyAccess, HasRoleAccessPolicy]
+    required_rbac_path = "/admin/radius"
     
     def post(self, request, username, action):
         service = RadiusSyncService()
@@ -611,7 +616,8 @@ class RadAcctViewSet(viewsets.ReadOnlyModelViewSet):
     """ViewSet for RADIUS Accounting records (read-only)"""
     queryset = RadAcct.objects.all()
     serializer_class = RadAcctSerializer
-    permission_classes = [IsAuthenticated, HasCompanyAccess]
+    permission_classes = [IsAuthenticated, HasCompanyAccess, HasRoleAccessPolicy]
+    required_rbac_path = "/admin/radius"
     
     def get_queryset(self):
         qs = super().get_queryset()
@@ -688,7 +694,8 @@ class RadAcctViewSet(viewsets.ReadOnlyModelViewSet):
 class NasViewSet(viewsets.ModelViewSet):
     """ViewSet for NAS management"""
     queryset = Nas.objects.all()
-    permission_classes = [IsAuthenticated, HasCompanyAccess]
+    permission_classes = [IsAuthenticated, HasCompanyAccess, HasRoleAccessPolicy]
+    required_rbac_path = "/admin/radius"
     
     def get_serializer_class(self):
         if self.action in ['retrieve', 'create', 'update']:
@@ -722,7 +729,8 @@ class RadiusBandwidthProfileViewSet(viewsets.ModelViewSet):
     """ViewSet for Bandwidth Profiles"""
     queryset = RadiusBandwidthProfile.objects.all()
     serializer_class = RadiusBandwidthProfileSerializer
-    permission_classes = [IsAuthenticated, HasCompanyAccess]
+    permission_classes = [IsAuthenticated, HasCompanyAccess, HasRoleAccessPolicy]
+    required_rbac_path = "/admin/radius"
     
     def get_queryset(self):
         qs = super().get_queryset()
@@ -756,7 +764,8 @@ class RadPostAuthViewSet(viewsets.ReadOnlyModelViewSet):
     """ViewSet for Post-Auth logs (read-only)"""
     queryset = RadPostAuth.objects.all()
     serializer_class = RadPostAuthSerializer
-    permission_classes = [IsAuthenticated, HasCompanyAccess]
+    permission_classes = [IsAuthenticated, HasCompanyAccess, HasRoleAccessPolicy]
+    required_rbac_path = "/admin/radius"
     
     def get_queryset(self):
         qs = super().get_queryset()
@@ -799,7 +808,8 @@ class RadiusSyncView(APIView):
     """
     Manual sync endpoints for RADIUS.
     """
-    permission_classes = [IsAuthenticated, HasCompanyAccess]
+    permission_classes = [IsAuthenticated, HasCompanyAccess, HasRoleAccessPolicy]
+    required_rbac_path = "/admin/radius"
     
     def post(self, request, sync_type):
         service = RadiusSyncService()
@@ -849,7 +859,8 @@ class RadiusTenantConfigViewSet(viewsets.ModelViewSet):
     """
     
     queryset = RadiusTenantConfig.objects.all()
-    permission_classes = [IsAuthenticated, HasCompanyAccess]
+    permission_classes = [IsAuthenticated, HasCompanyAccess, HasRoleAccessPolicy]
+    required_rbac_path = "/admin/radius"
     
     def get_serializer_class(self):
         if self.action == 'retrieve':
@@ -944,7 +955,8 @@ class CustomerRadiusCredentialsViewSet(viewsets.ModelViewSet):
         GET    /api/v1/radius/credentials/expired_count/ - Fast count of expired credentials
     """
     
-    permission_classes = [IsAuthenticated, HasCompanyAccess]
+    permission_classes = [IsAuthenticated, HasCompanyAccess, HasRoleAccessPolicy]
+    required_rbac_path = "/admin/radius"
     # FIX: Use LargeResultsSetPagination to allow larger page sizes (up to 1000)
     pagination_class = LargeResultsSetPagination
     

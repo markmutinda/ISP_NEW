@@ -34,7 +34,7 @@ from .services.gateway_dispatcher import GatewayDispatcher, PROVIDER_FIELDS
 from .services.credit_billing_service import CreditBillingService
 
 # Import custom permission
-from apps.core.permissions import IsAdminOrStaff
+from apps.core.permissions import HasRoleAccessPolicy, IsAdminOrStaff
 
 
 class SMSMessageViewSet(viewsets.ModelViewSet):
@@ -45,7 +45,8 @@ class SMSMessageViewSet(viewsets.ModelViewSet):
     NOTE: The default queryset returns ALL messages (including automated ones)
     with NO type filter. This ensures the history shows everything.
     """
-    permission_classes = [IsAuthenticated, IsAdminOrStaff]
+    permission_classes = [IsAuthenticated, IsAdminOrStaff, HasRoleAccessPolicy]
+    required_rbac_path = "/admin/sms"
     filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
     filterset_fields = ['status', 'type', 'provider', 'campaign__id']
     search_fields = ['recipient', 'message', 'recipient_name', 'error_message']
@@ -291,7 +292,8 @@ class SMSMessageViewSet(viewsets.ModelViewSet):
 class SMSTemplateViewSet(viewsets.ModelViewSet):
     queryset = SMSTemplate.objects.order_by('-created_at')
     serializer_class = SMSTemplateSerializer
-    permission_classes = [IsAuthenticated, IsAdminOrStaff]
+    permission_classes = [IsAuthenticated, IsAdminOrStaff, HasRoleAccessPolicy]
+    required_rbac_path = "/admin/sms"
     filter_backends = [filters.SearchFilter]
     search_fields = ['name', 'content']
 
@@ -312,7 +314,8 @@ class SMSTemplateViewSet(viewsets.ModelViewSet):
 class SMSCampaignViewSet(viewsets.ModelViewSet):
     queryset = SMSCampaign.objects.order_by('-created_at')
     serializer_class = SMSCampaignSerializer
-    permission_classes = [IsAuthenticated, IsAdminOrStaff]
+    permission_classes = [IsAuthenticated, IsAdminOrStaff, HasRoleAccessPolicy]
+    required_rbac_path = "/admin/sms"
     filter_backends = [DjangoFilterBackend, filters.SearchFilter]
     filterset_fields = ['status']
     search_fields = ['name']
@@ -512,7 +515,8 @@ class SMSStatsView(APIView):
     FIX: Stats now correctly count all messages (including automated ones)
     by using direct aggregates on the queryset instead of separate Counts.
     """
-    permission_classes = [IsAuthenticated, IsAdminOrStaff]
+    permission_classes = [IsAuthenticated, IsAdminOrStaff, HasRoleAccessPolicy]
+    required_rbac_path = "/admin/sms"
 
     def get(self, request):
         today = timezone.now().replace(hour=0, minute=0, second=0, microsecond=0)
@@ -551,7 +555,8 @@ class SMSBalanceView(APIView):
     GET /api/v1/messaging/sms/balance/
     Uses the active gateway's provider SDK to fetch real balance.
     """
-    permission_classes = [IsAuthenticated, IsAdminOrStaff]
+    permission_classes = [IsAuthenticated, IsAdminOrStaff, HasRoleAccessPolicy]
+    required_rbac_path = "/admin/sms"
 
     # FIX 4c: Updated get() method for proper balance handling
     def get(self, request):
@@ -590,7 +595,8 @@ class SMSGatewayConfigViewSet(viewsets.ModelViewSet):
     /api/v1/messaging/gateway/
     CRUD for per-tenant SMS gateway configuration.
     """
-    permission_classes = [IsAuthenticated, IsAdminOrStaff]
+    permission_classes = [IsAuthenticated, IsAdminOrStaff, HasRoleAccessPolicy]
+    required_rbac_path = "/admin/sms"
 
     def get_queryset(self):
         # Explicitly scope to current tenant schema to avoid cross-tenant leaks
@@ -693,7 +699,8 @@ class SMSNotificationSettingsView(APIView):
     GET  /api/v1/messaging/notification-settings/
     PATCH /api/v1/messaging/notification-settings/
     """
-    permission_classes = [IsAuthenticated, IsAdminOrStaff]
+    permission_classes = [IsAuthenticated, IsAdminOrStaff, HasRoleAccessPolicy]
+    required_rbac_path = "/admin/sms"
 
     def get(self, request):
         settings_obj = SMSNotificationSettings.get_settings()
@@ -744,7 +751,8 @@ class SMSWalletView(APIView):
     GET /api/v1/messaging/wallet/
     Returns current balance + last 20 topup records.
     """
-    permission_classes = [IsAuthenticated, IsAdminOrStaff]
+    permission_classes = [IsAuthenticated, IsAdminOrStaff, HasRoleAccessPolicy]
+    required_rbac_path = "/admin/sms"
 
     def get(self, request):
         wallet = TenantSMSWallet.objects.filter(is_active=True).first()
@@ -765,7 +773,8 @@ class SMSTopupInitiateView(APIView):
 
     Calculates cost using tiered pricing, creates a pending topup record, initiates STK push.
     """
-    permission_classes = [IsAuthenticated, IsAdminOrStaff]
+    permission_classes = [IsAuthenticated, IsAdminOrStaff, HasRoleAccessPolicy]
+    required_rbac_path = "/admin/sms"
 
     # FIX 7: Tiered pricing
     TIERS = [
@@ -1095,7 +1104,8 @@ class CustomerSearchView(APIView):
     Search customers for the SMS compose dialog.
     type: pppoe | hotspot | all
     """
-    permission_classes = [IsAuthenticated, IsAdminOrStaff]
+    permission_classes = [IsAuthenticated, IsAdminOrStaff, HasRoleAccessPolicy]
+    required_rbac_path = "/admin/sms"
 
     def get(self, request):
         q = request.query_params.get('q', '').strip()

@@ -7,12 +7,15 @@ from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
 
+from apps.core.permissions import HasRoleAccessPolicy
+
 logger = logging.getLogger(__name__)
 
 
 class InvoiceSettingsView(APIView):
     """GET/PATCH invoice auto-generation settings for current tenant"""
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, HasRoleAccessPolicy]
+    required_rbac_path = "/admin/settings/billing"
 
     def get(self, request):
         from apps.billing.models.billing_models import InvoiceSettings
@@ -38,7 +41,8 @@ class InvoiceSettingsView(APIView):
 
 class HotspotPruneSettingsView(APIView):
     """GET/PATCH hotspot client auto-pruning settings for current tenant"""
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, HasRoleAccessPolicy]
+    required_rbac_path = "/admin/settings/billing"
 
     def get(self, request):
         from apps.billing.models.hotspot_models import HotspotPruneSettings
@@ -77,7 +81,8 @@ class HotspotPruneSettingsView(APIView):
 
 class CustomerSearchView(APIView):
     """Efficient customer search for invoice creation (first 5, then searchable)"""
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, HasRoleAccessPolicy]
+    required_rbac_path = "/admin/invoices"
 
     def get(self, request):
         from apps.customers.models import Customer
@@ -115,7 +120,8 @@ class CustomerSearchView(APIView):
 
 class InvoicePDFView(APIView):
     """Generate PDF for an invoice"""
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, HasRoleAccessPolicy]
+    required_rbac_path = "/admin/invoices"
 
     def get(self, request, invoice_id):
         from apps.billing.models.billing_models import Invoice

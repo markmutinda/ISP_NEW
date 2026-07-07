@@ -7,6 +7,7 @@ from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
 from django.utils import timezone
 from django.core.mail import send_mail
+from apps.core.permissions import HasRoleAccessPolicy
 
 from .models import Technician, DispatchJob
 from .serializers_dispatch import (
@@ -28,7 +29,8 @@ class TechnicianViewSet(viewsets.ModelViewSet):
     """
     queryset = Technician.objects.select_related('user').filter(is_active=True)
     serializer_class = TechnicianSerializer
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, HasRoleAccessPolicy]
+    required_rbac_path = "/admin/staff"
 
     def get_serializer_class(self):
         if self.action == 'create':
@@ -64,7 +66,8 @@ class DispatchJobViewSet(viewsets.ModelViewSet):
         'customer', 'customer__user', 'assigned_to', 'assigned_to__user', 'ticket'
     ).all()
     serializer_class = DispatchJobSerializer
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, HasRoleAccessPolicy]
+    required_rbac_path = "/admin/dispatch"
 
     def get_queryset(self):
         qs = super().get_queryset()

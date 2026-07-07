@@ -7,6 +7,7 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework import status
 from django_tenants.utils import schema_context, get_public_schema_name
 
+from apps.core.permissions import HasRoleAccessPolicy
 from apps.core.models import Tenant, Company
 from apps.billing.models.payment_models import (
     TenantTumaConfig,
@@ -23,7 +24,8 @@ logger = logging.getLogger(__name__)
 
 
 class TumaBanksView(APIView):
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, HasRoleAccessPolicy]
+    required_rbac_path = "/admin/payment-methods"
 
     def get(self, request):
         try:
@@ -35,7 +37,8 @@ class TumaBanksView(APIView):
 
 
 class TumaCreateChildBusinessView(APIView):
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, HasRoleAccessPolicy]
+    required_rbac_path = "/admin/payment-methods"
 
     def post(self, request):
         schema = connection.schema_name
@@ -80,7 +83,8 @@ class TumaCreateChildBusinessView(APIView):
 
 
 class TumaTenantModeView(APIView):
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, HasRoleAccessPolicy]
+    required_rbac_path = "/admin/payment-methods"
 
     def _resolve_tenant_identity(self, schema_name):
         """

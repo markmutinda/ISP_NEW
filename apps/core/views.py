@@ -43,7 +43,7 @@ from .serializers import (
     CustomTokenObtainPairSerializer, DashboardStatsSerializer, ChangelogSerializer,
     FeatureRequestSerializer, CompanyBrandingSerializer, RoleAccessPolicySerializer
 )
-from .permissions import IsAdmin, IsAdminOrStaff, IsCustomer, IsTechnician
+from .permissions import HasRoleAccessPolicy, IsAdmin, IsAdminOrStaff, IsCustomer, IsTechnician
 
 logger = logging.getLogger(__name__)
 
@@ -446,7 +446,26 @@ class UserViewSet(viewsets.ModelViewSet):
     """
     queryset = User.objects.all()
     serializer_class = UserSerializer
-    permission_classes = [IsAuthenticated, IsAdminOrStaff]
+    permission_classes = [IsAuthenticated, IsAdminOrStaff, HasRoleAccessPolicy]
+    required_rbac_path = "/admin/users"
+
+    def get_required_rbac_path(self, request):
+        if getattr(self, "action", None) in ("me", "update_profile", "change_password"):
+            return None
+
+        staff_roles = {"admin", "support", "technician", "accountant", "staff"}
+        staff_only = str(request.query_params.get("staff_only", "")).lower() in {"1", "true", "yes"}
+        requested_role = str(request.data.get("role", "")).strip().lower() if hasattr(request, "data") else ""
+        if staff_only or requested_role in staff_roles:
+            return "/admin/staff"
+
+        if getattr(self, "action", None) in ("retrieve", "update", "partial_update", "destroy"):
+            pk = self.kwargs.get(self.lookup_url_kwarg or self.lookup_field)
+            if pk:
+                target = User.objects.filter(pk=pk).only("role", "is_staff").first()
+                if target and (target.is_staff or str(target.role or "").lower() in staff_roles):
+                    return "/admin/staff"
+        return self.required_rbac_path
     
     def get_serializer_class(self):
         if self.action == 'create':
@@ -459,10 +478,13 @@ class UserViewSet(viewsets.ModelViewSet):
     
     def get_permissions(self):
         if self.action in ['create', 'destroy']:
-            return [IsAuthenticated(), IsAdmin()]
+            return [IsAuthenticated(), IsAdmin(), HasRoleAccessPolicy()]
         elif self.action in ['update', 'partial_update', 'me', 'update_profile', 'change_password']:
-            return [IsAuthenticated()]
-        return [IsAuthenticated(), IsAdminOrStaff()]
+            permissions_list = [IsAuthenticated()]
+            if self.action not in ['me', 'update_profile', 'change_password']:
+                permissions_list.append(HasRoleAccessPolicy())
+            return permissions_list
+        return [IsAuthenticated(), IsAdminOrStaff(), HasRoleAccessPolicy()]
     
     def get_queryset(self):
         qs = super().get_queryset().select_related('company')
@@ -621,7 +643,8 @@ class RoleAccessPolicyViewSet(viewsets.ModelViewSet):
     fallback_setting_key = "staff_role_access_policies"
 
     serializer_class = RoleAccessPolicySerializer
-    permission_classes = [IsAuthenticated, IsAdminOrStaff]
+    permission_classes = [IsAuthenticated, IsAdminOrStaff, HasRoleAccessPolicy]
+    required_rbac_path = "/admin/staff"
     lookup_field = "role"
 
     editable_roles = ("staff", "technician", "accountant", "support")
@@ -710,8 +733,8 @@ class RoleAccessPolicyViewSet(viewsets.ModelViewSet):
 
     def get_permissions(self):
         if self.action in ["update", "partial_update", "create", "destroy"]:
-            return [IsAuthenticated(), IsAdmin()]
-        return [IsAuthenticated(), IsAdminOrStaff()]
+            return [IsAuthenticated(), IsAdmin(), HasRoleAccessPolicy()]
+        return [IsAuthenticated(), IsAdminOrStaff(), HasRoleAccessPolicy()]
 
     def perform_create(self, serializer):
         serializer.save(created_by=self.request.user, updated_by=self.request.user)
@@ -756,12 +779,13 @@ class CompanyViewSet(viewsets.ModelViewSet):
     """
     queryset = Company.objects.all()
     serializer_class = CompanySerializer
-    permission_classes = [IsAuthenticated, IsAdminOrStaff]
+    permission_classes = [IsAuthenticated, IsAdminOrStaff, HasRoleAccessPolicy]
+    required_rbac_path = "/admin/settings"
     parser_classes = [MultiPartParser, FormParser, JSONParser]
     
     def get_permissions(self):
         if self.action in ['create', 'destroy']:
-            permission_classes = [IsAuthenticated, IsAdmin]
+            permission_classes = [IsAuthenticated, IsAdmin, HasRoleAccessPolicy]
         else:
             permission_classes = self.permission_classes
         return [permission() for permission in permission_classes]
@@ -828,10 +852,11 @@ class TenantBrandingView(APIView):
     tenant admins and updates the public Company record created at registration.
     """
     parser_classes = [MultiPartParser, FormParser, JSONParser]
+    required_rbac_path = "/admin/settings"
 
     def get_permissions(self):
         if self.request.method.lower() in ['patch', 'put']:
-            return [IsAuthenticated(), IsAdmin()]
+            return [IsAuthenticated(), IsAdmin(), HasRoleAccessPolicy()]
         return [IsAuthenticated()]
 
     def _response_data(self, company, tenant, request):
@@ -938,11 +963,14 @@ class SystemSettingsViewSet(viewsets.ModelViewSet):
     """
     queryset = SystemSettings.objects.all()
     serializer_class = SystemSettingsSerializer
-    permission_classes = [IsAuthenticated, IsAdminOrStaff]
+    permission_classes = [IsAuthenticated, IsAdminOrStaff, HasRoleAccessPolicy]
+    required_rbac_path = "/admin/settings"
     
     def get_permissions(self):
         if self.action in ['create', 'update', 'partial_update', 'destroy']:
-            permission_classes = [IsAuthenticated, IsAdmin]
+            permission_classes = [IsAuthenticated, IsAdmin, HasRoleAccessPolicy]
+        else:
+            permission_classes = self.permission_classes
         return [permission() for permission in permission_classes]
     
     @action(detail=False, methods=['get'])
@@ -1187,7 +1215,8 @@ class AuditLogViewSet(viewsets.ReadOnlyModelViewSet):
     """
     queryset = AuditLog.objects.all().order_by('-timestamp')
     serializer_class = AuditLogSerializer
-    permission_classes = [IsAuthenticated, IsAdminOrStaff]
+    permission_classes = [IsAuthenticated, IsAdminOrStaff, HasRoleAccessPolicy]
+    required_rbac_path = "/admin/logs"
     
     def get_queryset(self):
         queryset = super().get_queryset()

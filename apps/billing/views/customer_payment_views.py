@@ -19,6 +19,7 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+from apps.core.permissions import HasRoleAccessPolicy
 from apps.billing.models.payment_models import (
     Payment, 
     InvoiceItemPayment, 
@@ -354,7 +355,8 @@ class CustomerPaymentMethodsView(APIView):
     POST /api/v1/billing/payment-methods/
     """
     
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, HasRoleAccessPolicy]
+    required_rbac_path = "/admin/payment-methods"
     
     def get(self, request):
         from apps.billing.models.payment_models import InvoiceItemPayment
@@ -459,7 +461,8 @@ class PaymentMethodDetailView(APIView):
 
     GET/PATCH/DELETE /api/v1/billing/payment-methods/<id>/
     """
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, HasRoleAccessPolicy]
+    required_rbac_path = "/admin/payment-methods"
 
     def _get_method(self, pk):
         from apps.billing.models.payment_models import InvoiceItemPayment
@@ -570,7 +573,8 @@ class PaymentMethodDetailView(APIView):
 
 class PaymentMethodToggleActiveView(APIView):
     """Toggle active state of a payment method."""
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, HasRoleAccessPolicy]
+    required_rbac_path = "/admin/payment-methods"
 
     def post(self, request, pk):
         """

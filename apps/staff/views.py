@@ -11,7 +11,7 @@ import pandas as pd
 import calendar
 
 # Correct imports from your custom permissions
-from apps.core.permissions import IsAdmin, IsAdminOrStaff
+from apps.core.permissions import HasRoleAccessPolicy, IsAdmin, IsAdminOrStaff
 
 from .models import (
     Department, Employee, Attendance, LeaveRequest,
@@ -31,7 +31,8 @@ class DepartmentViewSet(viewsets.ModelViewSet):
     """
     queryset = Department.objects.filter(is_active=True)
     serializer_class = DepartmentSerializer
-    permission_classes = [IsAuthenticated, IsAdminOrStaff]  # Staff + Admin access
+    permission_classes = [IsAuthenticated, IsAdminOrStaff, HasRoleAccessPolicy]  # Staff + Admin access
+    required_rbac_path = "/admin/staff"
     filter_backends = [SearchFilter, OrderingFilter]
     search_fields = ['name', 'description', 'location']
     ordering_fields = ['name', 'budget', 'created_at']
@@ -106,7 +107,8 @@ class EmployeeViewSet(viewsets.ModelViewSet):
     """
     queryset = Employee.objects.filter(is_active=True)
     serializer_class = EmployeeSerializer
-    permission_classes = [IsAuthenticated, IsAdmin]  # Only admins/HR can create/update/delete
+    permission_classes = [IsAuthenticated, IsAdmin, HasRoleAccessPolicy]  # Only admins/HR can create/update/delete
+    required_rbac_path = "/admin/staff"
     filter_backends = [filters.DjangoFilterBackend, SearchFilter, OrderingFilter]
     filterset_class = EmployeeFilter
     search_fields = [
@@ -140,7 +142,7 @@ class EmployeeViewSet(viewsets.ModelViewSet):
     def get_permissions(self):
         # List and retrieve can be seen by staff
         if self.action in ['list', 'retrieve']:
-            return [IsAuthenticated(), IsAdminOrStaff()]
+            return [IsAuthenticated(), IsAdminOrStaff(), HasRoleAccessPolicy()]
         return super().get_permissions()
     
     @action(detail=True, methods=['get'])
@@ -286,7 +288,8 @@ class AttendanceViewSet(viewsets.ModelViewSet):
     """
     queryset = Attendance.objects.all()
     serializer_class = AttendanceSerializer
-    permission_classes = [IsAuthenticated, IsAdminOrStaff]
+    permission_classes = [IsAuthenticated, IsAdminOrStaff, HasRoleAccessPolicy]
+    required_rbac_path = "/admin/staff"
     filter_backends = [filters.DjangoFilterBackend, OrderingFilter]
     filterset_class = AttendanceFilter
     ordering_fields = ['date', 'check_in', 'check_out']
@@ -462,6 +465,7 @@ class LeaveRequestViewSet(viewsets.ModelViewSet):
     queryset = LeaveRequest.objects.all()
     serializer_class = LeaveRequestSerializer
     permission_classes = [IsAuthenticated]  # Employees can create their own
+    required_rbac_path = "/admin/staff"
     filter_backends = [filters.DjangoFilterBackend, OrderingFilter]
     filterset_class = LeaveRequestFilter
     ordering_fields = ['start_date', 'end_date', 'created_at']
@@ -479,7 +483,7 @@ class LeaveRequestViewSet(viewsets.ModelViewSet):
     
     def get_permissions(self):
         if self.action in ['approve', 'reject', 'list', 'pending']:
-            return [IsAuthenticated(), IsAdminOrStaff()]
+            return [IsAuthenticated(), IsAdminOrStaff(), HasRoleAccessPolicy()]
         return super().get_permissions()
     
     def perform_create(self, serializer):
@@ -597,7 +601,8 @@ class PerformanceReviewViewSet(viewsets.ModelViewSet):
     """
     queryset = PerformanceReview.objects.all()
     serializer_class = PerformanceReviewSerializer
-    permission_classes = [IsAuthenticated, IsAdmin]  # Only HR/Admins manage reviews
+    permission_classes = [IsAuthenticated, IsAdmin, HasRoleAccessPolicy]  # Only HR/Admins manage reviews
+    required_rbac_path = "/admin/staff"
     filter_backends = [filters.DjangoFilterBackend, OrderingFilter]
     filterset_fields = ['employee', 'reviewed_by', 'review_date']
     ordering_fields = ['review_date', 'overall_rating']
@@ -656,7 +661,8 @@ class PayrollViewSet(viewsets.ModelViewSet):
     """
     queryset = Payroll.objects.all()
     serializer_class = PayrollSerializer
-    permission_classes = [IsAuthenticated, IsAdmin]  # Only HR/Admins
+    permission_classes = [IsAuthenticated, IsAdmin, HasRoleAccessPolicy]  # Only HR/Admins
+    required_rbac_path = "/admin/staff"
     filter_backends = [filters.DjangoFilterBackend, OrderingFilter]
     filterset_fields = ['employee', 'is_paid', 'payment_date']
     ordering_fields = ['payment_date', 'net_pay']
@@ -742,7 +748,8 @@ class AttendanceReportView(generics.GenericAPIView):
     """
     Generate attendance reports
     """
-    permission_classes = [IsAuthenticated, IsAdminOrStaff]
+    permission_classes = [IsAuthenticated, IsAdminOrStaff, HasRoleAccessPolicy]
+    required_rbac_path = "/admin/staff"
     
     def get(self, request):
         report_type = request.query_params.get('type', 'monthly')
@@ -800,7 +807,8 @@ class DepartmentReportView(generics.GenericAPIView):
     """
     Generate department reports
     """
-    permission_classes = [IsAuthenticated, IsAdminOrStaff]
+    permission_classes = [IsAuthenticated, IsAdminOrStaff, HasRoleAccessPolicy]
+    required_rbac_path = "/admin/staff"
     
     def get(self, request):
         departments = Department.objects.filter(is_active=True)
