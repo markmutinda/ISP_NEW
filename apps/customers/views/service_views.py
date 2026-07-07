@@ -80,26 +80,29 @@ class ServiceConnectionViewSet(viewsets.ModelViewSet):
     
     def get_queryset(self):
         """
-        - Superuser: sees everything (optional company filter)
-        - Company admin/staff: only their company's services
+        Always scope to the customer in the nested URL first, then apply role-based filtering.
+        - Superuser/staff: sees all services for that customer (or all if no customer_pk)
+        - Company admin/staff/technician: same (tenant-level)
         - Customer: only their own services
         """
         qs = super().get_queryset()
         user = self.request.user
-        
+
+        # Always scope to the customer in the nested URL first
+        customer_pk = self.kwargs.get('customer_pk')
+        if customer_pk:
+            qs = qs.filter(customer_id=customer_pk)
+
         # With django-tenants, schema-level scoping handles tenant isolation.
-        # Superusers and staff see all services in the current tenant schema.
         if user.is_superuser or user.is_staff:
             return qs
-        
-        # Admin/staff roles (tenant-level)
+
         if hasattr(user, 'role') and user.role in ('admin', 'staff', 'technician'):
             return qs
-        
-        # Customers see only their own
+
         if hasattr(user, 'customer_profile'):
             return qs.filter(customer=user.customer_profile)
-        
+
         return qs.none()
     
     def perform_create(self, serializer):

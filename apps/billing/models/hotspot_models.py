@@ -1,3 +1,5 @@
+# apps/billing/models/hotspot_models.py
+
 """
 Hotspot Models for WiFi Access Payments
 
@@ -409,8 +411,9 @@ class HotspotClient(models.Model):
     schema_name = models.SlugField(max_length=63, db_index=True, editable=False)
     
     # Primary identity - phone number is the stable identifier
+    # FIX 1: Widen field from 15 to 20 to accommodate "MAC-" + 12 hex chars + headroom
     canonical_phone = models.CharField(
-        max_length=15, 
+        max_length=20,  # was 15 — "MAC-" + 12 hex chars = 16, plus headroom
         blank=True, 
         null=True, 
         db_index=True,
@@ -536,7 +539,9 @@ class HotspotClient(models.Model):
             return cls.get_or_create_by_phone(schema_name, phone_number)
 
         # 3. Truly anonymous: key by MAC (e.g. Smart TV with no SIM)
-        anon_phone = f"MAC-{mac_address.replace(':', '').upper()}"
+        # FIX 2: Defensive truncation to ensure field never overflows
+        clean_mac = mac_address.replace(':', '').upper()
+        anon_phone = f"MAC-{clean_mac}"[:20]  # match new field max_length
         return cls.get_or_create_by_phone(schema_name, anon_phone)
 
 
@@ -1045,3 +1050,46 @@ class HotspotBranding(models.Model):
         if self.router:
             return f"Branding for {self.router.name}"
         return f"Default Branding - {self.company_name}"
+
+
+# ═══════════════════════════════════════════════════════════════════
+# HOTSPOT PRUNE SETTINGS - Auto-delete stale hotspot clients
+# ═══════════════════════════════════════════════════════════════════
+
+class HotspotPruneSettings(models.Model):
+    """
+    Per-tenant setting controlling how aggressively stale hotspot clients
+    (and their sessions/RADIUS credentials) get auto-deleted.
+    """
+    PRUNE_WINDOW_CHOICES = [
+        (1, '1 Day'),
+        (7, '7 Days'),
+        (30, '30 Days'),
+    ]
+
+    schema_name = models.SlugField(max_length=63, unique=True)
+    prune_window_days = models.PositiveIntegerField(
+        choices=PRUNE_WINDOW_CHOICES,
+        default=30,
+        help_text=(
+            "Hotspot clients whose most recent session expired more than this "
+            "many days ago will be automatically deleted."
+        ),
+    )
+    is_enabled = models.BooleanField(default=True)
+    last_pruned_at = models.DateTimeField(null=True, blank=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = 'Hotspot Prune Setting'
+        verbose_name_plural = 'Hotspot Prune Settings'
+
+    def __str__(self):
+        return f"Hotspot Prune Settings for {self.schema_name} ({self.prune_window_days}d)"
+
+    @classmethod
+    def get_settings(cls, schema_name=None):
+        from django.db import connection
+        schema = schema_name or connection.schema_name
+        obj, _ = cls.objects.get_or_create(schema_name=schema)
+        return obj

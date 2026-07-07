@@ -326,8 +326,15 @@ class AnalyticsReportsView(APIView, _RangeMixin):
         now = timezone.now()
         today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
         yesterday_start = today_start - timedelta(days=1)
-        week_start = today_start - timedelta(days=7)
-        prev_week_start = week_start - timedelta(days=7)
+        
+        # ============================================================
+        # FIX: Use Monday-anchored calendar week instead of rolling 7 days
+        # This matches weekly_income chart and fixes week-over-week % change
+        # ============================================================
+        days_to_monday = today_start.weekday()  # Monday=0 ... Sunday=6
+        week_start = today_start - timedelta(days=days_to_monday)   # ✅ Monday 00:00 of current week
+        prev_week_start = week_start - timedelta(days=7)            # ✅ Previous Monday 00:00
+        
         month_start = today_start.replace(day=1)
         prev_month_start = (month_start - timedelta(days=1)).replace(day=1)
 
@@ -1027,6 +1034,72 @@ class RouterDailyRevenueView(APIView, _RangeMixin):
                 "peak_amount": peak["revenue"] if peak else 0,
             },
         })
+
+
+# ================================================================
+# PPPoE vs Hotspot Daily Revenue Split View
+# ================================================================
+
+class DailyRevenueSplitView(APIView, _RangeMixin):
+    """
+    GET /api/analytics/revenue-split/?time_range=7d|30d|90d
+    Daily revenue split between PPPoE (Fiber/DSL) and Hotspot.
+    """
+    permission_classes = [IsAuthenticated, IsAdminOrStaff]
+
+    def get(self, request):
+        time_range = request.query_params.get("time_range", "30d")
+        start = self._start("reports", time_range)
+        if not start:
+            return Response({"error": "Invalid time_range. Use 7d, 30d, 90d."}, status=400)
+
+        ck = self._cache_key(request, "revenue_split", time_range)
+        cached = cache.get(ck)
+        if cached:
+            return Response(cached)
+
+        qs = Payment.objects.filter(status__iexact="completed", payment_date__gte=start)
+
+        rows = (
+            qs.annotate(day=TruncDay("payment_date"))
+            .values("day")
+            .annotate(
+                hotspot_revenue=Sum("amount", filter=Q(hotspot_session__isnull=False)),
+                pppoe_revenue=Sum("amount", filter=Q(hotspot_session__isnull=True)),
+            )
+            .order_by("day")
+        )
+
+        day_map = {
+            r["day"].date(): {
+                "hotspot": _safe_float(r["hotspot_revenue"]),
+                "pppoe": _safe_float(r["pppoe_revenue"]),
+            }
+            for r in rows
+        }
+
+        result = []
+        cursor = start.date()
+        end = timezone.now().date()
+        while cursor <= end:
+            vals = day_map.get(cursor, {"hotspot": 0, "pppoe": 0})
+            result.append({
+                "date": cursor.strftime("%b %d"),
+                "hotspot_revenue": vals["hotspot"],
+                "pppoe_revenue": vals["pppoe"],
+                "total": round(vals["hotspot"] + vals["pppoe"], 2),
+            })
+            cursor += timedelta(days=1)
+
+        payload = {
+            "daily_revenue": result,
+            "summary": {
+                "total_hotspot": round(sum(r["hotspot_revenue"] for r in result), 2),
+                "total_pppoe": round(sum(r["pppoe_revenue"] for r in result), 2),
+            },
+        }
+        cache.set(ck, payload, CACHE_TTL)
+        return Response(payload)
 
 
 # ================================================================

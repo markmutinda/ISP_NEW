@@ -1,3 +1,5 @@
+# apps/billing/serializers/hotspot_serializers.py
+
 """
 Hotspot Serializers for Admin API
 """
@@ -61,6 +63,8 @@ class HotspotPlanSerializer(serializers.ModelSerializer):
             'mikrotik_profile',
             # Display settings
             'is_active', 'is_popular', 'sort_order',
+            # Global template flag (NEW)
+            'is_global_template',          # <-- ADD THIS
             # Computed
             'total_validity_minutes',
             # ADD THIS: Subscriber count field

@@ -2020,7 +2020,14 @@ class UnifiedDashboardView(APIView):
         now = timezone.now()
         today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
         yesterday_start = today_start - timedelta(days=1)
-        week_start = today_start - timedelta(days=7)
+        
+        # ============================================================
+        # FIX: Use Monday-anchored calendar week instead of rolling 7 days
+        # This matches weekly_income chart and fixes "This Week" revenue
+        # ============================================================
+        days_to_monday = today_start.weekday()  # Monday=0 ... Sunday=6
+        week_start = today_start - timedelta(days=days_to_monday)   # ✅ Monday 00:00 of current week
+        
         month_start = today_start.replace(day=1)
         prev_month_start = (month_start - timedelta(days=1)).replace(day=1)
 

@@ -75,6 +75,11 @@ class SMSMessageViewSet(viewsets.ModelViewSet):
         if campaign_filter:
             qs = qs.filter(campaign__id=campaign_filter)
 
+        # NEW: filter by customer — powers the per-user SMS History tab
+        customer_filter = self.request.query_params.get('customer')
+        if customer_filter:
+            qs = qs.filter(customer_id=customer_filter)
+
         search = self.request.query_params.get('search')
         if search:
             qs = qs.filter(

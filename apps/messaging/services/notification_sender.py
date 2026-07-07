@@ -409,18 +409,9 @@ class SMSNotifier:
             return False
 
         ctx = _get_customer_context(customer)
-        ctx.update(_get_plan_context(customer=customer))
-
-        # Credentials
-        ctx['username'] = username
-        ctx['pppoe_username'] = username
-        ctx['login'] = username
-        ctx['password'] = password
-        ctx['pppoe_password'] = password
 
         default_msg = (
-            f"Hi {ctx['name']}, your internet is ready! "
-            f"Username: {username} | Password: {password} | Welcome aboard!"
+            f"Hi {ctx['name']}, welcome aboard! Your account number is {ctx['customer_account']}."
         )
         msg = _get_rendered_message('pppoe_welcome', default_msg, **ctx)
         return _send_once(f"pppoe_welcome:{customer.id}", phone, msg, ttl=3600,

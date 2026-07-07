@@ -22,6 +22,7 @@ from .hotspot_models import (
     HotspotPlan,
     HotspotSession,
     HotspotBranding,
+    HotspotPruneSettings,   # <-- add
 )
 
 from .ad_models import (
@@ -48,6 +49,7 @@ __all__ = [
     'HotspotPlan',
     'HotspotSession',
     'HotspotBranding',
+    'HotspotPruneSettings',   # <-- add to __all__
     # Ad Models
     'HotspotAd',
     'HotspotAdGrant',

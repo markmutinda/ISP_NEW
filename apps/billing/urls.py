@@ -78,7 +78,12 @@ from .views.hotspot_loyalty_views import (
 # ==========================
 # Invoice Settings & Utilities (NEW)
 # ==========================
-from .views.invoice_settings_views import InvoiceSettingsView, CustomerSearchView, InvoicePDFView
+from .views.invoice_settings_views import (
+    InvoiceSettingsView, 
+    CustomerSearchView, 
+    InvoicePDFView,
+    HotspotPruneSettingsView,   # <-- add
+)
 
 router = DefaultRouter()
 
@@ -265,6 +270,11 @@ urlpatterns = [
     path('invoice-settings/', InvoiceSettingsView.as_view(), name='invoice-settings'),
     path('customers/search/', CustomerSearchView.as_view(), name='invoice-customer-search'),
     path('invoices/<int:invoice_id>/pdf/', InvoicePDFView.as_view(), name='invoice-pdf'),
+    
+    # ==========================
+    # HOTSPOT PRUNE SETTINGS
+    # ==========================
+    path('hotspot-prune-settings/', HotspotPruneSettingsView.as_view(), name='hotspot-prune-settings'),
 
     # ==========================
     # Tuma Endpoints
