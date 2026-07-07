@@ -32,6 +32,37 @@ class PaymentView(APIView):
     """
     permission_classes = [IsAuthenticated, CustomerOnlyPermission]
     
+    def _normalize_msisdn(self, value):
+        """
+        Normalize to Tuma/Safaricom's required 2547XXXXXXXX format.
+        
+        Handles various input formats:
+        - 0712345678 -> 254712345678
+        - 712345678 -> 254712345678
+        - +254712345678 -> 254712345678
+        - 254712345678 -> 254712345678 (unchanged)
+        - 0712-345-678 -> 254712345678 (strips non-digits)
+        """
+        # Remove all non-digit characters
+        phone = ''.join(ch for ch in str(value or '') if ch.isdigit())
+        
+        # Normalize to 2547XXXXXXXX format
+        if phone.startswith('0') and len(phone) == 10:
+            # 0712345678 -> 254712345678
+            phone = '254' + phone[1:]
+        elif phone.startswith('7') and len(phone) == 9:
+            # 712345678 -> 254712345678
+            phone = '254' + phone
+        elif phone.startswith('254') and len(phone) == 12:
+            # 254712345678 -> unchanged
+            pass
+        elif phone.startswith('+254'):
+            # +254712345678 -> 254712345678
+            phone = phone[1:]
+        # If it's already in correct format, leave as is
+        
+        return phone
+    
     def get(self, request):
         """Get customer invoices and payments"""
         customer = request.user.customer_profile
@@ -201,28 +232,55 @@ class PaymentView(APIView):
                 return Response({'error': 'Payment service unavailable. Please try again.'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
         # ==========================================
-        # ROUTE 2: TUMA GATEWAY
+        # ROUTE 2: TUMA GATEWAY (FIXED VERSION)
         # ==========================================
         elif payment_method.tuma_configuration and payment_method.tuma_configuration.is_active:
+            tuma_cfg = payment_method.tuma_configuration
+            
+            # ==========================================
+            # FIX: Validate Tuma configuration before proceeding
+            # ==========================================
+            if not tuma_cfg.tuma_business_email or not tuma_cfg.tuma_business_api_key:
+                payment.status = 'FAILED'
+                payment.failure_reason = "Tuma business not fully configured for this ISP."
+                payment.save()
+                return Response({'error': payment.failure_reason}, status=status.HTTP_400_BAD_REQUEST)
+            
+            # ==========================================
+            # FIX: Normalize phone number to 2547XXXXXXXX format
+            # ==========================================
+            normalized_phone = self._normalize_msisdn(phone_number)
+            
+            # Validate the normalized phone number
+            if len(normalized_phone) != 12 or not normalized_phone.startswith('254'):
+                payment.status = 'FAILED'
+                payment.failure_reason = f"Invalid phone number format: {phone_number}"
+                payment.save()
+                return Response({'error': payment.failure_reason}, status=status.HTTP_400_BAD_REQUEST)
+            
             try:
                 from apps.billing.services.tuma_service import TumaClient, TumaError
                 client = TumaClient()
-                tuma_cfg = payment_method.tuma_configuration
                 
                 # Authenticate as the Child Business
-                child_token = client.get_token(tuma_cfg.tuma_business_email, tuma_cfg.tuma_business_api_key)
+                child_token = client.get_token(
+                    tuma_cfg.tuma_business_email, 
+                    tuma_cfg.tuma_business_api_key
+                )
                 
                 # Build the dynamic Webhook URL for this tenant
-                sub_domain = connection.schema_name.replace('tenant_', '')
-                callback_url = f"https://{sub_domain}.netily.co.ke/api/v1/billing/tuma/callback/"
+                callback_url = getattr(settings, 'TUMA_CALLBACK_URL', None)
+                if not callback_url:
+                    sub_domain = connection.schema_name.replace('tenant_', '')
+                    callback_url = f"https://{sub_domain}.netily.co.ke/api/v1/billing/tuma/callback/"
                 
-                # Push to Tuma
+                # Push to Tuma with normalized phone number
                 tuma_response = client.stk_push(
                     token=child_token,
-                    amount=int(actual_amount),  # Use the actual amount
-                    phone=phone_number,
+                    amount=int(actual_amount),
+                    phone=normalized_phone,  # FIX: Use normalized phone number
                     callback_url=callback_url,
-                    description=reference
+                    description=reference,
                 )
                 
                 checkout_id = tuma_response.get("data", {}).get("checkout_request_id", "")
@@ -239,15 +297,24 @@ class PaymentView(APIView):
                     'message': 'Please check your phone and enter your PIN to complete payment'
                 })
                 
-            except Exception as e:
+            except TumaError as e:
                 logger.error(f"Tuma initiation error: {e}")
                 payment.status = 'FAILED'
                 payment.failure_reason = str(e)
                 payment.save()
                 return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
+            
+            except Exception as e:
+                logger.error(f"Unexpected Tuma error: {e}")
+                payment.status = 'FAILED'
+                payment.failure_reason = f"Unexpected error: {str(e)}"
+                payment.save()
+                return Response({'error': 'Payment service unavailable. Please try again.'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
                 
         else:
-            return Response({'error': 'Payment method configuration is incomplete.'}, status=status.HTTP_400_BAD_REQUEST)
+            return Response({
+                'error': 'Payment method configuration is incomplete.'
+            }, status=status.HTTP_400_BAD_REQUEST)
     
     def _get_payment_methods(self):
         """Get available payment methods"""
