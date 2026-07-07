@@ -12,7 +12,7 @@ from decimal import Decimal
 import json
 
 # Use your existing permissions
-from apps.core.permissions import IsCompanyAdmin, IsCompanyStaff, IsCompanyMember
+from apps.core.permissions import HasRoleAccessPolicy, IsCompanyAdmin, IsCompanyStaff, IsCompanyMember
 from apps.core.models import Company
 from ..models.billing_models import Plan, BillingCycle, Invoice, InvoiceItem
 from ..serializers import (
@@ -240,7 +240,8 @@ class BillingCycleViewSet(viewsets.ModelViewSet):
     """
     queryset = BillingCycle.objects.all()
     serializer_class = BillingCycleSerializer
-    permission_classes = [IsAuthenticated, IsCompanyStaff]
+    permission_classes = [IsAuthenticated, IsCompanyStaff, HasRoleAccessPolicy]
+    required_rbac_path = "/admin/invoices"
     filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
     filterset_fields = ['status', 'is_locked', 'schema_name']
     search_fields = ['cycle_code', 'name', 'notes']
@@ -358,7 +359,8 @@ class InvoiceViewSet(viewsets.ModelViewSet):
     ViewSet for managing invoices
     """
     queryset = Invoice.objects.all()
-    permission_classes = [IsAuthenticated, IsCompanyStaff]
+    permission_classes = [IsAuthenticated, IsCompanyStaff, HasRoleAccessPolicy]
+    required_rbac_path = "/admin/invoices"
     filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
     filterset_fields = ['status', 'is_overdue', 'customer', 'billing_cycle']
     search_fields = ['invoice_number', 'customer__customer_code', 'customer__user__first_name', 'customer__user__last_name']
@@ -601,7 +603,8 @@ class InvoiceItemViewSet(viewsets.ModelViewSet):
     """
     queryset = InvoiceItem.objects.all()
     serializer_class = InvoiceItemSerializer
-    permission_classes = [IsAuthenticated, IsCompanyStaff]
+    permission_classes = [IsAuthenticated, IsCompanyStaff, HasRoleAccessPolicy]
+    required_rbac_path = "/admin/invoices"
     filter_backends = [DjangoFilterBackend]
     filterset_fields = ['invoice']
     

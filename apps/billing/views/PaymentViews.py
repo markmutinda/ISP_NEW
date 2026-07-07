@@ -19,7 +19,7 @@ from django.db.models import ProtectedError
 
 # Custom permissions
 from ..models.payment_models import Payment
-from apps.core.permissions import IsCompanyAdmin, IsCompanyStaff
+from apps.core.permissions import HasRoleAccessPolicy, IsCompanyAdmin, IsCompanyStaff
 from apps.customers.models import Customer
 from ..models.billing_models import Invoice
 from ..serializers import (
@@ -769,7 +769,8 @@ class PaymentViewSet(viewsets.ModelViewSet):
     """
     ViewSet for managing payments with M-Pesa support (PayHero removed)
     """
-    permission_classes = [IsAuthenticated, IsCompanyStaff]
+    permission_classes = [IsAuthenticated, IsCompanyStaff, HasRoleAccessPolicy]
+    required_rbac_path = "/admin/payments"
     filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
     filterset_fields = ['status', 'payment_method', 'customer', 'is_reconciled']
     search_fields = [
@@ -1430,7 +1431,8 @@ class ReceiptViewSet(viewsets.ModelViewSet):
     """
     ViewSet for managing receipts
     """
-    permission_classes = [IsAuthenticated, IsCompanyStaff]
+    permission_classes = [IsAuthenticated, IsCompanyStaff, HasRoleAccessPolicy]
+    required_rbac_path = "/admin/receipts"
     filter_backends = [DjangoFilterBackend, filters.SearchFilter]
     filterset_fields = ['status', 'customer']
     search_fields = ['receipt_number', 'customer__customer_code']

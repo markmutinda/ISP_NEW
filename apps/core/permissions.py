@@ -319,6 +319,92 @@ class IsAdminOrStaff(IsCompanyStaff):
     pass
 
 
+class HasRoleAccessPolicy(permissions.BasePermission):
+    """
+    Enforce tenant RoleAccessPolicy records for admin API endpoints.
+
+    Views opt in by setting `required_rbac_path`, for example
+    `required_rbac_path = "/admin/payments"`. Plain path grants remain
+    backward compatible; action tokens use `/admin/path::action`.
+    """
+
+    action_map = {
+        "list": "view",
+        "dashboard_stats": "view",
+        "retrieve": "view_details",
+        "create": "add",
+        "update": "edit",
+        "partial_update": "edit",
+        "destroy": "delete",
+        "mark_completed": "edit",
+        "mark_failed": "edit",
+        "reconcile": "edit",
+        "refund": "edit",
+        "issue": "edit",
+        "share": "view_details",
+    }
+
+    admin_roles = {"admin", "super_admin", "superadmin"}
+
+    def _normalize(self, value):
+        return str(value or "").strip().lower().replace(" ", "_").replace("-", "_")
+
+    def _required_action(self, request, view):
+        action = self.action_map.get(getattr(view, "action", None))
+        if action:
+            return action
+        if request.method in permissions.SAFE_METHODS:
+            return "view"
+        if request.method == "POST":
+            return "add"
+        if request.method in {"PUT", "PATCH"}:
+            return "edit"
+        if request.method == "DELETE":
+            return "delete"
+        return "view"
+
+    def has_permission(self, request, view):
+        user = getattr(request, "user", None)
+        if not user or not user.is_authenticated:
+            return False
+        if getattr(user, "is_superuser", False):
+            return True
+
+        role = self._normalize(getattr(user, "role", None))
+        access_level = self._normalize(getattr(user, "access_level", None))
+        if role in self.admin_roles or access_level in self.admin_roles:
+            return True
+
+        required_path = getattr(view, "required_rbac_path", None)
+        if not required_path:
+            return True
+
+        try:
+            from apps.core.models import RoleAccessPolicy
+
+            policy = RoleAccessPolicy.objects.filter(role=role).first()
+        except Exception:
+            return True
+
+        if not policy:
+            return True
+
+        allowed = policy.allowed_paths or []
+        if not allowed:
+            return False
+
+        required_action = self._required_action(request, view)
+        action_token = f"{required_path}::{required_action}"
+        if action_token in allowed:
+            return True
+
+        has_action_tokens = any(path.startswith(f"{required_path}::") for path in allowed)
+        if has_action_tokens:
+            return False
+
+        return any(required_path == path or required_path.startswith(f"{path}/") for path in allowed)
+
+
 class IsTechnician(IsCompanyTechnician):
     """
     Alias for IsCompanyTechnician for backward compatibility.
