@@ -16,12 +16,14 @@ from .models import NotificationLog
 from .serializers import NotificationLogSerializer
 from .permissions import IsAdminOrStaff
 from rest_framework.permissions import IsAuthenticated
+from apps.core.permissions import HasRoleAccessPolicy
 
 class NotificationLogViewSet(viewsets.ReadOnlyModelViewSet):
     """ViewSet for viewing notification logs (read-only)"""
     queryset = NotificationLog.objects.all()
     serializer_class = NotificationLogSerializer
-    permission_classes = [IsAuthenticated, IsAdminOrStaff]
+    permission_classes = [IsAuthenticated, IsAdminOrStaff, HasRoleAccessPolicy]
+    required_rbac_path = "/admin/notifications"
     filter_backends = [DjangoFilterBackend, filters.SearchFilter]
     filterset_fields = ['action', 'user']
     search_fields = ['details', 'ip_address']

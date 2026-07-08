@@ -9,7 +9,7 @@ from django.db.models import Q, Sum, Count
 from decimal import Decimal
 
 # Use your existing permissions
-from apps.core.permissions import IsCompanyAdmin, IsCompanyStaff, IsCompanyMember
+from apps.core.permissions import HasRoleAccessPolicy, IsCompanyAdmin, IsCompanyStaff, IsCompanyMember
 from apps.customers.models import Customer
 from ..models.voucher_models import VoucherBatch, Voucher
 from ..serializers import (
@@ -25,7 +25,8 @@ class VoucherBatchViewSet(viewsets.ModelViewSet):
     ViewSet for managing voucher batches
     """
     queryset = VoucherBatch.objects.all()
-    permission_classes = [IsAuthenticated, IsCompanyAdmin]  # Changed to IsCompanyAdmin
+    permission_classes = [IsAuthenticated, IsCompanyAdmin, HasRoleAccessPolicy]  # Changed to IsCompanyAdmin
+    required_rbac_path = "/admin/vouchers"
     filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
     filterset_fields = ['voucher_type', 'status', 'is_active']
     search_fields = ['batch_number', 'name', 'description']
@@ -122,7 +123,8 @@ class VoucherViewSet(viewsets.ModelViewSet):
     """
     queryset = Voucher.objects.all()
     serializer_class = VoucherSerializer
-    permission_classes = [IsAuthenticated, IsCompanyStaff]  # Changed to IsCompanyStaff
+    permission_classes = [IsAuthenticated, IsCompanyStaff, HasRoleAccessPolicy]  # Changed to IsCompanyStaff
+    required_rbac_path = "/admin/vouchers"
     filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
     filterset_fields = ['status', 'batch', 'is_reusable', 'sold_to']
     search_fields = ['code', 'pin', 'batch__name']
@@ -286,7 +288,8 @@ class VoucherUsageViewSet(viewsets.ReadOnlyModelViewSet):
     '''
     queryset = VoucherUsage.objects.all()
     serializer_class = VoucherUsageSerializer
-    permission_classes = [IsAuthenticated, IsCompanyStaff]
+    permission_classes = [IsAuthenticated, IsCompanyStaff, HasRoleAccessPolicy]
+    required_rbac_path = "/admin/vouchers"
     filter_backends = [DjangoFilterBackend, filters.OrderingFilter]
     filterset_fields = ['voucher', 'customer', 'payment', 'invoice']
     ordering_fields = ['created_at', 'amount']

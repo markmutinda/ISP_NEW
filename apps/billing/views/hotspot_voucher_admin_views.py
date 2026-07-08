@@ -11,7 +11,7 @@ from rest_framework.views import APIView
 
 from apps.billing.models.hotspot_models import HotspotPlan
 from apps.billing.models.voucher_models import Voucher, VoucherBatch
-from apps.core.permissions import IsCompanyStaff
+from apps.core.permissions import HasRoleAccessPolicy, IsCompanyStaff
 
 
 class HotspotVoucherGenerateView(APIView):
@@ -28,7 +28,8 @@ class HotspotVoucherGenerateView(APIView):
       "digits": 5                    # optional, default 5
     }
     """
-    permission_classes = [permissions.IsAuthenticated, IsCompanyStaff]
+    permission_classes = [permissions.IsAuthenticated, IsCompanyStaff, HasRoleAccessPolicy]
+    required_rbac_path = "/admin/vouchers"
 
     def post(self, request):
         plan_id = request.data.get('plan_id')
@@ -168,7 +169,8 @@ class HotspotVoucherListView(APIView):
       - status: used | unused | all (default all)
       - plan_id: optional hotspot plan UUID
     """
-    permission_classes = [permissions.IsAuthenticated, IsCompanyStaff]
+    permission_classes = [permissions.IsAuthenticated, IsCompanyStaff, HasRoleAccessPolicy]
+    required_rbac_path = "/admin/vouchers"
 
     def get(self, request):
         status_filter = (request.query_params.get('status') or 'all').lower()
@@ -233,7 +235,8 @@ class HotspotVoucherDetailView(APIView):
     PATCH /api/v1/hotspot/admin/vouchers/{id}/  — edit expiry date
     DELETE /api/v1/hotspot/admin/vouchers/{id}/ — delete voucher
     """
-    permission_classes = [permissions.IsAuthenticated, IsCompanyStaff]
+    permission_classes = [permissions.IsAuthenticated, IsCompanyStaff, HasRoleAccessPolicy]
+    required_rbac_path = "/admin/vouchers"
 
     def get_object(self, pk):
         try:

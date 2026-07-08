@@ -21,7 +21,7 @@ from .serializers import (
     TicketStatsSerializer,
 )
 
-from apps.core.permissions import IsAdminOrStaff, IsCustomer
+from apps.core.permissions import HasRoleAccessPolicy, IsAdminOrStaff, IsCustomer
 
 logger = logging.getLogger(__name__)
 
@@ -44,6 +44,13 @@ class SupportTicketViewSet(viewsets.ModelViewSet):
     ]
     ordering_fields = ['created_at', 'updated_at', 'priority', 'status']
     ordering = ['-created_at']
+    required_rbac_path = "/admin/tickets"
+
+    def get_required_rbac_path(self, request):
+        customer_actions = {"list", "retrieve", "messages", "reply", "create", "my"}
+        if getattr(request.user, "role", None) == "customer" and self.action in customer_actions:
+            return None
+        return self.required_rbac_path
 
     def get_queryset(self):
         user = self.request.user
@@ -105,14 +112,14 @@ class SupportTicketViewSet(viewsets.ModelViewSet):
     def get_permissions(self):
         if self.action in ['list', 'stats']:
             # Everyone authenticated can list (but filtered by role)
-            return [IsAuthenticated()]
+            return [IsAuthenticated(), HasRoleAccessPolicy()]
         if self.action in ['retrieve', 'messages', 'reply']:
-            return [IsAuthenticated()]
+            return [IsAuthenticated(), HasRoleAccessPolicy()]
         if self.action in ['create', 'my']:
-            return [IsAuthenticated()]
+            return [IsAuthenticated(), HasRoleAccessPolicy()]
         if self.action in ['update', 'partial_update', 'destroy', 'assign', 'status', 'escalate']:
-            return [IsAuthenticated(), IsAdminOrStaff()]
-        return [IsAuthenticated()]
+            return [IsAuthenticated(), IsAdminOrStaff(), HasRoleAccessPolicy()]
+        return [IsAuthenticated(), HasRoleAccessPolicy()]
 
     def create(self, request, *args, **kwargs):
         serializer = self.get_serializer(data=request.data)

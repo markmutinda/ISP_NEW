@@ -24,7 +24,7 @@ from apps.billing.serializers.hotspot_serializers import (
     HotspotClientSerializer,
 )
 from apps.network.models.router_models import Router
-from apps.core.permissions import IsAdminOrStaff
+from apps.core.permissions import HasRoleAccessPolicy, IsAdminOrStaff
 from utils.pagination import StandardResultsSetPagination
 
 logger = logging.getLogger(__name__)
@@ -45,7 +45,8 @@ class HotspotPlanViewSet(viewsets.ModelViewSet):
     """
     
     serializer_class = HotspotPlanSerializer
-    permission_classes = [IsAuthenticated, IsAdminOrStaff]
+    permission_classes = [IsAuthenticated, IsAdminOrStaff, HasRoleAccessPolicy]
+    required_rbac_path = "/admin/plans"
     pagination_class = None  # Plans are few per router, return flat array
     filter_backends = [DjangoFilterBackend, filters.OrderingFilter]
     ordering_fields = ['sort_order', 'price', 'name', 'created_at']
@@ -152,7 +153,8 @@ class HotspotSessionViewSet(viewsets.ReadOnlyModelViewSet):
     """
     
     serializer_class = HotspotSessionSerializer
-    permission_classes = [IsAuthenticated, IsAdminOrStaff]
+    permission_classes = [IsAuthenticated, IsAdminOrStaff, HasRoleAccessPolicy]
+    required_rbac_path = "/admin/usage"
     filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
     filterset_fields = ['status']
     search_fields = ['phone_number', 'mac_address', 'session_id']
@@ -271,7 +273,8 @@ class HotspotBrandingView(APIView):
     - PUT   /api/v1/hotspot/routers/{router_id}/branding/
     """
     
-    permission_classes = [IsAuthenticated, IsAdminOrStaff]
+    permission_classes = [IsAuthenticated, IsAdminOrStaff, HasRoleAccessPolicy]
+    required_rbac_path = "/admin/settings"
     
     def get_object(self, router_id):
         router = get_object_or_404(Router, id=router_id)
@@ -324,7 +327,8 @@ class HotspotDashboardView(APIView):
     GET /api/v1/hotspot/dashboard/
     """
     
-    permission_classes = [IsAuthenticated, IsAdminOrStaff]
+    permission_classes = [IsAuthenticated, IsAdminOrStaff, HasRoleAccessPolicy]
+    required_rbac_path = "/admin/analytics"
     
     def get(self, request):
         now = timezone.now()
@@ -385,7 +389,8 @@ class GlobalHotspotPlanListView(generics.ListAPIView):
     GET /api/v1/hotspot/admin/plans/
     """
     serializer_class = HotspotPlanSerializer
-    permission_classes = [IsAuthenticated, IsAdminOrStaff]
+    permission_classes = [IsAuthenticated, IsAdminOrStaff, HasRoleAccessPolicy]
+    required_rbac_path = "/admin/plans"
     queryset = HotspotPlan.objects.filter(is_active=True).select_related('router')
     pagination_class = None
     filter_backends = [filters.OrderingFilter]
@@ -402,7 +407,8 @@ class HotspotClientViewSet(viewsets.ReadOnlyModelViewSet):
     """
     
     serializer_class = HotspotClientSerializer
-    permission_classes = [IsAuthenticated, IsAdminOrStaff]
+    permission_classes = [IsAuthenticated, IsAdminOrStaff, HasRoleAccessPolicy]
+    required_rbac_path = "/admin/users"
     filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
     search_fields = ['canonical_phone', 'email', 'external_client_id', 'canonical_username']
     ordering_fields = ['last_seen_at', 'first_seen_at', 'total_spend', 'total_sessions']
@@ -429,7 +435,8 @@ class ActiveSubscriptionsView(APIView):
     UPDATED: Hotspot tab now shows ALL clients (not just active) with pagination.
     FIXED: Return ALL hotspot clients — frontend handles pagination.
     """
-    permission_classes = [IsAuthenticated, IsAdminOrStaff]
+    permission_classes = [IsAuthenticated, IsAdminOrStaff, HasRoleAccessPolicy]
+    required_rbac_path = "/admin/users"
 
     def get(self, request):
         from apps.radius.models import RadAcct
@@ -609,7 +616,8 @@ class HotspotClientDetailView(APIView):
     DELETE /api/v1/hotspot/admin/clients/{id}/
     Deletes a hotspot client and revokes their RADIUS credentials
     """
-    permission_classes = [IsAuthenticated, IsAdminOrStaff]
+    permission_classes = [IsAuthenticated, IsAdminOrStaff, HasRoleAccessPolicy]
+    required_rbac_path = "/admin/users"
 
     def get(self, request, id):
         from apps.radius.models import RadAcct
@@ -719,7 +727,8 @@ class RouterIncomeView(APIView):
     summing HotspotSession.amount which overcounts due to transitional
     'paid' status and test/pending sessions.
     """
-    permission_classes = [IsAuthenticated, IsAdminOrStaff]
+    permission_classes = [IsAuthenticated, IsAdminOrStaff, HasRoleAccessPolicy]
+    required_rbac_path = "/admin/analytics"
 
     def get(self, request, router_id):
         from apps.billing.models.payment_models import Payment
@@ -787,7 +796,8 @@ class HotspotSessionExtendView(APIView):
     
     Permission: Admin or Staff only.
     """
-    permission_classes = [IsAuthenticated, IsAdminOrStaff]
+    permission_classes = [IsAuthenticated, IsAdminOrStaff, HasRoleAccessPolicy]
+    required_rbac_path = "/admin/usage"
 
     def post(self, request, session_id):
         from apps.billing.models.hotspot_models import HotspotSession

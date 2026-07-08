@@ -33,7 +33,7 @@ from rest_framework.views import APIView
 from django_tenants.utils import schema_context, get_public_schema_name
 
 from apps.billing.models.ad_models import HotspotAd, HotspotAdGrant
-from apps.core.permissions import IsAdminOrStaff
+from apps.core.permissions import HasRoleAccessPolicy, IsAdminOrStaff
 from apps.network.models.router_models import Router
 
 
@@ -311,7 +311,8 @@ class HotspotAdMediaView(APIView):
 
 class HotspotAdAdminViewSet(viewsets.ModelViewSet):
     """CRUD for hotspot ads. Staff only."""
-    permission_classes = [IsAuthenticated, IsAdminOrStaff]
+    permission_classes = [IsAuthenticated, IsAdminOrStaff, HasRoleAccessPolicy]
+    required_rbac_path = "/admin/ads"
     parser_classes = [MultiPartParser, FormParser, JSONParser]
     filter_backends = [filters.SearchFilter, filters.OrderingFilter]
     search_fields = ['name']

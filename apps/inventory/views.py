@@ -8,7 +8,7 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.filters import SearchFilter, OrderingFilter
 from datetime import timedelta
 
-from apps.core.permissions import IsAdmin, IsAdminOrStaff
+from apps.core.permissions import HasRoleAccessPolicy, IsAdmin, IsAdminOrStaff
 
 from .models import (
     Supplier, EquipmentType, EquipmentItem, Assignment,
@@ -25,7 +25,8 @@ from .filters import EquipmentItemFilter, PurchaseOrderFilter
 class SupplierViewSet(viewsets.ModelViewSet):
     queryset = Supplier.objects.filter(is_active=True)
     serializer_class = SupplierSerializer
-    permission_classes = [IsAuthenticated, IsAdminOrStaff]
+    permission_classes = [IsAuthenticated, IsAdminOrStaff, HasRoleAccessPolicy]
+    required_rbac_path = "/admin/inventory"
     filter_backends = [SearchFilter, OrderingFilter]
     search_fields = ['name', 'contact_person', 'email', 'phone']
     ordering_fields = ['name', 'created_at']
@@ -50,7 +51,8 @@ class SupplierViewSet(viewsets.ModelViewSet):
 class EquipmentTypeViewSet(viewsets.ModelViewSet):
     queryset = EquipmentType.objects.filter(is_active=True)
     serializer_class = EquipmentTypeSerializer
-    permission_classes = [IsAuthenticated, IsAdminOrStaff]
+    permission_classes = [IsAuthenticated, IsAdminOrStaff, HasRoleAccessPolicy]
+    required_rbac_path = "/admin/inventory"
     filter_backends = [SearchFilter, OrderingFilter]
     search_fields = ['name', 'description']
     ordering_fields = ['name', 'created_at']
@@ -67,7 +69,8 @@ class EquipmentItemViewSet(viewsets.ModelViewSet):
         'equipment_type', 'supplier', 'assigned_to', 'assigned_to_customer'
     ).all()
     serializer_class = EquipmentItemSerializer
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, HasRoleAccessPolicy]
+    required_rbac_path = "/admin/inventory"
     filter_backends = [filters.DjangoFilterBackend, SearchFilter, OrderingFilter]
     filterset_class = EquipmentItemFilter
     search_fields = ['name', 'model', 'serial_number', 'asset_tag', 'mac_address', 'notes']
@@ -77,7 +80,7 @@ class EquipmentItemViewSet(viewsets.ModelViewSet):
     def get_permissions(self):
         if self.action in ['create', 'update', 'partial_update', 'destroy',
                            'assign', 'return_item', 'maintenance', 'dispose']:
-            return [IsAuthenticated(), IsAdminOrStaff()]
+            return [IsAuthenticated(), IsAdminOrStaff(), HasRoleAccessPolicy()]
         return super().get_permissions()
 
     @action(detail=False, methods=['get'])
@@ -248,7 +251,8 @@ class AssignmentViewSet(viewsets.ModelViewSet):
         'equipment', 'assigned_to', 'assigned_by'
     ).all()
     serializer_class = AssignmentSerializer
-    permission_classes = [IsAuthenticated, IsAdminOrStaff]
+    permission_classes = [IsAuthenticated, IsAdminOrStaff, HasRoleAccessPolicy]
+    required_rbac_path = "/admin/inventory"
     filter_backends = [filters.DjangoFilterBackend, OrderingFilter]
     filterset_fields = ['assigned_to', 'equipment']
     ordering_fields = ['assigned_date', 'created_at']
@@ -277,7 +281,8 @@ class AssignmentViewSet(viewsets.ModelViewSet):
 class PurchaseOrderViewSet(viewsets.ModelViewSet):
     queryset = PurchaseOrder.objects.all()
     serializer_class = PurchaseOrderSerializer
-    permission_classes = [IsAuthenticated, IsAdminOrStaff]
+    permission_classes = [IsAuthenticated, IsAdminOrStaff, HasRoleAccessPolicy]
+    required_rbac_path = "/admin/inventory"
     filter_backends = [filters.DjangoFilterBackend, SearchFilter, OrderingFilter]
     filterset_class = PurchaseOrderFilter
     search_fields = ['po_number', 'supplier__name', 'notes']
@@ -298,7 +303,8 @@ class PurchaseOrderViewSet(viewsets.ModelViewSet):
 class PurchaseOrderItemViewSet(viewsets.ModelViewSet):
     queryset = PurchaseOrderItem.objects.all()
     serializer_class = PurchaseOrderItemSerializer
-    permission_classes = [IsAuthenticated, IsAdminOrStaff]
+    permission_classes = [IsAuthenticated, IsAdminOrStaff, HasRoleAccessPolicy]
+    required_rbac_path = "/admin/inventory"
 
     def get_queryset(self):
         qs = super().get_queryset()
@@ -311,7 +317,8 @@ class PurchaseOrderItemViewSet(viewsets.ModelViewSet):
 class MaintenanceRecordViewSet(viewsets.ModelViewSet):
     queryset = MaintenanceRecord.objects.all()
     serializer_class = MaintenanceRecordSerializer
-    permission_classes = [IsAuthenticated, IsAdminOrStaff]
+    permission_classes = [IsAuthenticated, IsAdminOrStaff, HasRoleAccessPolicy]
+    required_rbac_path = "/admin/inventory"
     filter_backends = [filters.DjangoFilterBackend, OrderingFilter]
     filterset_fields = ['equipment', 'status']
     ordering_fields = ['scheduled_date', 'completed_date']
@@ -339,7 +346,8 @@ class MaintenanceRecordViewSet(viewsets.ModelViewSet):
 class StockAlertViewSet(viewsets.ReadOnlyModelViewSet):
     queryset = StockAlert.objects.filter(is_active=True)
     serializer_class = StockAlertSerializer
-    permission_classes = [IsAuthenticated, IsAdminOrStaff]
+    permission_classes = [IsAuthenticated, IsAdminOrStaff, HasRoleAccessPolicy]
+    required_rbac_path = "/admin/inventory"
 
     @action(detail=False, methods=['get'])
     def check_stock(self, request):
@@ -361,7 +369,8 @@ class StockAlertViewSet(viewsets.ReadOnlyModelViewSet):
 
 
 class StockReportView(generics.GenericAPIView):
-    permission_classes = [IsAuthenticated, IsAdminOrStaff]
+    permission_classes = [IsAuthenticated, IsAdminOrStaff, HasRoleAccessPolicy]
+    required_rbac_path = "/admin/inventory"
 
     def get(self, request):
         report_data = EquipmentItem.objects.values('equipment_type__name').annotate(

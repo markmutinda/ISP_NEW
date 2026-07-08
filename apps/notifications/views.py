@@ -9,6 +9,7 @@ from django.db.models import Q, Count, F
 from datetime import timedelta
 import logging
 
+from apps.core.permissions import HasRoleAccessPolicy
 from .models import (
     NotificationTemplate, 
     Notification, 
@@ -45,7 +46,8 @@ class NotificationTemplateViewSet(viewsets.ModelViewSet):
     """ViewSet for managing notification templates"""
     queryset = NotificationTemplate.objects.all()
     serializer_class = NotificationTemplateSerializer
-    permission_classes = [IsAuthenticated, CanManageTemplates]
+    permission_classes = [IsAuthenticated, CanManageTemplates, HasRoleAccessPolicy]
+    required_rbac_path = "/admin/notifications"
     filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
     filterset_fields = ['notification_type', 'trigger_event', 'is_active']
     search_fields = ['name', 'subject', 'message_template']
@@ -108,6 +110,7 @@ class NotificationViewSet(viewsets.ModelViewSet):
     """ViewSet for managing notifications"""
     serializer_class = NotificationSerializer
     permission_classes = [IsAuthenticated]
+    required_rbac_path = "/admin/notifications"
     filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
     filterset_fields = ['notification_type', 'status', 'priority']
     search_fields = ['subject', 'message', 'recipient_email', 'recipient_phone']
@@ -117,11 +120,11 @@ class NotificationViewSet(viewsets.ModelViewSet):
     def get_permissions(self):
         """Set permissions based on action"""
         if self.action in ['list', 'retrieve']:
-            permission_classes = [IsAuthenticated]
+            permission_classes = [IsAuthenticated, HasRoleAccessPolicy]
         elif self.action in ['create', 'update', 'partial_update', 'destroy']:
-            permission_classes = [IsAuthenticated, CanManageNotifications]
+            permission_classes = [IsAuthenticated, CanManageNotifications, HasRoleAccessPolicy]
         else:
-            permission_classes = [IsAuthenticated]
+            permission_classes = [IsAuthenticated, HasRoleAccessPolicy]
         return [permission() for permission in permission_classes]
     
     def get_queryset(self):
@@ -306,7 +309,8 @@ class AlertRuleViewSet(viewsets.ModelViewSet):
     """ViewSet for managing alert rules"""
     queryset = AlertRule.objects.all()
     serializer_class = AlertRuleSerializer
-    permission_classes = [IsAuthenticated, CanManageAlertRules]
+    permission_classes = [IsAuthenticated, CanManageAlertRules, HasRoleAccessPolicy]
+    required_rbac_path = "/admin/notifications"
     filter_backends = [DjangoFilterBackend, filters.SearchFilter]
     filterset_fields = ['alert_type', 'is_active']
     search_fields = ['name', 'description', 'model_name', 'field_name']
@@ -364,6 +368,7 @@ class NotificationPreferenceViewSet(viewsets.ModelViewSet):
     """ViewSet for managing notification preferences"""
     serializer_class = NotificationPreferenceSerializer
     permission_classes = [IsAuthenticated]
+    required_rbac_path = "/admin/notifications"
     
     def get_queryset(self):
         user = self.request.user
@@ -378,9 +383,9 @@ class NotificationPreferenceViewSet(viewsets.ModelViewSet):
     def get_permissions(self):
         """Set permissions based on action"""
         if self.action in ['list', 'retrieve', 'update', 'partial_update']:
-            permission_classes = [IsAuthenticated]
+            permission_classes = [IsAuthenticated, HasRoleAccessPolicy]
         elif self.action in ['create', 'destroy']:
-            permission_classes = [IsAuthenticated, CanManageNotifications]
+            permission_classes = [IsAuthenticated, CanManageNotifications, HasRoleAccessPolicy]
         else:
             permission_classes = [IsAuthenticated]
         return [permission() for permission in permission_classes]
@@ -411,7 +416,8 @@ class BulkNotificationViewSet(viewsets.ModelViewSet):
     """ViewSet for managing bulk notifications"""
     queryset = BulkNotification.objects.all()
     serializer_class = BulkNotificationSerializer
-    permission_classes = [IsAuthenticated, CanSendBulkNotifications]
+    permission_classes = [IsAuthenticated, CanSendBulkNotifications, HasRoleAccessPolicy]
+    required_rbac_path = "/admin/notifications"
     filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
     filterset_fields = ['notification_type', 'status', 'target_segment']
     search_fields = ['name', 'subject', 'message']
@@ -510,7 +516,8 @@ class BulkNotificationViewSet(viewsets.ModelViewSet):
 
 class SendNotificationView(APIView):
     """API view for sending manual notifications"""
-    permission_classes = [IsAuthenticated, CanManageNotifications]
+    permission_classes = [IsAuthenticated, CanManageNotifications, HasRoleAccessPolicy]
+    required_rbac_path = "/admin/notifications"
     
     def post(self, request):
         serializer = SendNotificationSerializer(data=request.data)
@@ -601,7 +608,8 @@ class SendNotificationView(APIView):
 
 class NotificationStatsView(APIView):
     """API view for notification statistics"""
-    permission_classes = [IsAuthenticated, IsAdminOrStaff]
+    permission_classes = [IsAuthenticated, IsAdminOrStaff, HasRoleAccessPolicy]
+    required_rbac_path = "/admin/notifications"
     
     def get(self, request):
         from django.db.models import Count, Avg, Q

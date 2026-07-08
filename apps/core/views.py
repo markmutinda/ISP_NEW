@@ -1904,7 +1904,8 @@ def _truthy(value):
 
 class TenantLeadListView(APIView):
     """Tenant-local lead list and manual lead capture for ISP admins."""
-    permission_classes = [IsAuthenticated, IsAdminOrStaff]
+    permission_classes = [IsAuthenticated, IsAdminOrStaff, HasRoleAccessPolicy]
+    required_rbac_path = "/admin/leads"
 
     def get(self, request):
         from django.db.models import Q
@@ -1974,7 +1975,8 @@ class TenantLeadListView(APIView):
 
 
 class TenantLeadStatsView(APIView):
-    permission_classes = [IsAuthenticated, IsAdminOrStaff]
+    permission_classes = [IsAuthenticated, IsAdminOrStaff, HasRoleAccessPolicy]
+    required_rbac_path = "/admin/leads"
 
     def get(self, request):
         from .models import Lead
@@ -1992,7 +1994,8 @@ class TenantLeadStatsView(APIView):
 
 
 class TenantLeadDetailView(APIView):
-    permission_classes = [IsAuthenticated, IsAdminOrStaff]
+    permission_classes = [IsAuthenticated, IsAdminOrStaff, HasRoleAccessPolicy]
+    required_rbac_path = "/admin/leads"
 
     def patch(self, request, pk):
         from .models import Lead

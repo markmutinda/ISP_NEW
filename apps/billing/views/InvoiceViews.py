@@ -34,6 +34,7 @@ class PlanViewSet(viewsets.ModelViewSet):
     search_fields = ['name', 'code', 'description']
     ordering_fields = ['name', 'base_price', 'created_at', 'subscriber_count']
     ordering = ['-created_at']
+    required_rbac_path = "/admin/plans"
     
     def get_serializer_class(self):
         """Return appropriate serializer based on action"""
@@ -46,9 +47,9 @@ class PlanViewSet(viewsets.ModelViewSet):
         if self.action in ['public']:
             return [AllowAny()]
         elif self.action in ['create', 'update', 'partial_update', 'destroy', 'toggle_active']:
-            return [IsAuthenticated(), IsCompanyAdmin()]
+            return [IsAuthenticated(), IsCompanyAdmin(), HasRoleAccessPolicy()]
         else:
-            return [IsAuthenticated(), IsCompanyStaff()]
+            return [IsAuthenticated(), IsCompanyStaff(), HasRoleAccessPolicy()]
     
     def perform_create(self, serializer):
         """Save plan with creator info and handle duplicate names politely."""
