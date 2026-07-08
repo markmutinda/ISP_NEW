@@ -450,18 +450,23 @@ class RadiusTenantConfigDetailSerializer(RadiusTenantConfigSerializer):
         extra_kwargs = {}
 
 
+# ================================================================
+# FIX: CustomerRadiusCredentialsSerializer - add customer_phone
+# ================================================================
+
 class CustomerRadiusCredentialsSerializer(serializers.ModelSerializer):
     """Serializer for customer RADIUS credentials."""
     
     customer_name = serializers.CharField(source='customer.full_name', read_only=True)
     customer_code = serializers.CharField(source='customer.customer_code', read_only=True)
+    customer_phone = serializers.CharField(source='customer.user.phone_number', read_only=True, default='')  # NEW
     profile_name = serializers.CharField(source='bandwidth_profile.name', read_only=True, allow_null=True)
     router_name = serializers.CharField(source='router.name', read_only=True, allow_null=True, default=None)
     
     class Meta:
         model = CustomerRadiusCredentials
         fields = [
-            'id', 'customer', 'customer_name', 'customer_code',
+            'id', 'customer', 'customer_name', 'customer_code', 'customer_phone',  # added customer_phone
             'username', 'password',
             'router', 'router_name',
             'bandwidth_profile', 'profile_name',
