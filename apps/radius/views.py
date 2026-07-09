@@ -1214,10 +1214,15 @@ class CustomerRadiusCredentialsViewSet(viewsets.ModelViewSet):
         """
         credentials = self.get_object()
 
-        if not credentials.router:
+        router = self._resolve_router_for_credentials(credentials)
+
+        if not router:
             return Response({
                 'status': 'error',
-                'message': 'No router assigned to this customer'
+                'message': (
+                    'Could not determine which router this customer is on. '
+                    'Assign a router to their service or RADIUS credentials first.'
+                )
             }, status=status.HTTP_400_BAD_REQUEST)
 
         try:
@@ -1229,13 +1234,13 @@ class CustomerRadiusCredentialsViewSet(viewsets.ModelViewSet):
                 'PPPOE': 'pppoe',
             }.get(credentials.connection_type, 'both')
 
-            api = MikrotikAPI(credentials.router)
+            api = MikrotikAPI(router)
             result = api.disconnect_user(credentials.username, connection_type=conn_type)
 
             # Check if we actually kicked any sessions
             kicked = bool(result.get('hotspot') or result.get('pppoe'))
 
-            router_name = credentials.router.name or credentials.router.host
+            router_name = router.name or router.host
 
             return Response({
                 'status': 'success' if kicked else 'not_connected',
@@ -1254,3 +1259,53 @@ class CustomerRadiusCredentialsViewSet(viewsets.ModelViewSet):
                 {'status': 'error', 'message': str(e)},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
+
+    def _resolve_router_for_credentials(self, credentials):
+        """
+        Best-effort resolution of which physical router (NAS) a customer
+        is connected through, since CustomerRadiusCredentials.router is
+        often left blank when the credential was auto-created from a plan
+        rather than an explicit router pick.
+
+        Resolution order:
+          1. credentials.router (explicit FK)
+          2. Active RadAcct session's nasipaddress -> matching Router
+          3. Customer's active service -> plan.ip_pool -> IPPool.router
+        """
+        from apps.network.models import Router
+        from django.db.models import Q
+        from apps.network.models.ipam_models import IPPool
+
+        if credentials.router:
+            return credentials.router
+
+        # 2. Look at their current live session's NAS IP (most reliable —
+        #    tells us exactly which router they're attached to right now)
+        active_session = RadAcct.objects.filter(
+            username=credentials.username,
+            acctstoptime__isnull=True,
+        ).order_by('-acctstarttime').first()
+
+        if active_session and active_session.nasipaddress:
+            router = Router.objects.filter(
+                Q(vpn_ip_address=active_session.nasipaddress) |
+                Q(ip_address=active_session.nasipaddress)
+            ).first()
+            if router:
+                return router
+
+        # 3. Fall back to the router attached to the plan's IP pool
+        customer = credentials.customer
+        if customer:
+            service = customer.services.filter(
+                status='ACTIVE', plan__isnull=False
+            ).select_related('plan').first()
+            if service and service.plan and service.plan.ip_pool:
+                try:
+                    pool = IPPool.objects.filter(id=service.plan.ip_pool).select_related('router').first()
+                    if pool and pool.router:
+                        return pool.router
+                except Exception:
+                    pass
+
+        return None
