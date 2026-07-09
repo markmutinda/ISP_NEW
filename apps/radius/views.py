@@ -952,6 +952,7 @@ class CustomerRadiusCredentialsViewSet(viewsets.ModelViewSet):
         POST   /api/v1/radius/credentials/{id}/sync/    - Force sync to RADIUS
         POST   /api/v1/radius/credentials/{id}/enable/  - Enable account
         POST   /api/v1/radius/credentials/{id}/disable/ - Disable account
+        POST   /api/v1/radius/credentials/{id}/refresh_internet/ - Kick user off router (refresh connection)
         GET    /api/v1/radius/credentials/expired_count/ - Fast count of expired credentials
     """
     
@@ -1189,3 +1190,67 @@ class CustomerRadiusCredentialsViewSet(viewsets.ModelViewSet):
             'plan_name': service.plan.name,
             'validity_type': service.plan.validity_type
         })
+
+    @action(detail=True, methods=['post'])
+    def refresh_internet(self, request, pk=None):
+        """
+        Kick the customer off their MikroTik router right now.
+        This does NOT touch RADIUS enable/disable state or expiration —
+        it just removes their active session. The router (and client
+        device) will automatically reconnect, which re-pulls their IP,
+        queue/rate-limit, and any other RADIUS reply attributes fresh.
+
+        POST /api/v1/radius/credentials/{id}/refresh_internet/
+
+        Returns:
+            {
+                "status": "success" or "not_connected" or "error",
+                "message": "Human readable message",
+                "details": {
+                    "hotspot": true/false,
+                    "pppoe": true/false
+                }
+            }
+        """
+        credentials = self.get_object()
+
+        if not credentials.router:
+            return Response({
+                'status': 'error',
+                'message': 'No router assigned to this customer'
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            from apps.network.integrations.mikrotik_api import MikrotikAPI
+
+            # Map connection type to MikrotikAPI disconnect_user connection_type
+            conn_type = {
+                'HOTSPOT': 'hotspot',
+                'PPPOE': 'pppoe',
+            }.get(credentials.connection_type, 'both')
+
+            api = MikrotikAPI(credentials.router)
+            result = api.disconnect_user(credentials.username, connection_type=conn_type)
+
+            # Check if we actually kicked any sessions
+            kicked = bool(result.get('hotspot') or result.get('pppoe'))
+
+            router_name = credentials.router.name or credentials.router.host
+
+            return Response({
+                'status': 'success' if kicked else 'not_connected',
+                'message': (
+                    f'Kicked {credentials.username} off {router_name}. '
+                    f'It will reconnect automatically.'
+                ) if kicked else (
+                    f'{credentials.username} is not currently connected to '
+                    f'{router_name}.'
+                ),
+                'details': result,
+            })
+        except Exception as e:
+            logger.error(f"Failed to refresh internet for {credentials.username}: {e}")
+            return Response(
+                {'status': 'error', 'message': str(e)},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
