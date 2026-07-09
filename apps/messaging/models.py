@@ -228,9 +228,21 @@ class SMSGatewayConfig(models.Model):
         # Enforce: only one active gateway at a time
         if self.is_active:
             SMSGatewayConfig.objects.exclude(pk=self.pk).update(is_active=False)
+        
         # If using inbuilt, provider field doesn't matter but set it to bytewave
         if self.use_inbuilt_system:
             self.provider = 'bytewave'
+            
+            # ── NEW: Prevent duplicate inbuilt rows ──
+            # Reuse the existing inbuilt gateway instead of letting a second row
+            # get created by a stray create() call
+            existing = SMSGatewayConfig.objects.filter(
+                use_inbuilt_system=True
+            ).exclude(pk=self.pk).first()
+            
+            if existing and not self.pk:
+                self.pk = existing.pk
+        
         super().save(*args, **kwargs)
 
 
