@@ -19,7 +19,7 @@ def sanitize_for_haproxy(name: str) -> str:
     """
     Sanitize a router name so it is safe to use in HAProxy
     frontend/backend declaration names.
-    HAProxy forbids: spaces, (), [], {}, /, \, :, ;, #, !, @, |, =, ~
+    HAProxy forbids: spaces, (), [], {}, /, \\, :, ;, #, !, @, |, =, ~
     
     This only sanitizes for HAProxy config generation — never stored in DB.
     The original display name is preserved in the database.
@@ -64,11 +64,9 @@ def generate_haproxy_config(routers: list) -> str:
         winbox_port = router.get('winbox_remote_port')
         api_port = router.get('api_remote_port')
 
-        # 🟢 FIX: Use `continue` instead of `return config` to skip this router
-        # and continue processing the remaining routers in the loop
         if not winbox_port or not api_port:
             logger.warning(f"[HAPROXY] Router {name} (ID: {router_id}) missing remote port assignments. Skipping.")
-            continue  # ← Was `return config` — this bug exits the whole loop early
+            continue  
 
         sections.append(f"""
 frontend winbox_{name}_{router_id}
@@ -169,7 +167,7 @@ def sync_haproxy_config() -> bool:
 
     try:
         with open(HAPROXY_CONFIG_PATH, 'w') as f:
-            f.write(config)
+            f.write(config + '\n\n')  # <--- THE FIX: Guaranteed new lines
         logger.info(f"[HAPROXY] Config written with {len(all_routers)} routers")
     except Exception as e:
         logger.error(f"[HAPROXY] Config write failed: {e}")
