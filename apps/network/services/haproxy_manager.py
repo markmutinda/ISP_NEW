@@ -144,11 +144,36 @@ def reload_haproxy() -> bool:
 
 
 def sync_haproxy_config() -> bool:
+    """
+    Synchronize HAProxy configuration with all routers across all tenants.
+    
+    The critical fix here addresses the root cause of empty configs:
+    - Django DB connections in long-lived Celery workers can go stale
+    - Stale connections throw OperationalError when first queried
+    - The try/except was silently swallowing these errors
+    - This would cause all_routers to be [] and wipe the config
+    
+    Fixes applied:
+    1. close_old_connections() before the loop to drop dead connections
+    2. Specific exception handling for OperationalError/InterfaceError
+    3. Retry logic with connection cleanup for individual tenants
+    4. Kill switch to prevent empty config writes
+    """
+    from django.db import close_old_connections
+    from django.db.utils import OperationalError, InterfaceError
     from django_tenants.utils import schema_context, get_tenant_model
     from apps.network.models.router_models import Router
 
+    # 🟢 FIX: Force Django to drop any dead/expired connections before we start.
+    # This is the actual fix for the overnight wipe — Celery workers are
+    # long-lived processes and Postgres connections silently die after
+    # nightly maintenance, backups, or idle timeouts.
+    logger.debug("[HAPROXY] Closing old database connections before sync")
+    close_old_connections()
+
     TenantModel = get_tenant_model()
     all_routers = []
+    tenant_errors = 0
 
     for tenant in TenantModel.objects.exclude(schema_name='public'):
         try:
@@ -160,14 +185,52 @@ def sync_haproxy_config() -> bool:
                     vpn_ip_address__isnull=False,
                 ).values('id', 'name', 'vpn_ip_address', 'winbox_remote_port', 'api_remote_port')
                 all_routers.extend(list(routers))
+                
+        except (OperationalError, InterfaceError) as e:
+            # 🟢 FIX: Connection actually died mid-loop — reconnect and retry once
+            tenant_errors += 1
+            logger.warning(
+                f"[HAPROXY] DB connection issue for {tenant.schema_name}, retrying: {e}"
+            )
+            close_old_connections()
+            try:
+                with schema_context(tenant.schema_name):
+                    routers = Router.objects.filter(
+                        vpn_provisioned=True,
+                        is_active=True,
+                        vpn_ip_address__isnull=False,
+                    ).values('id', 'name', 'vpn_ip_address', 'winbox_remote_port', 'api_remote_port')
+                    all_routers.extend(list(routers))
+                logger.info(f"[HAPROXY] Retry successful for {tenant.schema_name}")
+            except Exception as retry_err:
+                logger.error(
+                    f"[HAPROXY] Retry failed for {tenant.schema_name}: {retry_err}"
+                )
+                
         except Exception as e:
-            logger.error(f"[HAPROXY] Error reading routers for {tenant.schema_name}: {e}")
+            logger.error(
+                f"[HAPROXY] Unexpected error reading routers for {tenant.schema_name}: {e}"
+            )
+
+    if tenant_errors:
+        logger.warning(
+            f"[HAPROXY] {tenant_errors} tenant(s) had connection issues this sync"
+        )
+
+    # 🟢 KILL SWITCH: never let a DB hiccup wipe the live config
+    if not all_routers:
+        logger.error(
+            "[HAPROXY] CRITICAL: 0 routers found across all tenants — "
+            "refusing to overwrite haproxy.cfg. Likely a stale DB connection "
+            "or no routers provisioned yet."
+        )
+        return False
 
     config = generate_haproxy_config(all_routers)
 
     try:
         with open(HAPROXY_CONFIG_PATH, 'w') as f:
-            f.write(config + '\n\n')  # <--- THE FIX: Guaranteed new lines
+            f.write(config + '\n\n')
         logger.info(f"[HAPROXY] Config written with {len(all_routers)} routers")
     except Exception as e:
         logger.error(f"[HAPROXY] Config write failed: {e}")

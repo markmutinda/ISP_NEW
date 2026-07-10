@@ -49,11 +49,19 @@ if DATABASE_URL:
     DATABASES = {
         'default': dj_database_url.config(
             default=DATABASE_URL,
-            conn_max_age=600,
-            conn_health_checks=True,
+            conn_max_age=60,  # 🟢 FIX: Recycle connections every 60s instead of holding forever
+            conn_health_checks=True,  # 🟢 FIX: Django 4.1+ pings connection before reuse, auto-reconnects if dead
             engine='django_tenants.postgresql_backend',
         )
     }
+else:
+    # 🟢 FIX: If DATABASE_URL is not used, still apply health check settings to the default DB config
+    # This ensures the fixes apply even when using individual DB_HOST/DB_NAME env vars
+    if 'default' in DATABASES:
+        DATABASES['default'].update({
+            'CONN_MAX_AGE': 60,
+            'CONN_HEALTH_CHECKS': True,
+        })
 
 # ────────────────────────────────────────────────────────────────
 #  REDIS & CELERY — Railway provides REDIS_URL automatically
