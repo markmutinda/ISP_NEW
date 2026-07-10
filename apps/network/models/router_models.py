@@ -458,10 +458,16 @@ class Router(AuditMixin):
         
         🔒 Uses atomic spin-lock with cache.add() (SETNX) to prevent race conditions
         during concurrent cross-tenant port allocation. Works with ANY cache backend.
+        
+        🛠️ FIX: Removed synchronous HAProxy and VPN provisioning calls from transaction.
+        These are now handled by:
+        1. VPN provisioning → triggered via post_save signal (in signals.py)
+        2. HAProxy sync → deferred via Celery task on transaction commit
         """
         from django.utils.text import slugify
         import secrets
         import logging
+        from django.db import transaction
 
         logger = logging.getLogger(__name__)
 
@@ -529,26 +535,42 @@ class Router(AuditMixin):
         # ── Native save ──
         super().save(*args, **kwargs)
 
-        # ── HAProxy rebuild ──
-        if self.vpn_ip_address:
-            try:
-                from apps.network.services.haproxy_manager import sync_haproxy_config
-                sync_haproxy_config()
-            except Exception as h_err:
-                logger.error(f"[HAPROXY] Config rebuild failed: {h_err}")
+        # ═══════════════════════════════════════════════════════════════════════
+        # 🛠️ FIXED: All long-running/blocking operations now run OUTSIDE
+        # the transaction, using transaction.on_commit() to ensure they
+        # execute AFTER the DB transaction commits successfully.
+        # ═══════════════════════════════════════════════════════════════════════
 
-        # ── WireGuard/VPN auto-provisioning ──
-        if self.enable_openvpn and not self.vpn_provisioned:
-            try:
-                from apps.vpn.services.vpn_provisioning_service import VPNProvisioningService
-                service = VPNProvisioningService()
-                service.provision_router(self)
-            except Exception as e:
-                logger.error(f"Auto-Provisioning failed for {self.name}: {e}")
-
-        # ── RADIUS global map sync ──
+        # ── HAProxy rebuild (DEFERRED via Celery) ──
+        # Previously: sync_haproxy_config() ran synchronously inside transaction
+        # Now: Runs as Celery task after transaction commits
         if self.vpn_ip_address:
-            self._sync_to_global_map()
+            from apps.network.tasks import sync_haproxy_config_task
+            transaction.on_commit(lambda: sync_haproxy_config_task.delay())
+            logger.info(f"[HAPROXY] Deferred sync for {self.name} (will run after transaction commit)")
+
+        # ── REMOVED: Inline VPN provisioning call ──
+        # Previously: VPNProvisioningService.provision_router() was called here
+        # Now: Handled exclusively by the post_save signal in signals.py
+        # This prevents duplicate provisioning triggers
+        #
+        # REMOVED BLOCK:
+        # if self.enable_openvpn and not self.vpn_provisioned:
+        #     try:
+        #         from apps.vpn.services.vpn_provisioning_service import VPNProvisioningService
+        #         service = VPNProvisioningService()
+        #         service.provision_router(self)
+        #     except Exception as e:
+        #         logger.error(f"Auto-Provisioning failed for {self.name}: {e}")
+
+        # ── RADIUS global map sync (DEFERRED via on_commit) ──
+        # Previously: Ran synchronously inside transaction
+        # Now: Runs after transaction commits
+        if self.vpn_ip_address:
+            # Use on_commit to ensure this runs after the transaction closes
+            # This prevents the DB connection from being held open during the sync
+            transaction.on_commit(self._sync_to_global_map)
+            logger.debug(f"[GLOBAL MAP] Deferred sync for {self.name} (will run after transaction commit)")
         else:
             logger.debug(f"[GLOBAL MAP] Skipping sync for {self.name} - No VPN IP yet")
 

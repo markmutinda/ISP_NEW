@@ -130,3 +130,32 @@ def populate_ip_pool_addresses(self, pool_id: int, schema_name: str = 'public'):
     except Exception as exc:
         logger.error(f"[TASK] IPPool id={pool_id} schema={schema_name} failed: {exc}")
         raise self.retry(exc=exc, countdown=30)
+
+
+# ===== NEW TASK: HAProxy Config Sync =====
+@shared_task(
+    bind=True,
+    queue='default',
+    autoretry_for=(Exception,),
+    retry_backoff=True,
+    max_retries=3
+)
+def sync_haproxy_config_task(self):
+    """
+    Synchronize HAProxy configuration asynchronously.
+    This task runs outside of database transactions to prevent
+    long-running Docker socket calls from holding DB connections.
+    
+    Called via transaction.on_commit() from Router.save() to ensure
+    it runs after the transaction commits.
+    """
+    from apps.network.services.haproxy_manager import sync_haproxy_config
+    
+    try:
+        logger.info("[HAPROXY] Starting async config sync")
+        sync_haproxy_config()
+        logger.info("[HAPROXY] Config sync completed successfully")
+        return {"ok": True, "message": "HAProxy config synced"}
+    except Exception as e:
+        logger.error(f"[HAPROXY] Config sync failed: {e}")
+        raise self.retry(exc=e, countdown=10)
