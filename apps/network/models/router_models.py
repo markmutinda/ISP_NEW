@@ -311,7 +311,10 @@ class Router(AuditMixin):
 
     def sync_status(self, force=False):
         """
-        Fast socket check to see if the MikroTik is reachable (1.5s max delay).
+        Fast socket check to see if the MikroTik is reachable.
+        
+        Enhanced with retry logic and increased timeout to be resilient to
+        transient network issues. One lost packet won't trigger a false flap.
         
         Args:
             force (bool): If True, bypasses the cooldown check and forces a sync.
@@ -345,13 +348,25 @@ class Router(AuditMixin):
         # Store the old status before checking
         old_status = self.status
 
-        # 3. FAST SOCKET PING: Just check if port 8728 is open (bypasses heavy auth)
+        # 3. RESILIENT SOCKET CHECK: Increased timeout + retry logic
+        # This prevents false flaps from a single dropped SYN packet
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        sock.settimeout(1.5)  # Max 1.5 seconds wait time per router!
+        sock.settimeout(3.0)  # Increased from 1.5s to 3.0s for better resilience
         
         try:
             result = sock.connect_ex((target_ip, self.api_port or 8728))
+            
+            # If first attempt fails, retry once before declaring offline
+            # This absorbs a single dropped SYN packet without triggering an alert
+            if result != 0:
+                # Close and recreate socket for a fresh connection attempt
+                sock.close()
+                sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                sock.settimeout(3.0)  # Keep the same timeout for retry
+                result = sock.connect_ex((target_ip, self.api_port or 8728))
+            
             new_status = 'online' if result == 0 else 'offline'
+            
         except Exception:
             new_status = 'offline'
         finally:
