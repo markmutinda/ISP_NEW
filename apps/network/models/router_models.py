@@ -410,6 +410,17 @@ class Router(AuditMixin):
                 logger.info(f"[ONLINE ALERT] Queued SMS for {self.name} (schema={effective_schema})")
             else:
                 logger.warning(f"[ONLINE ALERT] Could not queue SMS — no valid schema for {self.name}")
+
+        # ── PERSIST TRANSITION FOR REACHABILITY HISTORY (heatmap chart) ──
+        if old_status in ('online', 'offline') and new_status in ('online', 'offline') and old_status != new_status:
+            try:
+                RouterEvent.objects.create(
+                    router=self,
+                    event_type='up' if new_status == 'online' else 'down',
+                    message=f"Router went {new_status}",
+                )
+            except Exception as e:
+                logger.warning(f"[REACHABILITY LOG] Failed to record transition for {self.name}: {e}")
         
         # Update status and timestamp
         if new_status == 'online':
