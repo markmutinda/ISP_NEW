@@ -255,6 +255,10 @@ class TexinBackend:
     Texin SMS API backend
     Docs: https://texin.co.ke/api/
     Auth: api_key in JSON body
+    
+    FIXED: Robust response parsing with status code and content-type checking.
+    The original code called resp.json() blindly, which would blow up if the
+    endpoint returned an empty body, HTML error page, or non-JSON content.
     """
     BASE_URL = 'https://texin.co.ke/api'
 
@@ -262,32 +266,89 @@ class TexinBackend:
         self.api_key = api_key
         self.sender_id = sender_id or 'Texin'
 
+    def _parse_json_response(self, resp: requests.Response) -> dict:
+        """
+        Safely parse JSON response with proper error handling.
+        
+        Returns:
+            Parsed JSON data as dict
+            
+        Raises:
+            RuntimeError: If response is not JSON or status code indicates failure
+        """
+        # Check HTTP status first
+        if resp.status_code >= 400:
+            snippet = (resp.text or '')[:200]
+            raise RuntimeError(
+                f"Texin API returned HTTP {resp.status_code}: {snippet!r}"
+            )
+
+        # Check Content-Type header
+        content_type = resp.headers.get('Content-Type', '')
+        if 'application/json' not in content_type:
+            snippet = (resp.text or '')[:200]
+            raise RuntimeError(
+                f"Texin returned non-JSON response (Content-Type: {content_type}): {snippet!r}"
+            )
+
+        # Check for empty body
+        if not resp.text or not resp.text.strip():
+            raise RuntimeError(
+                f"Texin returned empty response body (HTTP {resp.status_code})"
+            )
+
+        # Parse JSON with proper error handling
+        try:
+            return resp.json()
+        except ValueError as e:
+            snippet = (resp.text or '')[:200]
+            raise RuntimeError(
+                f"Texin returned malformed JSON (HTTP {resp.status_code}): {snippet!r}"
+            ) from e
+
     def send(self, to: str, message: str) -> Tuple[bool, str, Decimal]:
         phone = to.lstrip('+')
-        resp = requests.post(
-            f'{self.BASE_URL}/send_sms',
-            json={
-                'api_key': self.api_key,
-                'recipient': phone,
-                'message': message,
-                'sender_id': self.sender_id,
-            },
-            timeout=20,
-        )
-        data = resp.json()
+        
+        try:
+            resp = requests.post(
+                f'{self.BASE_URL}/send_sms',
+                json={
+                    'api_key': self.api_key,
+                    'recipient': phone,
+                    'message': message,
+                    'sender_id': self.sender_id,
+                },
+                timeout=20,
+            )
+            data = self._parse_json_response(resp)
+        except requests.Timeout:
+            raise RuntimeError("Texin API request timed out after 20 seconds")
+        except requests.ConnectionError:
+            raise RuntimeError("Could not connect to Texin API")
+        except Exception as e:
+            raise RuntimeError(f"Texin API communication error: {str(e)}")
 
         if data.get('success'):
             return True, str(data.get('message_id', '')), Decimal(str(data.get('cost', '0')))
 
-        raise RuntimeError(data.get('message', f'HTTP {resp.status_code}'))
+        # Extract error message from response
+        error_msg = data.get('message', f'HTTP {resp.status_code}')
+        raise RuntimeError(f"Texin send failed: {error_msg}")
 
     def get_balance(self) -> Dict[str, Any]:
-        resp = requests.post(
-            f'{self.BASE_URL}/get_balance',
-            json={'api_key': self.api_key},
-            timeout=15,
-        )
-        data = resp.json()
+        try:
+            resp = requests.post(
+                f'{self.BASE_URL}/get_balance',
+                json={'api_key': self.api_key},
+                timeout=15,
+            )
+            data = self._parse_json_response(resp)
+        except requests.Timeout:
+            raise RuntimeError("Texin API request timed out while checking balance")
+        except requests.ConnectionError:
+            raise RuntimeError("Could not connect to Texin API for balance check")
+        except Exception as e:
+            raise RuntimeError(f"Texin balance check communication error: {str(e)}")
 
         if data.get('success'):
             return {
@@ -295,7 +356,9 @@ class TexinBackend:
                 'currency': 'KES',
                 'unit_cost': Decimal(str(data.get('sms_cost_per_unit', '0.29'))),
             }
-        raise RuntimeError(f"Balance check failed: {data}")
+        
+        error_msg = data.get('message', 'Unknown error')
+        raise RuntimeError(f"Texin balance check failed: {error_msg}")
 
 
 class HubtelBackend:
@@ -574,6 +637,7 @@ class GatewayDispatcher:
             data['provider'] = self.config.provider
             return data
         except Exception as e:
+            # Log the actual error with more detail
             logger.error(f"[{self.config.provider}] Balance check failed: {e}")
             return {'success': False, 'error': str(e), 'balance': 0, 'currency': 'Unknown'}
 
