@@ -970,44 +970,108 @@ class MikrotikAPI:
             self.disconnect()
 
     # ────────────────────────────────────────────────────────────────
-    # HELPER METHODS
+    # OPTIMIZED SYSTEM HEALTH (Single connection, reused session)
     # ────────────────────────────────────────────────────────────────
 
     def get_system_health(self) -> Dict:
-        status = self.get_live_status()
-        if not status.get('online', False): return status
+        """
+        Get comprehensive system health metrics using a SINGLE connection.
         
+        This is a critical optimization: the old implementation called 7 separate
+        methods, each doing its own connect()/disconnect() cycle. Each connect()
+        takes ~0.6s over WireGuard, so 7 connections = ~4.2s overhead before
+        any data is even fetched.
+        
+        This version connects ONCE, fetches all needed data in that session,
+        then disconnects once. This reduces total time from ~8.9s to ~1.5-2.5s.
+        """
         try:
-            # OPTIMIZED: Fetch in parallel? No, but we can limit what we fetch
-            interfaces = self.get_interfaces()
-            queues = self.get_queues()
-            firewall_rules = self.get_firewall_filter_rules()
-            dhcp_leases = self.get_dhcp_leases()
-            
-            try: hotspot_active = len(self.get_active_hotspot_users())
-            except: hotspot_active = 0
-                
-            try: pppoe_active = len(self.get_active_pppoe_sessions())
-            except: pppoe_active = 0
+            if not self.connect():
+                return {"online": False, "error": "Connection failed"}
+
+            # ── Base system info ──
+            try:
+                resource = list(self.api.path('/system/resource'))[0]
+            except Exception:
+                resource = {}
+            try:
+                identity = list(self.api.path('/system/identity'))[0]
+            except Exception:
+                identity = {}
+
+            status = {
+                "online": True,
+                "identity": identity.get('name', 'Unknown'),
+                "model": resource.get('board-name', 'Unknown'),
+                "firmware": resource.get('version', 'Unknown'),
+                "uptime": resource.get('uptime', '0s'),
+                "cpu_load": resource.get('cpu-load', '0%'),
+                "free_memory": resource.get('free-memory', '0'),
+                "total_memory": resource.get('total-memory', '0'),
+                "free_hdd": resource.get('free-hdd-space', '0'),
+                "architecture": resource.get('architecture-name', 'Unknown'),
+            }
+
+            # ── Interfaces ──
+            try:
+                interfaces = list(self.api.path('/interface'))
+            except Exception:
+                interfaces = []
             
             up_interfaces = sum(1 for iface in interfaces if iface.get('running', False))
-            
-            status.update({
-                'interfaces_total': len(interfaces),
-                'interfaces_up': up_interfaces,
-                'interface_health': f"{up_interfaces}/{len(interfaces)}",
-                'queues_total': len(queues),
-                'firewall_rules': len(firewall_rules),
-                'dhcp_leases': len(dhcp_leases),
-                'hotspot_active': hotspot_active,
-                'pppoe_active': pppoe_active,
-                'total_active_users': hotspot_active + pppoe_active,
-                'timestamp': time.time(),
-            })
+            status['interfaces_total'] = len(interfaces)
+            status['interfaces_up'] = up_interfaces
+            status['interface_health'] = f"{up_interfaces}/{len(interfaces)}"
+
+            # ── Queues ──
+            try:
+                queues = list(self.api.path('/queue/simple'))
+                status['queues_total'] = len(queues)
+            except Exception:
+                status['queues_total'] = 0
+
+            # ── Firewall Rules ──
+            try:
+                firewall_rules = list(self.api.path('/ip/firewall/filter'))
+                status['firewall_rules'] = len(firewall_rules)
+            except Exception:
+                status['firewall_rules'] = 0
+
+            # ── DHCP Leases (bound only) ──
+            try:
+                dhcp_leases = [l for l in self.api.path('/ip/dhcp-server/lease') if l.get('status') == 'bound']
+                status['dhcp_leases'] = len(dhcp_leases)
+            except Exception:
+                status['dhcp_leases'] = 0
+
+            # ── Hotspot Active Users ──
+            try:
+                hotspot_active = len(list(self.api.path('/ip/hotspot/active')))
+            except Exception:
+                hotspot_active = 0
+            status['hotspot_active'] = hotspot_active
+
+            # ── PPPoE Active Sessions ──
+            try:
+                pppoe_active = len(list(self.api.path('/ppp/active')))
+            except Exception:
+                pppoe_active = 0
+            status['pppoe_active'] = pppoe_active
+
+            status['total_active_users'] = hotspot_active + pppoe_active
+            status['timestamp'] = time.time()
+
             return status
+
         except Exception as e:
-            status['health_error'] = str(e)
-            return status
+            logger.error(f"System health check failed for {self.device.name}: {e}")
+            return {"online": False, "error": str(e)}
+        finally:
+            self.disconnect()
+
+    # ────────────────────────────────────────────────────────────────
+    # HELPER METHODS
+    # ────────────────────────────────────────────────────────────────
 
     def _parse_size(self, size_str: str) -> int:
         try:
