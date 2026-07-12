@@ -6,6 +6,7 @@ import logging
 import os
 import json
 import socket
+import time
 from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
 from cryptography.hazmat.primitives.serialization import (
     Encoding, NoEncryption, PrivateFormat, PublicFormat)
@@ -22,6 +23,7 @@ def docker_exec(cmd_list):
     try:
         # 1. Create Exec Instance
         s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        s.settimeout(5)  # ← ADDED: prevent hanging
         s.connect('/var/run/docker.sock')
         payload = json.dumps({"AttachStdout": True, "AttachStderr": True, "Cmd": cmd_list}).encode('utf-8')
         req = (f"POST /containers/{WG_CONTAINER}/exec HTTP/1.0\r\n"
@@ -36,6 +38,7 @@ def docker_exec(cmd_list):
         
         # 2. Start Exec Instance
         s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        s.settimeout(5)  # ← ADDED: prevent hanging
         s.connect('/var/run/docker.sock')
         payload = json.dumps({"Detach": False, "Tty": False}).encode('utf-8')
         req = (f"POST /exec/{exec_id}/start HTTP/1.0\r\n"
@@ -147,6 +150,24 @@ def list_connected_peers() -> list:
         logger.error(f"[WG] list_connected_peers failed: {e}")
         return []
 
+def get_peer_handshake_age(public_key: str):
+    """
+    Returns seconds since last WireGuard handshake for this peer,
+    or None if no handshake has ever occurred / peer not found.
+    """
+    if not public_key:
+        return None
+    try:
+        peers = list_connected_peers()
+    except Exception:
+        return None
+    for p in peers:
+        if p.get('public_key') == public_key:
+            latest = p.get('latest_handshake') or 0
+            if latest <= 0:
+                return None
+            return time.time() - latest
+    return None
 
 def get_wireguard_interface_stats() -> dict:
     """

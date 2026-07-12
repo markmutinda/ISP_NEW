@@ -10,6 +10,14 @@ from apps.core.models import AuditMixin, Tenant
 # NOTE: Do NOT import ServiceConnection here to avoid Circular Import errors.
 # We will use 'customers.ServiceConnection' as a string reference instead.
 
+# ─── SENTINEL FOR PEER_HANDSHAKE_AGE DEFAULT ───
+class _Unset:
+    def __repr__(self):
+        return "<unset>"
+
+_UNSET = _Unset()
+# ──────────────────────────────────────────────────
+
 def generate_auth_key():
     random_part = secrets.token_hex(4).upper()
     return f"RTR_{random_part}_AUTH"
@@ -309,16 +317,17 @@ class Router(AuditMixin):
     def __str__(self):
         return f"{self.name} ({self.ip_address or 'No IP'})"
 
-    def sync_status(self, force=False):
+    def sync_status(self, force=False, peer_handshake_age=_UNSET):
         """
-        Fast socket check to see if the MikroTik is reachable.
+        Fast status check using WireGuard handshake age (primary) or TCP fallback.
         
-        Enhanced with retry logic and increased timeout to be resilient to
-        transient network issues. One lost packet won't trigger a false flap.
+        For WG-provisioned routers: uses handshake age from WG peer table.
+        For non-WG routers: falls back to resilient TCP socket check.
         
         Args:
             force (bool): If True, bypasses the cooldown check and forces a sync.
-                          If False, only syncs if last check was more than 30 seconds ago.
+            peer_handshake_age (int|None|_UNSET): Pre-fetched handshake age from caller.
+                If _UNSET, fetches it lazily via get_peer_handshake_age().
         
         Returns:
             str: The updated status ('online' or 'offline')
@@ -348,29 +357,35 @@ class Router(AuditMixin):
         # Store the old status before checking
         old_status = self.status
 
-        # 3. RESILIENT SOCKET CHECK: Increased timeout + retry logic
-        # This prevents false flaps from a single dropped SYN packet
-        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        sock.settimeout(3.0)  # Increased from 1.5s to 3.0s for better resilience
-        
-        try:
-            result = sock.connect_ex((target_ip, self.api_port or 8728))
-            
-            # If first attempt fails, retry once before declaring offline
-            # This absorbs a single dropped SYN packet without triggering an alert
-            if result != 0:
-                # Close and recreate socket for a fresh connection attempt
-                sock.close()
-                sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                sock.settimeout(3.0)  # Keep the same timeout for retry
+        # 3. PRIMARY CHECK: WireGuard handshake age (fast, reliable, no network round-trip)
+        new_status = None
+        if self.vpn_provisioned and self.wireguard_public_key:
+            try:
+                if peer_handshake_age is not _UNSET:
+                    age = peer_handshake_age  # pre-fetched by caller (e.g. watchdog task)
+                else:
+                    from apps.vpn.services.wireguard_manager import get_peer_handshake_age
+                    age = get_peer_handshake_age(self.wireguard_public_key)
+                new_status = 'online' if (age is not None and age < 180) else 'offline'
+            except Exception:
+                new_status = None  # fall through to TCP check below
+
+        # 3b. FALLBACK: Resilient socket check (legacy path, non-WG or WG lookup failed)
+        if new_status is None:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(3.0)
+            try:
                 result = sock.connect_ex((target_ip, self.api_port or 8728))
-            
-            new_status = 'online' if result == 0 else 'offline'
-            
-        except Exception:
-            new_status = 'offline'
-        finally:
-            sock.close()
+                if result != 0:
+                    sock.close()
+                    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                    sock.settimeout(3.0)
+                    result = sock.connect_ex((target_ip, self.api_port or 8728))
+                new_status = 'online' if result == 0 else 'offline'
+            except Exception:
+                new_status = 'offline'
+            finally:
+                sock.close()
         
         # ── TRIGGER ALERT ON STATUS TRANSITION ──
         # Get effective schema for tenant context
@@ -399,11 +414,18 @@ class Router(AuditMixin):
         # Update status and timestamp
         if new_status == 'online':
             self.last_seen = timezone.now()
-        
+
+        status_changed = (self.status != new_status)
         self.status = new_status
-        
-        # 4. UPDATE DB silently
-        self.save(update_fields=['status', 'last_seen', 'updated_at'])
+
+        # Only write to DB if status flipped, or on a normal (non-watchdog) cooldown-respecting call
+        if status_changed or not force:
+            self.save(update_fields=['status', 'last_seen', 'updated_at'])
+        else:
+            # still bump last_seen in memory for online routers without a DB write every cycle
+            if new_status == 'online' and (timezone.now() - (self.last_seen or timezone.now())).total_seconds() > 60:
+                self.save(update_fields=['last_seen', 'updated_at'])
+
         return self.status
 
     def _sync_to_global_map(self):

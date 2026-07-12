@@ -13,7 +13,21 @@ def refresh_router_statuses():
     """
     Background refresh of router status for all tenants.
     Replaces synchronous status checks from API request path.
+    
+    OPTIMIZED: Fetches WireGuard peer table once per sweep to avoid
+    N docker exec calls for WG-provisioned routers.
     """
+    from apps.vpn.services.wireguard_manager import list_connected_peers
+
+    # Fetch WG peer table once for the whole sweep (avoids N docker execs)
+    try:
+        peers = list_connected_peers()
+        handshake_map = {p['public_key']: p.get('latest_handshake') or 0 for p in peers}
+    except Exception as e:
+        logger.warning(f"[ROUTER STATUS] Could not list WG peers, falling back to TCP for all: {e}")
+        handshake_map = {}
+
+    now = time.time()
     TenantModel = get_tenant_model()
     tenants = TenantModel.objects.exclude(schema_name='public')
 
@@ -25,12 +39,17 @@ def refresh_router_statuses():
         tenant_start = time.perf_counter()
         try:
             with schema_context(tenant.schema_name):
-                # Removed .only() so the entire router object (including auth_key) loads into memory
                 routers = Router.objects.filter(is_active=True)
 
                 for router in routers:
                     try:
-                        router.sync_status(force=True)
+                        # Use pre-fetched handshake age if this is a WG router
+                        if router.vpn_provisioned and router.wireguard_public_key and router.wireguard_public_key in handshake_map:
+                            latest = handshake_map[router.wireguard_public_key]
+                            age = (now - latest) if latest > 0 else None
+                            router.sync_status(force=True, peer_handshake_age=age)
+                        else:
+                            router.sync_status(force=True)  # TCP fallback path, unchanged
                         total += 1
                     except Exception:
                         errors += 1
@@ -45,6 +64,52 @@ def refresh_router_statuses():
     total_ms = int((time.perf_counter() - started) * 1000)
     logger.info(f"[ROUTER STATUS] complete refreshed={total} errors={errors} duration_ms={total_ms}")
     return {"refreshed": total, "errors": errors, "duration_ms": total_ms}
+
+
+@shared_task
+def watchdog_router_status():
+    """
+    Fast, frequent status sweep for WireGuard-provisioned routers.
+    Fetches the WG peer table once, then updates all routers' status
+    from handshake age — no per-router network calls.
+    """
+    from apps.vpn.services.wireguard_manager import list_connected_peers
+
+    try:
+        peers = list_connected_peers()
+    except Exception as e:
+        logger.error(f"[WATCHDOG] Could not list WG peers: {e}")
+        return {'error': str(e)}
+
+    now = time.time()
+    handshake_map = {p['public_key']: p.get('latest_handshake') or 0 for p in peers}
+
+    TenantModel = get_tenant_model()
+    flipped = 0
+    checked = 0
+
+    for tenant in TenantModel.objects.exclude(schema_name='public'):
+        try:
+            with schema_context(tenant.schema_name):
+                routers = Router.objects.filter(
+                    is_active=True,
+                    vpn_provisioned=True,
+                    wireguard_public_key__isnull=False,
+                ).exclude(wireguard_public_key='')
+
+                for router in routers:
+                    latest = handshake_map.get(router.wireguard_public_key, 0)
+                    age = (now - latest) if latest > 0 else None
+                    old_status = router.status
+                    router.sync_status(force=True, peer_handshake_age=age)
+                    checked += 1
+                    if router.status != old_status:
+                        flipped += 1
+        except Exception as e:
+            logger.error(f"[WATCHDOG] tenant={tenant.schema_name} error={e}")
+
+    logger.info(f"[WATCHDOG] checked={checked} flipped={flipped}")
+    return {'checked': checked, 'flipped': flipped}
 
 
 @shared_task(
