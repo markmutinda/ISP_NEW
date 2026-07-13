@@ -35,6 +35,11 @@ from .otp_service import OTPService, OTPError, OTPRateLimitedError
 from .email_delivery import send_transactional_email
 
 from .models import User, Company, SystemSettings, AuditLog, Tenant, Changelog, FeatureRequest, FeatureUpvote, RoleAccessPolicy
+from .rbac_defaults import (
+    DEFAULT_ROLE_ACCESS_POLICIES,
+    EDITABLE_RBAC_ROLES,
+    normalize_role_access_policies,
+)
 from .serializers import (
     CustomTokenRefreshSerializer, UserSerializer, LoginSerializer, UserCreateSerializer, UserUpdateSerializer,
     AdminUserUpdateSerializer,
@@ -479,11 +484,11 @@ class UserViewSet(viewsets.ModelViewSet):
     def get_permissions(self):
         if self.action in ['create', 'destroy']:
             return [IsAuthenticated(), IsAdmin(), HasRoleAccessPolicy()]
-        elif self.action in ['update', 'partial_update', 'me', 'update_profile', 'change_password']:
+        elif self.action in ['me', 'update_profile', 'change_password']:
             permissions_list = [IsAuthenticated()]
-            if self.action not in ['me', 'update_profile', 'change_password']:
-                permissions_list.append(HasRoleAccessPolicy())
             return permissions_list
+        elif self.action in ['update', 'partial_update']:
+            return [IsAuthenticated(), IsAdminOrStaff(), HasRoleAccessPolicy()]
         return [IsAuthenticated(), IsAdminOrStaff(), HasRoleAccessPolicy()]
     
     def get_queryset(self):
@@ -647,34 +652,14 @@ class RoleAccessPolicyViewSet(viewsets.ModelViewSet):
     required_rbac_path = "/admin/staff"
     lookup_field = "role"
 
-    editable_roles = ("staff", "technician", "accountant", "support")
-
-    default_paths_by_role = {
-        "staff": [
-            "/admin/users", "/admin/dispatch", "/admin/inventory", "/admin/tickets",
-            "/admin/leads", "/admin/loyalty", "/admin/sms", "/admin/ads",
-        ],
-        "technician": [
-            "/admin/olt", "/admin/onu", "/admin/routers", "/admin/networks", "/admin/radius",
-            "/admin/fup", "/admin/usage", "/admin/dispatch", "/admin/inventory", "/admin/tickets",
-        ],
-        "accountant": [
-            "/admin/users", "/admin/invoices", "/admin/payments", "/admin/receipts",
-            "/admin/vouchers", "/admin/payment-methods", "/admin/analytics",
-            "/admin/settings/billing", "/admin/sms",
-        ],
-        "support": [
-            "/admin/users", "/admin/dispatch", "/admin/tickets", "/admin/leads",
-            "/admin/loyalty", "/admin/sms", "/admin/ads", "/admin/inventory",
-        ],
-    }
+    editable_roles = EDITABLE_RBAC_ROLES
+    default_paths_by_role = DEFAULT_ROLE_ACCESS_POLICIES
 
     def get_queryset(self):
         return RoleAccessPolicy.objects.filter(role__in=self.editable_roles)
 
     def _ensure_defaults(self):
-        for role, paths in self.default_paths_by_role.items():
-            RoleAccessPolicy.objects.get_or_create(role=role, defaults={"allowed_paths": paths})
+        normalize_role_access_policies()
 
     def _fallback_map(self):
         raw_value = SystemSettings.get_setting(self.fallback_setting_key, default={}) or {}

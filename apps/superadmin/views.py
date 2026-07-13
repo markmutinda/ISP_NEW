@@ -30,6 +30,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from apps.core.models import Tenant, Company, Domain, User, AuditLog, GlobalSystemSettings, SystemSettings, Changelog, FeatureRequest
+from apps.core.rbac_defaults import normalize_role_access_policies
 from .permissions import IsSuperAdmin
 from .models import TenantDeletionJob
 from .serializers import (
@@ -2484,6 +2485,92 @@ class TenantImpersonateView(APIView):
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 #  CHANGELOG MANAGEMENT (Superadmin CRUD)
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+
+class TenantRoleAccessNormalizeView(APIView):
+    """Normalize tenant role access policies from the public superadmin console."""
+    permission_classes = SUPERADMIN_PERMS
+
+    def post(self, request):
+        mode = str(request.data.get("mode") or "normalize_legacy").strip().lower()
+        reset_defaults = mode in {"reset", "reset_defaults", "force_reset"}
+        dry_run_value = request.data.get("dry_run", False)
+        dry_run = dry_run_value is True or str(dry_run_value).strip().lower() in {"1", "true", "yes"}
+        tenant_id = request.data.get("tenant_id")
+        schema_name = request.data.get("schema_name")
+
+        _ensure_public()
+        qs = (
+            Tenant.objects
+            .select_related("company")
+            .exclude(schema_name__in=PROTECTED_SCHEMAS)
+            .order_by("schema_name")
+        )
+        if tenant_id:
+            qs = qs.filter(id=tenant_id)
+        if schema_name:
+            qs = qs.filter(schema_name=schema_name)
+        tenants = list(qs)
+
+        totals = {
+            "tenants_total": len(tenants),
+            "tenants_processed": 0,
+            "created": 0,
+            "updated": 0,
+            "unchanged": 0,
+            "custom_preserved": 0,
+            "deduplicated": 0,
+            "errors": 0,
+        }
+        results = []
+
+        for tenant in tenants:
+            tenant_result = {
+                "tenant_id": str(tenant.id),
+                "schema_name": tenant.schema_name,
+                "company_name": tenant.company.name if tenant.company_id else tenant.subdomain,
+            }
+            try:
+                with schema_context(tenant.schema_name):
+                    summary = normalize_role_access_policies(
+                        reset_defaults=reset_defaults,
+                        dry_run=dry_run,
+                    )
+                totals["tenants_processed"] += 1
+                for key in ("created", "updated", "unchanged", "custom_preserved", "deduplicated"):
+                    totals[key] += int(summary.get(key, 0))
+                tenant_result.update(summary)
+            except Exception as exc:
+                totals["errors"] += 1
+                tenant_result["error"] = str(exc)
+                logger.exception("Failed to normalize RBAC defaults for tenant %s", tenant.schema_name)
+            finally:
+                _ensure_public()
+
+            results.append(tenant_result)
+
+        _log_action(
+            request.user,
+            "normalize_role_access",
+            "RoleAccessPolicy",
+            object_repr="tenant role access defaults",
+            changes={
+                "mode": "reset_defaults" if reset_defaults else "normalize_legacy",
+                "dry_run": dry_run,
+                "tenant_id": str(tenant_id) if tenant_id else None,
+                "schema_name": schema_name,
+                "summary": totals,
+            },
+            request=request,
+        )
+
+        return Response({
+            "mode": "reset_defaults" if reset_defaults else "normalize_legacy",
+            "dry_run": dry_run,
+            "summary": totals,
+            "results": results[:100],
+            "truncated": len(results) > 100,
+        })
 
 
 class SuperadminChangelogListView(APIView):
