@@ -368,9 +368,24 @@ class CustomerPaymentMethodsView(APIView):
             schema_name=connection.schema_name,
         ).exclude(
             code__startswith='HOTSPOT_',
+        ).select_related(
+            'mpesa_configuration', 'tuma_configuration',
         ).order_by('name')
         if is_active is not None:
             methods = methods.filter(is_active=is_active.lower() == 'true')
+        
+        def _mpesa_cfg(m):
+            cfg = m.mpesa_configuration
+            if not cfg:
+                return None
+            return {
+                'id': cfg.id,
+                'business_shortcode': cfg.business_shortcode,
+                'shortcode_type': cfg.shortcode_type,
+                'is_sandbox': cfg.is_sandbox,
+                'is_active': cfg.is_active,
+                'validation_status': cfg.validation_status,
+            }
         
         methods_data = [
             {
@@ -394,6 +409,12 @@ class CustomerPaymentMethodsView(APIView):
                 'transaction_fee': float(method.transaction_fee),
                 'fee_type': method.fee_type,
                 'status': method.status,
+                # ── FIX: these two were missing, which is why Daraja-linked
+                # methods were leaking into the "Netily/Tuma" method list on
+                # the frontend (the filter checks mpesa_configuration).
+                'mpesa_configuration': method.mpesa_configuration_id,
+                'mpesa_configuration_details': _mpesa_cfg(method),
+                'tuma_configuration': method.tuma_configuration_id,
                 'created_at': method.created_at.isoformat() if method.created_at else None,
                 'updated_at': method.updated_at.isoformat() if method.updated_at else None,
             }
