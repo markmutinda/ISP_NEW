@@ -58,7 +58,7 @@ def handle_router_lifecycle(sender, instance, created, **kwargs):
     1. Provision VPN (IP, Certs, CCD) if needed.
     2. Sync to RADIUS NAS whitelist ONLY if an IP exists.
     3. Trigger RADIUS client reload after commit.
-    4. Auto-sync HAProxy config after commit.
+    4. Auto-sync HAProxy config via Celery after commit.
     """
     update_fields = kwargs.get('update_fields')
 
@@ -122,14 +122,14 @@ def handle_router_lifecycle(sender, instance, created, **kwargs):
         logger.error(f"RADIUS NAS sync failed for {instance.name}: {e}")
 
     # ── AUTO-SYNC HAPROXY after every router save ──────────────────
-    def _sync_haproxy():
-        try:
-            from apps.network.services.haproxy_manager import sync_haproxy_config
-            sync_haproxy_config()
-        except Exception as e:
-            logger.error("[HAPROXY AUTO-SYNC] Failed: %s", e)
+    # 🛠️ FIX: Use Celery task instead of direct sync to avoid blocking
+    # the HTTP request with Docker socket calls.
+    def _sync_haproxy_async():
+        from apps.network.tasks import sync_haproxy_config_task
+        sync_haproxy_config_task.delay()
+        logger.info(f"[HAPROXY AUTO-SYNC] Deferred sync task queued for {instance.name}")
 
-    transaction.on_commit(_sync_haproxy)
+    transaction.on_commit(_sync_haproxy_async)
     # ───────────────────────────────────────────────────────────────
 
 
@@ -149,14 +149,13 @@ def cleanup_router_radius_nas(sender, instance, **kwargs):
             transaction.on_commit(reload_radius_clients_now)
             
             # ── AUTO-SYNC HAPROXY after router delete ──────────────────
-            def _sync_haproxy_on_delete():
-                try:
-                    from apps.network.services.haproxy_manager import sync_haproxy_config
-                    sync_haproxy_config()
-                except Exception as e:
-                    logger.error("[HAPROXY DELETE-SYNC] Failed: %s", e)
+            # 🛠️ FIX: Use Celery task instead of direct sync
+            def _sync_haproxy_async_on_delete():
+                from apps.network.tasks import sync_haproxy_config_task
+                sync_haproxy_config_task.delay()
+                logger.info(f"[HAPROXY DELETE-SYNC] Deferred sync task queued for deleted router {instance.name}")
             
-            transaction.on_commit(_sync_haproxy_on_delete)
+            transaction.on_commit(_sync_haproxy_async_on_delete)
             # ───────────────────────────────────────────────────────────────
     except Exception as e:
         logger.error(f"Failed to cleanup RADIUS NAS for {instance.name}: {e}")
@@ -311,13 +310,16 @@ def cleanup_global_router_map(sender, instance, **kwargs):
         logger.warning(f"[GLOBAL CLEANUP] {instance.name} has no IP address to clean up from GlobalRouterMap")
 
     # Also clean up HAProxy remote port assignment if needed
+    # 🛠️ FIX: Use Celery task instead of direct sync
+    def _cleanup_haproxy_async():
+        from apps.network.tasks import sync_haproxy_config_task
+        sync_haproxy_config_task.delay()
+        logger.info(f"[HAPROXY CLEANUP] Queued async sync for deleted router {instance.name}")
+    
     try:
-        from apps.network.services.haproxy_manager import sync_haproxy_config
-        # Trigger HAProxy config sync to remove this router's entries
-        transaction.on_commit(lambda: sync_haproxy_config())
-        logger.info(f"[HAPROXY CLEANUP] Triggered config sync for deleted router {instance.name}")
+        transaction.on_commit(_cleanup_haproxy_async)
     except Exception as e:
-        logger.warning(f"[HAPROXY CLEANUP] Failed to trigger config sync: {e}")
+        logger.warning(f"[HAPROXY CLEANUP] Failed to queue async sync: {e}")
 
 
 # ────────────────────────────────────────────────────────────────

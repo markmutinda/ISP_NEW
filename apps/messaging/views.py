@@ -718,24 +718,27 @@ class SMSNotificationSettingsView(APIView):
         if 'use_inbuilt_system' in request.data:
             use_inbuilt = request.data['use_inbuilt_system']
             if use_inbuilt:
-                # Create or update the gateway config to use inbuilt
-                gateway, created = SMSGatewayConfig.objects.get_or_create(
-                    use_inbuilt_system=True,
-                    defaults={
-                        'provider': 'bytewave',
-                        'is_active': True,
-                        'api_key': '',
-                        'api_secret': '',
-                        'sender_id': '',
-                    }
-                )
-                if not created:
-                    # Deactivate all others and activate this one
+                # FIX: Use .first() with order_by to handle duplicates safely
+                # instead of get_or_create which blows up with duplicates
+                gateway = SMSGatewayConfig.objects.filter(
+                    use_inbuilt_system=True
+                ).order_by('-updated_at').first()
+                
+                if not gateway:
+                    # No inbuilt gateway exists — create one
+                    gateway = SMSGatewayConfig.objects.create(
+                        use_inbuilt_system=True,
+                        provider='bytewave',
+                        is_active=True,
+                        api_key='',
+                        api_secret='',
+                        sender_id='',
+                    )
+                else:
+                    # Ensure it's active and deactivate all others
                     SMSGatewayConfig.objects.exclude(pk=gateway.pk).update(is_active=False)
                     gateway.is_active = True
                     gateway.save(update_fields=['is_active'])
-                else:
-                    SMSGatewayConfig.objects.exclude(pk=gateway.pk).update(is_active=False)
             else:
                 # When turning off inbuilt, just deactivate the inbuilt gateway.
                 # The tenant will need to configure their own provider.

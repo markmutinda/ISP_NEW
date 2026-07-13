@@ -439,23 +439,35 @@ def auto_generate_pppoe_invoices():
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# HOTSPOT CLIENT PRUNING TASK
+# HOTSPOT CLIENT PRUNING TASK — UPDATED WITH TRANSACTION ATOMICITY
 # ═══════════════════════════════════════════════════════════════════════════
 
 @shared_task(name='apps.billing.tasks.prune_stale_hotspot_clients')
 def prune_stale_hotspot_clients():
     """
-    Deletes hotspot clients (cascading to their sessions + devices) and revokes
-    RADIUS credentials for clients whose most recent session expired more than
-    the tenant's configured prune window ago. Respects per-tenant
-    HotspotPruneSettings (default 30 days).
+    Deletes hotspot clients (and their sessions, loyalty records, and
+    free-trial claims) whose most recent session expired more than the
+    tenant's configured prune window ago. Revokes RADIUS credentials too.
+
+    NOTE: Payment records are intentionally preserved (Payment.hotspot_session
+    is SET_NULL) since they're used for revenue analytics regardless of
+    whether the originating client record still exists.
+
+    FIXES:
+    1. transaction.atomic() wraps each client's deletions - either all succeed
+       or all roll back, preventing partial deletions.
+    2. Specific try/except around trial deletion prevents one bad MAC from
+       taking down the entire client deletion.
     """
     def _prune(tenant):
+        from django.db import transaction
         from apps.billing.models.hotspot_models import (
             HotspotPruneSettings, HotspotClient, HotspotSession,
+            HotspotClientDevice, HotspotFreeTrialUsage,
         )
         from apps.billing.services.hotspot_radius_service import HotspotRadiusService
         from apps.radius.services.radius_sync_service import RadiusSyncService
+        from apps.loyalty.models import LoyaltyMember
 
         settings_obj = HotspotPruneSettings.get_settings(tenant.schema_name)
         if not settings_obj.is_enabled:
@@ -465,6 +477,10 @@ def prune_stale_hotspot_clients():
         radius_service = HotspotRadiusService()
         sync_service = RadiusSyncService()
         pruned = 0
+        sessions_deleted = 0
+        loyalty_deleted = 0
+        trial_records_deleted = 0
+        errors = 0
 
         for client in HotspotClient.objects.filter(schema_name=tenant.schema_name).iterator():
             # Never touch a client with a currently active/paid session
@@ -488,12 +504,23 @@ def prune_stale_hotspot_clients():
             if not reference_time or reference_time >= cutoff:
                 continue
 
-            access_codes = (
+            # ── Collect access codes + MACs BEFORE deleting anything ──
+            access_codes = list(
                 HotspotSession.objects.filter(hotspot_client=client)
                 .exclude(access_code__isnull=True)
                 .values_list('access_code', flat=True)
                 .distinct()
             )
+            mac_addresses = list(
+                HotspotClientDevice.objects.filter(client=client)
+                .values_list('mac_address', flat=True)
+                .distinct()
+            )
+
+            # ── Revoke RADIUS credentials ──
+            # This happens outside the transaction because it affects external
+            # systems (RADIUS). If RADIUS cleanup fails, we still want to
+            # delete the client from the DB.
             for code in access_codes:
                 try:
                     radius_service.revoke_credentials(code)
@@ -501,18 +528,70 @@ def prune_stale_hotspot_clients():
                 except Exception as e:
                     logger.warning(f"[{tenant.schema_name}] RADIUS cleanup failed for {code}: {e}")
 
-            client.delete()  # cascades to HotspotSession + HotspotClientDevice
-            pruned += 1
+            # ── Wrap ALL DB deletions for this client in a transaction ──
+            # 🟢 FIX: transaction.atomic() ensures either ALL deletes succeed
+            # or NONE of them do. Prevents the half-deleted client scenario
+            # where sessions/loyalty are gone but the client remains.
+            try:
+                with transaction.atomic():
+                    # Delete sessions (Payment.hotspot_session is SET_NULL)
+                    deleted_count, _ = HotspotSession.objects.filter(hotspot_client=client).delete()
+                    sessions_deleted += deleted_count
+
+                    # Delete loyalty member (cascades to PointsTransaction)
+                    loyalty_count, _ = LoyaltyMember.objects.filter(hotspot_client=client).delete()
+                    loyalty_deleted += loyalty_count
+
+                    # 🟢 FIX: Delete trial usage with specific handling
+                    # This is isolated because a corrupted trial record for
+                    # one MAC shouldn't prevent the entire client from being
+                    # cleaned up.
+                    if mac_addresses:
+                        try:
+                            trial_count, _ = HotspotFreeTrialUsage.objects.filter(
+                                mac_address__in=mac_addresses
+                            ).delete()
+                            trial_records_deleted += trial_count
+                        except Exception as trial_err:
+                            # Log but don't re-raise - we don't want a bad
+                            # trial record to block the whole deletion.
+                            logger.warning(
+                                f"[{tenant.schema_name}] Trial cleanup failed for client {client.id}: {trial_err}"
+                            )
+
+                    # Delete the client (cascades to HotspotClientDevice)
+                    client.delete()
+                    pruned += 1
+
+            except Exception as e:
+                # 🟢 FIX: Any DB error rolls back the transaction and we continue
+                # to the next client. The client remains intact with all its
+                # associated records preserved.
+                errors += 1
+                logger.error(
+                    f"[{tenant.schema_name}] Prune failed for client {client.id} "
+                    f"(rolled back, client preserved): {e}",
+                    exc_info=True
+                )
+                continue
 
         settings_obj.last_pruned_at = timezone.now()
         settings_obj.save(update_fields=['last_pruned_at'])
 
-        if pruned:
+        if pruned or errors:
             logger.info(
                 f"[{tenant.schema_name}] Pruned {pruned} stale hotspot clients "
-                f"(window={settings_obj.prune_window_days}d)"
+                f"(sessions={sessions_deleted}, loyalty={loyalty_deleted}, "
+                f"trial_claims={trial_records_deleted}, errors={errors}, "
+                f"window={settings_obj.prune_window_days}d)"
             )
-        return {'pruned': pruned}
+        return {
+            'pruned': pruned,
+            'sessions_deleted': sessions_deleted,
+            'loyalty_deleted': loyalty_deleted,
+            'trial_records_deleted': trial_records_deleted,
+            'errors': errors,
+        }
 
     try:
         return _for_each_tenant(_prune)

@@ -597,8 +597,18 @@ class PaymentMethodViewSet(viewsets.ModelViewSet):
         user = self.request.user
         schema = connection.schema_name
 
-        # Enforce max 3 payment methods per tenant
-        existing_count = InvoiceItemPayment.objects.filter(schema_name=schema).count()
+        # ============================================================
+        # FIX: Exclude Daraja-linked methods from the cap count
+        # This keeps the backend in sync with the frontend filtering
+        # Daraja-linked methods (mpesa_configuration set) belong exclusively to
+        # the M-Pesa Daraja tab and should not count toward the 3-method limit.
+        # ============================================================
+        existing_count = InvoiceItemPayment.objects.filter(
+            schema_name=schema,
+        ).filter(
+            mpesa_configuration__isnull=True,  # Exclude Daraja-linked methods from the cap
+        ).count()
+        
         if existing_count >= 3:
             from rest_framework.exceptions import ValidationError
             raise ValidationError('Maximum 3 payment methods allowed. Delete or deactivate one to add another.')

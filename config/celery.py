@@ -41,6 +41,17 @@ app.conf.beat_schedule = {
     },
     
     # ────────────────────────────────────────────────────────────────
+    # Watchdog Router Status - Runs every 90 seconds
+    # Fast, frequent status sweep for WireGuard-provisioned routers.
+    # Fetches WG peer table once per sweep - no per-router network calls.
+    # ────────────────────────────────────────────────────────────────
+    'watchdog-router-status-every-90s': {
+        'task': 'apps.network.tasks.watchdog_router_status',
+        'schedule': 90,  # Every 90 seconds
+        'options': {'queue': 'default'}
+    },
+    
+    # ────────────────────────────────────────────────────────────────
     # RADIUS Session Management - Runs every 5 minutes
     # Disconnects users whose Expiration attribute has passed
     # ────────────────────────────────────────────────────────────────

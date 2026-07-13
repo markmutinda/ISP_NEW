@@ -96,6 +96,7 @@ TENANT_APPS = (
     'apps.customers',
     'apps.messaging',
     'apps.network',
+    'apps.fiber_map',
     'apps.billing',
     'apps.support',
     'apps.analytics',

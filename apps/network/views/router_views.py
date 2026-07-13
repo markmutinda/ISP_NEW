@@ -1693,6 +1693,97 @@ mute 20
         events = router.events.all().order_by('-created_at')[:50]  # Limit to 50 events
         serializer = RouterEventSerializer(events, many=True)
         return Response(serializer.data)
+
+    # ────────────────────────────────────────────────────────────────
+    # REACHABILITY HISTORY (Heatmap / Uptime Chart)
+    # ────────────────────────────────────────────────────────────────
+    @action(detail=True, methods=['get'], permission_classes=[IsAuthenticated, HasCompanyAccess])
+    def reachability(self, request, pk=None):
+        """
+        GitHub-style reachability history: daily uptime % + incident list.
+        
+        GET /api/v1/network/routers/{id}/reachability/?days=90
+        
+        Returns per-day uptime percentages and incident details for the heatmap chart.
+        """
+        from datetime import timedelta
+        router = self.get_object()
+
+        try:
+            days = min(int(request.query_params.get('days', 90)), 365)
+        except ValueError:
+            days = 90
+
+        since = timezone.now() - timedelta(days=days)
+        events = list(
+            router.events.filter(event_type__in=['up', 'down'], created_at__gte=since)
+            .order_by('created_at')
+        )
+
+        incidents = []
+        open_down = None
+        for ev in events:
+            if ev.event_type == 'down' and open_down is None:
+                open_down = ev.created_at
+            elif ev.event_type == 'up' and open_down is not None:
+                incidents.append({'start': open_down, 'end': ev.created_at})
+                open_down = None
+        if open_down is not None:
+            incidents.append({'start': open_down, 'end': timezone.now()})
+
+        day_map = {}
+        cursor = since.date()
+        today = timezone.now().date()
+        while cursor <= today:
+            day_map[cursor.isoformat()] = {'date': cursor.isoformat(), 'downtime_minutes': 0.0, 'incidents': []}
+            cursor += timedelta(days=1)
+
+        for inc in incidents:
+            start, end = inc['start'], inc['end']
+            day = start.date()
+            while day <= end.date():
+                day_start = timezone.make_aware(timezone.datetime.combine(day, timezone.datetime.min.time())) \
+                    if timezone.is_naive(timezone.datetime.combine(day, timezone.datetime.min.time())) \
+                    else timezone.datetime.combine(day, timezone.datetime.min.time())
+                day_end = day_start + timedelta(days=1)
+                overlap_start = max(start, day_start)
+                overlap_end = min(end, day_end)
+                minutes = max((overlap_end - overlap_start).total_seconds() / 60, 0)
+                key = day.isoformat()
+                if key in day_map:
+                    day_map[key]['downtime_minutes'] += minutes
+                    day_map[key]['incidents'].append({
+                        'start': overlap_start.isoformat(),
+                        'end': overlap_end.isoformat(),
+                        'duration_minutes': round(minutes, 1),
+                    })
+                day += timedelta(days=1)
+
+        result_days = []
+        for key in sorted(day_map.keys()):
+            d = day_map[key]
+            downtime = min(d['downtime_minutes'], 1440)
+            uptime_pct = round(100 - (downtime / 1440 * 100), 2)
+            result_days.append({
+                'date': d['date'],
+                'uptime_pct': uptime_pct,
+                'incident_count': len(d['incidents']),
+                'incidents': d['incidents'],
+            })
+
+        total_downtime = sum(d['downtime_minutes'] for d in day_map.values())
+        overall_uptime = round(100 - (total_downtime / (days * 1440) * 100), 2) if days > 0 else 100.0
+
+        return Response({
+            'router_id': router.id,
+            'days': result_days,
+            'summary': {
+                'total_incidents': len(incidents),
+                'total_downtime_minutes': round(total_downtime, 1),
+                'overall_uptime_pct': max(overall_uptime, 0),
+                'period_days': days,
+            },
+        })
     
     @action(detail=True, methods=['get'])
     def users(self, request, pk=None):
