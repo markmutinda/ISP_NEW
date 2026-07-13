@@ -11,7 +11,7 @@ from decimal import Decimal
 
 from django.conf import settings
 from django.db import transaction, connection
-from django.db.models import ProtectedError
+from django.db.models import ProtectedError, Q
 from django.utils import timezone
 
 from rest_framework import status
@@ -409,6 +409,11 @@ class CustomerPaymentMethodsView(APIView):
         """
         Create a new payment method (admin only). Max 3 per tenant.
         
+        FIX: Exclude Daraja-linked methods from the cap count so the backend
+        stays in sync with the frontend filtering in the Netily tab.
+        Daraja-linked methods (mpesa_configuration set) belong exclusively to
+        the M-Pesa Daraja tab and should not count toward the Netily 3-method limit.
+        
         OTP verification is handled by the frontend OtpGuard at the page level,
         so no per-request OTP check is required here.
         """
@@ -416,9 +421,17 @@ class CustomerPaymentMethodsView(APIView):
         from apps.billing.serializers.payment_serializers import PaymentMethodSerializer
 
         schema = connection.schema_name
+        
+        # FIX: Exclude Daraja-linked methods from the cap count
+        # This keeps the backend in sync with the frontend filtering
         existing_count = InvoiceItemPayment.objects.filter(
             schema_name=schema,
-        ).exclude(code__startswith='HOTSPOT_').count()
+        ).exclude(
+            code__startswith='HOTSPOT_',
+        ).filter(
+            mpesa_configuration__isnull=True,  # Exclude Daraja-linked methods from the cap
+        ).count()
+        
         if existing_count >= 3:
             return Response(
                 {'detail': 'Maximum 3 payment methods allowed. Delete or deactivate one to add another.'},
