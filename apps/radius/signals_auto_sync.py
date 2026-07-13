@@ -86,6 +86,26 @@ def calculate_expiration_from_plan(plan, start_time=None):
 
 
 # ────────────────────────────────────────────────────────────────
+# PRE-SAVE TRACKER FOR SERVICE STATUS CHANGES
+# ────────────────────────────────────────────────────────────────
+
+@receiver(pre_save, sender='customers.ServiceConnection')
+def track_service_status_change(sender, instance, **kwargs):
+    """
+    Track the old status of ServiceConnection before save.
+    This is used to detect when status actually transitions to ACTIVE.
+    """
+    if instance.pk:
+        try:
+            old = sender.objects.get(pk=instance.pk)
+            instance._old_status = old.status
+        except sender.DoesNotExist:
+            instance._old_status = None
+    else:
+        instance._old_status = None
+
+
+# ────────────────────────────────────────────────────────────────
 # CUSTOMER RADIUS CREDENTIALS SIGNALS
 # ────────────────────────────────────────────────────────────────
 
@@ -178,9 +198,18 @@ def auto_create_radius_for_service(sender, instance, created, **kwargs):
                 logger.info(f"Updated RADIUS password for user: {credentials.username}")
             # ─────────────────────────────────────────────────────────
             
-            # 🎯 Handle RENEWAL: When status changes from non-ACTIVE to ACTIVE
-            # This is the key moment to reset the expiration date and activation timestamp
-            if instance.status == 'ACTIVE' and not credentials.is_enabled:
+            # 🎯 Handle RENEWAL: only when status ACTUALLY transitions into ACTIVE.
+            # (Previously this only checked the current status + is_enabled, so an
+            # unrelated save — e.g. editing billing_account_number — while the
+            # customer happened to be expired/disabled would silently renew them.)
+            old_status = getattr(instance, '_old_status', None)
+            status_just_activated = (
+                old_status is not None
+                and old_status != 'ACTIVE'
+                and instance.status == 'ACTIVE'
+            )
+
+            if status_just_activated and not credentials.is_enabled:
                 credentials.is_enabled = True
                 credentials.disabled_reason = ''
                 
