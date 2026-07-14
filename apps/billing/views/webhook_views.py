@@ -111,64 +111,50 @@ class MpesaC2BWebhookView(APIView):
 
     def _calculate_renewal_expiry(self, service, amount, current_expiry=None, customer=None):
         """
-        Calculates subscription parameters based on incoming payments.
-        Supports seamless pre‑expiry day stacking and smart upgrade detection.
+        Only activates if the payment amount exactly matches:
+          - the current plan's price (or an exact multiple of it, for stacking), OR
+          - another active plan's price (exact match, for a genuine upgrade/downgrade)
+        Anything else is recorded as unmatched — no auto-activation, credit not touched.
         
         Returns: (matched_plan, quantity, new_expiry)
         """
         from decimal import Decimal
         from django.utils import timezone
         from apps.billing.models.billing_models import Plan
-        
+
         now = timezone.now()
         amount = Decimal(str(amount))
-        existing_credit = Decimal(str(customer.prepaid_credit or 0)) if customer else Decimal('0')
-        total_available = amount + existing_credit
 
         if not service.plan:
             return None, 0, None
 
         current_plan = service.plan
-        current_plan_price = Decimal(str(current_plan.base_price or 0))
-        current_plan_type = current_plan.plan_type
+        current_price = Decimal(str(current_plan.base_price or 0))
+
         matched_plan = None
+        quantity = 0
 
-        # 1. Intent Detection: Did they pay for a completely different high‑tier plan?
-        if current_plan_price > 0:
-            remainder = total_available % current_plan_price
-            if remainder >= Decimal('0.50'):  # Not a direct renewal multiple
-                matched_plan = Plan.objects.filter(
-                    is_active=True,
-                    plan_type=current_plan_type,
-                    base_price=total_available
-                ).first()
-
-        # 2. Check for multi‑month clean renewals of their existing plan
-        if not matched_plan and current_plan_price > 0:
-            remainder = total_available % current_plan_price
-            if remainder < Decimal('0.50') and total_available >= current_plan_price:
-                matched_plan = current_plan
-
-        # 3. Fallback to current plan if minimum threshold is met
-        if not matched_plan and total_available >= current_plan_price:
+        # 1. Exact match to current plan price (or clean multiple of it — stacking)
+        if current_price > 0 and amount % current_price == 0:
             matched_plan = current_plan
+            quantity = int(amount / current_price)
+
+        # 2. Exact match to a different active plan's price (upgrade/downgrade)
+        if not matched_plan:
+            matched_plan = Plan.objects.filter(
+                is_active=True,
+                plan_type=current_plan.plan_type,
+                base_price=amount,
+            ).first()
+            if matched_plan:
+                quantity = 1
 
         if not matched_plan:
-            if customer:
-                customer.prepaid_credit = total_available
-                customer.save(update_fields=['prepaid_credit'])
-            logger.info(f"Partial payment saved as prepaid credit: KES {total_available}")
+            # No exact match — do NOT touch prepaid_credit, do NOT activate.
+            # Payment is still recorded by the caller; this just signals "needs manual review".
             return None, 0, None
 
         plan_price = matched_plan.base_price
-        quantity = int(total_available / plan_price)
-        remainder = total_available - (plan_price * quantity)
-
-        if customer:
-            customer.prepaid_credit = remainder if remainder >= Decimal('0.50') else Decimal('0')
-            customer.save(update_fields=['prepaid_credit'])
-
-        # Time Stacking Logic: Accumulate days if current plan line is still active
         start_time = current_expiry if (current_expiry and current_expiry > now) else now
         validity_delta = matched_plan.get_validity_timedelta()
         new_expiry = start_time + (validity_delta * quantity) if validity_delta else None
@@ -610,12 +596,23 @@ class MpesaC2BWebhookView(APIView):
                             except Exception as e:
                                 logger.warning(f"PPPoE renewal SMS failed for customer {customer.id}: {e}")
                         else:
-                            logger.info(f"Partial payment processed for customer: {customer.customer_code}")
+                            # ============================================================
+                            # FIX 3: UNMATCHED AMOUNT — flag clearly for manual reconciliation
+                            # ============================================================
+                            logger.warning(
+                                f"UNMATCHED AMOUNT: customer={customer.customer_code}, amount={amount}, "
+                                f"current_plan={service.plan.name if service.plan else None}. "
+                                f"No plan price matched — payment recorded but NOT activated. Manual activation required."
+                            )
+                            payment.notes = (payment.notes or '') + (
+                                f"\nUnmatched amount KES {amount} — no plan price match. Manual activation required."
+                            )
+                            payment.save(update_fields=['notes'])
 
                         logger.info(
                             f"C2B payment processed: {trans_id} | "
                             f"Customer: {customer.customer_code} | Amount: KES {amount} | "
-                            f"Quantity: {quantity} period(s) | Credit balance: {customer.prepaid_credit}"
+                            f"Quantity: {quantity} period(s)"
                         )
 
                 except Exception as e:
