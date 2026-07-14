@@ -739,17 +739,11 @@ class ServiceConnectionViewSet(viewsets.ModelViewSet):
                 service.activation_date = service.activation_date or timezone.now()
                 service.save(update_fields=['status', 'activation_date'])
             
-            # Send notification SMS (uses merged payment/renewal template)
-            try:
-                from apps.messaging.services.notification_sender import SMSNotifier
-                SMSNotifier.pppoe_renewal(
-                    customer=customer,
-                    plan_name=new_plan.name if new_plan else (service.plan.name if service.plan else ""),
-                    expires_at=credentials.expiration_date,
-                )
-                logger.info(f"Expiry date set SMS sent to customer {customer.id}")
-            except Exception as e:
-                logger.warning(f"Expiry date set SMS failed: {e}")
+            # NOTE: No SMS sent here — this is a manual admin date change,
+            # not a payment. Real payment/renewal SMS is sent only from the
+            # payment webhooks (webhook_views.py, tuma_webhook_views.py,
+            # PaymentViews.mpesa_callback) when money actually lands.
+            logger.info(f"Expiry date manually set by admin for customer {customer.id} (no SMS sent)")
             
             # ============================================================
             # REMOVED: pppoe_plan_changed SMS call (toggle no longer exists)
@@ -863,20 +857,11 @@ class ServiceConnectionViewSet(viewsets.ModelViewSet):
             service.activation_date = service.activation_date or now
             service.save()
         
-        # ────────────────────────────────────────────────────────────
-        # SEND RENEWAL SMS NOTIFICATION (uses merged payment/renewal template)
-        # ────────────────────────────────────────────────────────────
-        try:
-            from apps.messaging.services.notification_sender import SMSNotifier
-            SMSNotifier.pppoe_renewal(
-                customer=customer,
-                plan_name=new_plan.name if new_plan else (service.plan.name if service.plan else ""),
-                expires_at=credentials.expiration_date,
-            )
-            logger.info(f"Renewal SMS sent to customer {customer.id}")
-        except Exception as e:
-            logger.warning(f"Renewal SMS failed: {e}")
-        # ────────────────────────────────────────────────────────────
+        # NOTE: No SMS sent here — this is a manual admin duration extension,
+        # not a payment. Real payment/renewal SMS is sent only from the
+        # payment webhooks (webhook_views.py, tuma_webhook_views.py,
+        # PaymentViews.mpesa_callback) when money actually lands.
+        logger.info(f"Subscription manually extended by admin for customer {customer.id} (no SMS sent)")
 
         # ============================================================
         # REMOVED: pppoe_plan_changed SMS call (toggle no longer exists)
@@ -939,9 +924,7 @@ class ServiceConnectionViewSet(viewsets.ModelViewSet):
             creds = None
         except Exception as e:
             logger.warning(f"Could not release old IP for service {service.id}: {e}")
-            creds = None
-
-        # Assign new IP
+            creds = None        # Assign new IP
         new_ip.assign_to_customer(customer, service)
         service.ip_address = new_ip.ip_address
         service.save(update_fields=['ip_address'])
