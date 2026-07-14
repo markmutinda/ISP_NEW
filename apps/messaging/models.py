@@ -184,7 +184,8 @@ class SMSGatewayConfig(models.Model):
         ('hubtel', 'Hubtel'),
         ('bytewave', 'Bytewave'),
         ('blessedtexts', 'BlessedTexts'),
-        ('texin', 'Texin'),  # ← ADDED
+        ('texin', 'Texin'),  
+        ('celcom', 'Celcom Africa'),
     )
 
     provider = models.CharField(max_length=30, choices=PROVIDER_CHOICES)

@@ -15,6 +15,7 @@ Supported providers:
   8. Bytewave
   9. BlessedTexts
   10. Texin
+  11. Celcom Africa
 """
 import logging
 import requests
@@ -175,6 +176,85 @@ class AdvantaBackend:
                              json={"apikey": self.api_key, "partnerID": self.partner_id}, timeout=10)
         data = resp.json()
         return {'balance': float(data.get('credit', 0)), 'currency': 'KES'}
+
+
+class CelcomBackend:
+    """
+    Celcom Africa SMS Backend
+    Docs: https://isms.celcomafrica.com/api/services/sendsms/
+    Auth: apikey + partnerID params
+    Success: respose-code == 200 (per-recipient, in "responses" array)
+    """
+    BASE_URL = 'https://isms.celcomafrica.com/api/services'
+
+    def __init__(self, api_key: str, extra_config: dict = None, sender_id: str = '', **kw):
+        self.api_key = api_key
+        self.sender_id = sender_id or 'INFOTEXT'
+        self.partner_id = (extra_config or {}).get('partner_id', '')
+
+    def send(self, to: str, message: str) -> Tuple[bool, str, Decimal]:
+        payload = {
+            'apikey': self.api_key,
+            'partnerID': self.partner_id,
+            'message': message,
+            'shortcode': self.sender_id,
+            'mobile': to.lstrip('+'),
+        }
+        resp = requests.post(
+            f'{self.BASE_URL}/sendsms/',
+            json=payload,
+            headers={'Content-Type': 'application/json'},
+            timeout=20,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+
+        responses = data.get('responses') or []
+        if not responses:
+            raise RuntimeError(f"Celcom returned no response data: {data}")
+
+        result = responses[0]
+        code = result.get('respose-code')  # sic — matches Celcom's actual field name
+
+        if str(code) == '200':
+            return True, str(result.get('messageid', '')), Decimal('0.00')
+
+        ERROR_CODES = {
+            '1001': 'Invalid sender id',
+            '1002': 'Network not allowed',
+            '1003': 'Invalid mobile number',
+            '1004': 'Low bulk credits',
+            '1005': 'Failed. System error',
+            '1006': 'Invalid credentials',
+            '1007': 'Failed. System error',
+            '1009': 'Unsupported data type',
+            '1010': 'Unsupported request type',
+            '4090': 'Internal error. Try again after 5 minutes',
+            '4091': 'No Partner ID is set',
+            '4092': 'No API key provided',
+            '4093': 'Details not found',
+        }
+        err = ERROR_CODES.get(str(code), result.get('response-description', f'Error code {code}'))
+        raise RuntimeError(err)
+
+    def get_balance(self) -> Dict[str, Any]:
+        resp = requests.post(
+            f'{self.BASE_URL}/getbalance/',
+            json={'apikey': self.api_key, 'partnerID': self.partner_id},
+            headers={'Content-Type': 'application/json'},
+            timeout=15,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+
+        # Celcom's balance response shape isn't formally documented;
+        # tolerate a few likely key names.
+        balance = (
+            data.get('balance')
+            if data.get('balance') is not None
+            else data.get('credit', data.get('sms_balance', 0))
+        )
+        return {'balance': float(balance or 0), 'currency': 'KES'}
 
 
 class BlessedTextsBackend:
@@ -450,6 +530,7 @@ BACKENDS = {
     'infobip': InfobipBackend,
     'beem': BeemBackend,
     'advanta': AdvantaBackend,
+    'celcom': CelcomBackend,
     'hubtel': HubtelBackend,
     'bytewave': BytewaveBackend,
     'blessedtexts': BlessedTextsBackend,
@@ -464,6 +545,7 @@ PROVIDER_FIELDS = {
     'infobip':        {'api_key': 'API Key', 'sender_id': 'Sender ID'},
     'beem':           {'api_key': 'API Key', 'api_secret': 'Secret Key', 'sender_id': 'Sender Name'},
     'advanta':        {'api_key': 'API Key', 'sender_id': 'Short Code'},
+    'celcom':         {'api_key': 'API Key', 'sender_id': 'Short Code'},
     'hubtel':         {'api_key': 'Client ID', 'api_secret': 'Client Secret', 'sender_id': 'Sender ID'},
     'bytewave':       {'api_key': 'API Token', 'sender_id': 'Sender ID'},
     'blessedtexts':   {'api_key': 'API Key', 'sender_id': 'Sender ID'},
