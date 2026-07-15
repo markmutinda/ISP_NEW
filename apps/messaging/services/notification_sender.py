@@ -131,7 +131,7 @@ def _dispatch(phone: str, message: str, schema_name: str = None) -> bool:
 
 
 def _send_once(dedup_key: str, phone: str, message: str, ttl: int = 600,
-               schema_name: str = None) -> bool:
+               schema_name: str = None, customer_id=None, recipient_name: str = '') -> bool:
     """
     Send SMS exactly once within the TTL window for the given dedup_key.
     Uses DB dedup (INSERT ... ON CONFLICT) as primary guard,
@@ -164,9 +164,11 @@ def _send_once(dedup_key: str, phone: str, message: str, ttl: int = 600,
     result = _dispatch(phone, message, schema_name=schema_name)
 
     if result:
-        _log_sms(phone, message, status='sent', msg_type='automated')
+        _log_sms(phone, message, status='sent', msg_type='automated',
+                  customer_id=customer_id, recipient_name=recipient_name)
     else:
-        _log_sms(phone, message, status='failed', msg_type='automated')
+        _log_sms(phone, message, status='failed', msg_type='automated',
+                  customer_id=customer_id, recipient_name=recipient_name)
 
     return result
 
@@ -415,7 +417,8 @@ class SMSNotifier:
         )
         msg = _get_rendered_message('pppoe_welcome', default_msg, **ctx)
         return _send_once(f"pppoe_welcome:{customer.id}", phone, msg, ttl=3600,
-                          schema_name=schema_name)
+                          schema_name=schema_name, customer_id=customer.id, 
+                          recipient_name=ctx['name'])
 
     # REMOVED: pppoe_new_subscription (no longer used)
 
@@ -453,7 +456,8 @@ class SMSNotifier:
         )
         msg = _get_rendered_message('pppoe_payment', default_msg, **ctx)
         return _send_once(f"pppoe_pay:{customer.id}:{reference}", phone, msg, ttl=3600,
-                          schema_name=schema_name)
+                          schema_name=schema_name, customer_id=customer.id, 
+                          recipient_name=ctx['name'])
 
     @staticmethod
     def pppoe_renewal(customer, plan_name: str, expires_at=None, reference: str = "",
@@ -496,7 +500,8 @@ class SMSNotifier:
         from django.utils import timezone as _tz
         ts = int(_tz.now().timestamp() // 3600)
         return _send_once(f"pppoe_renew:{customer.id}:{ts}", phone, msg, ttl=3600,
-                          schema_name=schema_name)
+                          schema_name=schema_name, customer_id=customer.id, 
+                          recipient_name=ctx['name'])
 
     @staticmethod
     def pppoe_expiry_reminder(customer, days_left: int, plan_name: str = "",
@@ -616,7 +621,8 @@ class SMSNotifier:
         else:
             dedup_key = f"pppoe_expired:{customer.id}"
 
-        return _send_once(dedup_key, phone, msg, ttl=3600, schema_name=schema_name)
+        return _send_once(dedup_key, phone, msg, ttl=3600, schema_name=schema_name,
+                          customer_id=customer.id, recipient_name=ctx['name'])
 
     # REMOVED: pppoe_suspended, pppoe_resumed, pppoe_plan_changed (no longer used)
 
@@ -648,7 +654,8 @@ class SMSNotifier:
         )
         msg = _get_rendered_message('pppoe_invoice_issued', default_msg, **ctx)
         return _send_once(f"invoice:{invoice.id}", phone, msg, ttl=3600,
-                          schema_name=schema_name)
+                          schema_name=schema_name, customer_id=customer.id, 
+                          recipient_name=ctx['name'])
 
     # ─────────────────────────────────────────────────────────────────
     # HOTSPOT
