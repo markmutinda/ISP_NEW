@@ -83,7 +83,8 @@ router.register(r'tr069-sessions', TR069SessionViewSet)
 # URLPATTERNS - Clean & Conflict-Free
 # =========================
 urlpatterns = [
-    path('network/routers/auth/', RouterAuthenticateView.as_view(), name='router-auth'),
+    # Router Authentication (public endpoint)
+    path('routers/auth/', RouterAuthenticateView.as_view(), name='router-auth'),
     path('routers/heartbeat/', RouterHeartbeatView.as_view(), name='router-heartbeat'),
     
     # Router Port Scan & Hotspot Configuration Endpoints
@@ -92,7 +93,7 @@ urlpatterns = [
     path('routers/<int:pk>/hotspot/config/', RouterHotspotConfigView.as_view(), name='router-hotspot-config'),
     path('routers/<int:pk>/hotspot/configure/', RouterHotspotConfigureView.as_view(), name='router-hotspot-configure'),
     
-    # This line works now because we imported the function above
+    # Router certificate download
     path('routers/<int:router_id>/cert/<str:cert_type>/', download_router_cert, name='router-cert-download'),
     
     path('routers/<int:pk>/hotspot/disable/', RouterHotspotDisableView.as_view(), name='router-hotspot-disable'),
@@ -100,7 +101,7 @@ urlpatterns = [
     path('routers/<int:pk>/hotspot/update/', RouterHotspotUpdateView.as_view(), name='router-hotspot-update'),
     path('routers/<int:pk>/bridge/port/', RouterBridgePortView.as_view(), name='router-bridge-port'),
 
-    # --- NEW: ROUTER PORT MANAGER ---
+    # Router Port Manager
     path('routers/<int:pk>/port-manager/', RouterPortManagerView.as_view(), name='router-port-manager'),
     
     # Hotspot IPAM (IP Address + Subnet Configuration)
@@ -109,25 +110,24 @@ urlpatterns = [
 
     # ─── Provisioning Endpoints (PUBLIC — for MikroTik /tool fetch) ───
     # Stage 1: Base script download (the "Magic Link" destination)
-    path('network/provision/<str:auth_key>/<slug:slug>/script.rsc',
+    path('provision/<str:auth_key>/<slug:slug>/script.rsc',
          ProvisionBaseScriptView.as_view(), name='provision-base-script'),
     
- # Stage 2: Version-specific config download (Added <slug:slug> to fix 404/HTML issue)
-    path('network/provision/<str:auth_key>/<slug:slug>/config',
+    # Stage 2: Version-specific config download
+    path('provision/<str:auth_key>/<slug:slug>/config',
          ProvisionConfigView.as_view(), name='provision-config'),
     
     # Certificate downloads
-    path('network/provision/<str:auth_key>/certs/<str:cert_type>',
+    path('provision/<str:auth_key>/certs/<str:cert_type>',
          ProvisionCertView.as_view(), name='provision-cert'),
     
     # Hotspot HTML downloads
-    path('network/provision/<str:auth_key>/hotspot/<str:page>',
+    path('provision/<str:auth_key>/hotspot/<str:page>',
          ProvisionHotspotHTMLView.as_view(), name='provision-hotspot-html'),
     
     # Legacy: Single-script download (backward compat)
-    path('network/routers/config/', LegacyScriptDownloadView.as_view(), name='legacy-script-download'),
-
+    path('routers/config/', LegacyScriptDownloadView.as_view(), name='legacy-script-download'),
     
+    # DRF Router URLs
     path('', include(router.urls)),
 ]
-
