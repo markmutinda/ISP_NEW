@@ -72,11 +72,15 @@ class ServiceCreateSerializer(serializers.ModelSerializer):
         max_digits=10, decimal_places=2, default=0, required=False
     )
     
-    # Accept both 'plan' and 'plan_id' for flexibility
+    # ============================================================
+    # FIX: Make plan required instead of optional
+    # This is the backend belt-and-suspenders fix that drives
+    # RADIUS expiration — users must have a plan to get expiry
+    # ============================================================
     plan = serializers.PrimaryKeyRelatedField(
         queryset=Plan.objects.all(),
-        required=False,
-        allow_null=True
+        required=True,        # was: required=False
+        allow_null=False,     # was: allow_null=True
     )
     
     # RADIUS password - if provided, use this as RADIUS password
