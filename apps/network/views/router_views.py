@@ -6,7 +6,7 @@ from rest_framework.views import APIView
 from django_filters.rest_framework import DjangoFilterBackend
 from django.utils import timezone
 from rest_framework.permissions import AllowAny, IsAuthenticated
-from django.db.models import Sum, Avg, F, Count
+from django.db.models import Sum, Avg, F, Count, Q
 from django.db import ProgrammingError
 from django.http import HttpResponse, Http404
 import textwrap
@@ -1785,25 +1785,60 @@ mute 20
             },
         })
     
+    # ================================================================
+    # FIX: Connected users — query RADIUS radacct, not Django ORM rows
+    # The HotspotUser/PPPoEUser tables are never populated by real sessions.
+    # Real sessions live in RADIUS radacct — use that instead.
+    # ================================================================
     @action(detail=True, methods=['get'])
     def users(self, request, pk=None):
+        """
+        Get active connected users from RADIUS radacct table.
+        
+        Returns:
+            {
+                "hotspot_users": int,  # non-PPP sessions
+                "pppoe_users": int,    # PPP sessions
+                "total": int           # sum of both
+            }
+        """
         router = self.get_object()
+        
         try:
-            hotspot_active = router.hotspot_users.filter(status='ACTIVE').count()
-            pppoe_connected = router.pppoe_users.filter(status='CONNECTED').count()
+            from apps.radius.models import RadAcct
+            
+            # Build the query for active sessions (acctstoptime IS NULL)
+            # Match by either VPN IP or WAN IP
+            active_qs = RadAcct.objects.filter(
+                acctstoptime__isnull=True
+            ).filter(
+                Q(nasipaddress=router.vpn_ip_address) | Q(nasipaddress=router.ip_address)
+            )
+            
+            # Aggregate counts
+            agg = active_qs.aggregate(
+                total=Count('radacctid'),
+                pppoe=Count('radacctid', filter=Q(framedprotocol='PPP')),
+            )
+            
+            total = agg['total'] or 0
+            pppoe = agg['pppoe'] or 0
+            hotspot = total - pppoe
+            
             return Response({
-                "hotspot_users": hotspot_active,
-                "pppoe_users": pppoe_connected,
-                "total": hotspot_active + pppoe_connected,
+                "hotspot_users": hotspot,
+                "pppoe_users": pppoe,
+                "total": total,
             })
+            
         except Exception as e:
-            logger.error(f"Error getting users for router {router.id}: {e}")
+            logger.error(f"Error getting RADIUS users for router {router.id}: {e}")
             return Response({
                 "hotspot_users": 0,
                 "pppoe_users": 0,
                 "total": 0,
-                "error": "Could not retrieve user counts"
-            })
+                "error": "Could not retrieve user counts from RADIUS"
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
     
     @action(detail=True, methods=['post'])
     def test_connection(self, request, pk=None):

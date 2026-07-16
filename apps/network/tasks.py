@@ -197,7 +197,6 @@ def populate_ip_pool_addresses(self, pool_id: int, schema_name: str = 'public'):
         raise self.retry(exc=exc, countdown=30)
 
 
-# ===== NEW TASK: HAProxy Config Sync =====
 @shared_task(
     bind=True,
     queue='default',
@@ -224,3 +223,153 @@ def sync_haproxy_config_task(self):
     except Exception as e:
         logger.error(f"[HAPROXY] Config sync failed: {e}")
         raise self.retry(exc=e, countdown=10)
+
+
+@shared_task(
+    bind=True,
+    queue='default',
+    autoretry_for=(Exception,),
+    retry_backoff=True,
+    max_retries=3
+)
+def recompute_router_uptime_percentages(self, days=30):
+    """
+    Recalculate uptime percentages for all active routers across all tenants.
+    
+    This task processes each tenant's routers and recalculates their
+    uptime percentage based on RouterEvent history. It runs as a background
+    task to avoid blocking API requests.
+    
+    Args:
+        days (int): Number of days to look back for uptime calculation.
+                   Default is 30 days.
+    
+    Returns:
+        dict: Summary of processed tenants and routers
+    """
+    logger.info(f"[UPTIME] Starting uptime recalculation for all tenants (days={days})")
+    
+    TenantModel = get_tenant_model()
+    tenants = TenantModel.objects.exclude(schema_name='public')
+    
+    results = {
+        'total_tenants': 0,
+        'successful_tenants': 0,
+        'failed_tenants': 0,
+        'total_routers': 0,
+        'updated_routers': 0,
+        'failed_routers': 0,
+        'tenants': [],
+        'days': days
+    }
+    
+    for tenant in tenants:
+        tenant_result = {
+            'schema': tenant.schema_name,
+            'status': 'success',
+            'routers': 0,
+            'updated': 0,
+            'failed': 0,
+            'error': None
+        }
+        
+        try:
+            with schema_context(tenant.schema_name):
+                # Get all active routers
+                routers = Router.objects.filter(is_active=True)
+                router_count = routers.count()
+                tenant_result['routers'] = router_count
+                results['total_routers'] += router_count
+                
+                # Recalculate uptime for each router
+                for router in routers:
+                    try:
+                        router.recalculate_uptime_percentage(days=days)
+                        tenant_result['updated'] += 1
+                        results['updated_routers'] += 1
+                    except Exception as e:
+                        tenant_result['failed'] += 1
+                        results['failed_routers'] += 1
+                        logger.error(
+                            f"[UPTIME] Failed for router {router.id} ({router.name}) "
+                            f"in tenant {tenant.schema_name}: {e}"
+                        )
+                
+                results['successful_tenants'] += 1
+                
+        except Exception as e:
+            tenant_result['status'] = 'failed'
+            tenant_result['error'] = str(e)
+            results['failed_tenants'] += 1
+            logger.exception(
+                f"[UPTIME] Failed for tenant {tenant.schema_name}: {e}"
+            )
+        
+        results['tenants'].append(tenant_result)
+        results['total_tenants'] += 1
+        
+        # Log per-tenant results
+        logger.info(
+            f"[UPTIME] Tenant {tenant.schema_name}: "
+            f"{tenant_result['updated']}/{tenant_result['routers']} routers updated"
+        )
+    
+    # Log summary
+    logger.info(
+        f"[UPTIME] Complete: {results['successful_tenants']}/{results['total_tenants']} tenants, "
+        f"{results['updated_routers']}/{results['total_routers']} routers updated"
+    )
+    
+    return results
+
+
+@shared_task(
+    bind=True,
+    queue='default',
+    autoretry_for=(Exception,),
+    retry_backoff=True,
+    max_retries=3
+)
+def recompute_single_router_uptime(self, router_id: int, schema_name: str, days=30):
+    """
+    Recalculate uptime percentage for a single router.
+    
+    Args:
+        router_id (int): The ID of the router to update
+        schema_name (str): The tenant schema where the router exists
+        days (int): Number of days to look back
+    
+    Returns:
+        dict: Result status and details
+    """
+    try:
+        with schema_context(schema_name):
+            router = Router.objects.get(id=router_id, is_active=True)
+            uptime = router.recalculate_uptime_percentage(days=days)
+            
+            logger.info(
+                f"[UPTIME] Router {router_id} ({router.name}) updated: "
+                f"{uptime}% over {days} days"
+            )
+            
+            return {
+                'status': 'success',
+                'router_id': router_id,
+                'router_name': router.name,
+                'uptime_percentage': float(uptime),
+                'days': days,
+                'schema': schema_name
+            }
+            
+    except Router.DoesNotExist:
+        logger.error(f"[UPTIME] Router {router_id} not found in schema {schema_name}")
+        return {
+            'status': 'error',
+            'reason': 'not_found',
+            'router_id': router_id,
+            'schema': schema_name
+        }
+        
+    except Exception as e:
+        logger.error(f"[UPTIME] Failed to update router {router_id}: {e}")
+        raise self.retry(exc=e, countdown=30)

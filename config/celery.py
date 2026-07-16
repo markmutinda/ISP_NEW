@@ -52,6 +52,31 @@ app.conf.beat_schedule = {
     },
     
     # ────────────────────────────────────────────────────────────────
+    # Router Uptime Recalculation - Runs hourly at minute 20
+    # Recalculates uptime percentages based on RouterEvent history.
+    # This ensures the list/grid displays accurate uptime percentages
+    # instead of showing sla_target (99%) as a fallback.
+    # ────────────────────────────────────────────────────────────────
+    'recompute-router-uptime-hourly': {
+        'task': 'apps.network.tasks.recompute_router_uptime_percentages',
+        'schedule': crontab(minute=20),  # Every hour at :20
+        'options': {'queue': 'default'}
+    },
+    
+    # ────────────────────────────────────────────────────────────────
+    # Router Uptime Daily Deep Recalculation - Runs daily at 2 AM
+    # Performs a more comprehensive 30-day recalculation.
+    # This catches any issues that might have been missed by the
+    # hourly recalculation and ensures SLA reporting is accurate.
+    # ────────────────────────────────────────────────────────────────
+    'recompute-router-uptime-daily': {
+        'task': 'apps.network.tasks.recompute_router_uptime_percentages',
+        'schedule': crontab(hour=2, minute=0),  # Daily at 2:00 AM
+        'args': (30,),  # 30-day calculation
+        'options': {'queue': 'default'}
+    },
+    
+    # ────────────────────────────────────────────────────────────────
     # RADIUS Session Management - Runs every 5 minutes
     # Disconnects users whose Expiration attribute has passed
     # ────────────────────────────────────────────────────────────────

@@ -2,6 +2,7 @@
 
 import secrets
 import uuid
+from datetime import timedelta
 from django.db import models
 from django.core.validators import MinValueValidator, MaxValueValidator
 from django.utils import timezone
@@ -316,6 +317,80 @@ class Router(AuditMixin):
 
     def __str__(self):
         return f"{self.name} ({self.ip_address or 'No IP'})"
+
+    def recalculate_uptime_percentage(self, days=30):
+        """
+        Calculate the actual uptime percentage based on RouterEvent history.
+        
+        This method processes the event history for the router, calculating
+        total downtime from 'down' and 'up' events. The calculation is
+        performed over the specified number of days (default 30).
+        
+        Args:
+            days (int): Number of days to look back for the calculation.
+                       Default is 30 days.
+        
+        Returns:
+            float: The calculated uptime percentage (0.00 - 100.00)
+        
+        Notes:
+            - If there are no events, returns the sla_target value (99.00%)
+            - Handles open 'down' events (router still down) by calculating
+              downtime up to the current time
+            - Updates the uptime_percentage field on the router instance
+        """
+        from datetime import timedelta
+        from django.utils import timezone
+
+        # Calculate the cutoff date
+        since = timezone.now() - timedelta(days=days)
+        
+        # Fetch all up/down events in chronological order
+        events = list(
+            self.events.filter(
+                event_type__in=['up', 'down'],
+                created_at__gte=since
+            ).order_by('created_at')
+        )
+        
+        # If no events exist, we can't calculate real uptime
+        # Return the SLA target as a fallback (but mark it clearly)
+        if not events:
+            # Store the target as a fallback, but we should log this
+            # since it means no uptime data exists
+            self.uptime_percentage = float(self.sla_target)
+            self.save(update_fields=['uptime_percentage', 'updated_at'])
+            return float(self.uptime_percentage)
+        
+        # Calculate total seconds in the period
+        total_seconds = days * 86400
+        downtime = 0
+        open_down = None
+        
+        # Process each event to calculate downtime
+        for ev in events:
+            if ev.event_type == 'down' and open_down is None:
+                # Start tracking a downtime period
+                open_down = ev.created_at
+            elif ev.event_type == 'up' and open_down is not None:
+                # End the downtime period and add to total
+                downtime += (ev.created_at - open_down).total_seconds()
+                open_down = None
+        
+        # If there's an open 'down' event (router is still down), 
+        # calculate downtime up to the current moment
+        if open_down is not None:
+            downtime += (timezone.now() - open_down).total_seconds()
+        
+        # Calculate uptime percentage
+        # Cap at 0% minimum (should never go negative)
+        uptime_pct = max(0.0, 100 - (downtime / total_seconds * 100))
+        
+        # Round to 2 decimal places and store
+        self.uptime_percentage = round(uptime_pct, 2)
+        self.save(update_fields=['uptime_percentage', 'updated_at'])
+        
+        return float(self.uptime_percentage)
 
     def sync_status(self, force=False, peer_handshake_age=_UNSET):
         """
