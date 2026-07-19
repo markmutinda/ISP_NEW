@@ -442,17 +442,24 @@ class HasRoleAccessPolicy(permissions.BasePermission):
         if not required_path:
             return True
 
+        # A missing (or temporarily unavailable) policy must never turn into
+        # unrestricted API access.  Use the same defaults that seed tenant
+        # policies so the frontend and backend make an identical decision.
+        from apps.core.rbac_defaults import DEFAULT_ROLE_ACCESS_POLICIES
+
         try:
             from apps.core.models import RoleAccessPolicy
 
             policy = RoleAccessPolicy.objects.filter(role=role).first()
+            allowed = (
+                policy.allowed_paths
+                if policy is not None
+                else DEFAULT_ROLE_ACCESS_POLICIES.get(role, [])
+            )
         except Exception:
-            return True
+            allowed = DEFAULT_ROLE_ACCESS_POLICIES.get(role, [])
 
-        if not policy:
-            return True
-
-        allowed = policy.allowed_paths or []
+        allowed = allowed or []
         if not allowed:
             return False
 

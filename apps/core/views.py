@@ -719,7 +719,43 @@ class RoleAccessPolicyViewSet(viewsets.ModelViewSet):
     def get_permissions(self):
         if self.action in ["update", "partial_update", "create", "destroy"]:
             return [IsAuthenticated(), IsAdmin(), HasRoleAccessPolicy()]
+        if self.action == "me":
+            # Reading one's own policy is the RBAC bootstrap operation.  It
+            # cannot itself require access to /admin/staff, otherwise a user
+            # can never discover newly assigned pages after signing in.
+            return [IsAuthenticated(), IsAdminOrStaff()]
         return [IsAuthenticated(), IsAdminOrStaff(), HasRoleAccessPolicy()]
+
+    @action(detail=False, methods=["get"], url_path="me")
+    def me(self, request):
+        """Return only the signed-in user's effective role policy."""
+        role = str(getattr(request.user, "role", "") or "").strip().lower().replace("-", "_")
+        if role in {"admin", "super_admin", "superadmin"}:
+            return Response({
+                "role": role,
+                "allowed_paths": [],
+                "is_unrestricted": True,
+            })
+        if role not in self.editable_roles:
+            return Response(
+                {"detail": "No dashboard access policy exists for this role."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+        try:
+            self._ensure_defaults()
+            policy = self.get_queryset().filter(role=role).first()
+        except DatabaseError:
+            policy = None
+        allowed_paths = (
+            policy.allowed_paths
+            if policy is not None
+            else self.default_paths_by_role.get(role, [])
+        )
+        return Response({
+            "role": role,
+            "allowed_paths": allowed_paths or [],
+            "is_unrestricted": False,
+        })
 
     def perform_create(self, serializer):
         serializer.save(created_by=self.request.user, updated_by=self.request.user)

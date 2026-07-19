@@ -1,13 +1,19 @@
 from django.core import mail
 from django.core.cache import cache
-from django.test import TestCase, override_settings
+from django.test import SimpleTestCase, TestCase, override_settings
 from django.utils import timezone
 from datetime import timedelta
 import uuid
+from types import SimpleNamespace
+from unittest.mock import patch
+
+from rest_framework.test import APIRequestFactory, force_authenticate
 
 from apps.core.models import User
 from apps.core.email_delivery import send_transactional_email
 from apps.core.otp_service import OTPService, OTPRateLimitedError, OTPError
+from apps.core.permissions import HasRoleAccessPolicy, IsAdminOrStaff
+from apps.core.views import RoleAccessPolicyViewSet
 
 
 @override_settings(EMAIL_BACKEND="django.core.mail.backends.locmem.EmailBackend")
@@ -123,3 +129,106 @@ class TransactionalEmailTests(TestCase):
         self.assertTrue(result["sent"])
         self.assertEqual(result["provider"], "smtp")
         self.assertEqual(len(mail.outbox), 1)
+
+
+class RoleAccessPermissionTests(SimpleTestCase):
+    def setUp(self):
+        self.permission = HasRoleAccessPolicy()
+        self.user = SimpleNamespace(
+            is_authenticated=True,
+            is_superuser=False,
+            role="technician",
+            access_level="",
+        )
+        self.request = SimpleNamespace(user=self.user, method="GET")
+
+    def _view(self, path, action="list"):
+        return SimpleNamespace(required_rbac_path=path, action=action)
+
+    @patch("apps.core.models.RoleAccessPolicy.objects.filter")
+    def test_missing_policy_uses_safe_role_defaults(self, policy_filter):
+        policy_filter.return_value.first.return_value = None
+
+        self.assertTrue(
+            self.permission.has_permission(self.request, self._view("/admin/routers"))
+        )
+        self.assertFalse(
+            self.permission.has_permission(self.request, self._view("/admin/settings"))
+        )
+
+    @patch("apps.core.models.RoleAccessPolicy.objects.filter")
+    def test_saved_policy_is_applied_immediately(self, policy_filter):
+        policy_filter.return_value.first.return_value = SimpleNamespace(
+            allowed_paths=["/admin/settings::view", "/admin/network-map::view"]
+        )
+
+        self.assertTrue(
+            self.permission.has_permission(self.request, self._view("/admin/settings"))
+        )
+        self.assertFalse(
+            self.permission.has_permission(self.request, self._view("/admin/routers"))
+        )
+
+    @patch("apps.core.models.RoleAccessPolicy.objects.filter")
+    def test_view_grant_does_not_grant_edit_or_create(self, policy_filter):
+        policy_filter.return_value.first.return_value = SimpleNamespace(
+            allowed_paths=["/admin/routers::view"]
+        )
+        self.request.method = "POST"
+
+        self.assertFalse(
+            self.permission.has_permission(
+                self.request,
+                self._view("/admin/routers", action=None),
+            )
+        )
+
+        policy_filter.return_value.first.return_value.allowed_paths.append(
+            "/admin/routers::add"
+        )
+        self.assertTrue(
+            self.permission.has_permission(
+                self.request,
+                self._view("/admin/routers", action=None),
+            )
+        )
+
+    @patch("apps.core.models.RoleAccessPolicy.objects.filter", side_effect=RuntimeError("db unavailable"))
+    def test_policy_lookup_error_does_not_grant_unrestricted_access(self, _policy_filter):
+        self.assertFalse(
+            self.permission.has_permission(self.request, self._view("/admin/settings"))
+        )
+
+
+class RoleAccessBootstrapTests(SimpleTestCase):
+    def test_me_read_does_not_require_staff_page_permission(self):
+        view = RoleAccessPolicyViewSet()
+        view.action = "me"
+
+        permission_types = {type(permission) for permission in view.get_permissions()}
+
+        self.assertIn(IsAdminOrStaff, permission_types)
+        self.assertNotIn(HasRoleAccessPolicy, permission_types)
+
+    @patch.object(RoleAccessPolicyViewSet, "_ensure_defaults")
+    @patch.object(RoleAccessPolicyViewSet, "get_queryset")
+    def test_me_returns_only_the_signed_in_roles_policy(self, get_queryset, _ensure_defaults):
+        allowed_paths = ["/admin/settings::view", "/admin/network-map::view"]
+        get_queryset.return_value.filter.return_value.first.return_value = SimpleNamespace(
+            allowed_paths=allowed_paths
+        )
+        user = SimpleNamespace(
+            is_authenticated=True,
+            is_superuser=False,
+            role="technician",
+            tenant_subdomain="tenant-test",
+        )
+        request = APIRequestFactory().get("/api/v1/core/role-access/me/")
+        force_authenticate(request, user=user)
+
+        response = RoleAccessPolicyViewSet.as_view({"get": "me"})(request)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["role"], "technician")
+        self.assertEqual(response.data["allowed_paths"], allowed_paths)
+        self.assertFalse(response.data["is_unrestricted"])
