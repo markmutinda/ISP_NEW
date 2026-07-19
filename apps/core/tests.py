@@ -8,11 +8,14 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from rest_framework.test import APIRequestFactory, force_authenticate
+from rest_framework.serializers import ValidationError
 
 from apps.core.models import User
 from apps.core.email_delivery import send_transactional_email
 from apps.core.otp_service import OTPService, OTPRateLimitedError, OTPError
 from apps.core.permissions import HasRoleAccessPolicy, IsAdminOrStaff
+from apps.core.rbac_defaults import DEFAULT_ROLE_ACCESS_POLICIES
+from apps.core.serializers import UserCreateSerializer
 from apps.core.views import RoleAccessPolicyViewSet
 
 
@@ -157,6 +160,19 @@ class RoleAccessPermissionTests(SimpleTestCase):
         )
 
     @patch("apps.core.models.RoleAccessPolicy.objects.filter")
+    def test_safe_defaults_cover_every_configurable_staff_role(self, policy_filter):
+        policy_filter.return_value.first.return_value = None
+
+        for role, tokens in DEFAULT_ROLE_ACCESS_POLICIES.items():
+            with self.subTest(role=role):
+                self.user.role = role
+                self.user.custom_allowed_paths = None
+                view_path = next(token for token in tokens if token.endswith("::view")).split("::", 1)[0]
+                self.assertTrue(
+                    self.permission.has_permission(self.request, self._view(view_path))
+                )
+
+    @patch("apps.core.models.RoleAccessPolicy.objects.filter")
     def test_saved_policy_is_applied_immediately(self, policy_filter):
         policy_filter.return_value.first.return_value = SimpleNamespace(
             allowed_paths=["/admin/settings::view", "/admin/network-map::view"]
@@ -192,6 +208,27 @@ class RoleAccessPermissionTests(SimpleTestCase):
                 self._view("/admin/routers", action=None),
             )
         )
+
+    @patch("apps.core.models.RoleAccessPolicy.objects.filter")
+    def test_per_user_policy_overrides_shared_role_policy(self, policy_filter):
+        policy_filter.return_value.first.return_value = SimpleNamespace(
+            allowed_paths=["/admin/routers::view"]
+        )
+        self.user.custom_allowed_paths = ["/admin/settings::view"]
+
+        self.assertTrue(
+            self.permission.has_permission(self.request, self._view("/admin/settings"))
+        )
+        self.assertFalse(
+            self.permission.has_permission(self.request, self._view("/admin/routers"))
+        )
+        policy_filter.assert_not_called()
+
+    def test_staff_management_cannot_be_delegated(self):
+        serializer = UserCreateSerializer()
+
+        with self.assertRaisesMessage(ValidationError, "cannot be delegated"):
+            serializer.validate_custom_allowed_paths(["/admin/staff::view"])
 
     @patch("apps.core.models.RoleAccessPolicy.objects.filter", side_effect=RuntimeError("db unavailable"))
     def test_policy_lookup_error_does_not_grant_unrestricted_access(self, _policy_filter):
@@ -232,3 +269,25 @@ class RoleAccessBootstrapTests(SimpleTestCase):
         self.assertEqual(response.data["role"], "technician")
         self.assertEqual(response.data["allowed_paths"], allowed_paths)
         self.assertFalse(response.data["is_unrestricted"])
+
+    @patch.object(RoleAccessPolicyViewSet, "_ensure_defaults")
+    @patch.object(RoleAccessPolicyViewSet, "get_queryset")
+    def test_me_prefers_per_user_override(self, get_queryset, ensure_defaults):
+        allowed_paths = ["/admin/invoices::view"]
+        user = SimpleNamespace(
+            is_authenticated=True,
+            is_superuser=False,
+            role="support",
+            tenant_subdomain="tenant-test",
+            custom_allowed_paths=allowed_paths,
+        )
+        request = APIRequestFactory().get("/api/v1/core/role-access/me/")
+        force_authenticate(request, user=user)
+
+        response = RoleAccessPolicyViewSet.as_view({"get": "me"})(request)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["allowed_paths"], allowed_paths)
+        self.assertEqual(response.data["source"], "user")
+        ensure_defaults.assert_not_called()
+        get_queryset.assert_not_called()

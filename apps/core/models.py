@@ -141,6 +141,15 @@ class User(AbstractUser, AuditMixin):
         default='customer',
         verbose_name='User Role'
     )
+    custom_allowed_paths = models.JSONField(
+        null=True,
+        blank=True,
+        default=None,
+        help_text=(
+            "Per-user dashboard permission tokens. Null inherits the role policy; "
+            "an explicit list overrides it."
+        ),
+    )
     
     company = models.ForeignKey(
         'Company',

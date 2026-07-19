@@ -447,17 +447,21 @@ class HasRoleAccessPolicy(permissions.BasePermission):
         # policies so the frontend and backend make an identical decision.
         from apps.core.rbac_defaults import DEFAULT_ROLE_ACCESS_POLICIES
 
-        try:
-            from apps.core.models import RoleAccessPolicy
+        custom_allowed = getattr(user, "custom_allowed_paths", None)
+        if custom_allowed is not None:
+            allowed = custom_allowed
+        else:
+            try:
+                from apps.core.models import RoleAccessPolicy
 
-            policy = RoleAccessPolicy.objects.filter(role=role).first()
-            allowed = (
-                policy.allowed_paths
-                if policy is not None
-                else DEFAULT_ROLE_ACCESS_POLICIES.get(role, [])
-            )
-        except Exception:
-            allowed = DEFAULT_ROLE_ACCESS_POLICIES.get(role, [])
+                policy = RoleAccessPolicy.objects.filter(role=role).first()
+                allowed = (
+                    policy.allowed_paths
+                    if policy is not None
+                    else DEFAULT_ROLE_ACCESS_POLICIES.get(role, [])
+                )
+            except Exception:
+                allowed = DEFAULT_ROLE_ACCESS_POLICIES.get(role, [])
 
         allowed = allowed or []
         if not allowed:

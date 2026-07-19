@@ -735,26 +735,34 @@ class RoleAccessPolicyViewSet(viewsets.ModelViewSet):
                 "role": role,
                 "allowed_paths": [],
                 "is_unrestricted": True,
+                "source": "admin",
             })
         if role not in self.editable_roles:
             return Response(
                 {"detail": "No dashboard access policy exists for this role."},
                 status=status.HTTP_403_FORBIDDEN,
             )
-        try:
-            self._ensure_defaults()
-            policy = self.get_queryset().filter(role=role).first()
-        except DatabaseError:
-            policy = None
-        allowed_paths = (
-            policy.allowed_paths
-            if policy is not None
-            else self.default_paths_by_role.get(role, [])
-        )
+        custom_allowed = getattr(request.user, "custom_allowed_paths", None)
+        if custom_allowed is not None:
+            allowed_paths = custom_allowed
+            source = "user"
+        else:
+            try:
+                self._ensure_defaults()
+                policy = self.get_queryset().filter(role=role).first()
+            except DatabaseError:
+                policy = None
+            allowed_paths = (
+                policy.allowed_paths
+                if policy is not None
+                else self.default_paths_by_role.get(role, [])
+            )
+            source = "role"
         return Response({
             "role": role,
             "allowed_paths": allowed_paths or [],
             "is_unrestricted": False,
+            "source": source,
         })
 
     def perform_create(self, serializer):

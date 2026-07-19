@@ -16,6 +16,26 @@ from .models import User, Company, Tenant, SystemSettings, AuditLog, Changelog, 
 logger = logging.getLogger(__name__)
 
 
+NON_DELEGABLE_RBAC_PATHS = {"/admin/staff"}
+
+
+def validate_dashboard_access_tokens(value):
+    if value is None:
+        return None
+    if not isinstance(value, list):
+        raise serializers.ValidationError("Dashboard access must be a list of route tokens.")
+    cleaned = []
+    for token in value:
+        if not isinstance(token, str) or not token.startswith("/admin/"):
+            raise serializers.ValidationError("Each dashboard access token must be an admin route path.")
+        route = token.split("::", 1)[0]
+        if route in NON_DELEGABLE_RBAC_PATHS:
+            raise serializers.ValidationError("Staff access management cannot be delegated.")
+        if token not in cleaned:
+            cleaned.append(token)
+    return cleaned
+
+
 class UserSerializer(serializers.ModelSerializer):
     """Serializer for User model"""
     
@@ -32,11 +52,15 @@ class UserSerializer(serializers.ModelSerializer):
             'id', 'email', 'first_name', 'last_name', 'full_name',
             'phone_number', 'id_number', 'gender', 'date_of_birth',
             'profile_picture', 'role', 'role_display', 'is_active',
+            'custom_allowed_paths',
             'is_verified', 'is_staff', 'is_superuser',
             'company', 'company_name', 'tenant', 'tenant_subdomain',
             'password', 'confirm_password', 'created_at', 'updated_at'
         ]
-        read_only_fields = ['id', 'created_at', 'updated_at', 'is_staff', 'is_superuser']
+        read_only_fields = [
+            'id', 'created_at', 'updated_at', 'is_staff', 'is_superuser',
+            'custom_allowed_paths',
+        ]
     
     def get_full_name(self, obj):
         return obj.get_full_name()
@@ -116,7 +140,8 @@ class UserCreateSerializer(serializers.ModelSerializer):
         fields = [
             'id', 'email', 'password', 'confirm_password',
             'first_name', 'last_name', 'phone_number', 'id_number',
-            'gender', 'date_of_birth', 'role', 'company', 'tenant' 
+            'gender', 'date_of_birth', 'role', 'company', 'tenant',
+            'custom_allowed_paths',
         ]
         read_only_fields = ['id']
     
@@ -130,7 +155,16 @@ class UserCreateSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError({
                 "password": "Password fields didn't match."
             })
+        if attrs.get('custom_allowed_paths') is not None:
+            role = attrs.get('role', 'customer')
+            if role not in {'staff', 'technician', 'accountant', 'support'}:
+                raise serializers.ValidationError({
+                    'custom_allowed_paths': 'Custom dashboard access is only available for staff roles.'
+                })
         return attrs
+
+    def validate_custom_allowed_paths(self, value):
+        return validate_dashboard_access_tokens(value)
     
     def create(self, validated_data):
         # Remove confirm_password from validated data if present
@@ -223,7 +257,19 @@ class AdminUserUpdateSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = User
-        fields = ['email', 'role', 'new_password', 'is_active']
+        fields = ['email', 'role', 'new_password', 'is_active', 'custom_allowed_paths']
+
+    def validate_custom_allowed_paths(self, value):
+        return validate_dashboard_access_tokens(value)
+
+    def validate(self, attrs):
+        if attrs.get('custom_allowed_paths') is not None:
+            role = attrs.get('role', getattr(self.instance, 'role', None))
+            if role not in {'staff', 'technician', 'accountant', 'support'}:
+                raise serializers.ValidationError({
+                    'custom_allowed_paths': 'Custom dashboard access is only available for staff roles.'
+                })
+        return attrs
 
     def validate_email(self, value):
         if value in (None, ""):
@@ -264,15 +310,7 @@ class RoleAccessPolicySerializer(serializers.ModelSerializer):
         return value
 
     def validate_allowed_paths(self, value):
-        if not isinstance(value, list):
-            raise serializers.ValidationError("Allowed paths must be a list.")
-        cleaned = []
-        for path in value:
-            if not isinstance(path, str) or not path.startswith("/admin/"):
-                raise serializers.ValidationError("Each allowed path must be an admin route path.")
-            if path not in cleaned:
-                cleaned.append(path)
-        return cleaned
+        return validate_dashboard_access_tokens(value)
 
 
 class LoginSerializer(serializers.Serializer):
