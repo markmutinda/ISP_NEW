@@ -186,6 +186,7 @@ class SMSGatewayConfig(models.Model):
         ('blessedtexts', 'BlessedTexts'),
         ('texin', 'Texin'),  
         ('celcom', 'Celcom Africa'),
+        ('talksasa', 'Talksasa'),
     )
 
     provider = models.CharField(max_length=30, choices=PROVIDER_CHOICES)

@@ -16,6 +16,7 @@ Supported providers:
   9. BlessedTexts
   10. Texin
   11. Celcom Africa
+  12. Talksasa
 """
 import logging
 import requests
@@ -441,6 +442,85 @@ class TexinBackend:
         raise RuntimeError(f"Texin balance check failed: {error_msg}")
 
 
+class TalksasaBackend:
+    """
+    Talksasa SMS API backend
+    Docs: https://bulksms.talksasa.com/api/v3/sms/send
+    Auth: Authorization: Bearer {api_token}
+    Success: status == "success"
+    """
+    BASE_URL = 'https://bulksms.talksasa.com/api/v3'
+
+    def __init__(self, api_key: str, sender_id: str = '', **kw):
+        self.api_key = api_key
+        self.sender_id = sender_id or 'NETILY'
+
+    def _headers(self):
+        return {
+            'Authorization': f'Bearer {self.api_key}',
+            'Content-Type': 'application/json',
+            'Accept': 'application/json',
+        }
+
+    def send(self, to: str, message: str) -> Tuple[bool, str, Decimal]:
+        phone = to.lstrip('+')
+        resp = requests.post(
+            f'{self.BASE_URL}/sms/send',
+            json={
+                'recipient': phone,
+                'sender_id': self.sender_id,
+                'type': 'plain',
+                'message': message,
+            },
+            headers=self._headers(),
+            timeout=20,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+
+        if data.get('status') == 'success':
+            payload = data.get('data')
+            msg_id = ''
+            cost = Decimal('0.00')
+            if isinstance(payload, dict):
+                msg_id = str(payload.get('uid') or payload.get('message_id') or '')
+                cost = Decimal(str(payload.get('cost', '0') or '0'))
+            return True, msg_id, cost
+
+        raise RuntimeError(data.get('message', 'Talksasa send failed'))
+
+    def get_balance(self) -> Dict[str, Any]:
+        resp = requests.get(
+            f'{self.BASE_URL}/balance',
+            headers=self._headers(),
+            timeout=15,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+
+        if data.get('status') != 'success':
+            raise RuntimeError(data.get('message', 'Talksasa balance check failed'))
+
+        payload = data.get('data')
+
+        # Docs don't pin down the exact key name inside "data" — tolerate the
+        # likely shapes (dict with a units/balance/sms_units key, or a bare number).
+        if isinstance(payload, dict):
+            units = (
+                payload.get('sms_units')
+                if payload.get('sms_units') is not None
+                else payload.get('balance', payload.get('units', 0))
+            )
+        else:
+            units = payload
+
+        return {
+            'balance': float(units or 0),
+            'currency': 'SMS_UNITS',
+            'unit_cost': Decimal('1.00'),
+        }
+
+
 class HubtelBackend:
     def __init__(self, api_key: str, api_secret: str, sender_id: str = '', **kw):
         self.client_id = api_key
@@ -535,6 +615,7 @@ BACKENDS = {
     'bytewave': BytewaveBackend,
     'blessedtexts': BlessedTextsBackend,
     'texin': TexinBackend,
+    'talksasa': TalksasaBackend,
 }
 
 # Human-readable field labels per provider
@@ -550,6 +631,7 @@ PROVIDER_FIELDS = {
     'bytewave':       {'api_key': 'API Token', 'sender_id': 'Sender ID'},
     'blessedtexts':   {'api_key': 'API Key', 'sender_id': 'Sender ID'},
     'texin':          {'api_key': 'API Key', 'sender_id': 'Sender ID'},
+    'talksasa':       {'api_key': 'API Token', 'sender_id': 'Sender ID'},
 }
 
 
