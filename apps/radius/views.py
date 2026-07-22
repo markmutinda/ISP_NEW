@@ -158,7 +158,7 @@ class RadiusActiveSessionsView(APIView):
         }
     """
     permission_classes = [IsAuthenticated, HasCompanyAccess, HasRoleAccessPolicy]
-    required_rbac_path = "/admin/radius"
+    required_rbac_paths = ("/admin/users", "/admin/radius")
 
     def get(self, request):
         # ── Real RADIUS sessions only (users with open radacct rows = truly online) ──
@@ -271,7 +271,7 @@ class RadiusOnlineUsernamesView(APIView):
         }
     """
     permission_classes = [IsAuthenticated, HasCompanyAccess, HasRoleAccessPolicy]
-    required_rbac_path = "/admin/radius"
+    required_rbac_paths = ("/admin/users", "/admin/radius")
 
     def get(self, request):
         from django.db.models import Sum
@@ -958,6 +958,7 @@ class CustomerRadiusCredentialsViewSet(viewsets.ModelViewSet):
     
     permission_classes = [IsAuthenticated, HasCompanyAccess, HasRoleAccessPolicy]
     required_rbac_path = "/admin/radius"
+    required_rbac_paths = ("/admin/users", "/admin/radius")
     # FIX: Use LargeResultsSetPagination to allow larger page sizes (up to 1000)
     pagination_class = LargeResultsSetPagination
     

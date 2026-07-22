@@ -22,8 +22,16 @@ class HasCompanyAccess(permissions.BasePermission):
         if request.user.is_superuser:
             return True
         
-        # User must have a company
-        if not hasattr(request.user, 'company') or not request.user.company:
+        # Public-schema users normally have a company FK. Tenant-schema users
+        # may carry ownership through middleware and denormalized identifiers.
+        user_company = getattr(request.user, 'company', None)
+        has_tenant_context = bool(
+            getattr(request, 'company', None)
+            or getattr(request, 'tenant', None)
+            or getattr(request.user, 'company_name', None)
+            or getattr(request.user, 'tenant_subdomain', None)
+        )
+        if not user_company and not has_tenant_context:
             return False
         
         # Check object's company ownership using various patterns
@@ -33,13 +41,21 @@ class HasCompanyAccess(permissions.BasePermission):
         
         # 1b. Denormalised company_name CharField (e.g. Router model)
         if hasattr(obj, 'company_name') and isinstance(getattr(type(obj), 'company_name', None), property) is False:
-            user_company_name = getattr(request.user.company, 'name', None)
+            user_company_name = (
+                getattr(user_company, 'name', None)
+                or getattr(request.user, 'company_name', None)
+            )
             if user_company_name and obj.company_name == user_company_name:
                 return True
         
         # 1c. Tenant-subdomain ownership (multi-tenant Router pattern)
         if hasattr(obj, 'tenant_subdomain') and hasattr(request, 'tenant'):
-            if obj.tenant_subdomain and obj.tenant_subdomain == getattr(request.tenant, 'schema_name', None):
+            tenant_identifiers = {
+                getattr(request.tenant, 'schema_name', None),
+                getattr(request.tenant, 'subdomain', None),
+            }
+            tenant_identifiers.discard(None)
+            if obj.tenant_subdomain and obj.tenant_subdomain in tenant_identifiers:
                 return True
         
         # 2. Through customer
@@ -364,6 +380,10 @@ class HasRoleAccessPolicy(permissions.BasePermission):
         "process_payroll": "edit",
         "sync_all": "edit",
         "sync_from_router": "edit",
+        "sync": "edit",
+        "regenerate_username": "edit",
+        "renew": "edit",
+        "refresh_internet": "edit",
         "disconnect": "edit",
         "disable": "edit",
         "enable": "edit",
@@ -419,6 +439,42 @@ class HasRoleAccessPolicy(permissions.BasePermission):
             return "delete"
         return "view"
 
+    def _required_paths(self, request, view):
+        many_resolver = getattr(view, "get_required_rbac_paths", None)
+        if callable(many_resolver):
+            try:
+                value = many_resolver(request)
+            except TypeError:
+                value = many_resolver()
+        else:
+            resolver = getattr(view, "get_required_rbac_path", None)
+            if callable(resolver):
+                try:
+                    value = resolver(request)
+                except TypeError:
+                    value = resolver()
+            else:
+                value = getattr(view, "required_rbac_paths", None)
+                if value is None:
+                    value = getattr(view, "required_rbac_path", None)
+
+        if not value:
+            return []
+        if isinstance(value, str):
+            return [value]
+        return [path for path in value if isinstance(path, str) and path]
+
+    def _path_is_allowed(self, allowed, required_path, required_action):
+        action_token = f"{required_path}::{required_action}"
+        if action_token in allowed:
+            return True
+
+        has_action_tokens = any(path.startswith(f"{required_path}::") for path in allowed)
+        if has_action_tokens:
+            return False
+
+        return any(required_path == path or required_path.startswith(f"{path}/") for path in allowed)
+
     def has_permission(self, request, view):
         user = getattr(request, "user", None)
         if not user or not user.is_authenticated:
@@ -431,15 +487,8 @@ class HasRoleAccessPolicy(permissions.BasePermission):
         if role in self.admin_roles or access_level in self.admin_roles:
             return True
 
-        resolver = getattr(view, "get_required_rbac_path", None)
-        if callable(resolver):
-            try:
-                required_path = resolver(request)
-            except TypeError:
-                required_path = resolver()
-        else:
-            required_path = getattr(view, "required_rbac_path", None)
-        if not required_path:
+        required_paths = self._required_paths(request, view)
+        if not required_paths:
             return True
 
         # A missing (or temporarily unavailable) policy must never turn into
@@ -468,15 +517,10 @@ class HasRoleAccessPolicy(permissions.BasePermission):
             return False
 
         required_action = self._required_action(request, view)
-        action_token = f"{required_path}::{required_action}"
-        if action_token in allowed:
-            return True
-
-        has_action_tokens = any(path.startswith(f"{required_path}::") for path in allowed)
-        if has_action_tokens:
-            return False
-
-        return any(required_path == path or required_path.startswith(f"{path}/") for path in allowed)
+        return any(
+            self._path_is_allowed(allowed, required_path, required_action)
+            for required_path in required_paths
+        )
 
 
 class IsTechnician(IsCompanyTechnician):

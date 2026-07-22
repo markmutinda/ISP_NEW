@@ -13,7 +13,7 @@ from rest_framework.serializers import ValidationError
 from apps.core.models import User
 from apps.core.email_delivery import send_transactional_email
 from apps.core.otp_service import OTPService, OTPRateLimitedError, OTPError
-from apps.core.permissions import HasRoleAccessPolicy, IsAdminOrStaff
+from apps.core.permissions import HasCompanyAccess, HasRoleAccessPolicy, IsAdminOrStaff
 from apps.core.rbac_defaults import DEFAULT_ROLE_ACCESS_POLICIES
 from apps.core.serializers import UserCreateSerializer
 from apps.core.views import RoleAccessPolicyViewSet
@@ -224,6 +224,33 @@ class RoleAccessPermissionTests(SimpleTestCase):
         )
         policy_filter.assert_not_called()
 
+    def test_supporting_endpoint_accepts_any_authorized_parent_page(self):
+        self.user.custom_allowed_paths = ["/admin/users::view"]
+        view = SimpleNamespace(
+            required_rbac_paths=("/admin/users", "/admin/radius"),
+            action=None,
+        )
+
+        self.assertTrue(self.permission.has_permission(self.request, view))
+
+        self.user.custom_allowed_paths = ["/admin/radius::view"]
+        self.assertTrue(self.permission.has_permission(self.request, view))
+
+        self.user.custom_allowed_paths = ["/admin/invoices::view"]
+        self.assertFalse(self.permission.has_permission(self.request, view))
+
+    def test_any_parent_page_still_requires_the_correct_action(self):
+        self.request.method = "PATCH"
+        view = SimpleNamespace(
+            required_rbac_paths=("/admin/users", "/admin/radius"),
+            action=None,
+        )
+        self.user.custom_allowed_paths = ["/admin/users::view"]
+        self.assertFalse(self.permission.has_permission(self.request, view))
+
+        self.user.custom_allowed_paths.append("/admin/users::edit")
+        self.assertTrue(self.permission.has_permission(self.request, view))
+
     def test_staff_management_cannot_be_delegated(self):
         serializer = UserCreateSerializer()
 
@@ -235,6 +262,38 @@ class RoleAccessPermissionTests(SimpleTestCase):
         self.assertFalse(
             self.permission.has_permission(self.request, self._view("/admin/settings"))
         )
+
+
+class CompanyObjectAccessTests(SimpleTestCase):
+    def test_tenant_staff_can_access_router_owned_by_tenant_subdomain(self):
+        user = SimpleNamespace(
+            is_authenticated=True,
+            is_superuser=False,
+            company=None,
+            company_name="Acme ISP",
+        )
+        request = SimpleNamespace(
+            user=user,
+            tenant=SimpleNamespace(schema_name="tenant_acme", subdomain="acme"),
+        )
+        router = SimpleNamespace(company_name="Acme ISP", tenant_subdomain="acme")
+
+        self.assertTrue(HasCompanyAccess().has_object_permission(request, None, router))
+
+    def test_router_from_another_tenant_is_denied(self):
+        user = SimpleNamespace(
+            is_authenticated=True,
+            is_superuser=False,
+            company=None,
+            company_name="Acme ISP",
+        )
+        request = SimpleNamespace(
+            user=user,
+            tenant=SimpleNamespace(schema_name="tenant_acme", subdomain="acme"),
+        )
+        router = SimpleNamespace(company_name="Other ISP", tenant_subdomain="other")
+
+        self.assertFalse(HasCompanyAccess().has_object_permission(request, None, router))
 
 
 class RoleAccessBootstrapTests(SimpleTestCase):

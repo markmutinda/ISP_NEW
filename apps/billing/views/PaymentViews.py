@@ -71,6 +71,29 @@ class MpesaConfigurationViewSet(viewsets.ModelViewSet):
             return MpesaConfigurationDetailSerializer
         return MpesaConfigurationSerializer
 
+    def get_permissions(self):
+        if self.action == 'active_summary':
+            return [IsAuthenticated(), IsCompanyStaff(), HasRoleAccessPolicy()]
+        return super().get_permissions()
+
+    def get_required_rbac_paths(self, request=None):
+        if self.action == 'active_summary':
+            return ("/admin/users", "/admin/payment-methods")
+        return (self.required_rbac_path,)
+
+    @action(detail=False, methods=['get'], url_path='active-summary')
+    def active_summary(self, request):
+        """Return non-secret active M-Pesa details needed by user workflows."""
+        config = self.get_queryset().filter(is_active=True).first()
+        if not config:
+            return Response({"business_shortcode": None, "is_active": False})
+        return Response({
+            "id": config.id,
+            "business_shortcode": config.business_shortcode,
+            "shortcode_type": config.shortcode_type,
+            "is_active": True,
+        })
+
     # ============================================================
     # FIX: Auto-activate payment method on create
     # ============================================================
