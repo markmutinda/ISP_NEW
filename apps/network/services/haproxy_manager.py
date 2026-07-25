@@ -60,27 +60,34 @@ def generate_haproxy_config(routers: list) -> str:
         if not vpn_ip:
             continue
 
-        # 🟢 Read pre-allocated unique ports directly instead of calculating from tenant ID
+        # Read pre-allocated unique ports directly instead of calculating from tenant ID
         winbox_port = router.get('winbox_remote_port')
         api_port = router.get('api_remote_port')
 
         if not winbox_port or not api_port:
             logger.warning(f"[HAPROXY] Router {name} (ID: {router_id}) missing remote port assignments. Skipping.")
-            continue  
+            continue
+
+        # FIX: router.id is only unique *within* a tenant schema, so two
+        # tenants can both have id=1 with the same router name, producing
+        # duplicate HAProxy section names. winbox_port is allocated from a
+        # single global atomic counter (port_allocator.py) and is therefore
+        # guaranteed unique across ALL tenants — use it as the suffix instead.
+        unique_suffix = winbox_port
 
         sections.append(f"""
-frontend winbox_{name}_{router_id}
+frontend winbox_{name}_{unique_suffix}
     bind *:{winbox_port}
-    default_backend be_winbox_{name}_{router_id}
+    default_backend be_winbox_{name}_{unique_suffix}
 
-backend be_winbox_{name}_{router_id}
+backend be_winbox_{name}_{unique_suffix}
     server router {vpn_ip}:8291 check inter 10s fall 3 rise 2
 
-frontend api_{name}_{router_id}
+frontend api_{name}_{unique_suffix}
     bind *:{api_port}
-    default_backend be_api_{name}_{router_id}
+    default_backend be_api_{name}_{unique_suffix}
 
-backend be_api_{name}_{router_id}
+backend be_api_{name}_{unique_suffix}
     server router {vpn_ip}:8728 check inter 10s fall 3 rise 2
 """)
     return config + '\n'.join(sections)
@@ -164,7 +171,7 @@ def sync_haproxy_config() -> bool:
     from django_tenants.utils import schema_context, get_tenant_model
     from apps.network.models.router_models import Router
 
-    # 🟢 FIX: Force Django to drop any dead/expired connections before we start.
+    # Force Django to drop any dead/expired connections before we start.
     # This is the actual fix for the overnight wipe — Celery workers are
     # long-lived processes and Postgres connections silently die after
     # nightly maintenance, backups, or idle timeouts.
@@ -178,7 +185,7 @@ def sync_haproxy_config() -> bool:
     for tenant in TenantModel.objects.exclude(schema_name='public'):
         try:
             with schema_context(tenant.schema_name):
-                # 🟢 Explicitly fetch 'winbox_remote_port' and 'api_remote_port'
+                # Explicitly fetch 'winbox_remote_port' and 'api_remote_port'
                 routers = Router.objects.filter(
                     vpn_provisioned=True,
                     is_active=True,
@@ -187,7 +194,7 @@ def sync_haproxy_config() -> bool:
                 all_routers.extend(list(routers))
                 
         except (OperationalError, InterfaceError) as e:
-            # 🟢 FIX: Connection actually died mid-loop — reconnect and retry once
+            # Connection actually died mid-loop — reconnect and retry once
             tenant_errors += 1
             logger.warning(
                 f"[HAPROXY] DB connection issue for {tenant.schema_name}, retrying: {e}"
@@ -217,7 +224,7 @@ def sync_haproxy_config() -> bool:
             f"[HAPROXY] {tenant_errors} tenant(s) had connection issues this sync"
         )
 
-    # 🟢 KILL SWITCH: never let a DB hiccup wipe the live config
+    # KILL SWITCH: never let a DB hiccup wipe the live config
     if not all_routers:
         logger.error(
             "[HAPROXY] CRITICAL: 0 routers found across all tenants — "
