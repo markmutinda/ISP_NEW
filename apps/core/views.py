@@ -34,6 +34,9 @@ from django.db import DatabaseError
 from .otp_service import OTPService, OTPError, OTPRateLimitedError
 from .email_delivery import send_transactional_email
 
+# Import country/currency constants
+from utils.constants import COUNTRY_CURRENCY_MAP
+
 from .models import User, Company, SystemSettings, AuditLog, Tenant, Changelog, FeatureRequest, FeatureUpvote, RoleAccessPolicy
 from .rbac_defaults import (
     DEFAULT_ROLE_ACCESS_POLICIES,
@@ -1358,6 +1361,9 @@ class CompanyRegisterView(generics.CreateAPIView):
             slug = f"{original_slug}-{counter}"
             counter += 1
 
+        # Get country from registration data, default to Kenya
+        country = data.get('company_country') or 'KE'
+        
         try:
             company = Company.objects.create(
                 name=data['company_name'],
@@ -1372,6 +1378,8 @@ class CompanyRegisterView(generics.CreateAPIView):
                 website=data.get('company_website', ''),
                 company_type='isp',
                 subscription_plan='basic',
+                country=country,
+                base_currency=COUNTRY_CURRENCY_MAP.get(country, 'KES'),
                 is_active=True
             )
             
@@ -1507,6 +1515,8 @@ class CompanyRegisterView(generics.CreateAPIView):
                     'name': company.name,
                     'slug': company.slug,
                     'subdomain': tenant.subdomain,
+                    'country': company.country,
+                    'base_currency': company.base_currency,
                 },
             },
             'welcome_email': email_result,

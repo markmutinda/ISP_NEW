@@ -13,6 +13,9 @@ from django.utils import timezone
 from django.contrib.auth.password_validation import validate_password
 from .models import User, Company, Tenant, SystemSettings, AuditLog, Changelog, FeatureRequest, FeatureUpvote, RoleAccessPolicy  # Add FeatureRequest and FeatureUpvote here
 
+# Import country/currency constants
+from utils.constants import COUNTRY_CHOICES, COUNTRY_CURRENCY_MAP
+
 logger = logging.getLogger(__name__)
 
 
@@ -449,6 +452,7 @@ class CompanySerializer(serializers.ModelSerializer):
             'id', 'name', 'slug', 'company_type', 'email', 'phone_number',
             'address', 'city', 'county', 'postal_code', 'registration_number',
             'tax_pin', 'website', 'logo', 'logo_url', 'is_active', 'subscription_plan',
+            'country', 'base_currency',
             'subscription_expiry', 'total_customers', 'active_customers',
             'created_at', 'updated_at', 'created_by'
         ]
@@ -726,6 +730,9 @@ class CompanyRegisterSerializer(serializers.Serializer):
     company_registration_number = serializers.CharField(max_length=100, required=False, allow_blank=True)
     company_tax_pin = serializers.CharField(max_length=50, required=False, allow_blank=True)
     company_website = serializers.URLField(required=False, allow_blank=True)
+    
+    # Country field for multi-country expansion
+    company_country = serializers.ChoiceField(choices=COUNTRY_CHOICES, required=False, default='KE')
     
     # Admin user fields
     admin_first_name = serializers.CharField(max_length=100, required=True)

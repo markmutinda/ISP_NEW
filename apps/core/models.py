@@ -10,6 +10,9 @@ from django.core.validators import RegexValidator
 from django.conf import settings
 from django_tenants.models import DomainMixin, TenantMixin
 
+# Import country/currency constants
+from utils.constants import COUNTRY_CHOICES, COUNTRY_CURRENCY_MAP
+
 
 class Domain(DomainMixin):
     """Domain model for tenant-specific domains"""
@@ -307,6 +310,19 @@ class Company(BaseModel):
     subscription_plan = models.CharField(max_length=50, default='basic')
     subscription_expiry = models.DateField(null=True, blank=True)
     
+    # Country & Currency Support (multi-country expansion)
+    country = models.CharField(
+        max_length=2,
+        choices=COUNTRY_CHOICES,
+        default='KE',
+        help_text="Country this ISP company operates in"
+    )
+    base_currency = models.CharField(
+        max_length=3,
+        default='KES',
+        help_text="Base currency for this company, derived from country at creation"
+    )
+    
     class Meta:
         app_label = 'core'
         ordering = ['name']
@@ -314,6 +330,12 @@ class Company(BaseModel):
     
     def __str__(self):
         return self.name
+    
+    def save(self, *args, **kwargs):
+        """Override save to auto-set base_currency from country if not set."""
+        if self.country and not self.base_currency:
+            self.base_currency = COUNTRY_CURRENCY_MAP.get(self.country, 'KES')
+        super().save(*args, **kwargs)
     
     @property
     def total_customers(self):

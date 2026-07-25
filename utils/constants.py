@@ -492,4 +492,110 @@ VOUCHER_TYPES = [
     ('LOYALTY', 'Loyalty Reward'),
 ]
 
+# ============================================================================
+# MULTI-COUNTRY & CURRENCY SUPPORT
+# ============================================================================
+# These constants support expansion into multiple African countries without
+# touching the existing KES-hardcoded billing logic yet.
 
+# Country & Currency Support (multi-country expansion)
+COUNTRY_CHOICES = [
+    ('KE', 'Kenya'),
+    ('GH', 'Ghana'),
+    ('NG', 'Nigeria'),
+    ('TZ', 'Tanzania'),
+    ('UG', 'Uganda'),
+]
+
+COUNTRY_CURRENCY_MAP = {
+    'KE': 'KES',  # Kenyan Shilling
+    'GH': 'GHS',  # Ghanaian Cedi
+    'NG': 'NGN',  # Nigerian Naira
+    'TZ': 'TZS',  # Tanzanian Shilling
+    'UG': 'UGX',  # Ugandan Shilling
+}
+
+# Currency symbols for display purposes
+CURRENCY_SYMBOLS = {
+    'KES': 'KSh',
+    'GHS': 'GH₵',
+    'NGN': '₦',
+    'TZS': 'TSh',
+    'UGX': 'USh',
+    'USD': '$',
+    'EUR': '€',
+    'GBP': '£',
+}
+
+# Country phone codes
+COUNTRY_PHONE_CODES = {
+    'KE': '+254',
+    'GH': '+233',
+    'NG': '+234',
+    'TZ': '+255',
+    'UG': '+256',
+}
+
+# Country-specific settings
+COUNTRY_SETTINGS = {
+    'KE': {
+        'currency': 'KES',
+        'timezone': 'Africa/Nairobi',
+        'tax_rates': {
+            'VAT': 16.0,
+            'WITHHOLDING': 5.0,
+        },
+        'date_format': 'd/m/Y',
+        'phone_code': '+254',
+    },
+    'GH': {
+        'currency': 'GHS',
+        'timezone': 'Africa/Accra',
+        'tax_rates': {
+            'VAT': 12.5,
+            'WITHHOLDING': 5.0,
+        },
+        'date_format': 'd/m/Y',
+        'phone_code': '+233',
+    },
+    'NG': {
+        'currency': 'NGN',
+        'timezone': 'Africa/Lagos',
+        'tax_rates': {
+            'VAT': 7.5,
+            'WITHHOLDING': 5.0,
+        },
+        'date_format': 'd/m/Y',
+        'phone_code': '+234',
+    },
+    'TZ': {
+        'currency': 'TZS',
+        'timezone': 'Africa/Dar_es_Salaam',
+        'tax_rates': {
+            'VAT': 18.0,
+            'WITHHOLDING': 5.0,
+        },
+        'date_format': 'd/m/Y',
+        'phone_code': '+255',
+    },
+    'UG': {
+        'currency': 'UGX',
+        'timezone': 'Africa/Kampala',
+        'tax_rates': {
+            'VAT': 18.0,
+            'WITHHOLDING': 6.0,
+        },
+        'date_format': 'd/m/Y',
+        'phone_code': '+256',
+    },
+}
+
+# Helper function to get currency for a country
+def get_currency_for_country(country_code: str) -> str:
+    """Get the currency code for a given country code."""
+    return COUNTRY_CURRENCY_MAP.get(country_code, 'KES')
+
+# Helper function to get country settings
+def get_country_settings(country_code: str) -> dict:
+    """Get all settings for a given country code."""
+    return COUNTRY_SETTINGS.get(country_code, COUNTRY_SETTINGS['KE'])
