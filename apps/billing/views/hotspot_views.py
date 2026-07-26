@@ -58,16 +58,19 @@ def _normalize_mac(mac: str) -> str:
     return (mac or "").upper().replace("-", ":").strip()
 
 
-def _canonical_phone(phone: str) -> str:
-    """Canonicalize phone number to 254 format."""
-    digits = ''.join(ch for ch in (phone or '') if ch.isdigit())
-    if not digits:
-        return ''
-    if digits.startswith('0'):
-        return '254' + digits[1:]
-    if digits.startswith('254'):
-        return digits
-    return '254' + digits
+def _canonical_phone(phone: str, country_code: str = 'KE') -> str:
+    """
+    Canonicalize phone number using the tenant's country configuration.
+    
+    Args:
+        phone: Raw phone number string
+        country_code: ISO country code (e.g., 'KE', 'GH', 'NG')
+    
+    Returns:
+        Canonicalized phone number in international format
+    """
+    from utils.phone import normalize_phone_number
+    return normalize_phone_number(phone, country_code)
 
 
 def _plan_data_limit_display(plan):
@@ -630,6 +633,11 @@ class HotspotPurchaseView(APIView):
                 }, status=status.HTTP_400_BAD_REQUEST)
             
             # ============================================================
+            # GET COUNTRY FROM TENANT'S COMPANY FOR PHONE NORMALIZATION
+            # ============================================================
+            customer_country = getattr(getattr(tenant, 'company', None), 'country', None) or 'KE'
+            
+            # ============================================================
             # TV CODE RESOLUTION: If tv_code provided, resolve MAC server-side
             # ============================================================
             reserved_access_code = None
@@ -671,6 +679,11 @@ class HotspotPurchaseView(APIView):
             
             mac_address = _normalize_mac(mac_address)
             
+            # ============================================================
+            # CANONICALIZE PHONE NUMBER USING COUNTRY-AWARE UTILITY
+            # ============================================================
+            phone_canonical = _canonical_phone(phone_number, customer_country)
+            
             # ══════════════════════════════════════════════════════════════
             # RESOLVE HOTSPOT IDENTITY
             # Identity priority: phone number → MAC → anonymous
@@ -682,7 +695,7 @@ class HotspotPurchaseView(APIView):
             hotspot_client = HotspotClient.get_or_create_by_mac(
                 schema_name=tenant.schema_name,
                 mac_address=mac_address,
-                phone_number=phone_number,
+                phone_number=phone_canonical,
             )
 
             # Register this specific device under the client
@@ -781,7 +794,7 @@ class HotspotPurchaseView(APIView):
                 session_id=session_id,
                 router=router,
                 plan=plan,
-                phone_number=phone_number,
+                phone_number=phone_canonical,
                 mac_address=mac_address,
                 amount=plan.price,
                 status='pending',
@@ -818,7 +831,7 @@ class HotspotPurchaseView(APIView):
                 currency='KES',
                 status='PROCESSING',
                 payment_reference=payment_ref,
-                payer_phone=phone_number,
+                payer_phone=phone_canonical,
                 schema_name=tenant.schema_name,
                 hotspot_session=session,
                 tuma_status='pending',
@@ -837,7 +850,7 @@ class HotspotPurchaseView(APIView):
 
                     mpesa_service = MpesaSTKPush(config=mpesa_cfg)
                     mpesa_result = mpesa_service.initiate_stk_push(
-                        phone_number=phone_number,
+                        phone_number=phone_canonical,
                         amount=plan.price,
                         account_reference=session.session_id[:12],
                         transaction_desc="Hotspot Access",
@@ -909,7 +922,7 @@ class HotspotPurchaseView(APIView):
                     tuma_res = client.stk_push(
                         token=token,
                         amount=float(plan.price),
-                        phone=phone_number,
+                        phone=phone_canonical,
                         callback_url=callback_url,
                         description=description,
                     )
@@ -1014,7 +1027,7 @@ class HotspotPurchaseView(APIView):
                 'message': 'STK push sent to your phone. Please complete payment on your M-Pesa.',
                 'payment_reference': payment.payment_number,
                 'amount': float(plan.price),
-                'phone_number': phone_number,
+                'phone_number': phone_canonical,
             }, status=status.HTTP_202_ACCEPTED)
 
 
@@ -1522,18 +1535,12 @@ class HotspotPhoneReconnectView(APIView):
         cache.set(cache_key, attempts + 1, timeout=self._RATE_LIMIT_TTL)
         return True
 
-    def _canonicalize_phone(self, phone: str) -> str:
-        """Normalize phone to 2547XXXXXXXX format."""
-        digits = ''.join(c for c in phone if c.isdigit())
-        if digits.startswith('0') and len(digits) == 10:
-            return '254' + digits[1:]
-        if digits.startswith('254') and len(digits) == 12:
-            return digits
-        if digits.startswith('7') and len(digits) == 9:
-            return '254' + digits
-        if digits.startswith('1') and len(digits) == 9:
-            return '254' + digits
-        return digits
+    def _canonicalize_phone(self, phone: str, country_code: str = 'KE') -> str:
+        """
+        Canonicalize phone number using the tenant's country configuration.
+        """
+        from utils.phone import normalize_phone_number
+        return normalize_phone_number(phone, country_code)
 
     @transaction.atomic
     def post(self, request):
@@ -1550,15 +1557,6 @@ class HotspotPhoneReconnectView(APIView):
         if not router_id:
             return Response({'error': 'Router ID is required'}, status=status.HTTP_400_BAD_REQUEST)
 
-        phone_canonical = self._canonicalize_phone(raw_phone)
-
-        # Basic format check — must be 12 digits starting with 254
-        if not (len(phone_canonical) == 12 and phone_canonical.startswith('254')):
-            return Response(
-                {'error': 'Enter a valid Kenyan phone number (07XX or 01XX format)'},
-                status=status.HTTP_400_BAD_REQUEST
-            )
-
         # ── Resolve tenant ────────────────────────────────────────
         try:
             from apps.core.models import Tenant
@@ -1569,6 +1567,19 @@ class HotspotPhoneReconnectView(APIView):
                 )
         except Exception:
             return Response({'error': 'Invalid tenant'}, status=status.HTTP_400_BAD_REQUEST)
+
+        # ── Get country from tenant's company ──────────────────────
+        customer_country = getattr(getattr(tenant, 'company', None), 'country', None) or 'KE'
+
+        # ── Canonicalize phone using country-aware utility ──────
+        phone_canonical = self._canonicalize_phone(raw_phone, customer_country)
+
+        # Basic format check — must be valid international format
+        if not phone_canonical:
+            return Response(
+                {'error': 'Invalid phone number format. Please enter a valid number.'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
 
         # ── Rate limit (per tenant + phone) ──────────────────────
         if not self._check_rate_limit(tenant.schema_name, phone_canonical):
@@ -1595,9 +1606,10 @@ class HotspotPhoneReconnectView(APIView):
             # ============================================================
             # IMPROVED PHONE LOOKUP: multiple formats + session fallback
             # ============================================================
-            phone_canonical = self._canonicalize_phone(raw_phone)  # 254111325479
-            phone_local = '0' + phone_canonical[3:]                # 0111325479
-            phone_short = phone_canonical[3:]                       # 111325479
+            # We already have phone_canonical from the country-aware normalizer
+            # But also try local formats for backward compatibility
+            phone_local = '0' + phone_canonical[3:] if len(phone_canonical) > 3 else ''
+            phone_short = phone_canonical[3:] if len(phone_canonical) > 3 else ''
 
             client = HotspotClient.objects.filter(
                 Q(canonical_phone=phone_canonical) |
@@ -1628,22 +1640,12 @@ class HotspotPhoneReconnectView(APIView):
                         # FIXED: When plan supports 1 device and the user is the legitimate owner
                         # (proven by phone number), allow reconnection by just reseeding RADIUS
                         # credentials with the new MAC, updating the session's MAC address.
-                        if plan_device_limit <= 1 and not existing_mac_session:
-                            # MAC likely randomized — this IS their device, just with a new MAC.
-                            # Since they proved ownership via phone number, allow reconnect and
-                            # update the session MAC so future auto-logins work correctly.
-                            base_session_updated = active_sessions.first()
-                            if base_session and mac_address and mac_address != '00:00:00:00:00:00':
-                                base_session_updated = base_session
-                                # Update the stored MAC so auto-login works next time
-                                base_session_updated.mac_address = mac_address
-                                base_session_updated.save(update_fields=['mac_address'])
-                                # Also register this device under the client
-                                if base_session_updated.hotspot_client:
-                                    HotspotClientDevice.record_device(
-                                        client=base_session_updated.hotspot_client,
-                                        mac_address=mac_address
-                                    )
+                        if plan_device_limit <= 1:
+                            base_session = direct_session
+                            # Update the stored MAC so auto-login works next time
+                            if mac_address and mac_address != '00:00:00:00:00:00':
+                                base_session.mac_address = mac_address
+                                base_session.save(update_fields=['mac_address'])
                             
                             access_code = base_session.access_code
                             try:

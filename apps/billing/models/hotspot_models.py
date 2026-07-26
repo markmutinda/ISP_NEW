@@ -111,7 +111,8 @@ class HotspotPlan(models.Model):
     
     # Pricing
     price = models.DecimalField(max_digits=10, decimal_places=2)
-    currency = models.CharField(max_length=3, default='KES')
+    # FIX: Changed default to empty string to allow currency derivation from tenant
+    currency = models.CharField(max_length=3, default='')  # was default='KES'
     
     # ════════════════════════════════════════════════════════════════
     # VALIDITY - Flexible time-based (Minutes/Hours/Days)
@@ -255,13 +256,15 @@ class HotspotPlan(models.Model):
         ]
     
     def __str__(self):
-        return f"{self.router.name} - {self.name} (KES {self.price})"
+        currency_symbol = self.currency or 'KES'
+        return f"{self.router.name} - {self.name} ({currency_symbol} {self.price})"
     
     def save(self, *args, **kwargs):
         """
         Save method with validation:
         - Ensures only one free trial plan exists per router
         - Handles both create and update scenarios via exclude(pk=self.pk)
+        - Derives currency from tenant country if not explicitly set
         - Syncs new fields to legacy fields for backward compatibility
         """
         # ════════════════════════════════════════════════════════════════
@@ -285,6 +288,14 @@ class HotspotPlan(models.Model):
                     "A free trial plan already exists for this router. "
                     "Only one free trial plan is allowed per router."
                 )
+        
+        # ════════════════════════════════════════════════════════════════
+        # CURRENCY DERIVATION - Auto-set from tenant country
+        # ════════════════════════════════════════════════════════════════
+        if not self.currency:
+            from apps.core.country_utils import get_tenant_base_currency
+            from django.db import connection
+            self.currency = get_tenant_base_currency(connection.schema_name)
         
         # Sync new fields to legacy fields for backward compatibility
         self._sync_legacy_fields()

@@ -733,7 +733,8 @@ class Payment(models.Model):
     amount = models.DecimalField(max_digits=12, decimal_places=2, validators=[MinValueValidator(0.01)])
     transaction_fee = models.DecimalField(max_digits=12, decimal_places=2, default=0)
     net_amount = models.DecimalField(max_digits=12, decimal_places=2, default=0)
-    currency = models.CharField(max_length=3, default='KES')
+    # FIX: Changed default to empty string to allow currency derivation from tenant
+    currency = models.CharField(max_length=3, default='')  # was default='KES'
 
     # 🔧 FIX: Changed from PROTECT to SET_NULL to allow payment method deletion while preserving payment history
     payment_method = models.ForeignKey(
@@ -842,6 +843,13 @@ class Payment(models.Model):
         
         if not self.schema_name and self.customer:
             self.schema_name = self.customer.schema_name
+        
+        # Derive currency from tenant country if not explicitly set
+        if not self.currency:
+            from apps.core.country_utils import get_tenant_base_currency
+            from django.db import connection
+            schema = self.schema_name or connection.schema_name
+            self.currency = get_tenant_base_currency(schema)
             
         # 2. Handle ID Generation with Concurrency Protection (RETRY LOOP)
         if not self.payment_number:
@@ -961,7 +969,8 @@ class Receipt(models.Model):
     
     amount = models.DecimalField(max_digits=12, decimal_places=2)
     amount_in_words = models.CharField(max_length=500)
-    currency = models.CharField(max_length=3, default='KES')
+    # FIX: Changed default to empty string to allow currency derivation from payment or tenant
+    currency = models.CharField(max_length=3, default='')  # was default='KES'
     
     payment_method = models.CharField(max_length=100)
     payment_reference = models.CharField(max_length=100, blank=True)
@@ -1006,14 +1015,26 @@ class Receipt(models.Model):
         if not self.amount and self.payment:
             self.amount = self.payment.amount
         
+        if not self.schema_name and self.payment:
+            self.schema_name = self.payment.schema_name
+            
+        # Derive currency from payment or tenant if not explicitly set
+        if not self.currency:
+            # Prefer the linked payment's currency (already resolved) over
+            # re-resolving from tenant, avoids a second lookup
+            if self.payment and self.payment.currency:
+                self.currency = self.payment.currency
+            else:
+                from apps.core.country_utils import get_tenant_base_currency
+                from django.db import connection
+                schema = self.schema_name or connection.schema_name
+                self.currency = get_tenant_base_currency(schema)
+        
         if not self.payment_method and self.payment:
             self.payment_method = self.payment.payment_method.name if self.payment.payment_method else "Unknown"
         
         if not self.payment_reference and self.payment:
             self.payment_reference = self.payment.payment_reference
-        
-        if not self.schema_name and self.payment:
-            self.schema_name = self.payment.schema_name
 
         # 2. Handle ID Generation with Concurrency Protection (RETRY LOOP)
         if not self.receipt_number:

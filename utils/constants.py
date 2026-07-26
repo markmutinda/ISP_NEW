@@ -590,6 +590,55 @@ COUNTRY_SETTINGS = {
     },
 }
 
+# ============================================================================
+# PHONE NUMBER FORMAT CONFIGURATION
+# ============================================================================
+# Phone format facts per country to prevent number corruption when normalizing.
+# These configs define how phone numbers should be parsed and formatted for
+# each supported country.
+
+COUNTRY_PHONE_CONFIG = {
+    'KE': {
+        'dial_code': '254',
+        'local_prefix': '0',        # leading digit customers dial locally
+        'national_length': 9,       # digits after the leading 0 is stripped
+        'full_length': 12,          # total digits after 254 prefix (254 + 9)
+        'example': '0712345678',
+    },
+    'GH': {
+        'dial_code': '233',
+        'local_prefix': '0',
+        'national_length': 9,
+        'full_length': 12,
+        'example': '0241234567',
+    },
+    'NG': {
+        'dial_code': '234',
+        'local_prefix': '0',
+        'national_length': 10,
+        'full_length': 13,
+        'example': '08012345678',
+    },
+    'TZ': {
+        'dial_code': '255',
+        'local_prefix': '0',
+        'national_length': 9,
+        'full_length': 12,
+        'example': '0712345678',
+    },
+    'UG': {
+        'dial_code': '256',
+        'local_prefix': '0',
+        'national_length': 9,
+        'full_length': 12,
+        'example': '0712345678',
+    },
+}
+
+# ============================================================================
+# HELPER FUNCTIONS
+# ============================================================================
+
 # Helper function to get currency for a country
 def get_currency_for_country(country_code: str) -> str:
     """Get the currency code for a given country code."""
@@ -599,3 +648,13 @@ def get_currency_for_country(country_code: str) -> str:
 def get_country_settings(country_code: str) -> dict:
     """Get all settings for a given country code."""
     return COUNTRY_SETTINGS.get(country_code, COUNTRY_SETTINGS['KE'])
+
+# Helper function to get phone configuration for a country
+def get_country_phone_config(country_code: str) -> dict:
+    """
+    Get phone number configuration for a given country code.
+    Falls back to Kenya (KE) config if an unknown or blank country code is passed.
+    """
+    if not country_code:
+        return COUNTRY_PHONE_CONFIG['KE']
+    return COUNTRY_PHONE_CONFIG.get(country_code, COUNTRY_PHONE_CONFIG['KE'])

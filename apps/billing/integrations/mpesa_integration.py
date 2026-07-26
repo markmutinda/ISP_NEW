@@ -114,21 +114,19 @@ class MpesaSTKPush:
         return encoded
     
     def _encrypt_phone_number(self, phone_number):
-        """Format phone number for M-Pesa (remove any non-digit characters)"""
-        # Remove any non-digit characters
-        phone = ''.join(filter(str.isdigit, phone_number))
+        """
+        Format phone number using the tenant's country configuration.
+        This replaces the Kenya-hardcoded version with a country-aware utility.
+        """
+        from django.db import connection
+        from apps.core.country_utils import get_tenant_country_code
+        from utils.phone import normalize_phone_number
+
+        # Get the tenant's country code from the current schema
+        country_code = get_tenant_country_code(connection.schema_name)
         
-        # Ensure it starts with 254
-        if phone.startswith('0'):
-            phone = '254' + phone[1:]
-        elif phone.startswith('7') and len(phone) == 9:
-            phone = '254' + phone
-        elif phone.startswith('254') and len(phone) == 12:
-            pass  # Already correct format
-        elif phone.startswith('+254'):
-            phone = phone[1:]
-        
-        return phone
+        # Normalize the phone number using the country-specific configuration
+        return normalize_phone_number(phone_number, country_code)
     
     def initiate_stk_push(self, phone_number, amount, account_reference, transaction_desc, payment=None):
         """

@@ -167,8 +167,13 @@ class SMSService:
             due_date = invoice.due_date.strftime('%d/%m/%Y')
             amount = invoice.balance
             
+            # Get currency from company
+            currency = 'KES'  # Default fallback
+            if self.company and hasattr(self.company, 'base_currency'):
+                currency = self.company.base_currency
+            
             message = f"Dear {customer.user.first_name},\n"
-            message += f"Reminder: Invoice {invoice_number} of KES {amount:,.2f} "
+            message += f"Reminder: Invoice {invoice_number} of {currency} {amount:,.2f} "
             message += f"is due on {due_date}. Please make payment to avoid service interruption.\n"
             message += f"Thank you for choosing {self.company.name if self.company else 'our service'}."
             
@@ -198,8 +203,13 @@ class SMSService:
             payment_method = payment.payment_method.name
             receipt_number = payment.payment_number
             
+            # Get currency from company
+            currency = 'KES'  # Default fallback
+            if self.company and hasattr(self.company, 'base_currency'):
+                currency = self.company.base_currency
+            
             message = f"Dear {customer.user.first_name},\n"
-            message += f"Payment of KES {amount:,.2f} via {payment_method} "
+            message += f"Payment of {currency} {amount:,.2f} via {payment_method} "
             message += f"has been received. Receipt No: {receipt_number}.\n"
             message += f"Thank you for your payment."
             
@@ -260,11 +270,16 @@ class SMSService:
             pin = voucher.pin
             amount = voucher.face_value
             
+            # Get currency from company
+            currency = 'KES'  # Default fallback
+            if self.company and hasattr(self.company, 'base_currency'):
+                currency = self.company.base_currency
+            
             message = f"Dear {customer.user.first_name},\n"
             message += f"Your voucher details:\n"
             message += f"Code: {voucher_code}\n"
             message += f"PIN: {pin}\n"
-            message += f"Amount: KES {amount:,.2f}\n"
+            message += f"Amount: {currency} {amount:,.2f}\n"
             message += f"Valid until: {voucher.valid_to.strftime('%d/%m/%Y')}"
             
             return self.send_single_sms(phone_number, message)
@@ -324,7 +339,7 @@ class SMSService:
     
     def _format_phone_number(self, phone_number):
         """
-        Format phone number for Africa's Talking
+        Format phone number for the SMS gateway, using tenant country config.
         
         Args:
             phone_number: Phone number to format
@@ -332,23 +347,15 @@ class SMSService:
         Returns:
             str: Formatted phone number
         """
-        # Remove any non-digit characters
-        phone = ''.join(filter(str.isdigit, phone_number))
+        from django.db import connection
+        from apps.core.country_utils import get_tenant_country_code
+        from utils.phone import normalize_phone_number
+
+        # Get the tenant's country code from the current schema
+        country_code = get_tenant_country_code(connection.schema_name)
         
-        # Convert to 254 format
-        if phone.startswith('0'):
-            formatted = '254' + phone[1:]
-        elif phone.startswith('7') and len(phone) == 9:
-            formatted = '254' + phone
-        elif phone.startswith('254') and len(phone) == 12:
-            formatted = phone
-        elif phone.startswith('+254'):
-            formatted = phone[1:]
-        else:
-            # Return as is if doesn't match Kenyan format
-            formatted = phone
-        
-        return formatted
+        # Normalize the phone number using the country-specific configuration
+        return normalize_phone_number(phone_number, country_code)
     
     def get_delivery_report(self, message_id):
         """
