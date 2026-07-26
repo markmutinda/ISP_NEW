@@ -636,6 +636,47 @@ COUNTRY_PHONE_CONFIG = {
 }
 
 # ============================================================================
+# COUNTRY PAYMENT METHODS
+# ============================================================================
+# Defines which payment methods are available in each country.
+# This is used for UI-gating and validation of allowed payment methods
+# based on the tenant's country.
+
+COUNTRY_PAYMENT_METHODS = {
+    'KE': [
+        'MPESA_STK',
+        'MPESA_TILL',
+        'MPESA_PAYBILL',
+        'BANK_TRANSFER',
+        'CASH',
+        'VOUCHER',
+    ],
+    'GH': [
+        'MOBILE_MONEY',   # MTN/AirtelTigo/Vodafone MoMo
+        'BANK_TRANSFER',
+        'CASH',
+        'VOUCHER',
+    ],
+    'NG': [
+        'BANK_TRANSFER',   # Paystack/Flutterwave integration coming later
+        'CASH',
+        'VOUCHER',
+    ],
+    'TZ': [
+        'MOBILE_MONEY',   # M-Pesa/TigoPesa/Airtel Money
+        'BANK_TRANSFER',
+        'CASH',
+        'VOUCHER',
+    ],
+    'UG': [
+        'MOBILE_MONEY',   # MTN MoMo/Airtel Money
+        'BANK_TRANSFER',
+        'CASH',
+        'VOUCHER',
+    ],
+}
+
+# ============================================================================
 # HELPER FUNCTIONS
 # ============================================================================
 
@@ -658,3 +699,13 @@ def get_country_phone_config(country_code: str) -> dict:
     if not country_code:
         return COUNTRY_PHONE_CONFIG['KE']
     return COUNTRY_PHONE_CONFIG.get(country_code, COUNTRY_PHONE_CONFIG['KE'])
+
+# Helper function to get allowed payment methods for a country
+def get_allowed_payment_methods(country_code: str) -> list:
+    """
+    Get the list of allowed payment methods for a given country code.
+    Falls back to Kenya (KE) payment methods if an unknown or blank country code is passed.
+    """
+    if not country_code:
+        return COUNTRY_PAYMENT_METHODS['KE']
+    return COUNTRY_PAYMENT_METHODS.get(country_code, COUNTRY_PAYMENT_METHODS['KE'])

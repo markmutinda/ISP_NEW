@@ -667,40 +667,35 @@ class MpesaValidation:
     """
     
     @staticmethod
-    def validate_phone_number(phone_number):
+    def validate_phone_number(phone_number, country_code=None):
         """
-        Validate Kenyan phone number format
+        Validate phone number using the country's configured format.
+        Falls back to the active tenant's country if none given.
         
         Args:
             phone_number: Phone number to validate
+            country_code: ISO country code (e.g., 'KE', 'GH', 'NG')
         
         Returns:
             tuple: (is_valid, formatted_number, error_message)
         """
-        # Remove any non-digit characters
-        phone = ''.join(filter(str.isdigit, phone_number))
-        
-        # Check length
-        if len(phone) < 9 or len(phone) > 12:
-            return False, None, "Invalid phone number length"
-        
-        # Convert to 254 format
-        if phone.startswith('0'):
-            formatted = '254' + phone[1:]
-        elif phone.startswith('7') and len(phone) == 9:
-            formatted = '254' + phone
-        elif phone.startswith('254') and len(phone) == 12:
-            formatted = phone
-        elif phone.startswith('+254'):
-            formatted = phone[1:]
-        else:
-            return False, None, "Invalid phone number format"
-        
-        # Final validation
-        if formatted.startswith('254') and len(formatted) == 12:
-            return True, formatted, None
-        else:
-            return False, None, "Invalid phone number format"
+        from utils.phone import normalize_phone_number, is_valid_phone_number
+        from utils.constants import get_country_phone_config
+
+        # Resolve country code if not provided
+        if country_code is None:
+            from django.db import connection
+            from apps.core.country_utils import get_tenant_country_code
+            country_code = get_tenant_country_code(connection.schema_name)
+
+        # Validate the phone number against the country's format
+        if not is_valid_phone_number(phone_number, country_code):
+            cfg = get_country_phone_config(country_code)
+            return False, None, f"Invalid phone number format. Expected e.g. {cfg['example']}"
+
+        # Normalize the phone number to international format
+        formatted = normalize_phone_number(phone_number, country_code)
+        return True, formatted, None
     
     @staticmethod
     def validate_amount(amount):
@@ -756,7 +751,7 @@ class MpesaValidation:
         return True
     
     @staticmethod
-    def verify_transaction(transaction_data, expected_amount=None, expected_phone=None):
+    def verify_transaction(transaction_data, expected_amount=None, expected_phone=None, country_code=None):
         """
         Verify M-Pesa transaction details
         
@@ -764,6 +759,7 @@ class MpesaValidation:
             transaction_data: Transaction data from callback
             expected_amount: Expected amount (optional)
             expected_phone: Expected phone number (optional)
+            country_code: ISO country code (optional, will auto-resolve)
         
         Returns:
             dict: Verification result
@@ -793,9 +789,10 @@ class MpesaValidation:
             if not is_valid_amount:
                 result['errors'].append(amount_error)
             
-            # Validate phone number
+            # Validate phone number with country awareness
             is_valid_phone, formatted_phone, phone_error = MpesaValidation.validate_phone_number(
-                transaction_data['phone_number']
+                transaction_data['phone_number'],
+                country_code=country_code
             )
             if not is_valid_phone:
                 result['errors'].append(phone_error)
@@ -808,7 +805,10 @@ class MpesaValidation:
                     result['warnings'].append(f"Amount mismatch: expected {expected_amount}, got {transaction_data['amount']}")
             
             if expected_phone:
-                is_valid_expected, formatted_expected, _ = MpesaValidation.validate_phone_number(expected_phone)
+                is_valid_expected, formatted_expected, _ = MpesaValidation.validate_phone_number(
+                    expected_phone,
+                    country_code=country_code
+                )
                 if is_valid_expected and is_valid_phone:
                     if formatted_phone != formatted_expected:
                         result['warnings'].append(f"Phone number mismatch: expected {formatted_expected}, got {formatted_phone}")

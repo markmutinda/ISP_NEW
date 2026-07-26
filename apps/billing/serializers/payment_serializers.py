@@ -11,6 +11,17 @@ from ..serializers.invoice_serializers import InvoiceSerializer
 
 
 # ==========================
+# HELPER: Tenant Country Resolver
+# ==========================
+
+def _tenant_country_code():
+    """Resolve the current tenant's country code from the database connection."""
+    from django.db import connection
+    from apps.core.country_utils import get_tenant_country_code
+    return get_tenant_country_code(connection.schema_name)
+
+
+# ==========================
 # M-Pesa Configuration Serializers
 # ==========================
 
@@ -124,26 +135,28 @@ class MpesaConfigurationTestSerializer(serializers.Serializer):
     )
 
     def validate_test_phone(self, value):
-        """Validate phone number format"""
+        """
+        Validate phone number format using country-aware validation.
+        Allows blank values (for token-only testing).
+        """
         if not value:
             return value
 
-        # Remove any non-digit characters
-        phone = ''.join(filter(str.isdigit, value))
+        from utils.phone import normalize_phone_number, is_valid_phone_number
+        from utils.constants import get_country_phone_config
+
+        # Resolve tenant country
+        country_code = _tenant_country_code()
         
-        # Check if it's a valid Kenyan phone number
-        if len(phone) == 9 and phone.startswith('7'):
-            phone = '254' + phone
-        elif len(phone) == 10 and phone.startswith('07'):
-            phone = '254' + phone[1:]
-        elif len(phone) == 12 and phone.startswith('254'):
-            pass  # Already in correct format
-        else:
+        # Validate against country format
+        if not is_valid_phone_number(value, country_code):
+            cfg = get_country_phone_config(country_code)
             raise serializers.ValidationError(
-                "Please enter a valid Kenyan phone number (e.g., 0712345678 or 254712345678)"
+                f"Please enter a valid phone number (e.g. {cfg['example']})"
             )
         
-        return phone
+        # Normalize to international format
+        return normalize_phone_number(value, country_code)
 
     def validate(self, attrs):
         """If one STK test field is provided, require the other as well."""
@@ -621,6 +634,11 @@ class MpesaSTKPushSerializer(serializers.Serializer):
     )
 
     def validate_amount(self, value):
+        """
+        Validate amount against M-Pesa's limits.
+        NOTE: This is M-Pesa specific and stays as KES 150,000 ceiling.
+        Ghana MoMo will have its own serializer with its own limits.
+        """
         if value <= 0:
             raise serializers.ValidationError("Amount must be greater than zero")
         if value > Decimal('150000.00'):
@@ -628,23 +646,25 @@ class MpesaSTKPushSerializer(serializers.Serializer):
         return value
 
     def validate_phone_number(self, value):
-        """Validate and format phone number"""
-        # Remove any non-digit characters
-        phone = ''.join(filter(str.isdigit, value))
+        """
+        Validate and format phone number using country-aware validation.
+        Falls back to the tenant's country configuration.
+        """
+        from utils.phone import normalize_phone_number, is_valid_phone_number
+        from utils.constants import get_country_phone_config
+
+        # Resolve tenant country
+        country_code = _tenant_country_code()
         
-        # Convert to international format
-        if len(phone) == 9 and phone.startswith('7'):
-            phone = '254' + phone
-        elif len(phone) == 10 and phone.startswith('07'):
-            phone = '254' + phone[1:]
-        elif len(phone) == 12 and phone.startswith('254'):
-            pass  # Already in correct format
-        else:
+        # Validate against country format
+        if not is_valid_phone_number(value, country_code):
+            cfg = get_country_phone_config(country_code)
             raise serializers.ValidationError(
-                "Please enter a valid Kenyan phone number (e.g., 0712345678 or 254712345678)"
+                f"Please enter a valid phone number (e.g. {cfg['example']})"
             )
         
-        return phone
+        # Normalize to international format
+        return normalize_phone_number(value, country_code)
 
     def validate(self, data):
         """Ensure either invoice_id or service_connection_id is provided"""

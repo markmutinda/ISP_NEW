@@ -44,6 +44,26 @@ class SMSService:
             logger.error(f"Failed to initialize Africa's Talking SDK: {str(e)}")
             raise
     
+    def _get_currency(self):
+        """
+        Resolve currency: explicit company.base_currency, else tenant lookup, else KES.
+        
+        Returns:
+            str: Currency code (e.g., 'KES', 'GHS', 'NGN')
+        """
+        # Prefer explicit company base_currency if set
+        if self.company and getattr(self.company, 'base_currency', None):
+            return self.company.base_currency
+        
+        # Fall back to tenant lookup from the current schema
+        try:
+            from django.db import connection
+            from apps.core.country_utils import get_tenant_base_currency
+            return get_tenant_base_currency(connection.schema_name)
+        except Exception:
+            # Final fallback
+            return 'KES'
+    
     def send_single_sms(self, phone_number, message):
         """
         Send single SMS to a phone number
@@ -167,10 +187,8 @@ class SMSService:
             due_date = invoice.due_date.strftime('%d/%m/%Y')
             amount = invoice.balance
             
-            # Get currency from company
-            currency = 'KES'  # Default fallback
-            if self.company and hasattr(self.company, 'base_currency'):
-                currency = self.company.base_currency
+            # Get currency using country-aware resolver
+            currency = self._get_currency()
             
             message = f"Dear {customer.user.first_name},\n"
             message += f"Reminder: Invoice {invoice_number} of {currency} {amount:,.2f} "
@@ -203,10 +221,8 @@ class SMSService:
             payment_method = payment.payment_method.name
             receipt_number = payment.payment_number
             
-            # Get currency from company
-            currency = 'KES'  # Default fallback
-            if self.company and hasattr(self.company, 'base_currency'):
-                currency = self.company.base_currency
+            # Get currency using country-aware resolver
+            currency = self._get_currency()
             
             message = f"Dear {customer.user.first_name},\n"
             message += f"Payment of {currency} {amount:,.2f} via {payment_method} "
@@ -270,10 +286,8 @@ class SMSService:
             pin = voucher.pin
             amount = voucher.face_value
             
-            # Get currency from company
-            currency = 'KES'  # Default fallback
-            if self.company and hasattr(self.company, 'base_currency'):
-                currency = self.company.base_currency
+            # Get currency using country-aware resolver
+            currency = self._get_currency()
             
             message = f"Dear {customer.user.first_name},\n"
             message += f"Your voucher details:\n"

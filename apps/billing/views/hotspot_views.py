@@ -845,13 +845,14 @@ class HotspotPurchaseView(APIView):
             payment_ref = f"HS-{session.session_id}-{int(time.time())}".replace(" ", "-")
 
             # Create payment linked to selected method
+            # FIX: Removed hardcoded currency='KES' — let Payment.save() derive from tenant.company.base_currency
             payment = Payment.objects.create(
                 customer=None,
                 payment_method=payment_method,
                 amount=plan.price,
                 transaction_fee=0,
                 net_amount=plan.price,
-                currency='KES',
+                # currency='KES',   # REMOVED — let Payment.save() derive from tenant.company.base_currency
                 status='PROCESSING',
                 payment_reference=payment_ref,
                 payer_phone=phone_canonical,
