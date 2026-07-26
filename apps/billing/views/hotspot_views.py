@@ -73,6 +73,28 @@ def _canonical_phone(phone: str, country_code: str = 'KE') -> str:
     return normalize_phone_number(phone, country_code)
 
 
+def _get_tenant_country(tenant) -> str:
+    """
+    Safely get a tenant's country code.
+    
+    This handles the case where tenant.company may not exist (Company.DoesNotExist)
+    which getattr() cannot catch because it only catches AttributeError.
+    
+    Args:
+        tenant: Tenant object from the public schema
+        
+    Returns:
+        str: Country code (defaults to 'KE')
+    """
+    try:
+        # Access the company through the OneToOne relationship
+        # This will raise Company.DoesNotExist if the company doesn't exist
+        return tenant.company.country or 'KE'
+    except Exception:
+        # Catch any exception (Company.DoesNotExist, AttributeError, etc.)
+        return 'KE'
+
+
 def _plan_data_limit_display(plan):
     """Human-readable data limit string for a Plan model object."""
     if plan.data_limit is None:
@@ -634,8 +656,9 @@ class HotspotPurchaseView(APIView):
             
             # ============================================================
             # GET COUNTRY FROM TENANT'S COMPANY FOR PHONE NORMALIZATION
+            # FIX: Use try/except to handle Company.DoesNotExist
             # ============================================================
-            customer_country = getattr(getattr(tenant, 'company', None), 'country', None) or 'KE'
+            customer_country = _get_tenant_country(tenant)
             
             # ============================================================
             # TV CODE RESOLUTION: If tv_code provided, resolve MAC server-side
@@ -1569,7 +1592,8 @@ class HotspotPhoneReconnectView(APIView):
             return Response({'error': 'Invalid tenant'}, status=status.HTTP_400_BAD_REQUEST)
 
         # ── Get country from tenant's company ──────────────────────
-        customer_country = getattr(getattr(tenant, 'company', None), 'country', None) or 'KE'
+        # FIX: Use try/except to handle Company.DoesNotExist
+        customer_country = _get_tenant_country(tenant)
 
         # ── Canonicalize phone using country-aware utility ──────
         phone_canonical = self._canonicalize_phone(raw_phone, customer_country)
