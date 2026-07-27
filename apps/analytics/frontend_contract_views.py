@@ -191,6 +191,8 @@ class _RangeMixin:
         "revenue": {"7d", "30d", "90d", "12m"},
         "usage": {"24h", "7d", "30d"},
         "network_deep": {"7d", "30d", "90d"},
+        "revenue_split": {"7d", "30d", "90d"},
+        "router_revenue": {"7d", "30d", "90d"},
     }
 
     def _start(self, key, time_range):
@@ -277,7 +279,7 @@ class AnalyticsReportsView(APIView, _RangeMixin):
                        if False, only include months up to current month
         Returns list of month objects with labels and amounts.
         """
-        now = timezone.now()
+        now = timezone.localtime(timezone.now())
         current_year = now.year
         current_month = now.month
 
@@ -323,8 +325,10 @@ class AnalyticsReportsView(APIView, _RangeMixin):
         if cached:
             return Response(cached)
 
+        # FIX: Convert to local time before computing day/week/month boundaries
         now = timezone.now()
-        today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        local_now = timezone.localtime(now)  # convert UTC -> Africa/Nairobi
+        today_start = local_now.replace(hour=0, minute=0, second=0, microsecond=0)
         yesterday_start = today_start - timedelta(days=1)
         
         # ============================================================
@@ -410,7 +414,7 @@ class AnalyticsReportsView(APIView, _RangeMixin):
         # ============================================================
         # NEW: Weekly Income Data (Current Week)
         # ============================================================
-        today_date = now.date()
+        today_date = local_now.date()
         weekly_income = self._get_weekly_income(today_date, week_offset=0)
 
         # ============================================================
@@ -421,7 +425,7 @@ class AnalyticsReportsView(APIView, _RangeMixin):
         # ============================================================
         # NEW: Monthly Earnings (Current Year, up to current month)
         # ============================================================
-        current_year = now.year
+        current_year = local_now.year
         monthly_earnings = self._get_monthly_earnings(current_year, include_future=False)
 
         # ============================================================
@@ -510,7 +514,7 @@ class AnalyticsChurnView(APIView, _RangeMixin):
         if (cached := cache.get(ck)):
             return Response(cached)
 
-        now = timezone.now()
+        now = timezone.localtime(timezone.now())
         total = Customer.objects.count()
 
         churn_qs = Customer.objects.filter(status__iexact="terminated", updated_at__gte=start)
@@ -623,6 +627,7 @@ class AnalyticsCustomersView(APIView, _RangeMixin):
         if (cached := cache.get(ck)):
             return Response(cached)
 
+        now = timezone.localtime(timezone.now())
         stats = Customer.objects.aggregate(
             total=Count("id"),
             active=Count("id", filter=Q(status__iexact="active")),
@@ -674,7 +679,6 @@ class AnalyticsCustomersView(APIView, _RangeMixin):
         } for x in loc_raw]
 
         # cohorts (last 12 months)
-        now = timezone.now()
         cohorts = []
         for i in range(12):
             cohort_start = (now - relativedelta(months=i)).replace(day=1, hour=0, minute=0, second=0, microsecond=0)
@@ -737,7 +741,7 @@ class AnalyticsRevenueView(APIView, _RangeMixin):
         if (cached := cache.get(ck)):
             return Response(cached)
 
-        now = timezone.now()
+        now = timezone.localtime(timezone.now())
         prev_start = start - (now - start)
 
         pay_cur = Payment.objects.filter(status__iexact="completed", payment_date__gte=start)

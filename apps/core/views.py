@@ -2088,8 +2088,12 @@ class UnifiedDashboardView(APIView):
         from django.db import connection
         tenant_schema = connection.schema_name
 
+        # ============================================================
+        # FIX: Convert to local time before computing day/week/month boundaries
+        # ============================================================
         now = timezone.now()
-        today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        local_now = timezone.localtime(now)  # convert UTC -> Africa/Nairobi
+        today_start = local_now.replace(hour=0, minute=0, second=0, microsecond=0)
         yesterday_start = today_start - timedelta(days=1)
         
         # ============================================================
@@ -2166,7 +2170,7 @@ class UnifiedDashboardView(APIView):
                     from apps.radius.models import CustomerRadiusCredentials
                     return CustomerRadiusCredentials.objects.filter(
                         expiration_date__isnull=False,
-                        expiration_date__lte=now,
+                        expiration_date__lte=local_now,
                     ).count()
                 except Exception:
                     return 0
@@ -2180,12 +2184,12 @@ class UnifiedDashboardView(APIView):
                     pppoe_count = CustomerRadiusCredentials.objects.filter(
                         is_enabled=True,
                     ).filter(
-                        Q(expiration_date__isnull=True) | Q(expiration_date__gt=now)
+                        Q(expiration_date__isnull=True) | Q(expiration_date__gt=local_now)
                     ).count()
 
                     hotspot_active = HotspotSession.objects.filter(
                         status='active',
-                        expires_at__gt=now,
+                        expires_at__gt=local_now,
                     ).values('hotspot_client_id').distinct().count()
 
                     return {'pppoe': pppoe_count, 'hotspot': hotspot_active, 'total': pppoe_count + hotspot_active}
@@ -2216,7 +2220,7 @@ class UnifiedDashboardView(APIView):
             with schema_context(tenant_schema):
                 try:
                     from apps.billing.models.payment_models import Payment
-                    days_to_monday = now.weekday()
+                    days_to_monday = local_now.weekday()
                     this_week_start = today_start - timedelta(days=days_to_monday)
                     last_week_start = this_week_start - timedelta(days=7)
 
@@ -2233,7 +2237,7 @@ class UnifiedDashboardView(APIView):
                         return [{'day': labels[i], 'amount': round(weekday_map[i], 2)} for i in range(7)]
 
                     return {
-                        'this_week': week_buckets(this_week_start, now),
+                        'this_week': week_buckets(this_week_start, local_now),
                         'last_week': week_buckets(last_week_start, this_week_start),
                     }
                 except Exception:
@@ -2244,8 +2248,8 @@ class UnifiedDashboardView(APIView):
                 try:
                     from apps.billing.models.payment_models import Payment
                     from datetime import datetime
-                    current_year = now.year
-                    current_month = now.month
+                    current_year = local_now.year
+                    current_month = local_now.month
                     labels = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec']
 
                     def year_buckets(year, max_month):
