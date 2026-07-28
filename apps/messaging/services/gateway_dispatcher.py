@@ -490,6 +490,13 @@ class TalksasaBackend:
         raise RuntimeError(data.get('message', 'Talksasa send failed'))
 
     def get_balance(self) -> Dict[str, Any]:
+        """
+        Get Talksasa account balance.
+        
+        FIXED: Talksasa's balance endpoint uses an undocumented key name inside
+        the data object. This method now logs the raw response and searches
+        through multiple possible key names to find the balance.
+        """
         resp = requests.get(
             f'{self.BASE_URL}/balance',
             headers=self._headers(),
@@ -503,16 +510,37 @@ class TalksasaBackend:
 
         payload = data.get('data')
 
-        # Docs don't pin down the exact key name inside "data" — tolerate the
-        # likely shapes (dict with a units/balance/sms_units key, or a bare number).
+        # DEBUG: log the raw payload once so we can see Talksasa's actual key names
+        logger.info(f"[Talksasa] raw balance payload: {payload!r}")
+
+        units = None
+
         if isinstance(payload, dict):
-            units = (
-                payload.get('sms_units')
-                if payload.get('sms_units') is not None
-                else payload.get('balance', payload.get('units', 0))
-            )
-        else:
+            # Try every plausible key name — Talksasa's docs don't specify the exact one
+            for key in (
+                'sms_units', 'balance', 'units', 'sms_balance',
+                'credit', 'credits', 'unit', 'sms_unit',
+                'available_units', 'remaining_units', 'wallet_balance',
+            ):
+                if payload.get(key) is not None:
+                    units = payload.get(key)
+                    break
+            
+            if units is None:
+                # Last resort: grab the first numeric-looking value in the dict
+                for v in payload.values():
+                    try:
+                        units = float(v)
+                        break
+                    except (TypeError, ValueError):
+                        continue
+        elif isinstance(payload, (int, float, str)):
             units = payload
+
+        if units is None:
+            raise RuntimeError(
+                f"Talksasa balance check: could not find a numeric balance in response: {payload!r}"
+            )
 
         return {
             'balance': float(units or 0),
