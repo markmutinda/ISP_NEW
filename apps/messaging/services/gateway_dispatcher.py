@@ -493,9 +493,11 @@ class TalksasaBackend:
         """
         Get Talksasa account balance.
         
-        FIXED: Talksasa's balance endpoint uses an undocumented key name inside
-        the data object. This method now logs the raw response and searches
-        through multiple possible key names to find the balance.
+        FIXED: Talksasa's balance endpoint returns {'remaining_balance': 'Ksh66'} 
+        where the value includes a currency prefix. This method now:
+        1. Logs the raw response for debugging
+        2. Searches through multiple possible key names including 'remaining_balance'
+        3. Strips currency prefixes and non-numeric characters to extract the numeric value
         """
         resp = requests.get(
             f'{self.BASE_URL}/balance',
@@ -510,32 +512,60 @@ class TalksasaBackend:
 
         payload = data.get('data')
 
-        # DEBUG: log the raw payload once so we can see Talksasa's actual key names
+        # DEBUG: log the raw payload so we can see Talksasa's actual key names
         logger.info(f"[Talksasa] raw balance payload: {payload!r}")
+
+        def _to_number(val):
+            """
+            Strip currency prefixes, commas, etc. and convert to float.
+            Examples: 'Ksh66' -> 66.0, '1,234.56' -> 1234.56, '66' -> 66.0
+            """
+            if val is None:
+                return None
+            if isinstance(val, (int, float)):
+                return float(val)
+            
+            # Convert to string and clean
+            s = str(val).strip()
+            if not s:
+                return None
+            
+            # Keep only digits, dots, and minus signs
+            cleaned = ''.join(c for c in s if c.isdigit() or c in '.-')
+            
+            if not cleaned or cleaned in ('-', '.'):
+                return None
+            
+            try:
+                return float(cleaned)
+            except ValueError:
+                return None
 
         units = None
 
         if isinstance(payload, dict):
-            # Try every plausible key name — Talksasa's docs don't specify the exact one
+            # Try every plausible key name - 'remaining_balance' is the confirmed Talksasa key
             for key in (
+                'remaining_balance',  # Confirmed Talksasa key
                 'sms_units', 'balance', 'units', 'sms_balance',
                 'credit', 'credits', 'unit', 'sms_unit',
                 'available_units', 'remaining_units', 'wallet_balance',
             ):
                 if payload.get(key) is not None:
-                    units = payload.get(key)
-                    break
-            
-            if units is None:
-                # Last resort: grab the first numeric-looking value in the dict
-                for v in payload.values():
-                    try:
-                        units = float(v)
+                    units = _to_number(payload.get(key))
+                    if units is not None:
+                        logger.info(f"[Talksasa] Found balance in key '{key}': {units}")
                         break
-                    except (TypeError, ValueError):
-                        continue
-        elif isinstance(payload, (int, float, str)):
-            units = payload
+            
+            # If still None, try to find any numeric value in the dict
+            if units is None:
+                for v in payload.values():
+                    units = _to_number(v)
+                    if units is not None:
+                        logger.info(f"[Talksasa] Found balance from fallback value: {units}")
+                        break
+        else:
+            units = _to_number(payload)
 
         if units is None:
             raise RuntimeError(
@@ -543,7 +573,7 @@ class TalksasaBackend:
             )
 
         return {
-            'balance': float(units or 0),
+            'balance': units,
             'currency': 'SMS_UNITS',
             'unit_cost': Decimal('1.00'),
         }
