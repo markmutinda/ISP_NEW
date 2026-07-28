@@ -745,6 +745,8 @@ class CompanyRegisterSerializer(serializers.Serializer):
         style={'input_type': 'password'},
         validators=[validate_password]
     )
+    referral_code = serializers.CharField(max_length=16, required=False, allow_blank=True, write_only=True)
+    attribution_token = serializers.UUIDField(required=False, allow_null=True, write_only=True)
     
     def validate_company_email(self, value):
         """Check company email uniqueness"""

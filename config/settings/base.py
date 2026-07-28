@@ -78,6 +78,7 @@ SHARED_APPS = (
     'apps.core',                       # Tenant & Domain models go here - MUST be in BOTH
     'apps.subscriptions',              # Netily platform subscriptions (public schema only)
     'apps.superadmin',
+    'apps.affiliate',                  # Platform affiliate accounts and attribution (public schema)
     # NOTE: token_blacklist is intentionally NOT in SHARED_APPS.
     # It must live only in TENANT_APPS so each tenant schema has its own
     # token_blacklist_outstandingtoken table with an FK that correctly
@@ -272,6 +273,9 @@ REST_FRAMEWORK = {
     'DEFAULT_PERMISSION_CLASSES': (
         'rest_framework.permissions.AllowAny',
     ),
+    'DEFAULT_THROTTLE_CLASSES': (
+        'rest_framework.throttling.ScopedRateThrottle',
+    ),
     'DEFAULT_FILTER_BACKENDS': (
         'django_filters.rest_framework.DjangoFilterBackend',
     ),
@@ -284,6 +288,10 @@ REST_FRAMEWORK = {
         'hotspot_auto_login': '20/min',           # Auto-login attempts
         'hotspot_tv_code_generate': '30/min',     # TV code generation (prevents abuse)
         'hotspot_tv_code_verify': '60/min',       # TV code verification (user-friendly)
+        'affiliate_click': '120/min',
+        'affiliate_register': '10/hour',
+        'affiliate_login': '20/min',
+        'affiliate_verify': '10/hour',
     },
 }
 

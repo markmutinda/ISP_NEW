@@ -85,6 +85,9 @@ api_urlpatterns = [
 
     # Platform support console endpoints (customer support executives)
     path('support-console/', include('apps.superadmin.support_urls')),
+
+    # Affiliate program (public attribution, affiliate auth, superadmin controls)
+    path('affiliate/', include('apps.affiliate.urls')),
     
     # FUP (Fair Usage Policy) app
     path('fup/', include('apps.fup.urls')),

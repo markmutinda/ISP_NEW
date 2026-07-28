@@ -1492,6 +1492,18 @@ class CompanyRegisterView(generics.CreateAPIView):
             raise
     
         connection.set_schema_to_public()
+
+        try:
+            from apps.affiliate.services import record_affiliate_signup
+            record_affiliate_signup(
+                referral_code=data.get("referral_code"),
+                attribution_token=data.get("attribution_token"),
+                email=data["admin_email"],
+                company_name=company.name,
+                company=company,
+            )
+        except Exception:
+            logger.exception("Affiliate attribution failed for company %s", company.name)
         
         refresh = RefreshToken.for_user(user)
         
@@ -1871,6 +1883,8 @@ class SubmitLeadView(APIView):
         company = request.data.get("company", "").strip()
         lead_source = request.data.get("lead_source", "").strip()
         referral_name = request.data.get("referral_name", "").strip()
+        referral_code = request.data.get("referral_code", "").strip()
+        attribution_token = request.data.get("attribution_token")
         message = request.data.get("message", "").strip()
 
         if not name or not email:
@@ -1878,7 +1892,7 @@ class SubmitLeadView(APIView):
 
         with schema_context(get_public_schema_name()):
             from .models import Lead
-            Lead.objects.create(
+            lead = Lead.objects.create(
                 name=name,
                 email=email,
                 phone=phone,
@@ -1887,6 +1901,17 @@ class SubmitLeadView(APIView):
                 referral_name=referral_name,
                 message=message,
             )
+            try:
+                from apps.affiliate.services import record_affiliate_signup
+                record_affiliate_signup(
+                    referral_code=referral_code,
+                    attribution_token=attribution_token,
+                    email=email,
+                    company_name=company,
+                    lead=lead,
+                )
+            except Exception:
+                logger.exception("Affiliate attribution failed for lead %s", lead.id)
 
         import threading
         def _send_lead_email():
