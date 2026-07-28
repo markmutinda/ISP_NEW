@@ -1,6 +1,6 @@
 """
-Lipanet-Style Cloud Controller Script Generator (v4.6)
-Hardcoded 3-minute interim updates for automatic accounting
+NEW VERSION OF NETILY SCRIPT GENERATOR
+
 """
 
 import logging
@@ -382,25 +382,57 @@ class MikrotikScriptGenerator:
 """
 
     def _section_walled_garden(self, r: Router, portal_domain: str) -> str:
-        tenant_domain = urlparse(self.get_tenant_portal_url()).netloc
-        
-        return f"""# ─────────────────────────────────────────────────────────────
-# 9. WALLED GARDEN (Pre-Auth Access)
-# ─────────────────────────────────────────────────────────────
-:put "Configuring Walled Garden..."
+        """
+        WALLED GARDEN — Centipid-style (domain → address-list)
 
+        Uses an address-list containing the real domain names.
+        RouterOS resolves them and keeps the IPs updated automatically.
+        This stops SNI/Host spoofing while surviving Droplet IP changes.
+        """
+        tenant_domain = urlparse(self.get_tenant_portal_url()).netloc
+        api_domain = urlparse(self.api_url).netloc
+
+        # Domains we own and want to IP-pin
+        own_domains = []
+        for d in (tenant_domain, api_domain, portal_domain):
+            if d and d not in own_domains:
+                own_domains.append(d)
+
+        # Build the address-list entries
+        addr_list_lines = []
+        for domain in own_domains:
+            addr_list_lines.append(
+                f'/ip firewall address-list add list=netily-portal-ips '
+                f'address="{domain}" comment="Netily-Portal-Domain"'
+            )
+        addr_list_script = "\n".join(addr_list_lines) if addr_list_lines else ""
+
+        return f"""# ─────────────────────────────────────────────────────────────
+# 9. WALLED GARDEN (domain → address-list, anti-tunnel)
+# ─────────────────────────────────────────────────────────────
+:put "Configuring hardened Walled Garden (address-list style)..."
+
+# Clean previous Netily rules
 :do {{ :foreach i in=[/ip hotspot walled-garden find comment~"Netily"] do={{ /ip hotspot walled-garden remove $i }} }} on-error={{}}
 :do {{ :foreach i in=[/ip hotspot walled-garden ip find comment~"Netily"] do={{ /ip hotspot walled-garden ip remove $i }} }} on-error={{}}
+:do {{ /ip firewall address-list remove [find list="netily-portal-ips"] }} on-error={{}}
 
-/ip hotspot walled-garden add dst-host="*{tenant_domain}*" comment="Netily-Tenant-Portal"
-/ip hotspot walled-garden add dst-host="*netily.co.ke*" comment="Netily-Backend-Core"
+# 1. Put our domains into an address-list (RouterOS will resolve & keep IPs fresh)
+{addr_list_script}
 
+# 2. Allow only real destination IPs belonging to those domains (ports 80 + 443)
+/ip hotspot walled-garden ip add action=accept protocol=tcp dst-port=80  dst-address-list=netily-portal-ips comment="Netily-Portal-80"
+/ip hotspot walled-garden ip add action=accept protocol=tcp dst-port=443 dst-address-list=netily-portal-ips comment="Netily-Portal-443"
+
+# 3. Third-party payment gateways (hostname only — we cannot pin their IPs)
 /ip hotspot walled-garden add dst-host="*.safaricom.co.ke" comment="Netily-MPesa"
 /ip hotspot walled-garden add dst-host="*.safaricom.com" comment="Netily-Safaricom"
-/ip hotspot walled-garden add dst-host="*.payhero.co.ke" comment="Netily-PayHero"
 
+# 4. VPN / RADIUS (already IP-based)
 /ip hotspot walled-garden ip add dst-address={self.vpn_gateway}/32 action=accept comment="Netily-VPN-API"
 /ip hotspot walled-garden ip add dst-address={self.vpn_network_cidr} action=accept comment="Netily-VPN-Network"
+
+:put "Walled Garden hardened (address-list style)."
 """
 
     def _section_ssl_certs(self, r: Router) -> str:
