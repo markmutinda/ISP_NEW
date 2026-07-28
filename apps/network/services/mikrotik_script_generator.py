@@ -406,6 +406,9 @@ class MikrotikScriptGenerator:
         server IPs, not just the hostname string. Keep hostname-based rules ONLY for
         third-party services (Safaricom/PayHero) whose IPs we don't own, but scope
         those to ports 80/443 only.
+        
+        BUG FIX: RouterOS walled-garden ip dst-port does NOT accept comma lists
+        like the regular firewall filter does — emit one rule per port.
         """
         tenant_domain = urlparse(self.get_tenant_portal_url()).netloc
         api_domain = urlparse(self.api_url).netloc
@@ -420,11 +423,16 @@ class MikrotikScriptGenerator:
             own_ips.update(self._resolve_host_ips(host))
 
         if own_ips:
-            ip_rules = "\n".join(
-                f'/ip hotspot walled-garden ip add dst-address={ip}/32 dst-port=80,443 '
-                f'protocol=tcp action=accept comment="Netily-Pinned-{ip}"'
-                for ip in sorted(own_ips)
-            )
+            # RouterOS walled-garden ip dst-port does NOT accept comma lists
+            # like the regular firewall filter does — emit one rule per port.
+            ip_rules_lines = []
+            for ip in sorted(own_ips):
+                for port in ('80', '443'):
+                    ip_rules_lines.append(
+                        f'/ip hotspot walled-garden ip add dst-address={ip}/32 dst-port={port} '
+                        f'protocol=tcp action=accept comment="Netily-Pinned-{ip}-{port}"'
+                    )
+            ip_rules = "\n".join(ip_rules_lines)
         else:
             # DNS failed at script-gen time — fall back to hostname rules so
             # the portal doesn't break, but this is not the hardened path.
