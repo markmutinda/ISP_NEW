@@ -2,6 +2,7 @@ import csv
 import hashlib
 import ipaddress
 import io
+import logging
 import uuid
 from datetime import timedelta
 from decimal import Decimal
@@ -9,7 +10,6 @@ from decimal import Decimal
 from django.conf import settings
 from django.contrib.auth import authenticate
 from django.core import signing
-from django.core.mail import send_mail
 from django.db import connection
 from django.db.models import Count, Q, Sum
 from django.db.models.functions import TruncDate
@@ -25,6 +25,7 @@ from rest_framework_simplejwt.tokens import AccessToken, Token
 from apps.superadmin.permissions import IsSuperAdmin
 from apps.superadmin.models import SuperAdminActivityLog
 from apps.core.otp_service import OTPError, OTPRateLimitedError, OTPService
+from apps.core.email_delivery import send_transactional_email
 
 from .models import AffiliateAccount, AffiliateClick, AffiliatePayout, AffiliateReferral
 from .permissions import IsActiveAffiliate
@@ -41,6 +42,7 @@ from .serializers import (
 AFFILIATE_PERMS = [IsAuthenticated, IsActiveAffiliate]
 SUPERADMIN_PERMS = [IsAuthenticated, IsSuperAdmin]
 VERIFICATION_SALT = "affiliate-email-verification"
+logger = logging.getLogger(__name__)
 
 
 class AffiliateRefreshToken(Token):
@@ -91,13 +93,31 @@ def _send_verification(account):
     token = signing.dumps({"affiliate_id": account.id, "email": account.user.email}, salt=VERIFICATION_SALT)
     frontend = getattr(settings, "FRONTEND_URL", "https://netily.co.ke").rstrip("/")
     url = f"{frontend}/affiliate/verify?token={token}"
-    send_mail(
-        "Verify your Netily affiliate account",
-        f"Verify your affiliate email by opening this link:\n\n{url}\n\nThis link expires in 24 hours.",
-        settings.DEFAULT_FROM_EMAIL,
-        [account.user.email],
-        fail_silently=True,
+    plain_message = (
+        "Welcome to the Netily Affiliate Program.\n\n"
+        f"Verify your email by opening this link:\n{url}\n\n"
+        "This link expires in 24 hours. If you did not create this account, you can ignore this email."
     )
+    html_message = (
+        "<h2>Verify your Netily affiliate account</h2>"
+        "<p>Welcome to the Netily Affiliate Program.</p>"
+        f'<p><a href="{url}">Verify my email address</a></p>'
+        "<p>This link expires in 24 hours. If you did not create this account, you can ignore this email.</p>"
+    )
+    result = send_transactional_email(
+        subject="Verify your Netily affiliate account",
+        recipient=account.user.email,
+        plain_message=plain_message,
+        html_message=html_message,
+    )
+    if not result.get("sent"):
+        logger.error(
+            "Affiliate verification delivery failed account_id=%s provider=%s error=%s",
+            account.id,
+            result.get("provider"),
+            result.get("error", "unknown"),
+        )
+    return result
 
 
 def _period_start(value):
@@ -142,8 +162,20 @@ class AffiliateRegisterView(APIView):
         serializer = AffiliateRegisterSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         account = serializer.save()
-        _send_verification(account)
-        return Response({"user": affiliate_user_data(account)}, status=status.HTTP_201_CREATED)
+        delivery = _send_verification(account)
+        sent = bool(delivery.get("sent"))
+        return Response(
+            {
+                "user": affiliate_user_data(account),
+                "verification_email_sent": sent,
+                "message": (
+                    "Verification email sent."
+                    if sent
+                    else "Account created, but the verification email could not be delivered. Please use resend."
+                ),
+            },
+            status=status.HTTP_201_CREATED,
+        )
 
 
 class AffiliateLoginView(APIView):
@@ -316,7 +348,12 @@ class AffiliateResendVerificationView(APIView):
         email = (request.data.get("email") or "").strip().lower()
         account = AffiliateAccount.objects.select_related("user").filter(user__email__iexact=email).first()
         if account and not account.is_verified:
-            _send_verification(account)
+            delivery = _send_verification(account)
+            if not delivery.get("sent"):
+                return Response(
+                    {"detail": "Verification email delivery is temporarily unavailable. Please try again shortly."},
+                    status=status.HTTP_503_SERVICE_UNAVAILABLE,
+                )
         return Response({"detail": "If the account exists, a verification email has been sent."})
 
 

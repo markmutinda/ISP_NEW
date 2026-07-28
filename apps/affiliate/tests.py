@@ -1,4 +1,6 @@
 from decimal import Decimal
+from types import SimpleNamespace
+from unittest.mock import patch
 
 from django.test import SimpleTestCase, TestCase, override_settings
 from rest_framework.test import APIClient
@@ -7,6 +9,7 @@ from apps.core.models import EmailOTP, LoginOTPChallenge, User
 
 from .models import AffiliateAccount, AffiliateClick, AffiliatePayout, AffiliateReferral
 from .services import record_affiliate_signup
+from .views import _send_verification
 
 
 @override_settings(
@@ -26,6 +29,25 @@ class AffiliateCorsTests(SimpleTestCase):
         self.assertEqual(response["Access-Control-Allow-Origin"], "https://netily.co.ke")
         allowed_headers = response["Access-Control-Allow-Headers"].lower().split(", ")
         self.assertIn("x-session-id", allowed_headers)
+
+
+class AffiliateVerificationEmailTests(SimpleTestCase):
+    @patch("apps.affiliate.views.send_transactional_email")
+    def test_verification_uses_transactional_delivery_and_returns_feedback(self, delivery):
+        delivery.return_value = {"sent": True, "provider": "smtp"}
+        account = SimpleNamespace(
+            id=42,
+            user=SimpleNamespace(email="affiliate@example.com"),
+        )
+
+        result = _send_verification(account)
+
+        self.assertTrue(result["sent"])
+        delivery.assert_called_once()
+        call = delivery.call_args.kwargs
+        self.assertEqual(call["recipient"], "affiliate@example.com")
+        self.assertIn("/affiliate/verify?token=", call["plain_message"])
+        self.assertIn("/affiliate/verify?token=", call["html_message"])
 
 
 class AffiliateApiTests(TestCase):
