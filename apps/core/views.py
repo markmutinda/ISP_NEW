@@ -2232,7 +2232,9 @@ class UnifiedDashboardView(APIView):
                         )
                         weekday_map = {i: 0 for i in range(7)}
                         for p in payments:
-                            weekday_map[p.payment_date.weekday()] += float(p.amount or 0)
+                            # FIX: Convert UTC to local timezone before calling .weekday()
+                            local_dt = timezone.localtime(p.payment_date)
+                            weekday_map[local_dt.weekday()] += float(p.amount or 0)
                         labels = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']
                         return [{'day': labels[i], 'amount': round(weekday_map[i], 2)} for i in range(7)]
 

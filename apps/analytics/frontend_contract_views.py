@@ -260,9 +260,11 @@ class AnalyticsReportsView(APIView, _RangeMixin):
         )
 
         # Aggregate by weekday
+        # FIX: Convert UTC to local timezone before calling .weekday()
         weekday_map = {i: 0 for i in range(7)}
         for p in payments:
-            weekday = p.payment_date.weekday()
+            local_dt = timezone.localtime(p.payment_date)
+            weekday = local_dt.weekday()
             weekday_map[weekday] += _safe_float(p.amount)
 
         # Build result with day labels (Mon-Sun)
