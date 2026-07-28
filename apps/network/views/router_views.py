@@ -450,6 +450,58 @@ class RouterViewSet(viewsets.ModelViewSet):
         return super().create(request, *args, **kwargs)
     
     # ────────────────────────────────────────────────────────────────
+    # DIAGNOSTICS — compare live router config vs provisioning baseline
+    # ────────────────────────────────────────────────────────────────
+    @action(detail=True, methods=['get'], permission_classes=[IsAuthenticated, HasCompanyAccess])
+    def diagnose(self, request, pk=None):
+        """
+        GET /routers/{id}/diagnose/
+        Read-only. self.get_object() already resolves the router within the
+        REQUESTING USER'S TENANT ONLY (see get_router_for_tenant) — this can
+        never diagnose a router belonging to a different tenant, and only
+        ever touches the single router identified by {id}.
+        """
+        router = self.get_object()
+        from apps.network.services.router_diagnostics import run_diagnosis
+        result = run_diagnosis(router)
+        return Response(result)
+
+    @action(detail=True, methods=['post'], url_path='diagnose/fix', permission_classes=[IsAuthenticated, HasCompanyAccess])
+    def diagnose_fix(self, request, pk=None):
+        """
+        POST /routers/{id}/diagnose/fix/
+        Body: {"check_id": "walled_garden_hardened"}  → fix ONE check
+              {"fix_all": true}                        → fix everything fixable
+        Scoped to this single router via self.get_object() — same
+        tenant-safe guarantee as diagnose().
+        """
+        router = self.get_object()
+        from apps.network.services.router_diagnostics import run_fix, run_fix_all
+
+        fix_all = request.data.get('fix_all', False)
+        check_id = request.data.get('check_id')
+
+        if fix_all:
+            result = run_fix_all(router)
+        elif check_id:
+            result = run_fix(router, check_id)
+        else:
+            return Response({'error': 'Provide check_id or fix_all=true'}, status=400)
+
+        if result.get('success'):
+            RouterEvent.objects.create(
+                router=router,
+                event_type='config_change',
+                message=f"Diagnostics fix applied: {check_id or 'all fixable checks'}",
+                details={
+                    'result': result,
+                    'applied_by': request.user.email if hasattr(request.user, 'email') else str(request.user),
+                }
+            )
+
+        return Response(result)
+
+    # ────────────────────────────────────────────────────────────────
     # CONFIGURATION ENDPOINTS (UPDATED TO USE SINGLE GENERATOR)
     # ────────────────────────────────────────────────────────────────
     @action(detail=True, methods=['get'], url_path='one-liner', permission_classes=[AllowAny])

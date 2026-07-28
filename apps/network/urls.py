@@ -108,6 +108,13 @@ urlpatterns = [
     path('routers/<int:pk>/hotspot/ipam/', RouterHotspotIPAMView.as_view(), name='router-hotspot-ipam'),
     path('routers/<int:pk>/hotspot/ipam/apply/', RouterHotspotIPAMApplyView.as_view(), name='router-hotspot-ipam-apply'),
 
+    # ────────────────────────────────────────────────────────────────
+    # DIAGNOSTICS ENDPOINTS
+    # ────────────────────────────────────────────────────────────────
+    # DRF @action with slash in url_path needs an explicit route
+    path('routers/<int:pk>/diagnose/', RouterViewSet.as_view({'get': 'diagnose'}), name='router-diagnose'),
+    path('routers/<int:pk>/diagnose/fix/', RouterViewSet.as_view({'post': 'diagnose_fix'}), name='router-diagnose-fix'),
+
     # ─── Provisioning Endpoints (PUBLIC — for MikroTik /tool fetch) ───
     # Stage 1: Base script download (the "Magic Link" destination)
     path('provision/<str:auth_key>/<slug:slug>/script.rsc',
