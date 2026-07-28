@@ -221,10 +221,33 @@ register_check(
 
 # ── Hotspot profile uses RADIUS accounting ──
 def _check_hotspot_radius_accounting(ctx: DiagnosticContext) -> bool:
+    def is_yes(v) -> bool:
+        """RouterOS returns boolean-ish fields as 'yes'/'no', not Python True/False."""
+        return str(v).strip().lower() in ('yes', 'true', '1')
+
     for p in ctx.live['hotspot_profiles']:
         if p.get('name') == 'netily-profile':
-            return str(p.get('use-radius')) == 'true' and str(p.get('radius-accounting')) == 'true'
+            return is_yes(p.get('use-radius')) and is_yes(p.get('radius-accounting'))
     return False
+
+
+def _fix_hotspot_radius_accounting(ctx: DiagnosticContext):
+    """Apply fix to enable RADIUS accounting on the hotspot profile."""
+    api = ctx.api
+    for p in ctx.live['hotspot_profiles']:
+        if p.get('name') == 'netily-profile':
+            api._execute('/ip/hotspot/profile', update={
+                '.id': p['.id'],
+                'use-radius': 'yes',
+                'radius-accounting': 'yes',
+                'radius-interim-update': '00:03:00',
+            })
+            logger.info(f"[DIAGNOSE] Fixed hotspot profile '{p.get('name')}' RADIUS accounting settings")
+            return
+    
+    # Profile doesn't exist at all — nothing to patch, this is a deeper
+    # provisioning gap that needs a reprovision, not a diagnose fix.
+    logger.warning("[DIAGNOSE] Hotspot profile 'netily-profile' not found, cannot fix RADIUS accounting")
 
 
 register_check(
@@ -232,6 +255,7 @@ register_check(
     label='Hotspot profile uses RADIUS accounting',
     category='Billing',
     severity='critical',
+    fix_fn=_fix_hotspot_radius_accounting,
 )(_check_hotspot_radius_accounting)
 
 
