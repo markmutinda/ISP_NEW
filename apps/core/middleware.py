@@ -8,7 +8,7 @@ import logging
 from django.utils.deprecation import MiddlewareMixin
 from django.db import connection
 from django.conf import settings
-from django.http import HttpResponseForbidden, HttpResponse, JsonResponse
+from django.http import JsonResponse
 from django.core.exceptions import PermissionDenied
 from django.utils import timezone
 
@@ -32,33 +32,6 @@ PUBLIC_ROUTER_PATHS = (
     '/api/v1/hotspot/purchase/',
     '/api/v1/hotspot/routers/',
 )
-
-
-class CorsPreflightMiddleware(MiddlewareMixin):
-    """
-    Handle CORS preflight requests before any other processing.
-    This ensures OPTIONS requests always get CORS headers even if other middleware fails.
-    """
-    
-    def process_request(self, request):
-        if request.method == 'OPTIONS':
-            response = HttpResponse()
-            response['Access-Control-Allow-Origin'] = request.META.get('HTTP_ORIGIN', '*')
-            response['Access-Control-Allow-Methods'] = 'GET, POST, PUT, PATCH, DELETE, OPTIONS'
-            response['Access-Control-Allow-Headers'] = 'Accept, Accept-Language, Content-Type, Authorization, X-CSRFToken, X-Requested-With, X-Tenant'
-            response['Access-Control-Allow-Credentials'] = 'true'
-            response['Access-Control-Max-Age'] = '86400'
-            return response
-        return None
-    
-    def process_response(self, request, response):
-        # Add CORS headers to all responses
-        origin = request.META.get('HTTP_ORIGIN', '*')
-        if 'Access-Control-Allow-Origin' not in response:
-            response['Access-Control-Allow-Origin'] = origin
-        if 'Access-Control-Allow-Credentials' not in response:
-            response['Access-Control-Allow-Credentials'] = 'true'
-        return response
 
 
 class TenantMainMiddleware(MiddlewareMixin):

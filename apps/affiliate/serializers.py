@@ -19,6 +19,8 @@ COUNTRY_CURRENCIES = {
     "Burundi": "BIF",
     "South Sudan": "SSP",
     "Nigeria": "NGN",
+    "Ghana": "GHS",
+    "South Africa": "ZAR",
 }
 
 

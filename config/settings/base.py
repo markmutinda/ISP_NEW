@@ -3,6 +3,7 @@ Django settings for ISP Management System - Base Configuration
 """
 
 import os
+from corsheaders.defaults import default_headers
 from pathlib import Path
 from datetime import timedelta
 import sys
@@ -130,7 +131,6 @@ if DEBUG and not RUNNING_TESTS:
 #  MIDDLEWARE — CorsMiddleware MUST be before anything that might return a response
 # ────────────────────────────────────────────────────────────────
 MIDDLEWARE = [
-    'apps.core.middleware.CorsPreflightMiddleware',  # Handle CORS preflight FIRST
     'corsheaders.middleware.CorsMiddleware',
     'apps.core.middleware.TenantMainMiddleware',
     'django.middleware.security.SecurityMiddleware',
@@ -328,8 +328,12 @@ else:
 # Always allow credentials (cookies, auth headers)
 CORS_ALLOW_CREDENTIALS = True
 
-# Allow all headers (JWT, Content-Type, etc.)
-CORS_ALLOW_ALL_HEADERS = True
+# Standard CORS headers plus the tenant and OTP browser-session headers.
+CORS_ALLOW_HEADERS = (
+    *default_headers,
+    "x-session-id",
+    "x-tenant",
+)
 
 # Allow all methods (GET, POST, PUT, DELETE)
 CORS_ALLOW_METHODS = [

@@ -1,12 +1,31 @@
 from decimal import Decimal
 
-from django.test import TestCase
+from django.test import SimpleTestCase, TestCase, override_settings
 from rest_framework.test import APIClient
 
 from apps.core.models import EmailOTP, LoginOTPChallenge, User
 
 from .models import AffiliateAccount, AffiliateClick, AffiliatePayout, AffiliateReferral
 from .services import record_affiliate_signup
+
+
+@override_settings(
+    CORS_ALLOW_ALL_ORIGINS=False,
+    CORS_ALLOWED_ORIGINS=["https://netily.co.ke"],
+)
+class AffiliateCorsTests(SimpleTestCase):
+    def test_login_preflight_allows_browser_session_header(self):
+        response = self.client.options(
+            "/api/v1/affiliate/login/",
+            HTTP_ORIGIN="https://netily.co.ke",
+            HTTP_ACCESS_CONTROL_REQUEST_METHOD="POST",
+            HTTP_ACCESS_CONTROL_REQUEST_HEADERS="content-type,x-session-id",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response["Access-Control-Allow-Origin"], "https://netily.co.ke")
+        allowed_headers = response["Access-Control-Allow-Headers"].lower().split(", ")
+        self.assertIn("x-session-id", allowed_headers)
 
 
 class AffiliateApiTests(TestCase):
