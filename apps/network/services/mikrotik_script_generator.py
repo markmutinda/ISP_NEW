@@ -385,20 +385,21 @@ class MikrotikScriptGenerator:
         tenant_domain = urlparse(self.get_tenant_portal_url()).netloc
         
         return f"""# ─────────────────────────────────────────────────────────────
-# 9. WALLED GARDEN (Pre-Auth Access)
+# 9. WALLED GARDEN (Pre-Auth Access) — HARDENED
 # ─────────────────────────────────────────────────────────────
 :put "Configuring Walled Garden..."
 
 :do {{ :foreach i in=[/ip hotspot walled-garden find comment~"Netily"] do={{ /ip hotspot walled-garden remove $i }} }} on-error={{}}
 :do {{ :foreach i in=[/ip hotspot walled-garden ip find comment~"Netily"] do={{ /ip hotspot walled-garden ip remove $i }} }} on-error={{}}
 
-/ip hotspot walled-garden add dst-host="*{tenant_domain}*" comment="Netily-Tenant-Portal"
-/ip hotspot walled-garden add dst-host="*netily.co.ke*" comment="Netily-Backend-Core"
+# Only the tenant portal (login page / captive portal)
+/ip hotspot walled-garden add dst-host="{tenant_domain}" comment="Netily-Tenant-Portal"
 
+# Payment gateways (M-Pesa)
 /ip hotspot walled-garden add dst-host="*.safaricom.co.ke" comment="Netily-MPesa"
 /ip hotspot walled-garden add dst-host="*.safaricom.com" comment="Netily-Safaricom"
-/ip hotspot walled-garden add dst-host="*.payhero.co.ke" comment="Netily-PayHero"
 
+# VPN / RADIUS (already IP-based — these are correct)
 /ip hotspot walled-garden ip add dst-address={self.vpn_gateway}/32 action=accept comment="Netily-VPN-API"
 /ip hotspot walled-garden ip add dst-address={self.vpn_network_cidr} action=accept comment="Netily-VPN-Network"
 """
