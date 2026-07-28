@@ -82,16 +82,6 @@ class MikrotikScriptGenerator:
             f':delay 2s; /import netily.rsc'
         )
 
-    def _resolve_host_ips(self, hostname: str) -> list:
-        """Resolve a hostname to its concrete IPv4 addresses at script-gen time."""
-        import socket
-        try:
-            infos = socket.getaddrinfo(hostname, None, socket.AF_INET)
-            return sorted({info[4][0] for info in infos})
-        except socket.gaierror:
-            logger.warning(f"[WALLED GARDEN] Could not resolve {hostname}")
-            return []
-
     def generate_base_script(self) -> str:
         r = self.router
         subdomain = r.tenant_subdomain or 'public'
@@ -392,79 +382,25 @@ class MikrotikScriptGenerator:
 """
 
     def _section_walled_garden(self, r: Router, portal_domain: str) -> str:
-        """
-        WALLED GARDEN - HARDENED AGAINST TUNNELING
-        
-        CRITICAL SECURITY FIX:
-        RouterOS walled-garden dst-host rules match on the hostname string the client
-        presents (HTTP Host header / TLS SNI) — they never verify the destination IP
-        actually belongs to that domain. HTTP Injector can open a raw TCP/SSH tunnel
-        to the attacker's own server, set SNI/Host to a whitelisted domain, and
-        RouterOS lets it through.
-        
-        FIX: IP-pin our own domains so that the destination IP must match our actual
-        server IPs, not just the hostname string. Keep hostname-based rules ONLY for
-        third-party services (Safaricom/PayHero) whose IPs we don't own, but scope
-        those to ports 80/443 only.
-        
-        BUG FIX: RouterOS walled-garden ip dst-port does NOT accept comma lists
-        like the regular firewall filter does — emit one rule per port.
-        """
         tenant_domain = urlparse(self.get_tenant_portal_url()).netloc
-        api_domain = urlparse(self.api_url).netloc
-
-        # IP-pin our own domains — this is the actual fix. Hostname (dst-host)
-        # rules only check the SNI/Host string the CLIENT sends; they never
-        # verify the client is really talking to our server. An attacker can
-        # tunnel to their own VPS while presenting our domain as SNI and
-        # RouterOS lets it through. Pinning by destination IP closes that.
-        own_ips = set()
-        for host in filter(None, {tenant_domain, api_domain, portal_domain}):
-            own_ips.update(self._resolve_host_ips(host))
-
-        if own_ips:
-            # RouterOS walled-garden ip dst-port does NOT accept comma lists
-            # like the regular firewall filter does — emit one rule per port.
-            ip_rules_lines = []
-            for ip in sorted(own_ips):
-                for port in ('80', '443'):
-                    ip_rules_lines.append(
-                        f'/ip hotspot walled-garden ip add dst-address={ip}/32 dst-port={port} '
-                        f'protocol=tcp action=accept comment="Netily-Pinned-{ip}-{port}"'
-                    )
-            ip_rules = "\n".join(ip_rules_lines)
-        else:
-            # DNS failed at script-gen time — fall back to hostname rules so
-            # the portal doesn't break, but this is not the hardened path.
-            ip_rules = (
-                f'/ip hotspot walled-garden add dst-host="*{tenant_domain}*" dst-port=80,443 comment="Netily-Tenant-Portal-FALLBACK"\n'
-                f'/ip hotspot walled-garden add dst-host="*{api_domain}*" dst-port=80,443 comment="Netily-Backend-FALLBACK"'
-            )
-
+        
         return f"""# ─────────────────────────────────────────────────────────────
-# 9. WALLED GARDEN (Pre-Auth Access — IP-PINNED, anti-tunnel)
+# 9. WALLED GARDEN (Pre-Auth Access)
 # ─────────────────────────────────────────────────────────────
-:put "Configuring Walled Garden (hardened)..."
+:put "Configuring Walled Garden..."
 
 :do {{ :foreach i in=[/ip hotspot walled-garden find comment~"Netily"] do={{ /ip hotspot walled-garden remove $i }} }} on-error={{}}
 :do {{ :foreach i in=[/ip hotspot walled-garden ip find comment~"Netily"] do={{ /ip hotspot walled-garden ip remove $i }} }} on-error={{}}
 
-{ip_rules}
+/ip hotspot walled-garden add dst-host="*{tenant_domain}*" comment="Netily-Tenant-Portal"
+/ip hotspot walled-garden add dst-host="*netily.co.ke*" comment="Netily-Backend-Core"
 
-# Third-party payment rails — no fixed IP we can pin, port-scoped only
-/ip hotspot walled-garden add dst-host="*.safaricom.co.ke" dst-port=80,443 comment="Netily-MPesa"
-/ip hotspot walled-garden add dst-host="*.safaricom.com" dst-port=80,443 comment="Netily-Safaricom"
-/ip hotspot walled-garden add dst-host="*.payhero.co.ke" dst-port=80,443 comment="Netily-PayHero"
+/ip hotspot walled-garden add dst-host="*.safaricom.co.ke" comment="Netily-MPesa"
+/ip hotspot walled-garden add dst-host="*.safaricom.com" comment="Netily-Safaricom"
+/ip hotspot walled-garden add dst-host="*.payhero.co.ke" comment="Netily-PayHero"
 
 /ip hotspot walled-garden ip add dst-address={self.vpn_gateway}/32 action=accept comment="Netily-VPN-API"
 /ip hotspot walled-garden ip add dst-address={self.vpn_network_cidr} action=accept comment="Netily-VPN-Network"
-
-# Force all pre-auth DNS through the router's own resolver — blocks
-# DNS-tunneling as a second bypass vector alongside SNI spoofing.
-/ip firewall nat add chain=dstnat action=redirect to-ports=53 protocol=udp dst-port=53 in-interface="netily-bridge" comment="Netily-Force-DNS"
-/ip firewall nat add chain=dstnat action=redirect to-ports=53 protocol=tcp dst-port=53 in-interface="netily-bridge" comment="Netily-Force-DNS-TCP"
-
-:put "Walled Garden hardened."
 """
 
     def _section_ssl_certs(self, r: Router) -> str:
