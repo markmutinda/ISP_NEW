@@ -558,7 +558,6 @@ class SMSBalanceView(APIView):
     permission_classes = [IsAuthenticated, IsAdminOrStaff, HasRoleAccessPolicy]
     required_rbac_path = "/admin/sms"
 
-    # FIX 4c: Updated get() method for proper balance handling
     def get(self, request):
         try:
             dispatcher = GatewayDispatcher()
@@ -568,8 +567,20 @@ class SMSBalanceView(APIView):
 
         balance_info.setdefault('unit_cost', 0.50)
         balance_info.setdefault('provider', 'none')
-        bal = balance_info.get('balance', 0) or 0
-        unit_cost = balance_info.get('unit_cost', 0.50) or 0.50
+
+        # Normalize both operands to float — this is the actual fix.
+        # bal/unit_cost can come back as float, Decimal, str, or None
+        # depending on which provider backend populated them.
+        try:
+            bal = float(balance_info.get('balance') or 0)
+        except (TypeError, ValueError):
+            bal = 0.0
+
+        try:
+            unit_cost = float(balance_info.get('unit_cost') or 0.50)
+        except (TypeError, ValueError):
+            unit_cost = 0.50
+
         balance_info['units_remaining'] = int(bal / unit_cost) if unit_cost else 0
         balance_info['last_updated'] = timezone.now().isoformat()
 
@@ -582,6 +593,9 @@ class SMSBalanceView(APIView):
         # Ensure balance is a number (not a dict) for the serializer
         if isinstance(balance_info.get('balance'), dict):
             balance_info['balance'] = balance_info['balance'].get('balance', 0)
+
+        # Keep balance consistently a float too
+        balance_info['balance'] = bal
 
         return Response(SMSBalanceSerializer(balance_info).data)
 
