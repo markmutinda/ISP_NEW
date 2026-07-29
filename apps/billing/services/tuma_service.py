@@ -760,6 +760,15 @@ def sync_active_method_to_tuma(schema_name, method):
 
     cfg.is_active = True
     cfg.save()
+
+    # Keep the FK in sync so payment-method lookups (e.g. hotspot checkout's
+    # _get_active_hotspot_payment_method priority-3 fallback, which requires
+    # tuma_configuration__isnull=False) can find this method without relying
+    # on the schema_name-only fallback in HotspotPurchaseView.
+    if method.tuma_configuration_id != cfg.id:
+        method.tuma_configuration = cfg
+        method.save(update_fields=['tuma_configuration'])
+
     logger.info(
         f"Tuma business synced for {schema_name}: "
         f"method={method.name}, type={method.method_type}, "
