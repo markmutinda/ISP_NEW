@@ -632,6 +632,8 @@ class GlobalSystemSettings(models.Model):
     # Security Settings
     # Controls whether tenant admin login requires email OTP challenge.
     admin_email_otp_enabled = models.BooleanField(default=False)
+    # Platform-wide affiliate login OTP. Kept off by default for lower-friction onboarding.
+    affiliate_email_otp_enabled = models.BooleanField(default=False)
 
     # Customer Portal Settings
     # When enabled, the customer plans page only shows the customer's

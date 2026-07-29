@@ -74,7 +74,9 @@ class AffiliateClick(models.Model):
 class AffiliateReferral(models.Model):
     STATUS_CHOICES = (
         ("pending", "Pending review"),
+        ("approved", "Approved for commission"),
         ("paid", "Commission paid"),
+        ("rejected", "Rejected"),
         ("churned", "Rejected or churned"),
     )
 

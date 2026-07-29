@@ -1,11 +1,12 @@
 from decimal import Decimal
 from types import SimpleNamespace
 from unittest.mock import patch
+from urllib.parse import parse_qs, urlparse
 
 from django.test import SimpleTestCase, TestCase, override_settings
 from rest_framework.test import APIClient
 
-from apps.core.models import EmailOTP, LoginOTPChallenge, User
+from apps.core.models import EmailOTP, GlobalSystemSettings, LoginOTPChallenge, User
 
 from .models import AffiliateAccount, AffiliateClick, AffiliatePayout, AffiliateReferral
 from .services import record_affiliate_signup
@@ -69,7 +70,21 @@ class AffiliateApiTests(TestCase):
             is_verified=True,
         )
 
-    def test_active_affiliate_can_login_and_read_own_profile(self):
+    def test_affiliate_login_otp_is_disabled_by_default(self):
+        response = self.client.post(
+            "/api/v1/affiliate/login/",
+            {"email": self.user.email, "password": "Strong-Test-Pass-349!"},
+            format="json",
+            HTTP_X_SESSION_ID="affiliate-browser-default",
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("access", response.data)
+        self.assertFalse(GlobalSystemSettings.get_solo().affiliate_email_otp_enabled)
+
+    def test_active_affiliate_can_use_enabled_otp_and_read_own_profile(self):
+        settings_obj = GlobalSystemSettings.get_solo()
+        settings_obj.affiliate_email_otp_enabled = True
+        settings_obj.save(update_fields=["affiliate_email_otp_enabled"])
         response = self.client.post(
             "/api/v1/affiliate/login/",
             {"email": self.user.email, "password": "Strong-Test-Pass-349!"},
@@ -125,6 +140,23 @@ class AffiliateApiTests(TestCase):
         )
         self.assertEqual(response.status_code, 200)
         click = AffiliateClick.objects.get(affiliate=self.account)
+        replay = self.client.post(
+            "/api/v1/affiliate/r/AMINA123/click/",
+            {"source": "WhatsApp", "attribution_token": str(click.attribution_token)},
+            format="json",
+        )
+        self.assertEqual(replay.status_code, 200)
+        self.assertFalse(replay.data["recorded"])
+        self.assertEqual(AffiliateClick.objects.filter(affiliate=self.account).count(), 1)
+        recent_duplicate = self.client.post(
+            "/api/v1/affiliate/r/AMINA123/click/",
+            {"source": "Direct"},
+            format="json",
+        )
+        self.assertEqual(recent_duplicate.status_code, 200)
+        self.assertFalse(recent_duplicate.data["recorded"])
+        self.assertEqual(recent_duplicate.data["attribution_token"], str(click.attribution_token))
+        self.assertEqual(AffiliateClick.objects.filter(affiliate=self.account).count(), 1)
 
         referral = record_affiliate_signup(
             referral_code="AMINA123",
@@ -141,8 +173,29 @@ class AffiliateApiTests(TestCase):
             email="NEWISP@example.com",
             company_name="Duplicate attempt",
         )
-        self.assertEqual(duplicate.pk, referral.pk)
+        self.assertIsNone(duplicate)
         self.assertEqual(AffiliateReferral.objects.count(), 1)
+
+    def test_referral_code_without_matching_click_token_is_not_attributed(self):
+        referral = record_affiliate_signup(
+            referral_code="AMINA123",
+            email="untracked@example.com",
+            company_name="Untracked ISP",
+        )
+        self.assertIsNone(referral)
+        self.assertFalse(AffiliateReferral.objects.filter(signup_email="untracked@example.com").exists())
+
+        self_referral = record_affiliate_signup(
+            referral_code="AMINA123",
+            attribution_token=str(
+                AffiliateClick.objects.create(
+                    affiliate=self.account,
+                    attribution_token="72a46f35-30bf-44cd-a353-59fa0f4bd08b",
+                ).attribution_token
+            ),
+            email=self.user.email,
+        )
+        self.assertIsNone(self_referral)
 
 
 class AffiliateSuperadminTests(TestCase):
@@ -207,3 +260,87 @@ class AffiliateSuperadminTests(TestCase):
         payout = AffiliatePayout.objects.get()
         self.assertEqual(payout.created_by, self.superadmin)
         self.assertIsNotNone(payout.processed_at)
+
+    def test_superadmin_controls_affiliate_otp_and_uses_one_time_account_access(self):
+        self.client.force_authenticate(self.superadmin)
+        response = self.client.patch(
+            "/api/v1/affiliate/admin/settings/",
+            {"affiliate_email_otp_enabled": True},
+            format="json",
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.data["affiliate_email_otp_enabled"])
+
+        response = self.client.post(f"/api/v1/affiliate/admin/affiliates/{self.account.id}/access/")
+        self.assertEqual(response.status_code, 200)
+        token = parse_qs(urlparse(response.data["access_url"]).query)["token"][0]
+
+        self.client.force_authenticate(user=None)
+        exchange = self.client.post(
+            "/api/v1/affiliate/admin-access/exchange/",
+            {"token": token},
+            format="json",
+        )
+        self.assertEqual(exchange.status_code, 200)
+        self.assertIn("access", exchange.data)
+        self.assertEqual(exchange.data["user"]["id"], self.account.id)
+
+        replay = self.client.post(
+            "/api/v1/affiliate/admin-access/exchange/",
+            {"token": token},
+            format="json",
+        )
+        self.assertEqual(replay.status_code, 400)
+
+    def test_superadmin_can_create_update_and_soft_delete_affiliate(self):
+        self.client.force_authenticate(self.superadmin)
+        created = self.client.post(
+            "/api/v1/affiliate/admin/affiliates/",
+            {
+                "full_name": "Manual Partner",
+                "email": "manual-partner@example.com",
+                "phone": "+254700001099",
+                "country": "Kenya",
+                "password": "Strong-Manual-Pass-721!",
+                "is_verified": True,
+            },
+            format="json",
+        )
+        self.assertEqual(created.status_code, 201)
+        affiliate_id = created.data["id"]
+
+        updated = self.client.patch(
+            f"/api/v1/affiliate/admin/affiliates/{affiliate_id}/",
+            {"full_name": "Updated Partner", "tier": "silver", "status": "suspended"},
+            format="json",
+        )
+        self.assertEqual(updated.status_code, 200)
+        self.assertEqual(updated.data["full_name"], "Updated Partner")
+        self.assertEqual(updated.data["tier"], "silver")
+
+        deleted = self.client.delete(f"/api/v1/affiliate/admin/affiliates/{affiliate_id}/")
+        self.assertEqual(deleted.status_code, 204)
+        account = AffiliateAccount.objects.get(pk=affiliate_id)
+        account.user.refresh_from_db()
+        self.assertEqual(account.status, "inactive")
+        self.assertFalse(account.user.is_active)
+
+    def test_completed_payout_cannot_exceed_manually_approved_commission(self):
+        self.referral.status = "approved"
+        self.referral.reward_amount = Decimal("1000.00")
+        self.referral.save(update_fields=["status", "reward_amount"])
+        self.client.force_authenticate(self.superadmin)
+
+        response = self.client.post(
+            f"/api/v1/affiliate/admin/affiliates/{self.account.id}/payouts/",
+            {
+                "amount": "1001.00",
+                "currency": "KES",
+                "method": "mpesa",
+                "status": "completed",
+                "reference": "MANUAL-OVERPAY",
+            },
+            format="json",
+        )
+        self.assertEqual(response.status_code, 400)
+        self.assertFalse(AffiliatePayout.objects.exists())
