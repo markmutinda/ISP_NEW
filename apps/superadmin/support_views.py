@@ -90,6 +90,8 @@ def _support_user_payload(user):
 
 
 def _serialize_lead(lead):
+    from apps.affiliate.services import affiliate_lead_data
+
     return {
         "id": lead.id,
         "name": lead.name,
@@ -98,6 +100,7 @@ def _serialize_lead(lead):
         "company_name": lead.company_name,
         "lead_source": lead.lead_source,
         "referral_name": lead.referral_name,
+        "affiliate_referral": affiliate_lead_data(lead),
         "message": lead.message,
         "is_contacted": lead.is_contacted,
         "contacted_at": lead.contacted_at.isoformat() if lead.contacted_at else None,
@@ -223,7 +226,9 @@ class SupportConsoleLeadListView(APIView):
         page = max(int(request.query_params.get("page", 1)), 1)
         page_size = min(max(int(request.query_params.get("page_size", 20)), 1), 100)
 
-        qs = Lead.objects.all().order_by("-created_at")
+        qs = Lead.objects.prefetch_related(
+            "affiliatereferral_set__affiliate__user"
+        ).order_by("-created_at")
         if search:
             qs = qs.filter(
                 Q(name__icontains=search)
@@ -231,7 +236,9 @@ class SupportConsoleLeadListView(APIView):
                 | Q(phone__icontains=search)
                 | Q(company_name__icontains=search)
                 | Q(referral_name__icontains=search)
-            )
+                | Q(affiliatereferral__affiliate__referral_code__icontains=search)
+                | Q(affiliatereferral__affiliate__user__email__icontains=search)
+            ).distinct()
         if contacted == "true":
             qs = qs.filter(is_contacted=True)
         elif contacted == "false":

@@ -7,6 +7,30 @@ from django.utils import timezone
 from .models import AffiliateAccount, AffiliateClick, AffiliateReferral
 
 
+def affiliate_lead_data(lead):
+    """Return trusted affiliate attribution for a lead, if one exists."""
+    if not lead:
+        return None
+    prefetched = getattr(lead, "_prefetched_objects_cache", {}).get("affiliatereferral_set")
+    referral = (
+        (prefetched[0] if prefetched else None)
+        if prefetched is not None
+        else lead.affiliatereferral_set.select_related("affiliate__user").first()
+    )
+    if not referral:
+        return None
+    affiliate = referral.affiliate
+    affiliate_name = affiliate.user.get_full_name().strip() or affiliate.user.email
+    return {
+        "referral_id": referral.id,
+        "referral_status": referral.status,
+        "affiliate_id": affiliate.id,
+        "affiliate_name": affiliate_name,
+        "affiliate_email": affiliate.user.email,
+        "referral_code": affiliate.referral_code,
+    }
+
+
 def record_affiliate_signup(*, referral_code, email, company_name="", company=None, lead=None, attribution_token=None):
     """
     Record a tracked signup without assigning money.

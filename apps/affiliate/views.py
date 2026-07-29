@@ -445,7 +445,7 @@ class AffiliateDashboardView(APIView):
         return Response({
             "greeting_name": request.user.first_name or request.user.email,
             "referral_code": account.referral_code,
-            "referral_link": f"{getattr(settings, 'FRONTEND_URL', 'https://netily.co.ke').rstrip('/')}/r/{account.referral_code}",
+            "referral_link": f"{getattr(settings, 'FRONTEND_URL', 'https://netily.co.ke').rstrip('/')}/affiliate/{account.referral_code}",
             "stats": {
                 "link_views": clicks,
                 "signed_up": signups,
@@ -596,7 +596,7 @@ class AffiliateMarketingView(APIView):
     permission_classes = AFFILIATE_PERMS
 
     def get(self, request):
-        link = f"{getattr(settings, 'FRONTEND_URL', 'https://netily.co.ke').rstrip('/')}/r/{request.user.affiliate_account.referral_code}"
+        link = f"{getattr(settings, 'FRONTEND_URL', 'https://netily.co.ke').rstrip('/')}/affiliate/{request.user.affiliate_account.referral_code}"
         return Response([
             {"id": 1, "category": "whatsapp", "title": "Affiliate introduction", "content": f"Manage your ISP with Netily: {link}"},
             {"id": 2, "category": "social", "title": "Social post", "content": f"Modern billing, RADIUS and network operations for ISPs: {link}"},

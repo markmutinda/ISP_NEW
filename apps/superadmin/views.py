@@ -4344,7 +4344,9 @@ class LeadListView(APIView):
         page_size = int(request.query_params.get("page_size", PAGE_SIZE))
         search = request.query_params.get("search", "").strip()
 
-        qs = Lead.objects.all().order_by("-created_at")
+        qs = Lead.objects.prefetch_related(
+            "affiliatereferral_set__affiliate__user"
+        ).order_by("-created_at")
         if search:
             qs = qs.filter(
                 Q(name__icontains=search) |
@@ -4352,8 +4354,10 @@ class LeadListView(APIView):
                 Q(company_name__icontains=search) |
                 Q(lead_source__icontains=search) |
                 Q(referral_name__icontains=search) |
+                Q(affiliatereferral__affiliate__referral_code__icontains=search) |
+                Q(affiliatereferral__affiliate__user__email__icontains=search) |
                 Q(phone__icontains=search)
-            )
+            ).distinct()
 
         # Filter by contacted status
         contacted = request.query_params.get("contacted")
@@ -4361,6 +4365,14 @@ class LeadListView(APIView):
             qs = qs.filter(is_contacted=True)
         elif contacted == "false":
             qs = qs.filter(is_contacted=False)
+
+        affiliate_referral = request.query_params.get("affiliate_referral")
+        if affiliate_referral == "true":
+            qs = qs.filter(affiliatereferral__isnull=False).distinct()
+        elif affiliate_referral == "false":
+            qs = qs.filter(affiliatereferral__isnull=True)
+
+        from apps.affiliate.services import affiliate_lead_data
 
         total = qs.count()
         start = (page - 1) * page_size
@@ -4375,6 +4387,7 @@ class LeadListView(APIView):
                 "company_name": l.company_name,
                 "lead_source": l.lead_source,
                 "referral_name": l.referral_name,
+                "affiliate_referral": affiliate_lead_data(l),
                 "message": l.message,
                 "is_contacted": l.is_contacted,
                 "contacted_at": l.contacted_at.isoformat() if l.contacted_at else None,
@@ -4432,6 +4445,7 @@ class LeadStatsView(APIView):
             "last_7_days": last_7,
             "contacted": Lead.objects.filter(is_contacted=True).count(),
             "not_contacted": Lead.objects.filter(is_contacted=False).count(),
+            "affiliate_referrals": Lead.objects.filter(affiliatereferral__isnull=False).distinct().count(),
             "source_breakdown": source_breakdown,
             "trend": trend,
         })
@@ -4458,6 +4472,8 @@ class LeadDetailView(APIView):
                 lead.contacted_at = None
             lead.save(update_fields=["is_contacted", "contacted_at"])
 
+        from apps.affiliate.services import affiliate_lead_data
+
         return Response({
             "id": lead.id,
             "name": lead.name,
@@ -4466,6 +4482,7 @@ class LeadDetailView(APIView):
             "company_name": lead.company_name,
             "lead_source": lead.lead_source,
             "referral_name": lead.referral_name,
+            "affiliate_referral": affiliate_lead_data(lead),
             "message": lead.message,
             "is_contacted": lead.is_contacted,
             "contacted_at": lead.contacted_at.isoformat() if lead.contacted_at else None,

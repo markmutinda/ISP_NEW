@@ -1901,9 +1901,10 @@ class SubmitLeadView(APIView):
                 referral_name=referral_name,
                 message=message,
             )
+            affiliate_referral = None
             try:
                 from apps.affiliate.services import record_affiliate_signup
-                record_affiliate_signup(
+                affiliate_referral = record_affiliate_signup(
                     referral_code=referral_code,
                     attribution_token=attribution_token,
                     email=email,
@@ -1912,6 +1913,9 @@ class SubmitLeadView(APIView):
                 )
             except Exception:
                 logger.exception("Affiliate attribution failed for lead %s", lead.id)
+            if affiliate_referral and lead.lead_source != "Affiliate Referral":
+                lead.lead_source = "Affiliate Referral"
+                lead.save(update_fields=["lead_source"])
 
         import threading
         def _send_lead_email():
@@ -1925,8 +1929,10 @@ class SubmitLeadView(APIView):
                         f"Email: {email}\n"
                         f"Phone: {phone}\n"
                         f"Company: {company}\n"
-                        f"Lead Source: {lead_source or 'Not specified'}\n"
+                        f"Lead Source: {lead.lead_source or 'Not specified'}\n"
                         f"Referred By: {referral_name or 'Not specified'}\n"
+                        f"Affiliate Referral: {'Yes' if affiliate_referral else 'No'}\n"
+                        f"Affiliate Code: {affiliate_referral.affiliate.referral_code if affiliate_referral else 'Not applicable'}\n"
                         f"Message: {message}"
                     ),
                     from_email=settings.DEFAULT_FROM_EMAIL,
@@ -1943,6 +1949,8 @@ class SubmitLeadView(APIView):
 
 
 def _serialize_lead(lead):
+    from apps.affiliate.services import affiliate_lead_data
+
     derived_status = "converted" if lead.is_contacted else "not_yet"
     return {
         "id": lead.id,
@@ -1952,6 +1960,7 @@ def _serialize_lead(lead):
         "company_name": lead.company_name,
         "lead_source": lead.lead_source,
         "referral_name": lead.referral_name,
+        "affiliate_referral": affiliate_lead_data(lead),
         "message": lead.message,
         "status": derived_status,
         "is_contacted": lead.is_contacted,

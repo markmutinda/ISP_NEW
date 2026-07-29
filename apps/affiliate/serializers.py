@@ -74,7 +74,7 @@ def affiliate_user_data(account):
         "country": account.country,
         "currency": account.currency,
         "referral_code": account.referral_code,
-        "referral_link": f"{getattr(settings, 'FRONTEND_URL', 'https://netily.co.ke').rstrip('/')}/r/{account.referral_code}",
+        "referral_link": f"{getattr(settings, 'FRONTEND_URL', 'https://netily.co.ke').rstrip('/')}/affiliate/{account.referral_code}",
         "is_verified": account.is_verified,
         "tier": account.tier,
         "status": account.status,

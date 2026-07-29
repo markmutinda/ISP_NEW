@@ -6,7 +6,7 @@ from urllib.parse import parse_qs, urlparse
 from django.test import SimpleTestCase, TestCase, override_settings
 from rest_framework.test import APIClient
 
-from apps.core.models import EmailOTP, GlobalSystemSettings, LoginOTPChallenge, User
+from apps.core.models import EmailOTP, GlobalSystemSettings, Lead, LoginOTPChallenge, User
 
 from .models import AffiliateAccount, AffiliateClick, AffiliatePayout, AffiliateReferral
 from .services import record_affiliate_signup
@@ -118,6 +118,7 @@ class AffiliateApiTests(TestCase):
         response = self.client.get("/api/v1/affiliate/me/")
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.data["email"], self.user.email)
+        self.assertTrue(response.data["referral_link"].endswith("/affiliate/AMINA123"))
 
     def test_suspended_affiliate_is_denied(self):
         self.account.status = "suspended"
@@ -196,6 +197,35 @@ class AffiliateApiTests(TestCase):
             email=self.user.email,
         )
         self.assertIsNone(self_referral)
+
+    def test_tracked_lead_is_structured_as_an_affiliate_referral(self):
+        click_response = self.client.post(
+            "/api/v1/affiliate/r/AMINA123/click/",
+            {"source": "LinkedIn"},
+            format="json",
+        )
+        self.assertEqual(click_response.status_code, 200)
+
+        response = self.client.post(
+            "/api/v1/core/leads/submit/",
+            {
+                "name": "Referred ISP",
+                "email": "referred-isp@example.com",
+                "company": "Referred Networks",
+                "lead_source": "Other",
+                "referral_code": "AMINA123",
+                "attribution_token": click_response.data["attribution_token"],
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 201)
+        lead = Lead.objects.get(email="referred-isp@example.com")
+        referral = AffiliateReferral.objects.get(lead=lead)
+        self.assertEqual(lead.lead_source, "Affiliate Referral")
+        self.assertEqual(referral.affiliate, self.account)
+        self.assertEqual(referral.status, "pending")
+        self.assertEqual(referral.reward_amount, Decimal("0"))
 
 
 class AffiliateSuperadminTests(TestCase):
