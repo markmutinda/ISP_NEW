@@ -171,6 +171,36 @@ class MpesaConfiguration(AuditMixin):
         
         self.full_clean()
         super().save(*args, **kwargs)
+        
+        # Sync the shortcode to the public-schema index
+        self._sync_shortcode_tenant_map()
+    
+    def _sync_shortcode_tenant_map(self):
+        """
+        Sync this MpesaConfiguration to the public-schema MpesaShortcodeTenantMap index.
+        This enables O(1) lookup for incoming webhooks instead of scanning all tenants.
+        """
+        from django_tenants.utils import schema_context, get_public_schema_name
+        from apps.core.models import MpesaShortcodeTenantMap
+
+        should_map = self.is_active or self.c2b_urls_registered
+        
+        with schema_context(get_public_schema_name()):
+            if should_map:
+                MpesaShortcodeTenantMap.objects.update_or_create(
+                    business_shortcode=self.business_shortcode,
+                    shortcode_type=self.shortcode_type,
+                    defaults={
+                        "schema_name": self.schema_name,
+                        "is_active": True,
+                    },
+                )
+            else:
+                MpesaShortcodeTenantMap.objects.filter(
+                    business_shortcode=self.business_shortcode,
+                    shortcode_type=self.shortcode_type,
+                    schema_name=self.schema_name,
+                ).update(is_active=False)
     
     @classmethod
     def get_active_configuration(cls, schema_name):
@@ -242,6 +272,31 @@ class MpesaConfiguration(AuditMixin):
         self.c2b_urls_registered = False
         self.c2b_urls_registered_at = None
         self.save(update_fields=['c2b_urls_registered', 'c2b_urls_registered_at'])
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# M-PESA CONFIGURATION CLEANUP SIGNAL
+# ─────────────────────────────────────────────────────────────────────────────
+
+from django.db.models.signals import post_delete
+from django.dispatch import receiver
+
+
+@receiver(post_delete, sender=MpesaConfiguration)
+def _cleanup_shortcode_map(sender, instance, **kwargs):
+    """
+    Clean up the public-schema MpesaShortcodeTenantMap entry when an
+    MpesaConfiguration is deleted.
+    """
+    from django_tenants.utils import schema_context, get_public_schema_name
+    from apps.core.models import MpesaShortcodeTenantMap
+    
+    with schema_context(get_public_schema_name()):
+        MpesaShortcodeTenantMap.objects.filter(
+            business_shortcode=instance.business_shortcode,
+            shortcode_type=instance.shortcode_type,
+            schema_name=instance.schema_name,
+        ).delete()
 
 
 class MpesaTransaction(models.Model):

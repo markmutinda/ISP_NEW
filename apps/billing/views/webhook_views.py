@@ -220,53 +220,29 @@ class MpesaC2BWebhookView(APIView):
             )
 
         try:
-            # 1. FIND THE TENANT
+            # ═══════════════════════════════════════════════════════════════
+            # 1. FIND THE TENANT — O(1) lookup instead of scanning all schemas
+            # ═══════════════════════════════════════════════════════════════
             target_tenant_schema = None
-            fallback_tenant_schema = None
-            
+
             if connection.schema_name == 'public':
-                for tenant in Tenant.objects.exclude(schema_name='public'):
-                    with schema_context(tenant.schema_name):
-                        try:
-                            if MpesaConfiguration.objects.filter(
-                                business_shortcode=shortcode
-                            ).filter(
-                                Q(is_active=True) | Q(c2b_urls_registered=True)
-                            ).exists():
-                                if ServiceConnection.objects.filter(
-                                    models.Q(billing_account_number__iexact=bill_ref) |
-                                    models.Q(mpesa_account_number__iexact=bill_ref)
-                                ).exists():
-                                    target_tenant_schema = tenant.schema_name
-                                    logger.info(f"Found matching tenant via ServiceConnection: {tenant.schema_name}")
-                                    break
-                                
-                                from apps.billing.models.hotspot_models import HotspotSession
-                                if HotspotSession.objects.filter(session_id__icontains=bill_ref).exists():
-                                    target_tenant_schema = tenant.schema_name
-                                    logger.info(f"Found matching tenant via HotspotSession reference: {tenant.schema_name}")
-                                    break
-                                
-                                if not fallback_tenant_schema:
-                                    fallback_tenant_schema = tenant.schema_name
-                                    logger.info(
-                                        f"Shortcode {shortcode} matched tenant {tenant.schema_name} "
-                                        f"(no account match for '{bill_ref}', will record as unmatched if no other match found)"
-                                    )
-                        except Exception as e:
-                            logger.debug(f"Error checking tenant {tenant.schema_name}: {e}")
-                            continue
-                
-                if not target_tenant_schema and fallback_tenant_schema:
-                    target_tenant_schema = fallback_tenant_schema
-                    logger.info(f"Using fallback tenant {target_tenant_schema} for unmatched payment")
+                from apps.core.models import MpesaShortcodeTenantMap
+                mapping = MpesaShortcodeTenantMap.objects.filter(
+                    business_shortcode=shortcode,
+                    is_active=True
+                ).values_list('schema_name', flat=True).first()
+                target_tenant_schema = mapping
+                if target_tenant_schema:
+                    logger.info(f"C2B shortcode map hit: {shortcode} -> {target_tenant_schema}")
+                else:
+                    logger.warning(f"No tenant mapping found for shortcode {shortcode}")
             else:
                 target_tenant_schema = connection.schema_name
 
             if not target_tenant_schema:
                 logger.warning(
                     f"UNMATCHED PAYMENT: ID={trans_id}, Account={bill_ref}, SC={shortcode}. "
-                    "No tenant matched (no active or registered M-Pesa config found). Manual reconciliation required."
+                    "No tenant matched (no active M-Pesa shortcode mapping found). Manual reconciliation required."
                 )
                 return Response(
                     {"ResultCode": 0, "ResultDesc": "Account Not Found"},
@@ -351,10 +327,12 @@ class MpesaC2BWebhookView(APIView):
                 # Begin customer activation block safely
                 try:
                     with transaction.atomic():
-                        # Find service connection structures
+                        # ═══════════════════════════════════════════════════════════════
+                        # FIND SERVICE CONNECTION — EXACT MATCH (no __iexact overhead)
+                        # ═══════════════════════════════════════════════════════════════
                         service = ServiceConnection.objects.filter(
-                            models.Q(billing_account_number__iexact=bill_ref) |
-                            models.Q(mpesa_account_number__iexact=bill_ref)
+                            models.Q(billing_account_number=bill_ref) |
+                            models.Q(mpesa_account_number=bill_ref)
                         ).select_related('customer', 'plan', 'pppoe_user', 'hotspot_user').first()
 
                         hotspot_session = None

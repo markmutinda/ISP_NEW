@@ -862,6 +862,31 @@ class TumaCallbackMap(models.Model):
         return f"{self.schema_name} | {self.checkout_request_id}"
 
 
+class MpesaShortcodeTenantMap(models.Model):
+    """
+    O(1) public-schema lookup: Paybill/Till shortcode -> tenant schema.
+    Avoids scanning every tenant schema on each C2B webhook.
+    This model lives in the public schema (core is a SHARED_APP).
+    """
+    business_shortcode = models.CharField(max_length=20, db_index=True)
+    shortcode_type = models.CharField(max_length=10)  # e.g., 'paybill', 'till'
+    schema_name = models.CharField(max_length=63, db_index=True)
+    is_active = models.BooleanField(default=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        app_label = "core"
+        unique_together = [("business_shortcode", "shortcode_type")]
+        indexes = [
+            models.Index(fields=["business_shortcode", "is_active"]),
+        ]
+        verbose_name = "M-Pesa Shortcode Tenant Map"
+        verbose_name_plural = "M-Pesa Shortcode Tenant Maps"
+
+    def __str__(self):
+        return f"{self.business_shortcode}({self.shortcode_type}) -> {self.schema_name}"
+
+
 class Lead(models.Model):
     """
     Stores leads from the public landing page.
