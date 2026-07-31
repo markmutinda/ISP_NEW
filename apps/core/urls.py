@@ -6,6 +6,12 @@ from rest_framework.routers import DefaultRouter
 from rest_framework_simplejwt.views import TokenRefreshView
 from . import views
 from .views_support import SupportChatDemoView
+from .webauthn_views import (
+    PasskeyRegisterOptionsView,
+    PasskeyRegisterVerifyView,
+    PasskeyLoginOptionsView,
+    PasskeyLoginVerifyView,
+)
 
 router = DefaultRouter()
 router.register(r'users', views.UserViewSet, basename='user')
@@ -64,6 +70,12 @@ urlpatterns = [
     path('leads/stats/', views.TenantLeadStatsView.as_view(), name='tenant-lead-stats'),
     path('leads/<int:pk>/', views.TenantLeadDetailView.as_view(), name='tenant-lead-detail'),
     path('leads/submit/', views.SubmitLeadView.as_view(), name='submit-lead'),
+    
+    # ── Passkey (WebAuthn) endpoints ──
+    path('auth/passkey/register/options/', PasskeyRegisterOptionsView.as_view(), name='passkey-register-options'),
+    path('auth/passkey/register/verify/', PasskeyRegisterVerifyView.as_view(), name='passkey-register-verify'),
+    path('auth/passkey/login/options/', PasskeyLoginOptionsView.as_view(), name='passkey-login-options'),
+    path('auth/passkey/login/verify/', PasskeyLoginVerifyView.as_view(), name='passkey-login-verify'),
     
     # Include router URLs
     path('', include(router.urls)),

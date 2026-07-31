@@ -378,6 +378,10 @@ TENANT_BASE_DOMAIN = os.getenv('TENANT_BASE_DOMAIN', 'localhost')
 # Frontend URL (Next.js app) — used for admin panel links et al
 FRONTEND_URL = os.getenv('FRONTEND_URL', 'http://localhost:3000')
 
+# ── WebAuthn / Passkey settings ──
+WEBAUTHN_RP_ID = os.getenv('WEBAUTHN_RP_ID', 'localhost')       # e.g. 'netily.co.ke' in prod
+WEBAUTHN_RP_NAME = os.getenv('WEBAUTHN_RP_NAME', 'Netily')
+
 # Netily tenant support chatbot
 OPENAI_API_KEY = os.getenv('OPENAI_API_KEY', '')
 NETILY_SUPPORT_CHAT_KNOWLEDGE_DIR = os.getenv('NETILY_SUPPORT_CHAT_KNOWLEDGE_DIR', 'rag/netily-support')

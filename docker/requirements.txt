@@ -51,6 +51,9 @@ requests==2.31.0
 # VPN/Certificate Management
 cryptography==42.0.0
 
+# WebAuthn / Passkey support
+webauthn==2.2.0
+
 # Production extras
 whitenoise==6.5.0
 django-storages==1.13.2

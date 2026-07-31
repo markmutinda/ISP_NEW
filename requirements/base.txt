@@ -51,6 +51,9 @@ langchain-text-splitters>=0.2.4,<0.3
 # VPN/Certificate Management
 cryptography==42.0.0
 
+# WebAuthn / Passkey support
+webauthn==2.2.0
+
 # SMS Integration
 africastalking==1.2.2
 

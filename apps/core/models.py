@@ -1001,3 +1001,36 @@ def notify_admins_of_new_lead(sender, instance, created, **kwargs):
             company=instance.company_name or 'Not specified',
             referral_name=instance.referral_name or 'Not specified',
         )
+
+# ─────────────────────────────────────────────────────────────────────────────
+# WEBAUTHN / PASSKEY CREDENTIALS
+# ─────────────────────────────────────────────────────────────────────────────
+
+class WebAuthnCredential(models.Model):
+    """Stores WebAuthn passkey credentials for passwordless authentication."""
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="webauthn_credentials"
+    )
+    credential_id = models.CharField(
+        max_length=255,
+        unique=True,
+        db_index=True
+    )
+    public_key = models.TextField()
+    sign_count = models.PositiveIntegerField(default=0)
+    device_label = models.CharField(
+        max_length=120,
+        blank=True,
+        default=""
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    last_used_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        app_label = "core"
+        ordering = ["-created_at"]
+
+    def __str__(self):
+        return f"{self.user.email or self.user.phone_number} - {self.device_label or 'Unnamed device'}"
