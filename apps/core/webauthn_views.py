@@ -200,3 +200,35 @@ class PasskeyLoginVerifyView(APIView):
                 "is_superuser": user.is_superuser,
             },
         })
+
+
+# ────────────────────────────────────────────────────────────────
+#  PASSKEY MANAGEMENT (List & Delete)
+# ────────────────────────────────────────────────────────────────
+
+class PasskeyListView(APIView):
+    """List the authenticated user's registered passkeys."""
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        creds = WebAuthnCredential.objects.filter(user=request.user).order_by("-created_at")
+        return Response([
+            {
+                "id": c.id,
+                "device_label": c.device_label or "Unnamed device",
+                "created_at": c.created_at,
+                "last_used_at": c.last_used_at,
+            }
+            for c in creds
+        ])
+
+
+class PasskeyDeleteView(APIView):
+    """Delete one of the authenticated user's passkeys."""
+    permission_classes = [IsAuthenticated]
+
+    def delete(self, request, pk):
+        deleted, _ = WebAuthnCredential.objects.filter(user=request.user, pk=pk).delete()
+        if not deleted:
+            return Response({"detail": "Passkey not found."}, status=404)
+        return Response(status=204)

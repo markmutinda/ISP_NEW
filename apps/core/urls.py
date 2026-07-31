@@ -11,6 +11,8 @@ from .webauthn_views import (
     PasskeyRegisterVerifyView,
     PasskeyLoginOptionsView,
     PasskeyLoginVerifyView,
+    PasskeyListView,     # NEW
+    PasskeyDeleteView,   # NEW
 )
 
 router = DefaultRouter()
@@ -76,6 +78,10 @@ urlpatterns = [
     path('auth/passkey/register/verify/', PasskeyRegisterVerifyView.as_view(), name='passkey-register-verify'),
     path('auth/passkey/login/options/', PasskeyLoginOptionsView.as_view(), name='passkey-login-options'),
     path('auth/passkey/login/verify/', PasskeyLoginVerifyView.as_view(), name='passkey-login-verify'),
+    
+    # ── Passkey Management (authenticated) ──
+    path('auth/passkey/list/', PasskeyListView.as_view(), name='passkey-list'),
+    path('auth/passkey/delete/<int:pk>/', PasskeyDeleteView.as_view(), name='passkey-delete'),
     
     # Include router URLs
     path('', include(router.urls)),
