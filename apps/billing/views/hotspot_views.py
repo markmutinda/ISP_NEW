@@ -53,6 +53,20 @@ MPESA_CAPABLE_METHOD_TYPES = [
 # HELPER UTILITIES
 # ============================================================
 
+def _today_valid_day_field() -> str:
+    """Return the HotspotPlan boolean field name for today's weekday."""
+    weekday_map = {
+        0: 'valid_monday',
+        1: 'valid_tuesday',
+        2: 'valid_wednesday',
+        3: 'valid_thursday',
+        4: 'valid_friday',
+        5: 'valid_saturday',
+        6: 'valid_sunday',
+    }
+    return weekday_map[timezone.now().weekday()]
+
+
 def _normalize_mac(mac: str) -> str:
     """Normalize MAC address to uppercase with colons."""
     return (mac or "").upper().replace("-", ":").strip()
@@ -350,6 +364,7 @@ class CaptivePortalView(APIView):
                         hotspot_plans = HotspotPlan.objects.filter(
                             router=router,
                             is_active=True,
+                            **{_today_valid_day_field(): True},   # ← ADDED: only show plans valid today
                         ).only(
                             'id', 'name', 'description', 'price', 'currency',
                             'validity_type', 'validity_value',
@@ -433,7 +448,8 @@ class HotspotPlansView(APIView):
 
         plans = HotspotPlan.objects.filter(
             router=router,
-            is_active=True
+            is_active=True,
+            **{_today_valid_day_field(): True},   # ← ADDED: only show plans valid today
         ).only(
             'id', 'name', 'price', 'currency', 'duration_minutes', 'data_limit_mb',
             'download_speed', 'upload_speed', 'speed_unit', 'description',
