@@ -3,10 +3,10 @@ Optional JWT authentication — used on endpoints that must stay public
 (AllowAny) but want to personalize the response when a valid customer
 token happens to be present (e.g. plans page showing current plan).
 """
-from rest_framework_simplejwt.authentication import JWTAuthentication
+from apps.core.authentication import SessionBoundJWTAuthentication
 
 
-class OptionalJWTAuthentication(JWTAuthentication):
+class OptionalJWTAuthentication(SessionBoundJWTAuthentication):
     def authenticate(self, request):
         try:
             return super().authenticate(request)

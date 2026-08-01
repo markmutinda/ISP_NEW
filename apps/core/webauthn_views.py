@@ -14,7 +14,7 @@ from django.utils import timezone
 from rest_framework.permissions import IsAuthenticated, AllowAny
 from rest_framework.response import Response
 from rest_framework.views import APIView
-from rest_framework_simplejwt.tokens import RefreshToken
+from .session_tokens import issue_refresh_token
 
 from webauthn import (
     generate_registration_options,
@@ -182,7 +182,7 @@ class PasskeyLoginVerifyView(APIView):
         if not user.is_active:
             return Response({"detail": "Account is disabled."}, status=403)
 
-        refresh = RefreshToken.for_user(user)
+        refresh = issue_refresh_token(user)
         user.last_login = timezone.now()
         user.save(update_fields=["last_login"])
 

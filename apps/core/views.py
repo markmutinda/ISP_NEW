@@ -9,7 +9,6 @@ from rest_framework.response import Response
 from rest_framework.decorators import action, api_view, permission_classes
 from rest_framework.permissions import IsAuthenticated, AllowAny
 from rest_framework_simplejwt.views import TokenObtainPairView
-from rest_framework_simplejwt.tokens import RefreshToken
 from django.contrib.auth import authenticate
 from django.utils import timezone
 from django.conf import settings
@@ -30,7 +29,7 @@ from .models import Domain
 import logging
 from django.http import Http404
 from django.shortcuts import get_object_or_404
-from django.db import DatabaseError
+from django.db import DatabaseError, transaction
 from .otp_service import OTPService, OTPError, OTPRateLimitedError
 from .email_delivery import send_transactional_email
 
@@ -52,6 +51,7 @@ from .serializers import (
     FeatureRequestSerializer, CompanyBrandingSerializer, RoleAccessPolicySerializer
 )
 from .permissions import HasRoleAccessPolicy, IsAdmin, IsAdminOrStaff, IsCustomer, IsTechnician
+from .session_tokens import issue_refresh_token
 
 logger = logging.getLogger(__name__)
 
@@ -332,7 +332,7 @@ class CustomTokenObtainPairView(TokenObtainPairView):
             except OTPError as exc:
                 return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
 
-        refresh = RefreshToken.for_user(user)
+        refresh = issue_refresh_token(user)
         user.last_login = timezone.now()
         user.save(update_fields=["last_login"])
         return Response({
@@ -426,7 +426,7 @@ class RegisterView(generics.CreateAPIView):
             if not user.company and not user.tenant:
                 pass
             
-            refresh = RefreshToken.for_user(user)
+            refresh = issue_refresh_token(user)
             
             AuditLog.log_action(
                 user=user,
@@ -536,6 +536,45 @@ class UserViewSet(viewsets.ModelViewSet):
         
         serializer.save(**save_kwargs)
         logger.info(f"UserViewSet: Created {role} user {serializer.instance.email}. is_staff={is_staff_status}")
+
+    @transaction.atomic
+    def destroy(self, request, *args, **kwargs):
+        """Immediately revoke and remove a tenant staff account."""
+        instance = self.get_object()
+        if instance.pk == request.user.pk:
+            return Response(
+                {"detail": "You cannot delete your own signed-in account."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if instance.is_superuser:
+            return Response(
+                {"detail": "Platform administrator accounts cannot be deleted here."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        target_id = str(instance.pk)
+        target_label = instance.get_full_name() or instance.email or target_id
+        target_email = instance.email
+
+        # Make credentials unusable before deletion. The hard delete invalidates
+        # every access token through the authentication layer's user lookup, while
+        # this step also protects against any in-flight authentication attempt.
+        instance.is_active = False
+        instance.set_unusable_password()
+        instance.save(update_fields=["is_active", "password", "updated_at"])
+
+        AuditLog.log_action(
+            user=request.user,
+            action="delete",
+            model_name="User",
+            object_id=target_id,
+            object_repr=target_label,
+            changes={"email": target_email, "sessions_revoked": True},
+            ip_address=request.META.get("REMOTE_ADDR"),
+            user_agent=request.META.get("HTTP_USER_AGENT", ""),
+        )
+        instance.delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)
 
     @action(detail=False, methods=['get', 'patch', 'put'])
     def me(self, request):
@@ -1172,7 +1211,7 @@ def register_user(request):
     if serializer.is_valid():
         user = serializer.save()
         
-        refresh = RefreshToken.for_user(user)
+        refresh = issue_refresh_token(user)
         
         AuditLog.log_action(
             user=user,
@@ -1505,7 +1544,7 @@ class CompanyRegisterView(generics.CreateAPIView):
         except Exception:
             logger.exception("Affiliate attribution failed for company %s", company.name)
         
-        refresh = RefreshToken.for_user(user)
+        refresh = issue_refresh_token(user)
         
         response_payload = {
             'message': 'Company created successfully',

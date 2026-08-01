@@ -4,14 +4,14 @@ Serializers for core app
 import logging
 from rest_framework import serializers
 from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
-from rest_framework_simplejwt.tokens import RefreshToken
 from django.contrib.auth import authenticate
 from .models import GlobalSystemSettings  # Add this
 from rest_framework_simplejwt.exceptions import InvalidToken  # Add this
-from rest_framework_simplejwt.serializers import TokenRefreshSerializer  # Already there or add
+from rest_framework_simplejwt.serializers import TokenRefreshSerializer as SimpleJWTTokenRefreshSerializer
 from django.utils import timezone
 from django.contrib.auth.password_validation import validate_password
 from .models import User, Company, Tenant, SystemSettings, AuditLog, Changelog, FeatureRequest, FeatureUpvote, RoleAccessPolicy  # Add FeatureRequest and FeatureUpvote here
+from .session_tokens import bind_token_to_user, issue_refresh_token, token_matches_user_session
 
 # Import country/currency constants
 from utils.constants import COUNTRY_CHOICES, COUNTRY_CURRENCY_MAP
@@ -345,7 +345,7 @@ class LoginSerializer(serializers.Serializer):
             })
         
         # Generate tokens
-        refresh = RefreshToken.for_user(user)
+        refresh = issue_refresh_token(user)
         
         # Update last login
         user.last_login = timezone.now()
@@ -357,41 +357,6 @@ class LoginSerializer(serializers.Serializer):
         data['token'] = str(refresh.access_token)
         data['refresh_token'] = str(refresh)
         
-        return data
-
-
-class TokenRefreshSerializer(serializers.Serializer):
-    """Serializer for token refresh"""
-    
-    refresh = serializers.CharField()
-    
-    def validate(self, data):
-        refresh = data.get('refresh')
-        
-        try:
-            token = RefreshToken(refresh)
-        except Exception as e:
-            logger.warning("Token refresh failed: invalid token")
-            raise serializers.ValidationError({
-                "refresh": "Invalid refresh token."
-            })
-        
-        # Get user from token
-        user_id = token.payload.get('user_id')
-        try:
-            user = User.objects.get(id=user_id)
-        except User.DoesNotExist:
-            logger.warning("Token refresh failed: user not found - user_id=%s", user_id)
-            raise serializers.ValidationError({
-                "refresh": "User not found."
-            })
-        
-        # Generate new access token
-        new_access_token = RefreshToken.for_user(user).access_token
-        
-        logger.debug("Token refreshed successfully for user_id=%s", user.id)
-        
-        data['access'] = str(new_access_token)
         return data
 
 
@@ -620,6 +585,10 @@ class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
     
     # Add email field
     email = serializers.EmailField()
+
+    @classmethod
+    def get_token(cls, user):
+        return bind_token_to_user(super().get_token(user), user)
     
     def validate(self, attrs):
         logger.debug("JWT login attempt received")
@@ -707,11 +676,18 @@ class GlobalSystemSettingsSerializer(serializers.ModelSerializer):
         read_only_fields = ['id']
 
 
-class CustomTokenRefreshSerializer(TokenRefreshSerializer):
+class CustomTokenRefreshSerializer(SimpleJWTTokenRefreshSerializer):
     def validate(self, attrs):
         try:
+            token = self.token_class(attrs["refresh"])
+            user_id = token.get("user_id")
+            user = User.objects.get(pk=user_id)
+            if not user.is_active:
+                raise InvalidToken("User is inactive")
+            if not token_matches_user_session(token, user):
+                raise InvalidToken("Session has been revoked. Please sign in again.")
             return super().validate(attrs)
-        except User.DoesNotExist:
+        except (User.DoesNotExist, TypeError, ValueError):
             logger.warning("Token refresh failed: user no longer exists")
             raise InvalidToken('User no longer exists')
 

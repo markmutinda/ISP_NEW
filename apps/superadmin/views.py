@@ -2438,8 +2438,8 @@ class TenantImpersonateView(APIView):
 
         # Generate JWT for the target user
         try:
-            from rest_framework_simplejwt.tokens import RefreshToken
-            refresh = RefreshToken.for_user(target_user)
+            from apps.core.session_tokens import issue_refresh_token
+            refresh = issue_refresh_token(target_user)
             tokens = {
                 "access": str(refresh.access_token),
                 "refresh": str(refresh),

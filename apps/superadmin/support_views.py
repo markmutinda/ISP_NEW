@@ -9,7 +9,7 @@ from rest_framework import status
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
-from rest_framework_simplejwt.tokens import RefreshToken
+from apps.core.session_tokens import issue_refresh_token
 
 from apps.core.models import Lead, Tenant, User
 from apps.superadmin.models import SuperAdminActivityLog, SupportActivityLog, SupportExecutiveProfile
@@ -147,7 +147,7 @@ class SupportConsoleLoginView(APIView):
         user.last_login = timezone.now()
         user.save(update_fields=["last_login"])
 
-        refresh = RefreshToken.for_user(user)
+        refresh = issue_refresh_token(user)
         SupportActivityLog.objects.create(
             support_user=user,
             action="login",

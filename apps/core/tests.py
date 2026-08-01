@@ -16,7 +16,42 @@ from apps.core.otp_service import OTPService, OTPRateLimitedError, OTPError
 from apps.core.permissions import HasCompanyAccess, HasRoleAccessPolicy, IsAdminOrStaff
 from apps.core.rbac_defaults import DEFAULT_ROLE_ACCESS_POLICIES
 from apps.core.serializers import UserCreateSerializer
+from apps.core.session_tokens import (
+    SESSION_HASH_CLAIM,
+    bind_token_to_user,
+    token_matches_user_session,
+)
 from apps.core.views import RoleAccessPolicyViewSet
+
+
+class SessionTokenTests(SimpleTestCase):
+    def setUp(self):
+        self.user = User(
+            email="staff@example.com",
+            phone_number="+254700000001",
+            role="technician",
+            is_staff=True,
+        )
+        self.user.set_password("FirstStrongPassword123!")
+
+    def test_staff_token_is_invalid_after_password_change(self):
+        token = {}
+        bind_token_to_user(token, self.user)
+        self.assertTrue(token_matches_user_session(token, self.user))
+
+        self.user.set_password("SecondStrongPassword456!")
+
+        self.assertFalse(token_matches_user_session(token, self.user))
+
+    def test_legacy_staff_token_requires_fresh_login(self):
+        self.assertFalse(token_matches_user_session({}, self.user))
+
+    def test_bound_token_contains_only_a_signed_session_fingerprint(self):
+        token = {}
+        bind_token_to_user(token, self.user)
+
+        self.assertIn(SESSION_HASH_CLAIM, token)
+        self.assertNotIn("FirstStrongPassword123!", token[SESSION_HASH_CLAIM])
 
 
 @override_settings(EMAIL_BACKEND="django.core.mail.backends.locmem.EmailBackend")
