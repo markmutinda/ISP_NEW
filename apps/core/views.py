@@ -2028,26 +2028,25 @@ class SubmitLeadView(APIView):
             request.headers.get("X-Request-ID", "-"),
         )
 
-        # Deliver immediately because lead volume is low and Telegram alerts are
-        # operationally important. If Telegram or its network is unavailable,
-        # queue a retry without ever rolling back the saved public-schema lead.
+        # Persist first, then hand notification delivery to the worker. Telegram
+        # latency or an outage must never hold the browser submission open.
         telegram_configured = bool(
             getattr(settings, "TELEGRAM_BOT_TOKEN", "")
             and getattr(settings, "TELEGRAM_ADMIN_CHAT_IDS", [])
         )
         if lead_created and telegram_configured:
-            telegram_sent = False
             try:
-                from apps.notifications.services.lead_alert_service import deliver_telegram_lead_alert
-                telegram_sent = deliver_telegram_lead_alert(lead.id)
+                from apps.notifications.tasks import send_telegram_lead_alert_by_id
+                send_telegram_lead_alert_by_id.apply_async(args=[lead.id], retry=False)
             except Exception:
-                logger.exception("Immediate Telegram delivery failed for lead %s", lead.id)
-            if not telegram_sent:
+                # Redis being unavailable should not lose the alert. Use a
+                # direct best-effort fallback after the lead is already saved.
+                logger.exception("Could not queue Telegram alert for lead %s", lead.id)
                 try:
-                    from apps.notifications.tasks import send_telegram_lead_alert_by_id
-                    send_telegram_lead_alert_by_id.delay(lead.id)
+                    from apps.notifications.services.lead_alert_service import deliver_telegram_lead_alert
+                    deliver_telegram_lead_alert(lead.id)
                 except Exception:
-                    logger.exception("Could not queue Telegram retry for lead %s", lead.id)
+                    logger.exception("Direct Telegram fallback failed for lead %s", lead.id)
         elif lead_created:
             logger.error(
                 "Lead %s saved, but Telegram alerts are not configured. "
