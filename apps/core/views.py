@@ -335,6 +335,19 @@ class CustomTokenObtainPairView(TokenObtainPairView):
         refresh = issue_refresh_token(user)
         user.last_login = timezone.now()
         user.save(update_fields=["last_login"])
+
+        # NEW: record login for Recent Activity card
+        AuditLog.log_action(
+            user=user,
+            action='login',
+            model_name='User',
+            object_id=str(user.id),
+            object_repr=user.get_full_name() or user.email or user.phone_number,
+            ip_address=request.META.get('REMOTE_ADDR'),
+            user_agent=request.META.get('HTTP_USER_AGENT', ''),
+            tenant=getattr(request, 'tenant', None),
+        )
+
         return Response({
             "refresh": str(refresh),
             "access": str(refresh.access_token),
@@ -2345,6 +2358,33 @@ class UnifiedDashboardView(APIView):
                 except Exception:
                     return {'this_year': [], 'last_year': []}
 
+        def get_recent_transactions():
+            with schema_context(tenant_schema):
+                try:
+                    from apps.billing.models.payment_models import Payment
+                    rows = (
+                        Payment.objects.filter(status__iexact='completed')
+                        .select_related('customer__user')
+                        .order_by('-payment_date')[:8]
+                        .only('id', 'amount', 'payment_date', 'payer_name',
+                              'customer__user__first_name', 'customer__user__last_name')
+                    )
+                    out = []
+                    for p in rows:
+                        if p.customer and p.customer.user:
+                            name = p.customer.user.get_full_name() or 'Customer'
+                        else:
+                            name = p.payer_name or 'Hotspot Client'
+                        out.append({
+                            'id': p.id,
+                            'name': name,
+                            'amount': float(p.amount or 0),
+                            'time': timezone.localtime(p.payment_date).strftime('%b %d, %I:%M %p'),
+                        })
+                    return out
+                except Exception:
+                    return []
+
         # Run all queries in parallel using threads
         with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
             futures = {
@@ -2358,6 +2398,7 @@ class UnifiedDashboardView(APIView):
                 'activity': executor.submit(get_recent_activity),
                 'weekly_income': executor.submit(get_weekly_income),
                 'monthly_earnings': executor.submit(get_monthly_earnings),
+                'recent_transactions': executor.submit(get_recent_transactions),  # NEW
             }
             results = {k: f.result() for k, f in futures.items()}
 
@@ -2408,6 +2449,7 @@ class UnifiedDashboardView(APIView):
                 'avg_response_time': '—',
             },
             'recent_activity': results['activity'],
+            'recent_transactions': results['recent_transactions'],  # NEW
             'overview': {
                 'today_revenue': today_rev,
                 'today_change': pct_change(today_rev, yesterday_rev),
