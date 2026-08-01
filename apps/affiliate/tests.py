@@ -198,6 +198,26 @@ class AffiliateApiTests(TestCase):
         )
         self.assertIsNone(self_referral)
 
+    def test_click_token_cannot_be_replayed_for_multiple_signup_emails(self):
+        click = AffiliateClick.objects.create(
+            affiliate=self.account,
+            attribution_token="2c6e5ae5-5c88-4e88-9697-982876c7a9da",
+        )
+        first = record_affiliate_signup(
+            referral_code="AMINA123",
+            attribution_token=str(click.attribution_token),
+            email="first-isp@example.com",
+        )
+        replay = record_affiliate_signup(
+            referral_code="AMINA123",
+            attribution_token=str(click.attribution_token),
+            email="second-isp@example.com",
+        )
+
+        self.assertIsNotNone(first)
+        self.assertIsNone(replay)
+        self.assertEqual(click.signups.count(), 1)
+
     def test_tracked_lead_is_structured_as_an_affiliate_referral(self):
         click_response = self.client.post(
             "/api/v1/affiliate/r/AMINA123/click/",

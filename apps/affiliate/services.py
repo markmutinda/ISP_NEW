@@ -1,7 +1,7 @@
 from datetime import timedelta
 
 from django.conf import settings
-from django.db import IntegrityError
+from django.db import IntegrityError, transaction
 from django.utils import timezone
 
 from .models import AffiliateAccount, AffiliateClick, AffiliateReferral
@@ -54,38 +54,55 @@ def record_affiliate_signup(*, referral_code, email, company_name="", company=No
 
     window_days = int(getattr(settings, "AFFILIATE_ATTRIBUTION_WINDOW_DAYS", 30))
     try:
-        click = (
-            AffiliateClick.objects.filter(
-                attribution_token=attribution_token,
-                affiliate=affiliate,
-                created_at__gte=timezone.now() - timedelta(days=window_days),
+        with transaction.atomic():
+            click = (
+                AffiliateClick.objects.select_for_update()
+                .filter(
+                    attribution_token=attribution_token,
+                    affiliate=affiliate,
+                    created_at__gte=timezone.now() - timedelta(days=window_days),
+                )
+                .first()
             )
-            .first()
-        )
+            if not click:
+                return None
+
+            # One tracked click represents one prospective ISP conversion. This
+            # prevents replaying a captured browser cookie for multiple accounts.
+            if click.signups.exclude(signup_email__iexact=email).exists():
+                return None
+
+            existing = AffiliateReferral.objects.filter(signup_email__iexact=email).first()
+            if existing and existing.affiliate_id != affiliate.id:
+                return None
+
+            if existing:
+                referral, created = existing, False
+            else:
+                referral, created = AffiliateReferral.objects.get_or_create(
+                    signup_email=email,
+                    defaults={
+                        "affiliate": affiliate,
+                        "click": click,
+                        "company": company,
+                        "lead": lead,
+                        "company_name": company_name,
+                        "currency": affiliate.currency,
+                    },
+                )
+            if not created:
+                changed = []
+                for field, value in (("company", company), ("lead", lead), ("click", click), ("company_name", company_name)):
+                    if value and not getattr(referral, field):
+                        setattr(referral, field, value)
+                        changed.append(field)
+                if changed:
+                    referral.save(update_fields=[*changed, "updated_at"])
+            return referral
     except (TypeError, ValueError):
-        click = None
-    if not click:
         return None
-    try:
-        referral, created = AffiliateReferral.objects.get_or_create(
-            signup_email=email,
-            defaults={
-                "affiliate": affiliate,
-                "click": click,
-                "company": company,
-                "lead": lead,
-                "company_name": company_name,
-                "currency": affiliate.currency,
-            },
-        )
-        if not created and referral.affiliate_id == affiliate.id:
-            changed = []
-            for field, value in (("company", company), ("lead", lead), ("click", click), ("company_name", company_name)):
-                if value and not getattr(referral, field):
-                    setattr(referral, field, value)
-                    changed.append(field)
-            if changed:
-                referral.save(update_fields=[*changed, "updated_at"])
     except IntegrityError:
-        referral = AffiliateReferral.objects.filter(signup_email=email).first()
-    return referral
+        return AffiliateReferral.objects.filter(
+            signup_email__iexact=email,
+            affiliate=affiliate,
+        ).first()

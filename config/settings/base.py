@@ -292,6 +292,7 @@ REST_FRAMEWORK = {
         'affiliate_register': '10/hour',
         'affiliate_login': '20/min',
         'affiliate_verify': '10/hour',
+        'lead_submit': '10/hour',
     },
 }
 

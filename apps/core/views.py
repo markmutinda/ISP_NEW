@@ -10,6 +10,8 @@ from rest_framework.decorators import action, api_view, permission_classes
 from rest_framework.permissions import IsAuthenticated, AllowAny
 from rest_framework_simplejwt.views import TokenObtainPairView
 from django.contrib.auth import authenticate
+from django.core.exceptions import ValidationError as DjangoValidationError
+from django.core.validators import validate_email
 from django.utils import timezone
 from django.conf import settings
 from rest_framework_simplejwt.views import TokenRefreshView
@@ -1914,47 +1916,144 @@ class SubmitLeadView(APIView):
     No authentication required.
     """
     permission_classes = [AllowAny]
+    authentication_classes = []
+    throttle_scope = "lead_submit"
 
     def post(self, request):
-        name = request.data.get("name", "").strip()
-        email = request.data.get("email", "").strip()
-        phone = request.data.get("phone", "").strip()
-        company = request.data.get("company", "").strip()
-        lead_source = request.data.get("lead_source", "").strip()
-        referral_name = request.data.get("referral_name", "").strip()
-        referral_code = request.data.get("referral_code", "").strip()
-        attribution_token = request.data.get("attribution_token")
-        message = request.data.get("message", "").strip()
+        text_fields = {
+            "name": (200, True),
+            "email": (254, True),
+            "phone": (20, False),
+            "company": (200, False),
+            "lead_source": (120, False),
+            "referral_name": (200, False),
+            "referral_code": (64, False),
+            "message": (5000, False),
+        }
+        cleaned = {}
+        for field, (max_length, required) in text_fields.items():
+            value = request.data.get(field, "")
+            if not isinstance(value, str):
+                return Response(
+                    {"error": f"{field.replace('_', ' ').title()} must be text."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            value = value.strip()
+            if required and not value:
+                return Response(
+                    {"error": f"{field.replace('_', ' ').title()} is required."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            if len(value) > max_length:
+                return Response(
+                    {"error": f"{field.replace('_', ' ').title()} is too long."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            cleaned[field] = value
 
-        if not name or not email:
-            return Response({"error": "Name and email are required."}, status=status.HTTP_400_BAD_REQUEST)
+        name = cleaned["name"]
+        email = cleaned["email"].lower()
+        phone = cleaned["phone"]
+        company = cleaned["company"]
+        lead_source = cleaned["lead_source"]
+        referral_name = cleaned["referral_name"]
+        referral_code = cleaned["referral_code"].upper()
+        attribution_token = request.data.get("attribution_token")
+        message = cleaned["message"]
+
+        try:
+            validate_email(email)
+        except DjangoValidationError:
+            return Response(
+                {"error": "Enter a valid email address."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
 
         with schema_context(get_public_schema_name()):
-            from .models import Lead
-            lead = Lead.objects.create(
-                name=name,
-                email=email,
-                phone=phone,
-                company_name=company,
-                lead_source=lead_source,
-                referral_name=referral_name,
-                message=message,
-            )
-            affiliate_referral = None
-            try:
-                from apps.affiliate.services import record_affiliate_signup
-                affiliate_referral = record_affiliate_signup(
-                    referral_code=referral_code,
-                    attribution_token=attribution_token,
-                    email=email,
+            with transaction.atomic():
+                from .models import Lead
+                # Network timeouts can cause a browser to retry a request whose
+                # first write already succeeded. Reuse only an identical, very
+                # recent submission so a retry does not create duplicate leads.
+                lead = Lead.objects.filter(
+                    email__iexact=email,
+                    name=name,
+                    phone=phone,
                     company_name=company,
-                    lead=lead,
-                )
+                    referral_name=referral_name,
+                    message=message,
+                    created_at__gte=timezone.now() - timedelta(minutes=2),
+                ).first()
+                lead_created = lead is None
+                if lead_created:
+                    lead = Lead.objects.create(
+                        name=name,
+                        email=email,
+                        phone=phone,
+                        company_name=company,
+                        lead_source=lead_source,
+                        referral_name=referral_name,
+                        message=message,
+                    )
+                affiliate_referral = None
+                try:
+                    from apps.affiliate.services import record_affiliate_signup
+                    affiliate_referral = record_affiliate_signup(
+                        referral_code=referral_code,
+                        attribution_token=attribution_token,
+                        email=email,
+                        company_name=company,
+                        lead=lead,
+                    )
+                except Exception:
+                    logger.exception("Affiliate attribution failed for lead %s", lead.id)
+                if affiliate_referral and lead.lead_source != "Affiliate Referral":
+                    lead.lead_source = "Affiliate Referral"
+                    lead.save(update_fields=["lead_source"])
+                elif (
+                    referral_code
+                    and not affiliate_referral
+                    and lead.lead_source.lower() == "affiliate referral"
+                ):
+                    # Preserve the acquisition signal without presenting an
+                    # unverified/replayed referral as commission-eligible.
+                    lead.lead_source = "Referral link (unverified)"
+                    lead.save(update_fields=["lead_source"])
+
+        logger.info(
+            "Public lead captured lead_id=%s created=%s affiliate_attributed=%s request_id=%s",
+            lead.id,
+            lead_created,
+            bool(affiliate_referral),
+            request.headers.get("X-Request-ID", "-"),
+        )
+
+        # Deliver immediately because lead volume is low and Telegram alerts are
+        # operationally important. If Telegram or its network is unavailable,
+        # queue a retry without ever rolling back the saved public-schema lead.
+        telegram_configured = bool(
+            getattr(settings, "TELEGRAM_BOT_TOKEN", "")
+            and getattr(settings, "TELEGRAM_ADMIN_CHAT_IDS", [])
+        )
+        if lead_created and telegram_configured:
+            telegram_sent = False
+            try:
+                from apps.notifications.services.lead_alert_service import deliver_telegram_lead_alert
+                telegram_sent = deliver_telegram_lead_alert(lead.id)
             except Exception:
-                logger.exception("Affiliate attribution failed for lead %s", lead.id)
-            if affiliate_referral and lead.lead_source != "Affiliate Referral":
-                lead.lead_source = "Affiliate Referral"
-                lead.save(update_fields=["lead_source"])
+                logger.exception("Immediate Telegram delivery failed for lead %s", lead.id)
+            if not telegram_sent:
+                try:
+                    from apps.notifications.tasks import send_telegram_lead_alert_by_id
+                    send_telegram_lead_alert_by_id.delay(lead.id)
+                except Exception:
+                    logger.exception("Could not queue Telegram retry for lead %s", lead.id)
+        elif lead_created:
+            logger.error(
+                "Lead %s saved, but Telegram alerts are not configured. "
+                "Set TELEGRAM_BOT_TOKEN and TELEGRAM_ADMIN_CHAT_IDS.",
+                lead.id,
+            )
 
         import threading
         def _send_lead_email():
@@ -1980,11 +2079,14 @@ class SubmitLeadView(APIView):
                 )
             except Exception:
                 pass
-        threading.Thread(target=_send_lead_email, daemon=True).start()
+        if lead_created:
+            threading.Thread(target=_send_lead_email, daemon=True).start()
 
         return Response({
             "message": "Thank you! We'll be in touch shortly.",
-        }, status=status.HTTP_201_CREATED)
+            "lead_id": lead.id,
+            "affiliate_attributed": bool(affiliate_referral),
+        }, status=status.HTTP_201_CREATED if lead_created else status.HTTP_200_OK)
 
 
 def _serialize_lead(lead):

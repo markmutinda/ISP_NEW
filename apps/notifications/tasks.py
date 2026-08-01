@@ -376,7 +376,7 @@ def process_alert_rules_task_for_tenant(schema_name):
 @shared_task(bind=True, max_retries=2, default_retry_delay=30)
 def send_telegram_lead_alert(self, name: str, email: str, phone: str, company: str, referral_name: str = "Not specified"):
     """
-    Send a Telegram alert to the superadmin group when a new ISP lead submits the contact form.
+    Legacy payload-compatible task for alerts queued before the lead-ID flow.
     
     This runs asynchronously in the background so the lead form submission doesn't have
     to wait for the Telegram API to respond.
@@ -421,3 +421,23 @@ def send_telegram_lead_alert(self, name: str, email: str, phone: str, company: s
             raise self.retry(exc=e)
         # Otherwise, return failure without retry
         return {'success': False, 'error': str(e), 'lead': name, 'email': email}
+
+
+@shared_task(bind=True, max_retries=3, default_retry_delay=30)
+def send_telegram_lead_alert_by_id(self, lead_id: int):
+    """Retry delivery of a referral-aware lead alert from the public schema."""
+    from apps.notifications.services.lead_alert_service import deliver_telegram_lead_alert
+
+    try:
+        success = deliver_telegram_lead_alert(lead_id)
+        if not success:
+            raise RuntimeError("Telegram rejected the lead alert or is not configured")
+        logger.info("Telegram lead alert sent successfully for lead_id=%s", lead_id)
+        return {"success": True, "lead_id": lead_id}
+    except Exception as exc:
+        logger.warning(
+            "Telegram lead alert attempt failed for lead_id=%s: %s",
+            lead_id,
+            exc,
+        )
+        raise self.retry(exc=exc)

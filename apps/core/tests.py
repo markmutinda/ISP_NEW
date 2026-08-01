@@ -22,6 +22,7 @@ from apps.core.session_tokens import (
     token_matches_user_session,
 )
 from apps.core.views import RoleAccessPolicyViewSet
+from apps.notifications.services.lead_alert_service import build_lead_alert_message
 
 
 class SessionTokenTests(SimpleTestCase):
@@ -52,6 +53,31 @@ class SessionTokenTests(SimpleTestCase):
 
         self.assertIn(SESSION_HASH_CLAIM, token)
         self.assertNotIn("FirstStrongPassword123!", token[SESSION_HASH_CLAIM])
+
+
+class LeadAlertMessageTests(SimpleTestCase):
+    def test_message_escapes_user_input_and_includes_affiliate_context(self):
+        lead = SimpleNamespace(
+            pk=42,
+            name="A <b>Network</b>",
+            company_name="ISP & Sons",
+            phone="+254700000000",
+            email="lead@example.com",
+            lead_source="Affiliate Referral",
+            referral_name="",
+            message="Need <fast> setup",
+        )
+
+        message = build_lead_alert_message(
+            lead,
+            {"affiliate_name": "Jane & Co", "referral_code": "REF123"},
+        )
+
+        self.assertIn("Lead ID:</b> 42", message)
+        self.assertIn("A &lt;b&gt;Network&lt;/b&gt;", message)
+        self.assertIn("Jane &amp; Co", message)
+        self.assertIn("REF123", message)
+        self.assertNotIn("Need <fast>", message)
 
 
 @override_settings(EMAIL_BACKEND="django.core.mail.backends.locmem.EmailBackend")
