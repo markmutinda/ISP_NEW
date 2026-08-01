@@ -186,18 +186,6 @@ class PasskeyLoginVerifyView(APIView):
         user.last_login = timezone.now()
         user.save(update_fields=["last_login"])
 
-        from .models import AuditLog
-        AuditLog.log_action(
-            user=user,
-            action='login',
-            model_name='User',
-            object_id=str(user.id),
-            object_repr=user.get_full_name() or user.email or user.phone_number,
-            ip_address=request.META.get('REMOTE_ADDR'),
-            user_agent=request.META.get('HTTP_USER_AGENT', ''),
-            tenant=getattr(request, 'tenant', None),
-        )
-
         return Response({
             "refresh": str(refresh),
             "access": str(refresh.access_token),
