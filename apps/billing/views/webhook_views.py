@@ -338,8 +338,10 @@ class MpesaC2BWebhookView(APIView):
                         hotspot_session = None
                         if not service:
                             from apps.billing.models.hotspot_models import HotspotSession
+                            # FIX: Match on session_id regardless of status, so C2B confirmations
+                            # arriving after STK already activated the session still link the FK
                             hotspot_session = HotspotSession.objects.filter(
-                                session_id__icontains=bill_ref, status='pending'
+                                session_id__icontains=bill_ref
                             ).select_related('plan', 'router').first()
                             
                             if hotspot_session:
@@ -398,12 +400,18 @@ class MpesaC2BWebhookView(APIView):
                             last_name = data.get('LastName', '')
                             payer_full_name = f"{first_name} {last_name}".strip()
 
+                            # FIX 2: Tag hotspot-style refs so downstream analytics can still classify correctly
+                            notes = (
+                                f"UNMATCHED ACCOUNT: Customer entered '{bill_ref}'. Manual activation required."
+                                + (" [HOTSPOT-REF]" if bill_ref.upper().startswith("HS_") or "-" in bill_ref[:8] else "")
+                            )
+                            
                             payment = Payment.objects.create(
                                 customer=None, amount=amount, payment_method=method, status='COMPLETED',
                                 transaction_id=trans_id, mpesa_receipt=trans_id, mpesa_phone=msisdn, payer_phone='',
                                 payer_name=payer_full_name or "M-Pesa User", mpesa_transaction=mpesa_txn,
                                 payment_date=timezone.now(), schema_name=target_tenant_schema,
-                                notes=f"UNMATCHED ACCOUNT: Customer entered '{bill_ref}'. Manual activation required."
+                                notes=notes
                             )
                             mpesa_txn.payment = payment
                             mpesa_txn.save(update_fields=['payment'])

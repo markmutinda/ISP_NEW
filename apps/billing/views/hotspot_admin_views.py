@@ -726,6 +726,9 @@ class RouterIncomeView(APIView):
     FIXED: Now uses Payment table as single source of truth instead of
     summing HotspotSession.amount which overcounts due to transitional
     'paid' status and test/pending sessions.
+    
+    FIX 4: Uses HOTSPOT_Q to classify payments that may have missing FK
+    but are clearly hotspot payments based on account_reference or notes.
     """
     permission_classes = [IsAuthenticated, IsAdminOrStaff, HasRoleAccessPolicy]
     required_rbac_path = "/admin/analytics"
@@ -733,18 +736,24 @@ class RouterIncomeView(APIView):
     def get(self, request, router_id):
         from apps.billing.models.payment_models import Payment
         from apps.network.models.router_models import PPPoEUser
-        from django.db.models import Sum
+        from django.db.models import Sum, Q
 
         # Verify router exists and user has access (tenant-scoped via Router lookup)
         router = get_object_or_404(Router, id=router_id)
 
-        # Hotspot income: sum COMPLETED payments linked to hotspot sessions on this router
+        # FIX 4: HOTSPOT_Q classifies hotspot payments via FK OR signals
+        HOTSPOT_Q = (
+            Q(hotspot_sessions__router_id=router_id) |
+            Q(mpesa_transaction__account_reference__istartswith="HS_") |
+            Q(notes__icontains="hotspot")
+        )
+
+        # Hotspot income: sum COMPLETED payments that match HOTSPOT_Q
         hotspot_income = (
             Payment.objects
-            .filter(
-                status='COMPLETED',
-                hotspot_sessions__router_id=router_id,
-            )
+            .filter(status='COMPLETED')
+            .filter(HOTSPOT_Q)
+            .distinct()
             .aggregate(total=Sum('amount'))['total'] or 0
         )
 
@@ -760,8 +769,8 @@ class RouterIncomeView(APIView):
             .filter(
                 status='COMPLETED',
                 customer_id__in=pppoe_customer_ids,
-                hotspot_sessions__isnull=True,  # exclude hotspot payments
             )
+            .exclude(HOTSPOT_Q)
             .aggregate(total=Sum('amount'))['total'] or 0
         )
 

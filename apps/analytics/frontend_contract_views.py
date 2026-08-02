@@ -1066,12 +1066,21 @@ class DailyRevenueSplitView(APIView, _RangeMixin):
 
         qs = Payment.objects.filter(status__iexact="completed", payment_date__gte=start)
 
+        # FIX 3: Classify hotspot via FK OR account_reference/notes signals
+        # This handles historical data where hotspot_session is NULL but the payment
+        # is clearly a hotspot payment based on account reference pattern or notes.
+        HOTSPOT_Q = (
+            Q(hotspot_session__isnull=False) |
+            Q(mpesa_transaction__account_reference__istartswith="HS_") |
+            Q(notes__icontains="hotspot")
+        )
+
         rows = (
             qs.annotate(day=TruncDay("payment_date"))
             .values("day")
             .annotate(
-                hotspot_revenue=Sum("amount", filter=Q(hotspot_session__isnull=False)),
-                pppoe_revenue=Sum("amount", filter=Q(hotspot_session__isnull=True)),
+                hotspot_revenue=Sum("amount", filter=HOTSPOT_Q),
+                pppoe_revenue=Sum("amount", filter=~HOTSPOT_Q),
             )
             .order_by("day")
         )
