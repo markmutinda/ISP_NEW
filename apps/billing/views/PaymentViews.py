@@ -967,8 +967,7 @@ class PaymentViewSet(viewsets.ModelViewSet):
                 'message': 'M-Pesa service is not properly configured. Please contact support.'
             }, status=status.HTTP_400_BAD_REQUEST)
         
-        # Create payment record
-        from ..models.payment_models import Payment
+        # FIX 4: Create payment with service_type='PPPOE'
         payment = Payment.objects.create(
             schema_name=connection.schema_name,
             customer=customer,
@@ -978,7 +977,8 @@ class PaymentViewSet(viewsets.ModelViewSet):
             status='PENDING',
             payer_phone=phone_number,
             payer_name=customer.full_name,
-            created_by=request.user
+            created_by=request.user,
+            service_type='PPPOE',   # Permanent classification for analytics
         )
         
         # Determine account reference
@@ -1297,6 +1297,7 @@ class PaymentViewSet(viewsets.ModelViewSet):
         except InvoiceItemPayment.DoesNotExist:
             return Response({'status': 'error', 'message': 'Bank transfer payment method not configured'}, status=status.HTTP_400_BAD_REQUEST)
         
+        # FIX 4: Create payment with service_type='PPPOE'
         payment = Payment.objects.create(
             schema_name=connection.schema_name,
             customer=customer,
@@ -1308,7 +1309,8 @@ class PaymentViewSet(viewsets.ModelViewSet):
             bank_name=bank_name,
             account_number=account_number,
             payer_name=customer.full_name,
-            created_by=request.user
+            created_by=request.user,
+            service_type='PPPOE',   # Permanent classification for analytics
         )
         
         return Response({

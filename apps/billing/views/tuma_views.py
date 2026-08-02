@@ -289,6 +289,7 @@ class TumaInitiatePaymentView(APIView):
             import time
             payment_reference = f"PAY-{customer.customer_code}-{int(time.time())}".replace(" ", "-")
             
+            # FIX 4: Create payment with service_type='PPPOE' - this view is the customer-portal PPPoE payment path
             payment = Payment.objects.create(
                 customer=customer,
                 payment_method=method,
@@ -305,6 +306,7 @@ class TumaInitiatePaymentView(APIView):
                 payer_phone=phone,
                 payer_email=getattr(customer.user, "email", ""),
                 schema_name=schema,
+                service_type='PPPOE',   # Permanent classification for analytics
             )
 
             invoice_id = request.data.get("invoice_id")

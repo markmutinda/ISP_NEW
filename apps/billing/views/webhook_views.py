@@ -376,13 +376,15 @@ class MpesaC2BWebhookView(APIView):
                                 last_name = data.get('LastName', '')
                                 payer_full_name = f"{first_name} {last_name}".strip()
 
+                                # FIX 4: C2B hotspot-matched branch - set service_type='HOTSPOT'
                                 payment = Payment.objects.create(
                                     amount=amount, payment_method=method, status='COMPLETED',
                                     transaction_id=trans_id, mpesa_receipt=trans_id, mpesa_phone=msisdn,
                                     payer_phone='', payer_name=payer_full_name if payer_full_name else "M-Pesa User",
                                     mpesa_transaction=mpesa_txn, payment_date=timezone.now(),
                                     schema_name=target_tenant_schema, hotspot_session=hotspot_session,
-                                    notes=f"C2B hotspot payment via Paybill. Session: {hotspot_session.session_id}. Ref: {trans_id}"
+                                    notes=f"C2B hotspot payment via Paybill. Session: {hotspot_session.session_id}. Ref: {trans_id}",
+                                    service_type='HOTSPOT',   # Permanent classification for analytics
                                 )
                                 mpesa_txn.payment = payment
                                 mpesa_txn.save(update_fields=['payment'])
@@ -400,18 +402,16 @@ class MpesaC2BWebhookView(APIView):
                             last_name = data.get('LastName', '')
                             payer_full_name = f"{first_name} {last_name}".strip()
 
-                            # FIX 2: Tag hotspot-style refs so downstream analytics can still classify correctly
-                            notes = (
-                                f"UNMATCHED ACCOUNT: Customer entered '{bill_ref}'. Manual activation required."
-                                + (" [HOTSPOT-REF]" if bill_ref.upper().startswith("HS_") or "-" in bill_ref[:8] else "")
-                            )
+                            # FIX 4: Unmatched-account branch - tag as HOTSPOT if ref looks like one, else OTHER
+                            is_hotspot_ref = bill_ref.upper().startswith("HS_") or "-" in bill_ref[:8]
                             
                             payment = Payment.objects.create(
                                 customer=None, amount=amount, payment_method=method, status='COMPLETED',
                                 transaction_id=trans_id, mpesa_receipt=trans_id, mpesa_phone=msisdn, payer_phone='',
                                 payer_name=payer_full_name or "M-Pesa User", mpesa_transaction=mpesa_txn,
                                 payment_date=timezone.now(), schema_name=target_tenant_schema,
-                                notes=notes
+                                notes=f"UNMATCHED ACCOUNT: Customer entered '{bill_ref}'. Manual activation required.",
+                                service_type='HOTSPOT' if is_hotspot_ref else 'OTHER',  # Permanent classification
                             )
                             mpesa_txn.payment = payment
                             mpesa_txn.save(update_fields=['payment'])
@@ -429,12 +429,14 @@ class MpesaC2BWebhookView(APIView):
                         last_name = data.get('LastName', '')
                         payer_full_name = f"{first_name} {last_name}".strip()
 
+                        # FIX 4: Matched PPPoE-subscription branch - set service_type='PPPOE'
                         payment = Payment.objects.create(
                             customer=service.customer, amount=amount, payment_method=method, status='COMPLETED',
                             transaction_id=trans_id, mpesa_receipt=trans_id, mpesa_phone=msisdn, payer_phone='',
                             payer_name=payer_full_name if payer_full_name else "M-Pesa User", mpesa_transaction=mpesa_txn,
                             payment_date=timezone.now(), schema_name=target_tenant_schema,
-                            notes=f"C2B payment via Paybill. Account: {bill_ref}. Ref: {trans_id}"
+                            notes=f"C2B payment via Paybill. Account: {bill_ref}. Ref: {trans_id}",
+                            service_type='PPPOE',   # Permanent classification for analytics
                         )
                         mpesa_txn.payment = payment
                         mpesa_txn.save(update_fields=['payment'])

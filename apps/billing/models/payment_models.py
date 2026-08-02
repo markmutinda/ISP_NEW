@@ -770,6 +770,13 @@ class Payment(models.Model):
         ('DISPUTED', 'Disputed'),
     ]
 
+    # FIX 4: SERVICE_TYPE choices for permanent classification
+    SERVICE_TYPE_CHOICES = [
+        ('HOTSPOT', 'Hotspot'),
+        ('PPPOE', 'PPPoE'),
+        ('OTHER', 'Other'),
+    ]
+
     # 🧠 Widen these fields to 255 to prevent truncation
     payment_number = models.CharField(max_length=255, unique=True)
     
@@ -812,6 +819,15 @@ class Payment(models.Model):
         related_name='payments',
         db_index=True,
         help_text="Explicit link to the hotspot session that initiated this payment (for STK Push)"
+    )
+
+    # FIX 4: Permanent service_type field - survives hotspot_session deletion via pruning
+    service_type = models.CharField(
+        max_length=10,
+        choices=SERVICE_TYPE_CHOICES,
+        blank=True,
+        db_index=True,
+        help_text="Set once at creation; survives hotspot_session deletion via pruning"
     )
 
     # REMOVED: payhero_external_reference = models.CharField(max_length=255, blank=True, null=True, unique=True)
@@ -884,12 +900,14 @@ class Payment(models.Model):
             models.Index(fields=['tuma_merchant_request_id']),
             models.Index(fields=['tuma_checkout_request_id']),
             models.Index(fields=['hotspot_session']),  # Added index for the new field
+            models.Index(fields=['service_type']),  # Added index for service_type
             models.Index(fields=['schema_name', 'status', 'payment_date']),
         ]
 
     def __str__(self):
         customer_ref = self.customer.customer_code if self.customer else "Hotspot Client"
-        return f"Payment #{self.payment_number} - {customer_ref}"
+        service = f" [{self.get_service_type_display()}]" if self.service_type else ""
+        return f"Payment #{self.payment_number} - {customer_ref}{service}"
 
     def save(self, *args, **kwargs):
         # 1. Handle standard fields first
@@ -905,8 +923,26 @@ class Payment(models.Model):
             from django.db import connection
             schema = self.schema_name or connection.schema_name
             self.currency = get_tenant_base_currency(schema)
-            
-        # 2. Handle ID Generation with Concurrency Protection (RETRY LOOP)
+        
+        # 2. Infer service_type if not explicitly set
+        if not self.service_type:
+            if self.hotspot_session_id:
+                self.service_type = 'HOTSPOT'
+            elif self.customer_id:
+                # Check if customer has a hotspot service connection
+                # Check if customer has any service connections
+                if hasattr(self, 'customer') and self.customer:
+                    # Look for hotspot services - this is a heuristic
+                    # PPPoE customers will have a service with plan_type='PPPOE' or similar
+                    # but for now, if there's a customer but no hotspot_session, it's PPPoE
+                    # In the future, this could be more sophisticated
+                    self.service_type = 'PPPOE'
+                else:
+                    self.service_type = 'OTHER'
+            else:
+                self.service_type = 'OTHER'
+
+        # 3. Handle ID Generation with Concurrency Protection (RETRY LOOP)
         if not self.payment_number:
             year = timezone.now().year
             month = timezone.now().month

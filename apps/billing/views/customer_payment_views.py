@@ -204,7 +204,7 @@ class InitiateCustomerPaymentView(APIView):
         # Generate internal reference - ensure no spaces
         reference = f"PAY-{customer.customer_code}-{int(time.time())}".replace(" ", "-")
         
-        # Create payment record
+        # Create payment record with service_type='PPPOE'
         payment = Payment.objects.create(
             customer=customer,
             invoice=invoice,
@@ -216,6 +216,7 @@ class InitiateCustomerPaymentView(APIView):
             status='PENDING',
             notes="Customer initiated payment via dashboard",
             schema_name=schema,
+            service_type='PPPOE',   # Permanent classification for analytics
         )
         
         # ============================================================

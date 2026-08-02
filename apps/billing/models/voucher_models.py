@@ -285,7 +285,7 @@ class Voucher(models.Model):
         return restriction.id == hotspot_plan.id
 
     def use_voucher(self, customer, amount, description=""):
-        from .payment_models import Payment, PaymentMethod
+        from .payment_models import Payment, InvoiceItemPayment
         
         if not self.is_valid():
             return None, "Voucher is not valid"
@@ -315,11 +315,15 @@ class Voucher(models.Model):
         self.save()
         
         # Create payment record
-        payment_method = PaymentMethod.objects.filter(
+        payment_method = InvoiceItemPayment.objects.filter(
             method_type='VOUCHER',           
         ).first()
         
         if payment_method:
+            # Determine service_type based on voucher restriction
+            hotspot_plan = self.get_hotspot_plan_restriction()
+            service_type = 'HOTSPOT' if hotspot_plan else 'PPPOE'
+            
             payment = Payment.objects.create(
                 customer=customer,
                 amount=amount,
@@ -328,7 +332,8 @@ class Voucher(models.Model):
                 transaction_id=f"VCH-{usage.id}",
                 status='COMPLETED',
                 notes=f"Voucher payment using {self.code}",
-                created_by=customer.user
+                created_by=customer.user,
+                service_type=service_type,   # Permanent classification for analytics
             )
             
             return payment, "Voucher used successfully"

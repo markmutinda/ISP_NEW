@@ -860,21 +860,20 @@ class HotspotPurchaseView(APIView):
 
             payment_ref = f"HS-{session.session_id}-{int(time.time())}".replace(" ", "-")
 
-            # Create payment linked to selected method
-            # FIX: Removed hardcoded currency='KES' — let Payment.save() derive from tenant.company.base_currency
+            # Create payment linked to selected method with service_type='HOTSPOT'
             payment = Payment.objects.create(
                 customer=None,
                 payment_method=payment_method,
                 amount=plan.price,
                 transaction_fee=0,
                 net_amount=plan.price,
-                # currency='KES',   # REMOVED — let Payment.save() derive from tenant.company.base_currency
                 status='PROCESSING',
                 payment_reference=payment_ref,
                 payer_phone=phone_canonical,
                 schema_name=tenant.schema_name,
                 hotspot_session=session,
                 tuma_status='pending',
+                service_type='HOTSPOT',   # Permanent classification for analytics
             )
 
             # ===============================
@@ -1292,9 +1291,6 @@ class HotspotPurchaseStatusView(APIView):
                 
                 elif status == 'failed':
                     session.mark_failed(message)
-                    # ── SMS: REMOVED - hotspot_payment_failed toggle no longer exists ──
-                    # The hotspot_payment_failed method was removed from SMSNotifier.
-                    # Only welcome and session_expired remain.
                     
                     return Response({
                         'status': 'failed',
@@ -1658,7 +1654,7 @@ class HotspotPhoneReconnectView(APIView):
                 Q(canonical_phone=phone_short)
             ).first()
 
-            # ── NEW: Also search sessions directly by phone_number if client not found ──
+            # ── NEW: Also search sessions directly by phone number if client not found ──
             if not client:
                 # Try to find active sessions directly by phone number variants
                 direct_session = HotspotSession.objects.filter(
