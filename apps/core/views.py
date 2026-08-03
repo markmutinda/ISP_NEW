@@ -2015,8 +2015,8 @@ class SubmitLeadView(APIView):
                     and not affiliate_referral
                     and lead.lead_source.lower() == "affiliate referral"
                 ):
-                    # Preserve the acquisition signal without presenting an
-                    # unverified/replayed referral as commission-eligible.
+                    # Preserve the acquisition signal if the code could not be
+                    # linked to an active affiliate account.
                     lead.lead_source = "Referral link (unverified)"
                     lead.save(update_fields=["lead_source"])
 

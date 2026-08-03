@@ -463,7 +463,7 @@ class AffiliateReferralListView(APIView):
     permission_classes = AFFILIATE_PERMS
 
     def get(self, request):
-        referrals = request.user.affiliate_account.referrals.select_related("click")
+        referrals = request.user.affiliate_account.referrals.select_related("click", "lead")
         return Response([referral_data(item) for item in referrals])
 
 
@@ -620,7 +620,7 @@ class AdminAffiliateListView(APIView):
 
     def get(self, request):
         _ensure_public()
-        qs = AffiliateAccount.objects.select_related("user").prefetch_related("referrals__click", "payouts")
+        qs = AffiliateAccount.objects.select_related("user").prefetch_related("referrals__click", "referrals__lead", "payouts")
         search = (request.query_params.get("search") or "").strip()
         state = (request.query_params.get("status") or "").strip()
         if search:

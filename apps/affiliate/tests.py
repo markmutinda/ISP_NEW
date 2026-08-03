@@ -174,17 +174,20 @@ class AffiliateApiTests(TestCase):
             email="NEWISP@example.com",
             company_name="Duplicate attempt",
         )
-        self.assertIsNone(duplicate)
+        self.assertEqual(duplicate, referral)
         self.assertEqual(AffiliateReferral.objects.count(), 1)
 
-    def test_referral_code_without_matching_click_token_is_not_attributed(self):
+    def test_referral_code_without_matching_click_token_is_pending_review(self):
         referral = record_affiliate_signup(
             referral_code="AMINA123",
             email="untracked@example.com",
             company_name="Untracked ISP",
         )
-        self.assertIsNone(referral)
-        self.assertFalse(AffiliateReferral.objects.filter(signup_email="untracked@example.com").exists())
+        self.assertIsNotNone(referral)
+        self.assertEqual(referral.affiliate, self.account)
+        self.assertIsNone(referral.click)
+        self.assertEqual(referral.status, "pending")
+        self.assertEqual(referral.reward_amount, Decimal("0"))
 
         self_referral = record_affiliate_signup(
             referral_code="AMINA123",
@@ -246,6 +249,27 @@ class AffiliateApiTests(TestCase):
         self.assertEqual(referral.affiliate, self.account)
         self.assertEqual(referral.status, "pending")
         self.assertEqual(referral.reward_amount, Decimal("0"))
+
+    def test_code_only_lead_is_linked_to_affiliate_for_review(self):
+        response = self.client.post(
+            "/api/v1/core/leads/submit/",
+            {
+                "name": "Code Only ISP",
+                "email": "code-only-isp@example.com",
+                "company": "Code Only Networks",
+                "lead_source": "Affiliate referral",
+                "referral_code": "AMINA123",
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 201)
+        lead = Lead.objects.get(email="code-only-isp@example.com")
+        referral = AffiliateReferral.objects.get(lead=lead)
+        self.assertEqual(lead.lead_source, "Affiliate Referral")
+        self.assertEqual(referral.affiliate, self.account)
+        self.assertIsNone(referral.click)
+        self.assertEqual(referral.status, "pending")
 
 
 class AffiliateSuperadminTests(TestCase):

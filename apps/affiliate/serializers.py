@@ -84,19 +84,23 @@ def affiliate_user_data(account):
 
 def referral_data(referral):
     click = referral.click
+    lead = getattr(referral, "lead", None)
+    attribution_type = "tracked_click" if click else "lead_form" if lead else "manual"
     return {
         "id": referral.id,
         "isp_name": referral.company_name or referral.signup_email,
         "company": referral.company_name,
+        "signup_email": referral.signup_email,
         "signup_date": referral.created_at.isoformat(),
         "status": referral.status,
         "reward_amount": float(referral.reward_amount),
         "currency": referral.currency,
         "admin_notes": referral.admin_notes,
-        "attribution_type": "tracked_click" if click else "manual",
+        "attribution_type": attribution_type,
         "click_id": click.id if click else None,
         "clicked_at": click.created_at.isoformat() if click else None,
-        "source": click.source if click else "Manual",
+        "lead_id": lead.id if lead else None,
+        "source": click.source if click else "Referral form" if lead else "Manual",
     }
 
 
