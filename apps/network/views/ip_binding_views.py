@@ -1,6 +1,7 @@
 import logging
 from datetime import timedelta
 
+from django.db import IntegrityError, transaction
 from django.utils import timezone
 from rest_framework import viewsets, status
 from rest_framework.decorators import action
@@ -15,6 +16,39 @@ from apps.network.serializers.ip_binding_serializers import IPBindingSerializer
 import apps.network.integrations.mikrotik_api as mikrotik_api_module
 
 logger = logging.getLogger(__name__)
+
+
+def _plan_max_limit(plan) -> str:
+    """
+    Build a MikroTik max-limit string ('upload/download') from a HotspotPlan,
+    honouring speed_unit (Mbps vs Kbps) and distinct up/down values instead of
+    silently defaulting.
+    """
+    unit = (getattr(plan, 'speed_unit', 'MBPS') or 'MBPS').upper()
+    suffix = 'k' if unit == 'KBPS' else 'M'
+
+    download = getattr(plan, 'download_speed', None)
+    upload = getattr(plan, 'upload_speed', None)
+
+    # Only fall back to a default when the plan genuinely has no value set —
+    # never silently override a real (even small) configured speed.
+    if not download:
+        download = 5
+    if not upload:
+        upload = download
+
+    return f"{upload}{suffix}/{download}{suffix}"
+
+
+def _resolve_ip_for_mac(api: "mikrotik_api_module.MikrotikAPI", mac: str) -> str:
+    """Best-effort IP lookup via ARP/DHCP when the caller didn't supply one."""
+    try:
+        hosts = api.get_arp_and_dhcp_hosts()
+        match = next((h for h in hosts if h.get('mac', '').upper() == mac.upper()), None)
+        return match.get('ip', '') if match else ''
+    except Exception as e:
+        logger.warning(f"IP resolution for {mac} failed (non-fatal): {e}")
+        return ''
 
 
 class IPBindingViewSet(viewsets.ModelViewSet):
@@ -40,32 +74,65 @@ class IPBindingViewSet(viewsets.ModelViewSet):
         router = data['router']
         plan = data.get('plan')
         mac = data['mac_address']
-        ip_address = data.get('ip_address', '')
+        ip_address = data.get('ip_address', '') or ''
         name = data.get('name') or mac
 
         if not plan:
             return Response({'error': 'A plan is required to determine speed and duration'}, status=400)
 
+        # ── Idempotency guard: prevent duplicate router objects from a
+        # double-click. If an active binding already exists for this
+        # router+mac, just return it instead of creating a duplicate.
+        existing = IPBinding.objects.filter(
+            router=router, mac_address=mac, status='active'
+        ).first()
+        if existing:
+            return Response(self.get_serializer(existing).data, status=status.HTTP_200_OK)
+
         expires_at = timezone.now() + timedelta(minutes=plan.total_validity_minutes)
+        max_limit = _plan_max_limit(plan)
 
         api = mikrotik_api_module.MikrotikAPI(router)
         binding_id = api.add_ip_binding(mac_address=mac, ip_address=ip_address, comment=f"Netily:{name}")
         if not binding_id:
             return Response({'error': 'Failed to create binding on router. Check router connectivity.'}, status=502)
 
-        queue_name = f"netily-ipb-{mac.replace(':', '')}"
-        speed_val = getattr(plan, 'download_speed', None) or 5
-        max_limit = f"{speed_val}M/{speed_val}M"
-        queue_ok = api.add_simple_queue(queue_name, f"{ip_address}/32", max_limit) if ip_address else False
+        # If no IP was supplied up front, try to resolve it now so we can
+        # still apply the plan's speed via a targeted simple queue.
+        if not ip_address:
+            ip_address = _resolve_ip_for_mac(api, mac)
 
-        binding = IPBinding.objects.create(
-            router=router, plan=plan, name=name, mac_address=mac,
-            ip_address=ip_address or None, status='active',
-            activated_at=timezone.now(), expires_at=expires_at,
-            mikrotik_binding_id=binding_id or '',
-            queue_name=queue_name if queue_ok else '',
-            notes=data.get('notes', ''), created_by=request.user,
-        )
+        queue_name = f"netily-ipb-{mac.replace(':', '')}"
+        queue_ok = False
+        if ip_address:
+            queue_ok = api.add_simple_queue(queue_name, f"{ip_address}/32", max_limit)
+        else:
+            logger.warning(
+                f"IP binding {mac} on router {router.id} created without a known IP — "
+                f"no speed-limiting queue applied yet. It will apply once the device "
+                f"gets an IP (edit/recreate the binding once connected)."
+            )
+
+        try:
+            with transaction.atomic():
+                binding = IPBinding.objects.create(
+                    router=router, plan=plan, name=name, mac_address=mac,
+                    ip_address=ip_address or None, status='active',
+                    activated_at=timezone.now(), expires_at=expires_at,
+                    mikrotik_binding_id=binding_id or '',
+                    queue_name=queue_name if queue_ok else '',
+                    notes=data.get('notes', ''), created_by=request.user,
+                )
+        except IntegrityError:
+            # Lost a race with a parallel duplicate request — the router-side
+            # objects we just created are harmless duplicates of an existing
+            # binding; clean them up and return the winner.
+            self._teardown_router_objects(api, mac, binding_id, queue_name if queue_ok else '')
+            winner = IPBinding.objects.filter(router=router, mac_address=mac, status='active').first()
+            if winner:
+                return Response(self.get_serializer(winner).data, status=status.HTTP_200_OK)
+            raise
+
         return Response(self.get_serializer(binding).data, status=status.HTTP_201_CREATED)
 
     def destroy(self, request, *args, **kwargs):
@@ -102,6 +169,14 @@ class IPBindingViewSet(viewsets.ModelViewSet):
                 api.remove_simple_queue_by_name(binding.queue_name)
         except Exception as e:
             logger.warning(f"IP binding teardown failed for {binding.mac_address}: {e}")
+
+    def _teardown_router_objects(self, api, mac: str, binding_id: str, queue_name: str):
+        try:
+            api.remove_ip_binding(mac, binding_id)
+            if queue_name:
+                api.remove_simple_queue_by_name(queue_name)
+        except Exception as e:
+            logger.warning(f"Duplicate-binding cleanup failed for {mac}: {e}")
 
 
 class RouterKnownHostsView(APIView):
