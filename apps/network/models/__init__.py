@@ -1,6 +1,7 @@
 # apps/network/models/__init__.py
 
 from .router_models import Router, RouterEvent  # NEW: Import Router and RouterEvent
+from .ip_binding_models import IPBinding  # NEW: Import IPBinding
 
 from .olt_models import (
     OLTDevice, OLTPort, PONPort, ONUDevice, OLTConfig
@@ -23,9 +24,10 @@ from .ipam_models import (
     IPPool, IPAddress, DHCPRange, Subnet, VLAN
 )
 
-# Updated __all__ - Removed MikrotikDevice, added Router and RouterEvent
+# Updated __all__ - Added IPBinding
 __all__ = [
     'Router', 'RouterEvent',                     # NEW
+    'IPBinding',                                 # NEW
     'OLTDevice', 'OLTPort', 'PONPort', 'ONUDevice', 'OLTConfig',
     'CPEDevice', 'TR069Parameter', 'TR069Session', 'ACSConfiguration',
     'MikrotikInterface', 'HotspotUser', 'PPPoEUser', 'MikrotikQueue',

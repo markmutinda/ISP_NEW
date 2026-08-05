@@ -57,6 +57,9 @@ from apps.network.views.tr069_views import (
     TR069SessionViewSet,
 )
 
+# ===== IP BINDING =====
+from apps.network.views.ip_binding_views import IPBindingViewSet, RouterKnownHostsView
+
 # =========================
 # DRF ROUTER
 # =========================
@@ -78,6 +81,9 @@ router.register(r'acs-configs', ACSConfigurationViewSet)
 router.register(r'cpe-devices', CPEDeviceViewSet)
 router.register(r'tr069-parameters', TR069ParameterViewSet)
 router.register(r'tr069-sessions', TR069SessionViewSet)
+
+# Register IP Binding ViewSet
+router.register(r'ip-bindings', IPBindingViewSet, basename='ip-binding')
 
 # =========================
 # URLPATTERNS - Clean & Conflict-Free
@@ -134,6 +140,10 @@ urlpatterns = [
     
     # Legacy: Single-script download (backward compat)
     path('routers/config/', LegacyScriptDownloadView.as_view(), name='legacy-script-download'),
+    
+    # ─── IP Binding Endpoints ───
+    # Router known hosts (DHCP + ARP) for IP binding picker
+    path('routers/<int:router_id>/known-hosts/', RouterKnownHostsView.as_view(), name='router-known-hosts'),
     
     # DRF Router URLs
     path('', include(router.urls)),

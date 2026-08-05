@@ -77,6 +77,16 @@ app.conf.beat_schedule = {
     },
     
     # ────────────────────────────────────────────────────────────────
+    # IP Binding Cleanup - Runs every 5 minutes
+    # Revokes expired IP bindings + queues from MikroTik routers
+    # ────────────────────────────────────────────────────────────────
+    'cleanup-expired-ip-bindings-every-5-min': {
+        'task': 'apps.network.tasks.cleanup_expired_ip_bindings',
+        'schedule': crontab(minute='*/5'),
+        'options': {'queue': 'default'}
+    },
+    
+    # ────────────────────────────────────────────────────────────────
     # RADIUS Session Management - Runs every 5 minutes
     # Disconnects users whose Expiration attribute has passed
     # ────────────────────────────────────────────────────────────────
@@ -361,7 +371,7 @@ app.conf.task_routes = {
     'apps.messaging.tasks.*': {'queue': 'default'},      # ← Changed from 'messaging' to 'default'
     'apps.vpn.tasks.*': {'queue': 'default'},
     'apps.fup.tasks.*': {'queue': 'radius'},  # FUP tasks use radius queue
-    'apps.network.tasks.*': {'queue': 'default'},  # Network tasks (router status)
+    'apps.network.tasks.*': {'queue': 'default'},  # Network tasks (router status, IP binding cleanup)
 }
 
 # ════════════════════════════════════════════════════════════════════════════

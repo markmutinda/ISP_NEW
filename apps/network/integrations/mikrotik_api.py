@@ -1225,3 +1225,93 @@ class MikrotikAPI:
             return {"error": "Interface not found"}
         except Exception as e: return {"error": str(e)}
         finally: self.disconnect()
+
+    # ────────────────────────────────────────────────────────────────
+    # HOTSPOT IP BINDING (bypassed) — devices that skip the captive portal
+    # ────────────────────────────────────────────────────────────────
+
+    def add_ip_binding(self, mac_address: str, ip_address: str = '', comment: str = '') -> Optional[str]:
+        try:
+            if not self.connect():
+                return None
+            params = {'mac-address': mac_address, 'type': 'bypassed'}
+            if ip_address:
+                params['address'] = ip_address
+            if comment:
+                params['comment'] = comment[:255]
+            result = self.api.path('/ip/hotspot/ip-binding').add(**params)
+            return result if isinstance(result, str) else (result.get('ret') if isinstance(result, dict) else None)
+        except Exception as e:
+            logger.error(f"Failed to add IP binding {mac_address}: {e}")
+            return None
+        finally:
+            self.disconnect()
+
+    def remove_ip_binding(self, mac_address: str, binding_id: str = '') -> bool:
+        try:
+            if not self.connect():
+                return False
+            if binding_id:
+                try:
+                    self.api.path('/ip/hotspot/ip-binding').remove(binding_id)
+                    return True
+                except Exception:
+                    pass
+            for b in list(self.api.path('/ip/hotspot/ip-binding')):
+                if (b.get('mac-address', '') or '').upper() == mac_address.upper():
+                    self.api.path('/ip/hotspot/ip-binding').remove(b['.id'])
+                    return True
+            return True  # already gone
+        except Exception as e:
+            logger.error(f"Failed to remove IP binding {mac_address}: {e}")
+            return False
+        finally:
+            self.disconnect()
+
+    def remove_simple_queue_by_name(self, name: str) -> bool:
+        try:
+            if not self.connect():
+                return False
+            for q in list(self.api.path('/queue/simple')):
+                if q.get('name') == name:
+                    self.api.path('/queue/simple').remove(q['.id'])
+            return True
+        except Exception as e:
+            logger.error(f"Failed to remove simple queue {name}: {e}")
+            return False
+        finally:
+            self.disconnect()
+
+    def get_arp_and_dhcp_hosts(self) -> List[Dict]:
+        """Merge DHCP leases + ARP table for the IP-binding host picker."""
+        try:
+            if not self.connect():
+                return []
+            hosts = {}
+            try:
+                for lease in self.api.path('/ip/dhcp-server/lease'):
+                    mac = (lease.get('mac-address') or '').upper()
+                    if not mac:
+                        continue
+                    hosts[mac] = {
+                        'mac': mac,
+                        'ip': lease.get('address', ''),
+                        'hostname': lease.get('host-name', '') or lease.get('comment', ''),
+                        'source': 'dhcp',
+                    }
+            except Exception:
+                pass
+            try:
+                for entry in self.api.path('/ip/arp'):
+                    mac = (entry.get('mac-address') or '').upper()
+                    if not mac or mac in hosts:
+                        continue
+                    hosts[mac] = {'mac': mac, 'ip': entry.get('address', ''), 'hostname': '', 'source': 'arp'}
+            except Exception:
+                pass
+            return list(hosts.values())[:100]
+        except Exception as e:
+            logger.error(f"Failed to fetch ARP/DHCP hosts: {e}")
+            return []
+        finally:
+            self.disconnect()
