@@ -373,3 +373,57 @@ def recompute_single_router_uptime(self, router_id: int, schema_name: str, days=
     except Exception as e:
         logger.error(f"[UPTIME] Failed to update router {router_id}: {e}")
         raise self.retry(exc=e, countdown=30)
+
+
+@shared_task(name='apps.network.tasks.cleanup_expired_ip_bindings')
+def cleanup_expired_ip_bindings():
+    """
+    Revoke MikroTik IP bindings + queues whose expiry has passed. Per-tenant.
+    
+    This task runs periodically to clean up expired IP bindings by:
+    1. Removing the IP binding from the MikroTik router
+    2. Removing the associated simple queue if it exists
+    3. Marking the binding status as 'expired' in the database
+    
+    Returns:
+        dict: {'cleaned': total_count}
+    """
+    from django.utils import timezone as tz
+    from django_tenants.utils import schema_context
+    from apps.core.models import Tenant
+    from apps.network.models.ip_binding_models import IPBinding
+    import apps.network.integrations.mikrotik_api as mikrotik_api_module
+
+    total = 0
+    for tenant in Tenant.objects.exclude(schema_name='public'):
+        try:
+            with schema_context(tenant.schema_name):
+                expired = IPBinding.objects.select_related('router').filter(
+                    status='active', expires_at__lt=tz.now(),
+                )
+                for binding in expired:
+                    api = mikrotik_api_module.MikrotikAPI(binding.router)
+                    try:
+                        # Remove the IP binding from MikroTik
+                        api.remove_ip_binding(binding.mac_address, binding.mikrotik_binding_id)
+                        # Remove the associated queue if it exists
+                        if binding.queue_name:
+                            api.remove_simple_queue_by_name(binding.queue_name)
+                        logger.info(
+                            f"[{tenant.schema_name}] Cleaned expired IP binding "
+                            f"for {binding.mac_address} (binding ID: {binding.mikrotik_binding_id})"
+                        )
+                    except Exception as e:
+                        logger.warning(
+                            f"[{tenant.schema_name}] Teardown failed for "
+                            f"{binding.mac_address}: {e}"
+                        )
+                    # Always update status even if API call fails
+                    binding.status = 'expired'
+                    binding.save(update_fields=['status', 'updated_at'])
+                    total += 1
+        except Exception as e:
+            logger.error(f"IP binding cleanup failed for tenant {tenant.schema_name}: {e}")
+    
+    logger.info(f"[IP BINDING CLEANUP] Cleaned {total} expired bindings across all tenants")
+    return {'cleaned': total}
