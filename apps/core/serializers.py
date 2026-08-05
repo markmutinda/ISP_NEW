@@ -670,10 +670,29 @@ class DashboardStatsSerializer(serializers.Serializer):
 
 
 class GlobalSystemSettingsSerializer(serializers.ModelSerializer):
+    VALID_APPEARANCE_FONTS = {
+        "outfit",
+        "montserrat",
+        "space-grotesk",
+        "calibri",
+        "inter",
+        "roboto",
+        "lato",
+        "open-sans",
+        "source-sans-3",
+        "ibm-plex-sans",
+    }
+
     class Meta:
         model = GlobalSystemSettings
         fields = '__all__'
         read_only_fields = ['id']
+
+    def validate_appearance_font(self, value):
+        normalized = (value or "outfit").strip().lower()
+        if normalized not in self.VALID_APPEARANCE_FONTS:
+            raise serializers.ValidationError("Choose a supported appearance font.")
+        return normalized
 
 
 class CustomTokenRefreshSerializer(SimpleJWTTokenRefreshSerializer):

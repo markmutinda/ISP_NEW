@@ -641,6 +641,9 @@ class GlobalSystemSettings(models.Model):
     # Defaults to False so existing tenants keep seeing all plans.
     hide_lower_plans_in_customer_portal = models.BooleanField(default=False)
 
+    # Appearance Settings
+    appearance_font = models.CharField(max_length=40, default='outfit', blank=True)
+
     class Meta:
         app_label = 'core'
         verbose_name = 'Global System Settings'
