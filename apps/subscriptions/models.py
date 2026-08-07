@@ -1058,11 +1058,11 @@ class BillingCycle(models.Model):
         billable_count = self.calculate_total_pppoe()
         return (Decimal(str(billable_count)) * self.snapshot_pppoe_price).quantize(Decimal('0.01'))
 
-    def refresh_actual_hotspot_revenue(self):
+    def refresh_actual_hotspot_revenue(self, actual=None):
         """
         Reconcile and return actual hotspot revenue from paid sessions.
         """
-        actual = self.get_actual_hotspot_revenue()
+        actual = self.get_actual_hotspot_revenue() if actual is None else actual
         if self.hotspot_revenue_accumulated != actual:
             type(self).objects.filter(pk=self.pk).update(hotspot_revenue_accumulated=actual)
             self.hotspot_revenue_accumulated = actual
@@ -1125,7 +1125,7 @@ class BillingCycle(models.Model):
         
         return self.calculate_billable_usage_charge()
 
-    def get_actual_hotspot_revenue(self):
+    def _get_legacy_actual_hotspot_revenue(self):
         """
         Query actual paid hotspot sessions from the tenant's schema.
         Returns the sum of amounts from sessions activated during this cycle.
@@ -1142,6 +1142,55 @@ class BillingCycle(models.Model):
                 activated_at__lt=self.end_date,
             ).aggregate(total=Sum('amount'))['total']
         return result or Decimal('0.00')
+
+    def get_actual_hotspot_revenue(self):
+        return self.get_actual_hotspot_revenue_details()["revenue"]
+
+    def get_actual_hotspot_revenue_details(self):
+        """
+        Query actual paid hotspot revenue from the tenant's schema.
+
+        Completed hotspot Payment rows are the primary source of truth because
+        they reflect money received and survive hotspot session pruning. Older
+        tenants may only have HotspotSession rows, so use those as a legacy
+        fallback only when no completed hotspot payment exists in the cycle.
+        """
+        from django_tenants.utils import schema_context
+        from django.db.models import Q, Sum
+
+        with schema_context(self.tenant.schema_name):
+            from apps.billing.models import Payment
+            from apps.billing.models.hotspot_models import HotspotSession
+
+            payment_qs = Payment.objects.filter(
+                status='COMPLETED',
+                payment_date__gte=self.start_date,
+                payment_date__lt=self.end_date,
+            ).filter(
+                Q(service_type='HOTSPOT') |
+                Q(hotspot_session__isnull=False) |
+                Q(payment_number__istartswith='HS_')
+            )
+            payment_total = payment_qs.aggregate(total=Sum('amount'))['total'] or Decimal('0.00')
+            payment_count = payment_qs.count()
+
+            if payment_count:
+                return {
+                    "revenue": payment_total,
+                    "count": payment_count,
+                    "source": "completed_hotspot_payments",
+                }
+
+            session_qs = HotspotSession.objects.filter(
+                status__in=['active', 'expired'],
+                activated_at__gte=self.start_date,
+                activated_at__lt=self.end_date,
+            )
+            return {
+                "revenue": session_qs.aggregate(total=Sum('amount'))['total'] or Decimal('0.00'),
+                "count": session_qs.count(),
+                "source": "legacy_paid_hotspot_sessions",
+            }
 
 
 class BillableClientRecord(models.Model):

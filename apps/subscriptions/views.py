@@ -373,7 +373,10 @@ class SubscriptionUsageView(APIView):
                     if updates:
                         BillingCycle.objects.filter(pk=active_cycle.pk).update(**updates)
 
-                    actual_hotspot_revenue = active_cycle.refresh_actual_hotspot_revenue()
+                    hotspot_revenue_details = active_cycle.get_actual_hotspot_revenue_details()
+                    actual_hotspot_revenue = active_cycle.refresh_actual_hotspot_revenue(
+                        hotspot_revenue_details["revenue"]
+                    )
                     hotspot_share = active_cycle.calculate_hotspot_revenue_share(actual_hotspot_revenue)
                     billable_pppoe = active_cycle.calculate_total_pppoe()
                     pppoe_charge = active_cycle.calculate_pppoe_charge()
@@ -434,6 +437,13 @@ class SubscriptionUsageView(APIView):
                         'invoice_total_estimate': invoice_total_estimate,
                         'invoice_number': invoice_number,
                         'invoice_adjustment_note': invoice_adjustment_note,
+                        'hotspot_revenue_count': hotspot_revenue_details["count"],
+                        'hotspot_revenue_source': hotspot_revenue_details["source"],
+                        'hotspot_revenue_note': (
+                            'Hotspot revenue is reconciled from completed hotspot payments in the active billing cycle.'
+                            if hotspot_revenue_details["source"] == "completed_hotspot_payments"
+                            else 'Hotspot revenue is reconciled from legacy paid hotspot sessions because no completed hotspot payment records were found in this cycle.'
+                        ),
                     })
         
         data = {

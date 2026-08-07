@@ -142,6 +142,8 @@ class SubscriptionUsageSerializer(serializers.Serializer):
     hotspot_revenue_accrued = serializers.DecimalField(max_digits=12, decimal_places=2, required=False)
     hotspot_revenue_share_pct = serializers.DecimalField(max_digits=5, decimal_places=2, required=False)
     hotspot_revenue_share_amount = serializers.DecimalField(max_digits=12, decimal_places=2, required=False)
+    hotspot_revenue_count = serializers.IntegerField(required=False)
+    hotspot_revenue_source = serializers.CharField(required=False, allow_blank=True)
     hotspot_minimum_charge = serializers.DecimalField(max_digits=12, decimal_places=2, required=False)
     hotspot_billable_charge = serializers.DecimalField(max_digits=12, decimal_places=2, required=False)
     pppoe_count = serializers.IntegerField(required=False)

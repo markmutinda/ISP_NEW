@@ -187,24 +187,15 @@ def generate_metered_invoices():
                     logger.info(f"[{tenant.name}] Found {len(active_usernames)} unique PPPoE users with positive usage during cycle")
 
                     # ─── ACTUAL HOTSPOT REVENUE FROM DATABASE ───
-                    # Query the REAL paid sessions instead of trusting the accumulator.
-                    # This is the single source of truth for hotspot billing.
-                    from apps.billing.models.hotspot_models import HotspotSession
-                    actual_hotspot_revenue = HotspotSession.objects.filter(
-                        status__in=['active', 'expired'],
-                        activated_at__gte=cycle.start_date,
-                        activated_at__lt=cycle.end_date,
-                    ).aggregate(total=Sum('amount'))['total'] or Decimal('0.00')
-
-                    hotspot_session_count = HotspotSession.objects.filter(
-                        status__in=['active', 'expired'],
-                        activated_at__gte=cycle.start_date,
-                        activated_at__lt=cycle.end_date,
-                    ).count()
+                    # Query the reconciled hotspot revenue instead of trusting the accumulator.
+                    # Completed hotspot payments are the primary source of truth.
+                    hotspot_details = cycle.get_actual_hotspot_revenue_details()
+                    actual_hotspot_revenue = hotspot_details["revenue"]
+                    hotspot_session_count = hotspot_details["count"]
 
                     logger.info(
                         f"[{tenant.name}] Actual hotspot revenue from {hotspot_session_count} "
-                        f"paid sessions: KES {actual_hotspot_revenue:,.2f} "
+                        f"{hotspot_details['source']}: KES {actual_hotspot_revenue:,.2f} "
                         f"(accumulator was: KES {cycle.hotspot_revenue_accumulated:,.2f})"
                     )
 
@@ -848,14 +839,12 @@ def send_trial_welcome_email(self, company_id):
 @shared_task
 def reconcile_hotspot_accumulators():
     """
-    Periodic task: recalculate hotspot_revenue_accumulated from actual
-    HotspotSession records for all active billing cycles.
+    Periodic task: recalculate hotspot_revenue_accumulated from completed
+    hotspot payments for all active billing cycles.
 
     This ensures the real-time accumulator stays in sync with the DB
     source of truth, catching any drift from bugs or race conditions.
     """
-    from apps.billing.models.hotspot_models import HotspotSession
-
     active_cycles = BillingCycle.objects.filter(
         status='active',
     ).select_related('tenant')
@@ -863,18 +852,15 @@ def reconcile_hotspot_accumulators():
     reconciled = 0
     for cycle in active_cycles:
         try:
-            with schema_context(cycle.tenant.schema_name):
-                actual = HotspotSession.objects.filter(
-                    status__in=['active', 'expired'],
-                    activated_at__gte=cycle.start_date,
-                    activated_at__lt=cycle.end_date,
-                ).aggregate(total=Sum('amount'))['total'] or Decimal('0.00')
+            actual_details = cycle.get_actual_hotspot_revenue_details()
+            actual = actual_details["revenue"]
 
             with schema_context(get_public_schema_name()):
                 if cycle.hotspot_revenue_accumulated != actual:
                     logger.info(
                         f"[{cycle.tenant.schema_name}] Reconciling hotspot accumulator: "
-                        f"KES {cycle.hotspot_revenue_accumulated} -> KES {actual}"
+                        f"KES {cycle.hotspot_revenue_accumulated} -> KES {actual} "
+                        f"({actual_details['source']})"
                     )
                     BillingCycle.objects.filter(pk=cycle.pk).update(
                         hotspot_revenue_accumulated=actual
@@ -913,7 +899,6 @@ def refresh_metered_billing_estimates():
 
             with schema_context(schema):
                 from apps.customers.models import Customer
-                from apps.billing.models.hotspot_models import HotspotSession
                 pppoe_count = Customer.objects.count()
 
             pppoe_unit = Decimal(str(plan.pppoe_unit_price))
@@ -945,12 +930,7 @@ def refresh_metered_billing_estimates():
                     if updates:
                         BillingCycle.objects.filter(pk=active_cycle.pk).update(**updates)
 
-                    with schema_context(schema):
-                        hotspot_revenue = HotspotSession.objects.filter(
-                            status__in=['active', 'expired'],
-                            activated_at__gte=active_cycle.start_date,
-                            activated_at__lt=active_cycle.end_date,
-                        ).aggregate(total=Sum('amount'))['total'] or Decimal('0.00')
+                    hotspot_revenue = active_cycle.get_actual_hotspot_revenue()
 
                     if active_cycle.hotspot_revenue_accumulated != hotspot_revenue:
                         BillingCycle.objects.filter(pk=active_cycle.pk).update(
@@ -977,12 +957,7 @@ def refresh_metered_billing_estimates():
                     cycle_id = str(active_cycle.id)
                     cycle_start = active_cycle.start_date.isoformat()
                     cycle_end = active_cycle.end_date.isoformat()
-                    with schema_context(schema):
-                        hotspot_revenue = HotspotSession.objects.filter(
-                            status__in=['active', 'expired'],
-                            activated_at__gte=active_cycle.start_date,
-                            activated_at__lt=active_cycle.end_date,
-                        ).aggregate(total=Sum('amount'))['total'] or Decimal('0.00')
+                    hotspot_revenue = active_cycle.get_actual_hotspot_revenue()
                     if hotspot_revenue:
                         BillingCycle.objects.filter(pk=active_cycle.pk).update(
                             hotspot_revenue_accumulated=hotspot_revenue

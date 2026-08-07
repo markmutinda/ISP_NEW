@@ -1,10 +1,9 @@
 """
-Recalculate hotspot_revenue_accumulated from ACTUAL paid HotspotSession records.
+Recalculate hotspot_revenue_accumulated from actual hotspot revenue.
 
 Instead of trusting the running accumulator (which can drift due to bugs,
-double-counting, or missed decrements), this command queries the real
-HotspotSession rows in each tenant's schema and sets the accumulator
-to the actual sum.
+double-counting, or missed decrements), this command uses the same
+payment-first reconciliation logic as the subscription usage API.
 
 Applies to ALL tenants by default, or a single tenant with --tenant.
 
@@ -13,15 +12,12 @@ Usage:
     python manage.py fix_hotspot_revenue --apply   # actually update
     python manage.py fix_hotspot_revenue --apply --tenant pink4
 """
-from decimal import Decimal
-
 from django.core.management.base import BaseCommand
-from django.db.models import Sum
 from django_tenants.utils import schema_context, get_public_schema_name
 
 
 class Command(BaseCommand):
-    help = "Recalculate hotspot_revenue_accumulated from actual paid HotspotSession records for all tenants."
+    help = "Recalculate hotspot_revenue_accumulated from actual hotspot revenue for all tenants."
 
     def add_arguments(self, parser):
         parser.add_argument(
@@ -66,27 +62,18 @@ class Command(BaseCommand):
                 f" -> {cycle.end_date.date()} (status={cycle.status})"
             )
 
-            # Query actual paid sessions from the tenant's schema
-            with schema_context(tenant.schema_name):
-                from apps.billing.models.hotspot_models import HotspotSession
-                actual_revenue = HotspotSession.objects.filter(
-                    status__in=['active', 'expired'],
-                    activated_at__gte=cycle.start_date,
-                    activated_at__lt=cycle.end_date,
-                ).aggregate(total=Sum('amount'))['total'] or Decimal('0.00')
-
-                session_count = HotspotSession.objects.filter(
-                    status__in=['active', 'expired'],
-                    activated_at__gte=cycle.start_date,
-                    activated_at__lt=cycle.end_date,
-                ).count()
+            revenue_details = cycle.get_actual_hotspot_revenue_details()
+            actual_revenue = revenue_details["revenue"]
+            record_count = revenue_details["count"]
+            source = revenue_details["source"]
 
             old_val = cycle.hotspot_revenue_accumulated
             drift = old_val - actual_revenue
 
             if old_val == actual_revenue:
                 self.stdout.write(
-                    f"  [OK] {label}: KES {old_val} -- already correct ({session_count} sessions)"
+                    f"  [OK] {label}: KES {old_val} -- already correct "
+                    f"({record_count} {source})"
                 )
                 skipped_count += 1
                 continue
@@ -99,13 +86,13 @@ class Command(BaseCommand):
                 self.stdout.write(
                     self.style.SUCCESS(
                         f"  FIXED {label}: KES {old_val} -> KES {actual_revenue} "
-                        f"(drift: {drift:+,.2f}, {session_count} actual sessions)"
+                        f"(drift: {drift:+,.2f}, {record_count} {source})"
                     )
                 )
             else:
                 self.stdout.write(
                     f"  [DRY-RUN] {label}: KES {old_val} -> KES {actual_revenue} "
-                    f"(drift: {drift:+,.2f}, {session_count} actual sessions)"
+                    f"(drift: {drift:+,.2f}, {record_count} {source})"
                 )
             fixed_count += 1
 
