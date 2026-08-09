@@ -2245,7 +2245,8 @@ class UnifiedDashboardView(APIView):
     
     GET /api/v1/core/dashboard/unified/
     """
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, IsAdminOrStaff, HasRoleAccessPolicy]
+    required_rbac_path = "/admin"
 
     def get(self, request):
         from django.db.models import Sum, Count, Q
@@ -2261,6 +2262,7 @@ class UnifiedDashboardView(APIView):
         # ============================================================
         from django.db import connection
         tenant_schema = connection.schema_name
+        can_view_revenue = self._can_view_revenue(request)
 
         # ============================================================
         # FIX: Convert to local time before computing day/week/month boundaries
@@ -2450,17 +2452,20 @@ class UnifiedDashboardView(APIView):
         with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
             futures = {
                 'customers': executor.submit(get_customer_stats),
-                'revenue': executor.submit(get_revenue_stats),
+                'revenue': executor.submit(get_revenue_stats) if can_view_revenue else None,
                 'routers': executor.submit(get_router_stats),
                 'tickets': executor.submit(get_ticket_stats),
                 'expired': executor.submit(get_expired_count),
                 'subscriptions': executor.submit(get_active_subscriptions),
                 'online': executor.submit(get_online_count),
                 'activity': executor.submit(get_recent_activity),
-                'weekly_income': executor.submit(get_weekly_income),
-                'monthly_earnings': executor.submit(get_monthly_earnings),
+                'weekly_income': executor.submit(get_weekly_income) if can_view_revenue else None,
+                'monthly_earnings': executor.submit(get_monthly_earnings) if can_view_revenue else None,
             }
-            results = {k: f.result() for k, f in futures.items()}
+            results = {
+                k: f.result() if f is not None else {}
+                for k, f in futures.items()
+            }
 
         rev = results['revenue']
         today_rev = float(rev.get('today') or 0)
@@ -2522,3 +2527,38 @@ class UnifiedDashboardView(APIView):
                 'last_year_earnings': earnings.get('last_year', []),
             },
         })
+
+    def _can_view_revenue(self, request) -> bool:
+        user = getattr(request, "user", None)
+        if not user or not user.is_authenticated:
+            return False
+        if getattr(user, "is_superuser", False):
+            return True
+
+        permission = HasRoleAccessPolicy()
+        role = permission._normalize(getattr(user, "role", None))
+        access_level = permission._normalize(getattr(user, "access_level", None))
+        if role in permission.admin_roles or access_level in permission.admin_roles:
+            return True
+
+        custom_allowed = getattr(user, "custom_allowed_paths", None)
+        if custom_allowed is not None:
+            allowed = custom_allowed
+        else:
+            try:
+                policy = RoleAccessPolicy.objects.filter(role=role).first()
+                allowed = policy.allowed_paths if policy is not None else DEFAULT_ROLE_ACCESS_POLICIES.get(role, [])
+            except Exception:
+                allowed = DEFAULT_ROLE_ACCESS_POLICIES.get(role, [])
+
+        finance_paths = (
+            "/admin/payments",
+            "/admin/invoices",
+            "/admin/receipts",
+            "/admin/analytics",
+            "/admin/settings/billing",
+        )
+        return any(
+            permission._path_is_allowed(allowed or [], path, "view")
+            for path in finance_paths
+        )

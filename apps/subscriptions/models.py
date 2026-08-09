@@ -988,6 +988,37 @@ class BillingCycle(models.Model):
             self.snapshot_hotspot_share_pct = plan.hotspot_revenue_share_pct
         super().save(*args, **kwargs)
 
+    @classmethod
+    def get_current_active_cycle(cls, tenant, subscription, *, create=False, now=None):
+        """
+        Return the active billing cycle that overlaps the current clock time.
+        Stale active rows are ignored so live usage only reflects the tenant's
+        current billing window.
+        """
+        now = now or timezone.now()
+        qs = cls.objects.filter(
+            tenant=tenant,
+            subscription=subscription,
+            status='active',
+            start_date__lte=now,
+            end_date__gt=now,
+        ).select_related('tenant', 'subscription__plan').order_by('-start_date')
+        cycle = qs.first()
+        if cycle or not create:
+            return cycle
+
+        start = subscription.current_period_start or now
+        end = subscription.current_period_end or (start + timedelta(days=30))
+        if end <= now:
+            end = now + timedelta(days=30)
+        return cls.objects.create(
+            tenant=tenant,
+            subscription=subscription,
+            start_date=start,
+            end_date=end,
+            status='active',
+        )
+
     def get_raw_pppoe_count(self):
         """
         Returns the actual number of unique PPPoE users with positive usage.

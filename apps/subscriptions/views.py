@@ -330,33 +330,18 @@ class SubscriptionUsageView(APIView):
 
         if plan.is_metered and tenant:
             with schema_context('public'):
-                active_cycle = BillingCycle.objects.filter(
-                    tenant=tenant,
-                    subscription=subscription,
-                    status__in=['active', 'invoiced'],
-                ).select_related('tenant', 'subscription__plan').order_by('-start_date').first()
+                active_cycle = BillingCycle.get_current_active_cycle(
+                    tenant,
+                    subscription,
+                    create=subscription.status in ['active', 'trial'],
+                )
 
                 if not active_cycle:
-                    active_cycle = BillingCycle.objects.filter(
-                        tenant=tenant,
-                        subscription=subscription,
-                    ).select_related('tenant', 'subscription__plan').order_by('-end_date').first()
-
-                if not active_cycle:
-                    if subscription.status in ['active', 'trial']:
-                        active_cycle = BillingCycle.objects.create(
-                            tenant=tenant,
-                            subscription=subscription,
-                            start_date=subscription.current_period_start or timezone.now(),
-                            end_date=subscription.current_period_end or (timezone.now() + timedelta(days=30)),
-                            status='active',
-                        )
-                    else:
-                        logger.warning(
-                            "No billing cycle found for expired subscription company=%s tenant=%s",
-                            company.id,
-                            tenant.schema_name,
-                        )
+                    logger.warning(
+                        "No current active billing cycle found for company=%s tenant=%s",
+                        company.id,
+                        tenant.schema_name,
+                    )
 
                 if active_cycle:
                     fallback_pct = Decimal(str(plan.hotspot_revenue_share_pct or 0)) or Decimal('3.00')

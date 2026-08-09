@@ -29,9 +29,11 @@ def validate_dashboard_access_tokens(value):
         raise serializers.ValidationError("Dashboard access must be a list of route tokens.")
     cleaned = []
     for token in value:
-        if not isinstance(token, str) or not token.startswith("/admin/"):
+        if not isinstance(token, str):
             raise serializers.ValidationError("Each dashboard access token must be an admin route path.")
         route = token.split("::", 1)[0]
+        if not (route == "/admin" or route.startswith("/admin/")):
+            raise serializers.ValidationError("Each dashboard access token must be an admin route path.")
         if route in NON_DELEGABLE_RBAC_PATHS:
             raise serializers.ValidationError("Staff access management cannot be delegated.")
         if token not in cleaned:

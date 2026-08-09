@@ -14,7 +14,8 @@ def tokens(path: str, actions: tuple[str, ...] = ("view",)) -> list[str]:
 
 DEFAULT_ROLE_ACCESS_POLICIES: dict[str, list[str]] = {
     "staff": (
-        tokens("/admin/users", ("view", "view_details", "add", "edit"))
+        tokens("/admin")
+        + tokens("/admin/users", ("view", "view_details", "add", "edit"))
         + tokens("/admin/dispatch", ("view", "view_details", "add", "edit"))
         + tokens("/admin/inventory", ("view", "view_details"))
         + tokens("/admin/tickets", ("view", "view_details", "add", "edit"))
@@ -24,7 +25,8 @@ DEFAULT_ROLE_ACCESS_POLICIES: dict[str, list[str]] = {
         + tokens("/admin/ads", ("view", "add", "edit"))
     ),
     "technician": (
-        tokens("/admin/olt", ("view", "add", "edit"))
+        tokens("/admin")
+        + tokens("/admin/olt", ("view", "add", "edit"))
         + tokens("/admin/onu", ("view", "add", "edit"))
         + tokens("/admin/routers", ("view", "view_details", "add", "edit"))
         + tokens("/admin/networks", ("view", "add", "edit"))
@@ -36,7 +38,8 @@ DEFAULT_ROLE_ACCESS_POLICIES: dict[str, list[str]] = {
         + tokens("/admin/tickets", ("view", "view_details", "edit"))
     ),
     "accountant": (
-        tokens("/admin/users", ("view", "view_details"))
+        tokens("/admin")
+        + tokens("/admin/users", ("view", "view_details"))
         + tokens("/admin/invoices", ("view", "view_details", "add", "edit"))
         + tokens("/admin/payments", ("view", "view_details", "add"))
         + tokens("/admin/receipts", ("view", "view_details"))
@@ -47,7 +50,8 @@ DEFAULT_ROLE_ACCESS_POLICIES: dict[str, list[str]] = {
         + tokens("/admin/sms", ("view", "add"))
     ),
     "support": (
-        tokens("/admin/users", ("view", "view_details", "edit"))
+        tokens("/admin")
+        + tokens("/admin/users", ("view", "view_details", "edit"))
         + tokens("/admin/dispatch", ("view", "view_details", "add", "edit"))
         + tokens("/admin/tickets", ("view", "view_details", "add", "edit"))
         + tokens("/admin/leads", ("view", "view_details", "add", "edit"))
@@ -61,20 +65,20 @@ DEFAULT_ROLE_ACCESS_POLICIES: dict[str, list[str]] = {
 
 LEGACY_DEFAULT_ROLE_ACCESS_POLICIES: dict[str, list[str]] = {
     "staff": [
-        "/admin/users", "/admin/dispatch", "/admin/inventory", "/admin/tickets",
+        "/admin", "/admin/users", "/admin/dispatch", "/admin/inventory", "/admin/tickets",
         "/admin/leads", "/admin/loyalty", "/admin/sms", "/admin/ads",
     ],
     "technician": [
-        "/admin/olt", "/admin/onu", "/admin/routers", "/admin/networks", "/admin/radius",
+        "/admin", "/admin/olt", "/admin/onu", "/admin/routers", "/admin/networks", "/admin/radius",
         "/admin/fup", "/admin/usage", "/admin/dispatch", "/admin/inventory", "/admin/tickets",
     ],
     "accountant": [
-        "/admin/users", "/admin/invoices", "/admin/payments", "/admin/receipts",
+        "/admin", "/admin/users", "/admin/invoices", "/admin/payments", "/admin/receipts",
         "/admin/vouchers", "/admin/payment-methods", "/admin/analytics",
         "/admin/settings/billing", "/admin/sms",
     ],
     "support": [
-        "/admin/users", "/admin/dispatch", "/admin/tickets", "/admin/leads",
+        "/admin", "/admin/users", "/admin/dispatch", "/admin/tickets", "/admin/leads",
         "/admin/loyalty", "/admin/sms", "/admin/ads", "/admin/inventory",
     ],
 }
@@ -117,7 +121,21 @@ def normalize_role_access_policies(*, reset_defaults: bool = False, dry_run: boo
             continue
 
         current_paths = policy.allowed_paths or []
-        should_update = reset_defaults or set(current_paths) == set(legacy_paths)
+        default_without_dashboard = [
+            path for path in default_paths
+            if path not in {"/admin::view", "/admin"}
+        ]
+        legacy_without_dashboard = [
+            path for path in legacy_paths
+            if path != "/admin"
+        ]
+        current_set = set(current_paths)
+        should_update = (
+            reset_defaults
+            or current_set == set(legacy_paths)
+            or current_set == set(legacy_without_dashboard)
+            or current_set == set(default_without_dashboard)
+        )
         if should_update and set(current_paths) != set(default_paths):
             summary["updated"] += 1
             summary["roles"][role] = "reset" if reset_defaults else "normalized"

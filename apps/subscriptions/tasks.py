@@ -724,6 +724,8 @@ def sweep_pppoe_ghost_records():
 
     active_cycles = BillingCycle.objects.filter(
         status='active',
+        start_date__lte=now,
+        end_date__gt=now,
     ).select_related('tenant')
 
     total_created = 0
@@ -910,11 +912,11 @@ def refresh_metered_billing_estimates():
             cycle_end = None
 
             with schema_context(get_public_schema_name()):
-                active_cycle = BillingCycle.objects.filter(
-                    tenant=tenant,
-                    subscription=company.subscription,
-                    status='active',
-                ).select_related('tenant').order_by('-start_date').first()
+                active_cycle = BillingCycle.get_current_active_cycle(
+                    tenant,
+                    company.subscription,
+                    create=False,
+                )
 
                 if active_cycle:
                     updates = {}
@@ -944,12 +946,10 @@ def refresh_metered_billing_estimates():
                     cycle_start = active_cycle.start_date.isoformat()
                     cycle_end = active_cycle.end_date.isoformat()
                 else:
-                    active_cycle = BillingCycle.objects.create(
+                    active_cycle = BillingCycle.get_current_active_cycle(
                         tenant=tenant,
                         subscription=company.subscription,
-                        start_date=company.subscription.current_period_start or timezone.now(),
-                        end_date=company.subscription.current_period_end or (timezone.now() + timedelta(days=30)),
-                        status='active',
+                        create=True,
                     )
                     minimum_charge = active_cycle.snapshot_base_fee or minimum_charge
                     pppoe_unit = active_cycle.snapshot_pppoe_price or pppoe_unit

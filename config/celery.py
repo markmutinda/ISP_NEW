@@ -279,7 +279,7 @@ app.conf.beat_schedule = {
     },
     'reconcile-hotspot-accumulators': {
         'task': 'apps.subscriptions.tasks.reconcile_hotspot_accumulators',
-        'schedule': crontab(hour=6, minute=0),  # Daily at 6:00 AM
+        'schedule': crontab(hour='8,14,20', minute=0),  # Same cadence as metered billing estimates
         'options': {'queue': 'billing'}
     },
 
