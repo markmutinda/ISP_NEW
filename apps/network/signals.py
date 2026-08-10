@@ -2,11 +2,12 @@ from django.db.models.signals import post_save, post_delete, pre_delete
 from django.dispatch import receiver
 from django.db import transaction
 from django.core.cache import cache
+from django.db import connection
+from django_tenants.utils import schema_context
 from apps.network.models.router_models import Router
 from apps.radius.models import Nas
 from apps.vpn.services.vpn_provisioning_service import VPNProvisioningService
-from django.db import connection
-from django_tenants.utils import schema_context
+from apps.core.cache_versioning import bump_cache_version
 import logging
 import subprocess
 
@@ -460,7 +461,7 @@ def clone_global_hotspot_plans_to_new_router(sender, instance, created, **kwargs
         ).order_by('name', 'sort_order', 'id'):
 
             if plan.name in seen_names:
-                continue  # Skip duplicates — same plan exists on multiple routers
+                continue  # Skip duplicates — same plan exists on different routers
             seen_names.add(plan.name)
 
             # Don't overwrite if new router already has a plan with this name
@@ -511,3 +512,23 @@ def clone_global_hotspot_plans_to_new_router(sender, instance, created, **kwargs
             f"Failed to clone global hotspot plans to router {instance.id}: {e}",
             exc_info=True,
         )
+
+
+# ────────────────────────────────────────────────────────────────
+# FIX 4: Cache invalidation signals for captive portal
+# Bumps cache version when router changes
+# ────────────────────────────────────────────────────────────────
+
+@receiver(post_save, sender=Router)
+@receiver(post_delete, sender=Router)
+def _bump_captive_cache_on_router_change(sender, instance, **kwargs):
+    """
+    Bump cache version when a Router is created, updated, or deleted.
+    This instantly invalidates all cached captive portal payloads for this tenant.
+    """
+    try:
+        schema_name = connection.schema_name
+        bump_cache_version(schema_name)
+        logger.debug(f"Cache version bumped for schema {schema_name} due to Router change")
+    except Exception as e:
+        logger.error(f"Failed to bump cache version on Router change: {e}")
