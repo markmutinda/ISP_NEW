@@ -2236,7 +2236,7 @@ class TenantLeadDetailView(APIView):
 
 
 # ============================================================
-# NEW: Unified Dashboard View - Single endpoint replacing 8+ calls
+# UNIFIED DASHBOARD VIEW - Single endpoint replacing 8+ calls
 # ============================================================
 class UnifiedDashboardView(APIView):
     """
@@ -2254,30 +2254,20 @@ class UnifiedDashboardView(APIView):
         from datetime import timedelta
         import concurrent.futures
 
-        # ============================================================
-        # FIX: Capture tenant schema BEFORE spawning threads
-        # Each worker thread gets its own fresh DB connection that does
-        # NOT inherit django-tenants' schema/search_path. Without this,
-        # every query in the thread runs against the public schema.
-        # ============================================================
+        # Capture tenant schema BEFORE spawning threads
         from django.db import connection
         tenant_schema = connection.schema_name
         can_view_revenue = self._can_view_revenue(request)
 
-        # ============================================================
-        # FIX: Convert to local time before computing day/week/month boundaries
-        # ============================================================
+        # Convert to local time before computing day/week/month boundaries
         now = timezone.now()
-        local_now = timezone.localtime(now)  # convert UTC -> Africa/Nairobi
+        local_now = timezone.localtime(now)
         today_start = local_now.replace(hour=0, minute=0, second=0, microsecond=0)
         yesterday_start = today_start - timedelta(days=1)
         
-        # ============================================================
-        # FIX: Use Monday-anchored calendar week instead of rolling 7 days
-        # This matches weekly_income chart and fixes "This Week" revenue
-        # ============================================================
-        days_to_monday = today_start.weekday()  # Monday=0 ... Sunday=6
-        week_start = today_start - timedelta(days=days_to_monday)   # ✅ Monday 00:00 of current week
+        # Use Monday-anchored calendar week
+        days_to_monday = today_start.weekday()
+        week_start = today_start - timedelta(days=days_to_monday)
         
         month_start = today_start.replace(day=1)
         prev_month_start = (month_start - timedelta(days=1)).replace(day=1)
@@ -2327,29 +2317,32 @@ class UnifiedDashboardView(APIView):
                 except Exception:
                     return {'total': 0, 'online': 0, 'offline': 0, 'warning': 0, 'maintenance': 0, 'total_connected_users': 0}
 
-        def get_ticket_stats():
+        # COMBINED: tickets, expired, and online in ONE worker
+        def get_misc_stats():
             with schema_context(tenant_schema):
                 try:
                     from apps.support.models import SupportTicket as Ticket
-                    return Ticket.objects.aggregate(
+                    from apps.radius.models import CustomerRadiusCredentials, RadAcct
+
+                    tickets = Ticket.objects.aggregate(
                         total=Count('id'),
                         open=Count('id', filter=Q(status__iexact='open')),
                         in_progress=Count('id', filter=Q(status__iexact='in_progress')),
                         resolved=Count('id', filter=Q(status__iexact='resolved')),
                     )
-                except Exception:
-                    return {'total': 0, 'open': 0, 'in_progress': 0, 'resolved': 0}
-
-        def get_expired_count():
-            with schema_context(tenant_schema):
-                try:
-                    from apps.radius.models import CustomerRadiusCredentials
-                    return CustomerRadiusCredentials.objects.filter(
+                    expired = CustomerRadiusCredentials.objects.filter(
                         expiration_date__isnull=False,
                         expiration_date__lte=local_now,
                     ).count()
+                    online = RadAcct.objects.filter(acctstoptime__isnull=True).count()
+
+                    return {
+                        'tickets': tickets,
+                        'expired': expired,
+                        'online': online,
+                    }
                 except Exception:
-                    return 0
+                    return {'tickets': {}, 'expired': 0, 'online': 0}
 
         def get_active_subscriptions():
             with schema_context(tenant_schema):
@@ -2371,14 +2364,6 @@ class UnifiedDashboardView(APIView):
                     return {'pppoe': pppoe_count, 'hotspot': hotspot_active, 'total': pppoe_count + hotspot_active}
                 except Exception:
                     return {'pppoe': 0, 'hotspot': 0, 'total': 0}
-
-        def get_online_count():
-            with schema_context(tenant_schema):
-                try:
-                    from apps.radius.models import RadAcct
-                    return RadAcct.objects.filter(acctstoptime__isnull=True).count()
-                except Exception:
-                    return 0
 
         def get_recent_activity():
             with schema_context(tenant_schema):
@@ -2408,7 +2393,6 @@ class UnifiedDashboardView(APIView):
                         )
                         weekday_map = {i: 0 for i in range(7)}
                         for p in payments:
-                            # FIX: Convert UTC to local timezone before calling .weekday()
                             local_dt = timezone.localtime(p.payment_date)
                             weekday_map[local_dt.weekday()] += float(p.amount or 0)
                         labels = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']
@@ -2448,16 +2432,14 @@ class UnifiedDashboardView(APIView):
                 except Exception:
                     return {'this_year': [], 'last_year': []}
 
-        # Run all queries in parallel using threads
-        with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
+        # Run all queries in parallel - REDUCED from 8 to 6 workers
+        with concurrent.futures.ThreadPoolExecutor(max_workers=6) as executor:
             futures = {
                 'customers': executor.submit(get_customer_stats),
                 'revenue': executor.submit(get_revenue_stats) if can_view_revenue else None,
                 'routers': executor.submit(get_router_stats),
-                'tickets': executor.submit(get_ticket_stats),
-                'expired': executor.submit(get_expired_count),
+                'misc': executor.submit(get_misc_stats),  # Combined worker
                 'subscriptions': executor.submit(get_active_subscriptions),
-                'online': executor.submit(get_online_count),
                 'activity': executor.submit(get_recent_activity),
                 'weekly_income': executor.submit(get_weekly_income) if can_view_revenue else None,
                 'monthly_earnings': executor.submit(get_monthly_earnings) if can_view_revenue else None,
@@ -2466,6 +2448,12 @@ class UnifiedDashboardView(APIView):
                 k: f.result() if f is not None else {}
                 for k, f in futures.items()
             }
+
+        # Extract combined misc stats
+        misc = results.get('misc', {})
+        tickets = misc.get('tickets', {})
+        expired_count = misc.get('expired', 0)
+        online_count = misc.get('online', 0)
 
         rev = results['revenue']
         today_rev = float(rev.get('today') or 0)
@@ -2487,9 +2475,9 @@ class UnifiedDashboardView(APIView):
         return Response({
             'total_customers': results['customers'].get('total', 0),
             'active_customers': results['customers'].get('active', 0),
-            'expired_customers': results['expired'],
+            'expired_customers': expired_count,
             'active_subscriptions': subs,
-            'online_count': results['online'],
+            'online_count': online_count,
             'routers': {
                 'total_routers': r.get('total', 0),
                 'online_routers': r.get('online', 0),
@@ -2507,10 +2495,10 @@ class UnifiedDashboardView(APIView):
                 'transactions_today': int(rev.get('today_tx') or 0),
             },
             'tickets': {
-                'total': results['tickets'].get('total', 0),
-                'open': results['tickets'].get('open', 0),
-                'in_progress': results['tickets'].get('in_progress', 0),
-                'resolved': results['tickets'].get('resolved', 0),
+                'total': tickets.get('total', 0),
+                'open': tickets.get('open', 0),
+                'in_progress': tickets.get('in_progress', 0),
+                'resolved': tickets.get('resolved', 0),
                 'avg_response_time': '—',
             },
             'recent_activity': results['activity'],
@@ -2521,10 +2509,10 @@ class UnifiedDashboardView(APIView):
                 'month_revenue': month_rev,
                 'month_change': pct_change(month_rev, prev_month_rev),
                 'total_transactions_today': int(rev.get('today_tx') or 0),
-                'weekly_income': income.get('this_week', []),
-                'last_week_income': income.get('last_week', []),
-                'monthly_earnings': earnings.get('this_year', []),
-                'last_year_earnings': earnings.get('last_year', []),
+                'weekly_income': income.get('this_week', []) if income else [],
+                'last_week_income': income.get('last_week', []) if income else [],
+                'monthly_earnings': earnings.get('this_year', []) if earnings else [],
+                'last_year_earnings': earnings.get('last_year', []) if earnings else [],
             },
         })
 

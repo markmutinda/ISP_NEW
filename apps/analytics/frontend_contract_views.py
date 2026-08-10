@@ -71,64 +71,65 @@ def _bytes_to_gb(v):
 def _get_top_impactful_customers():
     """Top 10 customers by lifetime spend. Combines PPPoE + Hotspot clients."""
     from apps.billing.models.payment_models import Payment
-    from django.db.models import Sum, Count, Q
+    from django.db.models import Sum, Count, Max
 
-    # PPPoE customers
-    pppoe_rows = (
-        Payment.objects
-        .filter(status__iexact="completed", customer__isnull=False)
-        .values("customer_id", "customer__user__first_name", "customer__user__last_name", "customer__customer_code")
-        .annotate(total=Sum("amount"), tx_count=Count("id"))
-        .order_by("-total")
-    )
-
-    # Hotspot clients
-    hotspot_rows = (
-        Payment.objects
-        .filter(status__iexact="completed", hotspot_session__hotspot_client__isnull=False)
+    # PPPoE customers - DB-side aggregation
+    pppoe = (
+        Payment.objects.filter(status__iexact="completed", customer__isnull=False)
         .values(
-            "hotspot_session__hotspot_client__id",
-            "hotspot_session__hotspot_client__canonical_username",
-            "hotspot_session__hotspot_client__canonical_phone",
+            "customer_id",
+            "customer__customer_code",
+            "customer__user__first_name",
+            "customer__user__last_name"
         )
-        .annotate(total=Sum("amount"), tx_count=Count("id"))
-        .order_by("-total")
+        .annotate(
+            total_amount=Sum("amount"),
+            transaction_count=Count("id"),
+            last_payment_date=Max("payment_date")
+        )
+        .order_by("-total_amount")[:10]
     )
-
-    bucket = []
-
-    for r in pppoe_rows:
-        fn = r.get("customer__user__first_name") or ""
-        ln = r.get("customer__user__last_name") or ""
-        name = f"{fn} {ln}".strip() or r.get("customer__customer_code") or "Unknown"
-        bucket.append({
+    
+    # Hotspot clients - DB-side aggregation
+    hotspot = (
+        Payment.objects.filter(
+            status__iexact="completed",
+            hotspot_session__hotspot_client__isnull=False
+        )
+        .values(
+            "hotspot_session__hotspot_client_id",
+            "hotspot_session__hotspot_client__canonical_username"
+        )
+        .annotate(
+            total_amount=Sum("amount"),
+            transaction_count=Count("id"),
+            last_payment_date=Max("payment_date")
+        )
+        .order_by("-total_amount")[:10]
+    )
+    
+    # Build rows from aggregated data
+    rows = [
+        {
             "type": "PPPOE",
-            "display_name": name,
-            "identifier": r.get("customer__customer_code") or "",
-            "total_amount": _safe_float(r["total"]),
-            "tx_count": r["tx_count"],
-        })
-
-    for r in hotspot_rows:
-        bucket.append({
+            "display_name": f"{r['customer__user__first_name']} {r['customer__user__last_name']}".strip() or r["customer__customer_code"],
+            "total_amount": float(r["total_amount"] or 0),
+            "tx_count": r["transaction_count"],
+            "last_payment_date": r["last_payment_date"].isoformat() if r["last_payment_date"] else None
+        }
+        for r in pppoe
+    ] + [
+        {
             "type": "HOTSPOT",
-            "display_name": r.get("hotspot_session__hotspot_client__canonical_username") or "Hotspot User",
-            "identifier": r.get("hotspot_session__hotspot_client__canonical_phone") or "",
-            "total_amount": _safe_float(r["total"]),
-            "tx_count": r["tx_count"],
-        })
-
-    # Merge & deduplicate by display_name, sort, top 10
-    seen = {}
-    for item in bucket:
-        key = item["display_name"]
-        if key in seen:
-            seen[key]["total_amount"] += item["total_amount"]
-            seen[key]["tx_count"] += item["tx_count"]
-        else:
-            seen[key] = dict(item)
-
-    return sorted(seen.values(), key=lambda x: x["total_amount"], reverse=True)[:10]
+            "display_name": r["hotspot_session__hotspot_client__canonical_username"] or "Hotspot User",
+            "total_amount": float(r["total_amount"] or 0),
+            "tx_count": r["transaction_count"],
+            "last_payment_date": r["last_payment_date"].isoformat() if r["last_payment_date"] else None
+        }
+        for r in hotspot
+    ]
+    
+    return sorted(rows, key=lambda x: x["total_amount"], reverse=True)[:10]
 
 
 def _get_plan_analytics():

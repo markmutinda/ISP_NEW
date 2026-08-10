@@ -434,6 +434,7 @@ class ActiveSubscriptionsView(APIView):
     
     UPDATED: Hotspot tab now shows ALL clients (not just active) with pagination.
     FIXED: Return ALL hotspot clients — frontend handles pagination.
+    FIXED: Use PostgreSQL DISTINCT ON to deduplicate clients at the DB level.
     """
     permission_classes = [IsAuthenticated, IsAdminOrStaff, HasRoleAccessPolicy]
     required_rbac_path = "/admin/users"
@@ -503,7 +504,8 @@ class ActiveSubscriptionsView(APIView):
             })
 
         # ── Hotspot subscriptions — ALL clients, any session status ──
-        # We group by hotspot_client and show their most recent session
+        # FIX: Use PostgreSQL DISTINCT ON to deduplicate clients at the DB level
+        # This avoids materializing every session row in Python memory.
         all_hotspot_sessions = (
             HotspotSession.objects
             .filter(
@@ -511,21 +513,14 @@ class ActiveSubscriptionsView(APIView):
                 hotspot_client__isnull=False,
             )
             .select_related('plan', 'router', 'hotspot_client')
-            .order_by('-activated_at')
+            .order_by('hotspot_client_id', '-activated_at')
+            .distinct('hotspot_client_id')  # PostgreSQL DISTINCT ON
         )
 
-        # De-duplicate: one entry per client (most recent session wins)
-        seen_clients = set()
-        unique_sessions = []
-        for s in all_hotspot_sessions:
-            cid = s.hotspot_client_id
-            if cid not in seen_clients:
-                seen_clients.add(cid)
-                unique_sessions.append(s)
-
-        # FIX 2: Return ALL hotspot clients — frontend handles pagination
-        total_hotspot = len(unique_sessions)
-        paginated_sessions = unique_sessions  # Return ALL, frontend handles pagination
+        # We now have one session per client (the most recent one)
+        # No Python de-dup loop needed!
+        total_hotspot = all_hotspot_sessions.count()
+        paginated_sessions = all_hotspot_sessions  # Return ALL, frontend handles pagination
 
         # Build radacct map for enrichment only (not for filtering)
         open_radacct_usernames = set(
