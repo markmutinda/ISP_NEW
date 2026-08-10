@@ -1,4 +1,4 @@
-from django.db import connection
+from django.db import connection  # module-level — do NOT re-import unaliased inside functions below
 from django.db.models.signals import post_save, pre_save, post_delete
 from django.dispatch import receiver
 from django.utils import timezone
@@ -148,7 +148,6 @@ def handle_payment_completion(sender, instance, created, **kwargs):
     # Send payment confirmation email (kept - separate channel)
     if customer:
         try:
-            from django.db import connection
             from apps.billing.tasks import send_payment_confirmation_email
             send_payment_confirmation_email.delay(
                 customer_id=customer.id,
