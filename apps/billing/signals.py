@@ -64,6 +64,17 @@ def handle_payment_completion(sender, instance, created, **kwargs):
     if not status_just_set:
         return
 
+    # ─── INVALIDATE TICKER CACHE ──────────────────────────────────
+    # Delete the cached ticker data immediately so the dashboard
+    # reflects this payment on the next poll (within seconds).
+    # The TTL (20s) serves as a safety net if this signal ever gets missed.
+    try:
+        from django.core.cache import cache
+        cache.delete(f"payments_ticker:{connection.schema_name}")
+        logger.debug(f"Ticker cache invalidated for schema {connection.schema_name}")
+    except Exception as e:
+        logger.warning(f"Failed to invalidate ticker cache: {e}")
+
     customer = instance.customer
     if customer:
         from decimal import Decimal

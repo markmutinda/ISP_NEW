@@ -18,7 +18,7 @@ from django.conf import settings
 from django.db import connection
 from django.utils import timezone
 
-from apps.radius.models import RadCheck, RadReply, RadUserGroup
+from apps.radius.models import RadCheck, RadReply, RadUserGroup, RadAcct
 from apps.radius.services.radius_sync_service import RadiusSyncService
 
 logger = logging.getLogger(__name__)
@@ -33,6 +33,29 @@ class HotspotRadiusService:
     
     def __init__(self):
         self.sync_service = RadiusSyncService()
+    
+    def _close_stale_sessions_for_user(self, username: str) -> int:
+        """
+        Close any open radacct rows for this username before minting new
+        credentials. Prevents 'no more sessions are allowed' rejections caused
+        by ghost sessions (router reboot / MAC rotation / crash) that the
+        periodic sweep hasn't caught up with yet.
+        
+        This is O(1) — a single indexed UPDATE on username + acctstoptime IS NULL.
+        
+        Returns:
+            Number of stale sessions closed
+        """
+        updated = RadAcct.objects.filter(
+            username=username,
+            acctstoptime__isnull=True,
+        ).update(
+            acctstoptime=timezone.now(),
+            acctterminatecause='Admin-Reset',
+        )
+        if updated:
+            logger.info(f"Closed {updated} stale radacct row(s) for {username} before reissue")
+        return updated
     
     def create_hotspot_credentials(
         self,
@@ -61,6 +84,10 @@ class HotspotRadiusService:
             True if credentials were created successfully
         """
         try:
+            # ─── FIX: close any stale open radacct row for this user BEFORE
+            # re-issuing credentials, so Simultaneous-Use doesn't block reconnects ───
+            self._close_stale_sessions_for_user(username)
+            
             # Build check attributes (authentication)
             check_attributes = {
                 'Cleartext-Password': password,
