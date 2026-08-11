@@ -4300,6 +4300,95 @@ class SubscriptionPaymentListView(APIView):
             "completed_at": payment.completed_at.isoformat() if payment.completed_at else None,
         }
 
+    def _reference_q(self, reference):
+        return (
+            Q(mpesa_receipt__iexact=reference)
+            | Q(bank_reference__iexact=reference)
+            | Q(payhero_reference__iexact=reference)
+        )
+
+    def _reference_values(self, payment_method, reference):
+        if payment_method == "mpesa_paybill":
+            return reference, None, None
+        if payment_method == "bank_transfer":
+            return None, reference, None
+        return None, None, reference
+
+    def _parse_amount(self, value):
+        try:
+            amount = Decimal(str(value)).quantize(Decimal("0.01"))
+        except Exception:
+            return None
+        return amount if amount > 0 else None
+
+    def _parse_paid_at(self, value):
+        raw = str(value or "").strip()
+        if not raw:
+            return timezone.now()
+        parsed = parse_datetime(raw)
+        if parsed is None:
+            parsed_date = parse_date(raw)
+            if parsed_date:
+                parsed = timezone.make_aware(datetime.combine(parsed_date, time.min))
+        if parsed and timezone.is_naive(parsed):
+            parsed = timezone.make_aware(parsed)
+        return parsed
+
+    def _apply_payment_fields(
+        self,
+        payment,
+        *,
+        subscription,
+        intended_plan,
+        billing_period,
+        amount,
+        payment_method,
+        reference,
+        phone_number,
+        paid_at,
+    ):
+        receipt_value, bank_value, card_value = self._reference_values(payment_method, reference)
+        period_anchor = (
+            subscription.current_period_end
+            if subscription.current_period_end and subscription.current_period_end > paid_at
+            else paid_at
+        )
+        payment.subscription = subscription
+        payment.intended_plan = intended_plan
+        payment.intended_billing_period = billing_period
+        payment.amount = amount
+        payment.currency = "KES"
+        payment.payment_method = payment_method
+        payment.phone_number = phone_number or None
+        payment.mpesa_receipt = receipt_value
+        payment.bank_reference = bank_value
+        payment.payhero_reference = card_value
+        payment.status = "completed"
+        payment.completed_at = paid_at
+        payment.period_start = period_anchor
+        payment.period_end = period_anchor + timedelta(days=365 if billing_period == "yearly" else 30)
+        update_fields = [
+            "subscription",
+            "intended_plan",
+            "intended_billing_period",
+            "amount",
+            "currency",
+            "payment_method",
+            "phone_number",
+            "mpesa_receipt",
+            "bank_reference",
+            "payhero_reference",
+            "status",
+            "completed_at",
+            "period_start",
+            "period_end",
+        ]
+        if payment._state.adding:
+            payment.save()
+        else:
+            payment.save(update_fields=update_fields)
+        return payment
+
     def get(self, request):
         _ensure_public()
         from apps.subscriptions.models import SubscriptionPayment
@@ -4380,25 +4469,13 @@ class SubscriptionPaymentListView(APIView):
         if not reference:
             return Response({"detail": "Payment reference is required."}, status=status.HTTP_400_BAD_REQUEST)
 
-        try:
-            amount = Decimal(str(data.get("amount"))).quantize(Decimal("0.01"))
-        except Exception:
+        amount = self._parse_amount(data.get("amount"))
+        if amount is None:
             return Response({"detail": "Enter a valid payment amount."}, status=status.HTTP_400_BAD_REQUEST)
-        if amount <= 0:
-            return Response({"detail": "Payment amount must be greater than zero."}, status=status.HTTP_400_BAD_REQUEST)
 
-        paid_at_raw = str(data.get("completed_at") or "").strip()
-        paid_at = timezone.now()
-        if paid_at_raw:
-            paid_at = parse_datetime(paid_at_raw)
-            if paid_at is None:
-                parsed_date = parse_date(paid_at_raw)
-                if parsed_date:
-                    paid_at = timezone.make_aware(datetime.combine(parsed_date, time.min))
-            if paid_at is None:
-                return Response({"detail": "Payment date is invalid."}, status=status.HTTP_400_BAD_REQUEST)
-            if timezone.is_naive(paid_at):
-                paid_at = timezone.make_aware(paid_at)
+        paid_at = self._parse_paid_at(data.get("completed_at"))
+        if paid_at is None:
+            return Response({"detail": "Payment date is invalid."}, status=status.HTTP_400_BAD_REQUEST)
 
         with schema_context(get_public_schema_name()):
             subscription_qs = CompanySubscription.objects.select_related("company", "plan")
@@ -4422,48 +4499,40 @@ class SubscriptionPaymentListView(APIView):
                 except NetilyPlan.DoesNotExist:
                     return Response({"detail": "Selected plan was not found."}, status=status.HTTP_404_NOT_FOUND)
 
-            if payment_method == "mpesa_paybill":
-                duplicate_q = Q(mpesa_receipt__iexact=reference)
-                receipt_value, bank_value, card_value = reference, None, None
-            elif payment_method == "bank_transfer":
-                duplicate_q = Q(bank_reference__iexact=reference)
-                receipt_value, bank_value, card_value = None, reference, None
-            else:
-                duplicate_q = Q(payhero_reference__iexact=reference)
-                receipt_value, bank_value, card_value = None, None, reference
-
-            if SubscriptionPayment.objects.filter(duplicate_q).exists():
-                return Response(
-                    {"detail": "A subscription payment with this reference already exists."},
-                    status=status.HTTP_400_BAD_REQUEST,
+            existing_payment = (
+                SubscriptionPayment.objects.select_related(
+                    "subscription__company", "subscription__plan", "intended_plan"
                 )
-
-            period_anchor = subscription.current_period_end if subscription.current_period_end and subscription.current_period_end > paid_at else paid_at
-            period_end = period_anchor + timedelta(days=365 if billing_period == "yearly" else 30)
-
+                .filter(self._reference_q(reference))
+                .first()
+            )
+            replaced_existing = existing_payment is not None
+            previous_snapshot = self._payment_row(existing_payment) if existing_payment else None
             with transaction.atomic():
-                payment = SubscriptionPayment.objects.create(
+                if existing_payment:
+                    payment = SubscriptionPayment.objects.select_for_update().get(id=existing_payment.id)
+                else:
+                    payment = SubscriptionPayment()
+                payment = self._apply_payment_fields(
+                    payment,
                     subscription=subscription,
                     intended_plan=intended_plan,
-                    intended_billing_period=billing_period,
+                    billing_period=billing_period,
                     amount=amount,
-                    currency="KES",
                     payment_method=payment_method,
-                    phone_number=phone_number or None,
-                    mpesa_receipt=receipt_value,
-                    bank_reference=bank_value,
-                    payhero_reference=card_value,
-                    status="completed",
-                    completed_at=paid_at,
-                    period_start=period_anchor,
-                    period_end=period_end,
+                    reference=reference,
+                    phone_number=phone_number,
+                    paid_at=paid_at,
                 )
 
-            invoice = sync_subscription_invoice_payment(payment, notify=notify_tenant)
-            invoice_fully_paid = subscription_invoice_is_fully_paid(invoice)
+            invoice = None
+            invoice_fully_paid = False
             subscription_activated = False
+            if not replaced_existing:
+                invoice = sync_subscription_invoice_payment(payment, notify=notify_tenant)
+                invoice_fully_paid = subscription_invoice_is_fully_paid(invoice)
 
-            if apply_to_subscription and invoice_fully_paid:
+            if apply_to_subscription and invoice_fully_paid and not replaced_existing:
                 with transaction.atomic():
                     payment = SubscriptionPayment.objects.select_for_update().select_related(
                         "subscription__company", "subscription__plan", "intended_plan"
@@ -4497,6 +4566,8 @@ class SubscriptionPaymentListView(APIView):
                     "amount": str(amount),
                     "payment_method": payment_method,
                     "reference": reference,
+                    "replaced_existing": replaced_existing,
+                    "previous": previous_snapshot,
                     "subscription_activated": subscription_activated,
                     "invoice_number": getattr(invoice, "invoice_number", None),
                     "notes": notes,
@@ -4513,10 +4584,15 @@ class SubscriptionPaymentListView(APIView):
         return Response(
             {
                 "detail": (
-                    "Manual payment recorded and subscription updated."
-                    if subscription_activated
-                    else "Manual payment recorded."
+                    "Existing transaction reference replaced. Review the linked invoice if this payment had already been reconciled."
+                    if replaced_existing
+                    else (
+                        "Manual payment recorded and subscription updated."
+                        if subscription_activated
+                        else "Manual payment recorded."
+                    )
                 ),
+                "replaced_existing": replaced_existing,
                 "subscription_activated": subscription_activated,
                 "invoice_fully_paid": invoice_fully_paid,
                 "invoice_number": getattr(invoice, "invoice_number", None),
@@ -4527,6 +4603,128 @@ class SubscriptionPaymentListView(APIView):
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 #  LEADS
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+
+class SubscriptionPaymentDetailView(SubscriptionPaymentListView):
+    """Edit a platform subscription payment record without creating a duplicate."""
+    permission_classes = SUPERADMIN_PERMS
+
+    def patch(self, request, pk):
+        _ensure_public()
+        from apps.subscriptions.models import CompanySubscription, NetilyPlan, SubscriptionPayment
+
+        data = request.data or {}
+        payment_method = str(data.get("payment_method") or "").strip()
+        reference = str(data.get("reference") or "").strip()
+        billing_period = str(data.get("billing_period") or "").strip()
+        plan_id = str(data.get("plan_id") or "").strip()
+        tenant_id = str(data.get("tenant_id") or "").strip()
+        company_id = str(data.get("company_id") or "").strip()
+        subscription_id = str(data.get("subscription_id") or "").strip()
+        phone_number = str(data.get("phone_number") or "").strip()
+        notes = str(data.get("notes") or "").strip()
+
+        if payment_method and payment_method not in self.payment_methods:
+            return Response(
+                {"detail": "Manual payments must use Paybill, bank transfer, or card."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if billing_period and billing_period not in self.billing_periods:
+            return Response({"detail": "Billing period must be monthly or yearly."}, status=status.HTTP_400_BAD_REQUEST)
+
+        with schema_context(get_public_schema_name()):
+            try:
+                payment = SubscriptionPayment.objects.select_related(
+                    "subscription__company", "subscription__plan", "intended_plan"
+                ).get(pk=pk)
+            except SubscriptionPayment.DoesNotExist:
+                return Response({"detail": "Payment not found."}, status=status.HTTP_404_NOT_FOUND)
+
+            amount = self._parse_amount(data.get("amount", payment.amount))
+            if amount is None:
+                return Response({"detail": "Enter a valid payment amount."}, status=status.HTTP_400_BAD_REQUEST)
+
+            paid_at = self._parse_paid_at(data.get("completed_at") or payment.completed_at)
+            if paid_at is None:
+                return Response({"detail": "Payment date is invalid."}, status=status.HTTP_400_BAD_REQUEST)
+
+            next_method = payment_method or payment.payment_method
+            next_reference = reference or self._payment_row(payment)["reference"]
+            if not next_reference:
+                return Response({"detail": "Payment reference is required."}, status=status.HTTP_400_BAD_REQUEST)
+
+            conflicting = (
+                SubscriptionPayment.objects
+                .filter(self._reference_q(next_reference))
+                .exclude(pk=payment.pk)
+                .first()
+            )
+            if conflicting:
+                return Response(
+                    {"detail": "That reference belongs to another payment. Use Manual Payment to replace by reference."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+            subscription = payment.subscription
+            if subscription_id or company_id or tenant_id:
+                subscription_qs = CompanySubscription.objects.select_related("company", "plan")
+                try:
+                    if subscription_id:
+                        subscription = subscription_qs.get(pk=subscription_id)
+                    elif company_id:
+                        subscription = subscription_qs.get(company_id=company_id)
+                    else:
+                        tenant = Tenant.objects.select_related("company").get(pk=tenant_id)
+                        subscription = subscription_qs.get(company=tenant.company)
+                except Tenant.DoesNotExist:
+                    return Response({"detail": "Tenant not found."}, status=status.HTTP_404_NOT_FOUND)
+                except CompanySubscription.DoesNotExist:
+                    return Response({"detail": "Subscription not found for this tenant."}, status=status.HTTP_404_NOT_FOUND)
+
+            intended_plan = payment.intended_plan or subscription.plan
+            if plan_id:
+                try:
+                    intended_plan = NetilyPlan.objects.get(pk=plan_id)
+                except NetilyPlan.DoesNotExist:
+                    return Response({"detail": "Selected plan was not found."}, status=status.HTTP_404_NOT_FOUND)
+
+            previous_snapshot = self._payment_row(payment)
+            with transaction.atomic():
+                payment = SubscriptionPayment.objects.select_for_update().get(pk=payment.pk)
+                payment = self._apply_payment_fields(
+                    payment,
+                    subscription=subscription,
+                    intended_plan=intended_plan,
+                    billing_period=billing_period or payment.intended_billing_period or subscription.billing_period or "monthly",
+                    amount=amount,
+                    payment_method=next_method,
+                    reference=next_reference,
+                    phone_number=phone_number,
+                    paid_at=paid_at,
+                )
+
+            _log_action(
+                request.user,
+                "update",
+                "SubscriptionPayment",
+                object_repr=f"Edited payment {next_reference} for {subscription.company.name}",
+                object_id=payment.id,
+                changes={
+                    "previous": previous_snapshot,
+                    "updated": self._payment_row(payment),
+                    "notes": notes,
+                },
+                request=request,
+            )
+
+            return Response({
+                "detail": "Payment updated.",
+                "payment": self._payment_row(
+                    SubscriptionPayment.objects.select_related(
+                        "subscription__company", "subscription__plan", "intended_plan"
+                    ).get(pk=payment.pk)
+                ),
+            })
 
 
 class LeadListView(APIView):

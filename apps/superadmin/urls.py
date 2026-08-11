@@ -94,6 +94,7 @@ urlpatterns = [
 
     # Subscription Payment History (platform billing records)
     path("subscription-payments/", views.SubscriptionPaymentListView.as_view(), name="subscription-payment-list"),
+    path("subscription-payments/<uuid:pk>/", views.SubscriptionPaymentDetailView.as_view(), name="subscription-payment-detail"),
 
     # Leads
     path("leads/", views.LeadListView.as_view(), name="lead-list"),
