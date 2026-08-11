@@ -240,7 +240,7 @@ class CaptivePortalView(APIView):
     permission_classes = [AllowAny]
     authentication_classes = []
 
-    # FIX 1: Optimized with caching and leaner DB field selection
+    # FIX 1: Optimized with caching, versioning, and stampede guard
     def get(self, request):
         router_id = request.query_params.get('router')
         tenant_subdomain = request.query_params.get('tenant')
@@ -255,27 +255,39 @@ class CaptivePortalView(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        # ---- FAST PATH: short-lived cache (safe, no behavior change) ----
-        cache_key = f"hotspot:captive:v1:{tenant_subdomain}:{router_id}"
+        # ---- FAST PATH: resolved tenant with caching ----
+        from apps.core.tenant_cache import resolve_tenant_cached
+        from apps.core.cache_versioning import get_cache_version
+
+        tenant_info = resolve_tenant_cached(tenant_subdomain)
+        if not tenant_info:
+            return Response(
+                {'status': 'error', 'message': 'Tenant not found'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        schema_name = tenant_info['schema_name']
+        version = get_cache_version(schema_name)
+        cache_key = f"hotspot:captive:v2:{schema_name}:{router_id}:{version}"
+
         cached_payload = cache.get(cache_key)
         if cached_payload is not None:
             return Response(cached_payload)
 
-        try:
-            from apps.core.models import Tenant
-            with schema_context(get_public_schema_name()):
-                tenant = Tenant.objects.get(
-                    Q(subdomain=tenant_subdomain) | Q(schema_name=tenant_subdomain),
-                    is_active=True
-                )
-        except Exception as e:
-            logger.error(f"Tenant '{tenant_subdomain}' not found: {e}")
-            return Response({'status': 'error', 'message': 'Tenant not found'}, status=status.HTTP_400_BAD_REQUEST)
+        # Stampede guard: only one worker computes on a cold cache per (tenant, router)
+        lock_key = f"{cache_key}:lock"
+        if not cache.add(lock_key, "1", timeout=5):
+            import time
+            time.sleep(0.15)
+            cached_payload = cache.get(cache_key)
+            if cached_payload is not None:
+                return Response(cached_payload)
+            # fall through and compute anyway if lock holder was slow/died
 
         try:
-            with schema_context(tenant.schema_name):
-                # Router lookup - safe fallback without field restrictions
-                router_qs = Router.objects.filter(is_active=True)
+            with schema_context(schema_name):
+                # Router lookup - with select_related for branding
+                router_qs = Router.objects.filter(is_active=True).select_related('hotspot_branding')
 
                 router = None
                 try:
@@ -320,32 +332,30 @@ class CaptivePortalView(APIView):
                     }
 
                     branding_data = None
-                    try:
-                        branding = getattr(router, 'hotspot_branding', None)
-                        if branding is None:
-                            branding = HotspotBranding.objects.filter(is_default=True).only(
-                                'company_name', 'logo', 'background_image',
-                                'primary_color', 'secondary_color', 'text_color', 'background_color',
-                                'welcome_title', 'welcome_message', 'support_phone', 'support_email'
-                            ).first()
-                        if branding:
-                            branding_data = {
-                                'company_name': branding.company_name,
-                                'logo_url': branding.logo.url if branding.logo else None,
-                                'background_image_url': branding.background_image.url if branding.background_image else None,
-                                'primary_color': branding.primary_color,
-                                'secondary_color': branding.secondary_color,
-                                'text_color': branding.text_color,
-                                'background_color': branding.background_color,
-                                'welcome_title': branding.welcome_title,
-                                'welcome_message': branding.welcome_message,
-                                'support_phone': branding.support_phone,
-                                'support_email': branding.support_email,
-                            }
-                            if not portal_config['support_phone'] and branding.support_phone:
-                                portal_config['support_phone'] = branding.support_phone
-                    except Exception:
-                        logger.debug("CaptivePortal: no branding found for router %s", router_id)
+                    # Now joined via select_related, no extra query
+                    branding = getattr(router, 'hotspot_branding', None)
+                    if branding is None:
+                        branding = HotspotBranding.objects.filter(is_default=True).only(
+                            'company_name', 'logo', 'background_image',
+                            'primary_color', 'secondary_color', 'text_color', 'background_color',
+                            'welcome_title', 'welcome_message', 'support_phone', 'support_email'
+                        ).first()
+                    if branding:
+                        branding_data = {
+                            'company_name': branding.company_name,
+                            'logo_url': branding.logo.url if branding.logo else None,
+                            'background_image_url': branding.background_image.url if branding.background_image else None,
+                            'primary_color': branding.primary_color,
+                            'secondary_color': branding.secondary_color,
+                            'text_color': branding.text_color,
+                            'background_color': branding.background_color,
+                            'welcome_title': branding.welcome_title,
+                            'welcome_message': branding.welcome_message,
+                            'support_phone': branding.support_phone,
+                            'support_email': branding.support_email,
+                        }
+                        if not portal_config['support_phone'] and branding.support_phone:
+                            portal_config['support_phone'] = branding.support_phone
 
                     # ── FALLBACK: use Router.logo if no branding logo set ──
                     if router and getattr(router, 'logo', None):
@@ -400,6 +410,8 @@ class CaptivePortalView(APIView):
         except Exception as exc:
             logger.error(f"CaptivePortal internal error for tenant {tenant_subdomain}: {exc}")
             return Response({'status': 'error', 'message': 'Internal server error'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        finally:
+            cache.delete(lock_key)
 
         payload = {
             'status': 'success',
@@ -408,8 +420,8 @@ class CaptivePortalView(APIView):
             'plans': plans_data,
         }
 
-        # Keep cache short so admin updates appear quickly
-        cache.set(cache_key, payload, timeout=30)
+        # Long TTL is safe: version-bump signals invalidate instantly on any write
+        cache.set(cache_key, payload, timeout=3600)
         return Response(payload)
 
 

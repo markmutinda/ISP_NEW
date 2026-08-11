@@ -902,6 +902,11 @@ class Payment(models.Model):
             models.Index(fields=['hotspot_session']),  # Added index for the new field
             models.Index(fields=['service_type']),  # Added index for service_type
             models.Index(fields=['schema_name', 'status', 'payment_date']),
+            # NEW: Covering index for ticker/dashboard queries
+            models.Index(
+                fields=['schema_name', 'status', '-payment_date', 'service_type'],
+                name='pay_ticker_idx'
+            ),
         ]
 
     def __str__(self):

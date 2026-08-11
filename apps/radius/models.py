@@ -273,6 +273,11 @@ class RadAcct(models.Model):
             models.Index(fields=['acctstoptime']),
             # Added index for nasidentifier for faster lookups
             models.Index(fields=['nasidentifier']),
+            # ─── NEW INDEX FOR STALE SESSION CLEANUP ──────────────────
+            # Optimizes the query: WHERE username = %s AND acctstoptime IS NULL
+            # Used by HotspotRadiusService._close_stale_sessions_for_user()
+            # to prevent Simultaneous-Use rejections from ghost sessions.
+            models.Index(fields=['username', 'acctstoptime'], name='radacct_user_open_idx'),
         ]
     
     def __str__(self):

@@ -1,10 +1,13 @@
-from django.db.models.signals import post_save, pre_save
+from django.db import connection  # module-level — do NOT re-import unaliased inside functions below
+from django.db.models.signals import post_save, pre_save, post_delete
 from django.dispatch import receiver
 from django.utils import timezone
 from .models.billing_models import Invoice, InvoiceItem
 from .models.payment_models import Payment
 from .models.voucher_models import Voucher
+from .models.hotspot_models import HotspotPlan, HotspotBranding
 from .integrations.africastalking import SMSService
+from apps.core.cache_versioning import bump_cache_version
 import logging
 
 logger = logging.getLogger(__name__)
@@ -60,6 +63,17 @@ def handle_payment_completion(sender, instance, created, **kwargs):
 
     if not status_just_set:
         return
+
+    # ─── INVALIDATE TICKER CACHE ──────────────────────────────────
+    # Delete the cached ticker data immediately so the dashboard
+    # reflects this payment on the next poll (within seconds).
+    # The TTL (20s) serves as a safety net if this signal ever gets missed.
+    try:
+        from django.core.cache import cache
+        cache.delete(f"payments_ticker:{connection.schema_name}")
+        logger.debug(f"Ticker cache invalidated for schema {connection.schema_name}")
+    except Exception as e:
+        logger.warning(f"Failed to invalidate ticker cache: {e}")
 
     customer = instance.customer
     if customer:
@@ -134,7 +148,6 @@ def handle_payment_completion(sender, instance, created, **kwargs):
     # Send payment confirmation email (kept - separate channel)
     if customer:
         try:
-            from django.db import connection
             from apps.billing.tasks import send_payment_confirmation_email
             send_payment_confirmation_email.delay(
                 customer_id=customer.id,
@@ -196,3 +209,38 @@ def send_invoice_notification(sender, instance, created, **kwargs):
                     SMSNotifier.pppoe_invoice_issued(customer, instance, schema_name=_conn.schema_name)
             except Exception as e:
                 logger.error(f"Failed to send invoice notification: {e}")
+
+
+# ============================================================
+# FIX 4: Cache invalidation signals for captive portal
+# Bumps cache version when hotspot plans or branding change
+# ============================================================
+
+@receiver(post_save, sender=HotspotPlan)
+@receiver(post_delete, sender=HotspotPlan)
+def _bump_captive_cache_on_plan_change(sender, instance, **kwargs):
+    """
+    Bump cache version when a HotspotPlan is created, updated, or deleted.
+    This instantly invalidates all cached captive portal payloads for this tenant.
+    """
+    try:
+        schema_name = connection.schema_name
+        bump_cache_version(schema_name)
+        logger.debug(f"Cache version bumped for schema {schema_name} due to HotspotPlan change")
+    except Exception as e:
+        logger.error(f"Failed to bump cache version on HotspotPlan change: {e}")
+
+
+@receiver(post_save, sender=HotspotBranding)
+@receiver(post_delete, sender=HotspotBranding)
+def _bump_captive_cache_on_branding_change(sender, instance, **kwargs):
+    """
+    Bump cache version when HotspotBranding is created, updated, or deleted.
+    This instantly invalidates all cached captive portal payloads for this tenant.
+    """
+    try:
+        schema_name = connection.schema_name
+        bump_cache_version(schema_name)
+        logger.debug(f"Cache version bumped for schema {schema_name} due to HotspotBranding change")
+    except Exception as e:
+        logger.error(f"Failed to bump cache version on HotspotBranding change: {e}")

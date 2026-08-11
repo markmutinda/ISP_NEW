@@ -27,6 +27,7 @@ from .frontend_contract_views import (
     AnalyticsNetworkDeepView,  # NEW: Add this import
     DailyRevenueSplitView,  # ADD THIS - PPPoE vs Hotspot revenue split
 )
+from .views_ticker import RecentPaymentsTickerView  # NEW: Import ticker view
 
 app_name = 'analytics'
 
@@ -75,4 +76,9 @@ urlpatterns = [
     # NEW: PPPoE vs Hotspot Daily Revenue Split Endpoint
     # ============================================================
     path('revenue-split/', DailyRevenueSplitView.as_view(), name='analytics-revenue-split'),
+    
+    # ============================================================
+    # NEW: Recent Payments Ticker for Dashboard Greeting Card
+    # ============================================================
+    path('payments-ticker/', RecentPaymentsTickerView.as_view(), name='payments-ticker'),
 ]
