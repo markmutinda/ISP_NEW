@@ -1266,8 +1266,8 @@ class PaymentListView(APIView):
                 qs = qs.filter(
                     Q(subscription__company__name__icontains=search)
                     | Q(mpesa_receipt__icontains=search)
-                    | Q(payhero_reference__icontains=search)
                     | Q(bank_reference__icontains=search)
+                    | Q(payhero_reference__icontains=search)
                 )
 
             for p in qs[:200]:
@@ -3387,6 +3387,7 @@ class SubscriptionInvoiceListView(APIView):
         })
 
 
+
 class SubscriptionInvoiceReminderSettingsView(APIView):
     permission_classes = SUPERADMIN_PERMS
 
@@ -4269,6 +4270,35 @@ class SubscriptionStkCallbackView(APIView):
 class SubscriptionPaymentListView(APIView):
     """List all ISP-to-Netily subscription payments from the public schema."""
     permission_classes = SUPERADMIN_PERMS
+    payment_methods = {"mpesa_paybill", "bank_transfer", "card"}
+    billing_periods = {"monthly", "yearly"}
+
+    def _payment_row(self, payment):
+        reference = (
+            payment.mpesa_receipt
+            or payment.bank_reference
+            or payment.payhero_reference
+            or ""
+        )
+        return {
+            "id": str(payment.id),
+            "company_name": payment.subscription.company.name if payment.subscription and payment.subscription.company else "-",
+            "plan_name": payment.intended_plan.name if payment.intended_plan else (
+                payment.subscription.plan.name if payment.subscription and payment.subscription.plan else "-"
+            ),
+            "amount": str(payment.amount),
+            "currency": payment.currency,
+            "payment_method": payment.payment_method,
+            "status": payment.status,
+            "reference": reference,
+            "mpesa_receipt": payment.mpesa_receipt or "",
+            "bank_reference": payment.bank_reference or "",
+            "phone_number": payment.phone_number or "",
+            "period_start": payment.period_start.isoformat() if payment.period_start else None,
+            "period_end": payment.period_end.isoformat() if payment.period_end else None,
+            "created_at": payment.created_at.isoformat() if payment.created_at else None,
+            "completed_at": payment.completed_at.isoformat() if payment.completed_at else None,
+        }
 
     def get(self, request):
         _ensure_public()
@@ -4282,13 +4312,15 @@ class SubscriptionPaymentListView(APIView):
 
         with schema_context(get_public_schema_name()):
             qs = SubscriptionPayment.objects.select_related(
-                "subscription__company", "intended_plan"
+                "subscription__company", "subscription__plan", "intended_plan"
             ).order_by("-created_at")
 
             if search:
                 qs = qs.filter(
                     Q(subscription__company__name__icontains=search)
                     | Q(mpesa_receipt__icontains=search)
+                    | Q(bank_reference__icontains=search)
+                    | Q(payhero_reference__icontains=search)
                     | Q(phone_number__icontains=search)
                 )
             if status_filter:
@@ -4300,23 +4332,7 @@ class SubscriptionPaymentListView(APIView):
             start = (page - 1) * page_size
             payments = qs[start: start + page_size]
 
-            results = []
-            for p in payments:
-                results.append({
-                    "id": str(p.id),
-                    "company_name": p.subscription.company.name if p.subscription and p.subscription.company else "—",
-                    "plan_name": p.intended_plan.name if p.intended_plan else (
-                        p.subscription.plan.name if p.subscription and p.subscription.plan else "—"
-                    ),
-                    "amount": str(p.amount),
-                    "currency": p.currency,
-                    "payment_method": p.payment_method,
-                    "status": p.status,
-                    "mpesa_receipt": p.mpesa_receipt or "",
-                    "phone_number": p.phone_number or "",
-                    "created_at": p.created_at.isoformat() if p.created_at else None,
-                    "completed_at": p.completed_at.isoformat() if p.completed_at else None,
-                })
+            results = [self._payment_row(payment) for payment in payments]
 
         return Response({
             "count": total,
@@ -4327,6 +4343,187 @@ class SubscriptionPaymentListView(APIView):
         })
 
 
+
+    def post(self, request):
+        _ensure_public()
+        from apps.subscriptions.models import CompanySubscription, NetilyPlan, SubscriptionPayment
+        from apps.subscriptions.billing_lifecycle import (
+            sync_subscription_invoice_payment,
+            subscription_invoice_is_fully_paid,
+        )
+
+        data = request.data or {}
+        tenant_id = str(data.get("tenant_id") or "").strip()
+        subscription_id = str(data.get("subscription_id") or "").strip()
+        company_id = str(data.get("company_id") or "").strip()
+        payment_method = str(data.get("payment_method") or "mpesa_paybill").strip()
+        reference = str(data.get("reference") or "").strip()
+        billing_period = str(data.get("billing_period") or "monthly").strip()
+        plan_id = str(data.get("plan_id") or "").strip()
+        phone_number = str(data.get("phone_number") or "").strip()
+        notes = str(data.get("notes") or "").strip()
+        apply_to_subscription = data.get("apply_to_subscription", True) is not False
+        notify_tenant = data.get("notify_tenant", True) is not False
+
+        if not (tenant_id or subscription_id or company_id):
+            return Response(
+                {"detail": "Choose the tenant whose subscription this payment belongs to."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if payment_method not in self.payment_methods:
+            return Response(
+                {"detail": "Manual payments must use Paybill, bank transfer, or card."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if billing_period not in self.billing_periods:
+            return Response({"detail": "Billing period must be monthly or yearly."}, status=status.HTTP_400_BAD_REQUEST)
+        if not reference:
+            return Response({"detail": "Payment reference is required."}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            amount = Decimal(str(data.get("amount"))).quantize(Decimal("0.01"))
+        except Exception:
+            return Response({"detail": "Enter a valid payment amount."}, status=status.HTTP_400_BAD_REQUEST)
+        if amount <= 0:
+            return Response({"detail": "Payment amount must be greater than zero."}, status=status.HTTP_400_BAD_REQUEST)
+
+        paid_at_raw = str(data.get("completed_at") or "").strip()
+        paid_at = timezone.now()
+        if paid_at_raw:
+            paid_at = parse_datetime(paid_at_raw)
+            if paid_at is None:
+                parsed_date = parse_date(paid_at_raw)
+                if parsed_date:
+                    paid_at = timezone.make_aware(datetime.combine(parsed_date, time.min))
+            if paid_at is None:
+                return Response({"detail": "Payment date is invalid."}, status=status.HTTP_400_BAD_REQUEST)
+            if timezone.is_naive(paid_at):
+                paid_at = timezone.make_aware(paid_at)
+
+        with schema_context(get_public_schema_name()):
+            subscription_qs = CompanySubscription.objects.select_related("company", "plan")
+            try:
+                if subscription_id:
+                    subscription = subscription_qs.get(pk=subscription_id)
+                elif company_id:
+                    subscription = subscription_qs.get(company_id=company_id)
+                else:
+                    tenant = Tenant.objects.select_related("company").get(pk=tenant_id)
+                    subscription = subscription_qs.get(company=tenant.company)
+            except Tenant.DoesNotExist:
+                return Response({"detail": "Tenant not found."}, status=status.HTTP_404_NOT_FOUND)
+            except CompanySubscription.DoesNotExist:
+                return Response({"detail": "Subscription not found for this tenant."}, status=status.HTTP_404_NOT_FOUND)
+
+            intended_plan = subscription.plan
+            if plan_id:
+                try:
+                    intended_plan = NetilyPlan.objects.get(pk=plan_id)
+                except NetilyPlan.DoesNotExist:
+                    return Response({"detail": "Selected plan was not found."}, status=status.HTTP_404_NOT_FOUND)
+
+            if payment_method == "mpesa_paybill":
+                duplicate_q = Q(mpesa_receipt__iexact=reference)
+                receipt_value, bank_value, card_value = reference, None, None
+            elif payment_method == "bank_transfer":
+                duplicate_q = Q(bank_reference__iexact=reference)
+                receipt_value, bank_value, card_value = None, reference, None
+            else:
+                duplicate_q = Q(payhero_reference__iexact=reference)
+                receipt_value, bank_value, card_value = None, None, reference
+
+            if SubscriptionPayment.objects.filter(duplicate_q).exists():
+                return Response(
+                    {"detail": "A subscription payment with this reference already exists."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+            period_anchor = subscription.current_period_end if subscription.current_period_end and subscription.current_period_end > paid_at else paid_at
+            period_end = period_anchor + timedelta(days=365 if billing_period == "yearly" else 30)
+
+            with transaction.atomic():
+                payment = SubscriptionPayment.objects.create(
+                    subscription=subscription,
+                    intended_plan=intended_plan,
+                    intended_billing_period=billing_period,
+                    amount=amount,
+                    currency="KES",
+                    payment_method=payment_method,
+                    phone_number=phone_number or None,
+                    mpesa_receipt=receipt_value,
+                    bank_reference=bank_value,
+                    payhero_reference=card_value,
+                    status="completed",
+                    completed_at=paid_at,
+                    period_start=period_anchor,
+                    period_end=period_end,
+                )
+
+            invoice = sync_subscription_invoice_payment(payment, notify=notify_tenant)
+            invoice_fully_paid = subscription_invoice_is_fully_paid(invoice)
+            subscription_activated = False
+
+            if apply_to_subscription and invoice_fully_paid:
+                with transaction.atomic():
+                    payment = SubscriptionPayment.objects.select_for_update().select_related(
+                        "subscription__company", "subscription__plan", "intended_plan"
+                    ).get(id=payment.id)
+                    payment.apply_intended_plan()
+                    subscription = payment.subscription
+
+                    if subscription.is_trial or subscription.status in ("trialing", "expired", "pending", "past_due"):
+                        subscription.convert_from_trial(billing_period=subscription.billing_period or billing_period)
+                    else:
+                        subscription.extend_subscription()
+
+                    payment.period_start = subscription.current_period_start
+                    payment.period_end = subscription.current_period_end
+                    payment.save(update_fields=["period_start", "period_end"])
+                    subscription_activated = True
+
+                try:
+                    from apps.subscriptions.tasks import send_cycle_activated_email
+                    send_cycle_activated_email.delay(str(subscription.company_id))
+                except Exception as email_err:
+                    logger.warning("Failed to queue manual payment activation email: %s", email_err)
+
+            _log_action(
+                request.user,
+                "create",
+                "SubscriptionPayment",
+                object_repr=f"Manual payment {reference} for {subscription.company.name}",
+                object_id=payment.id,
+                changes={
+                    "amount": str(amount),
+                    "payment_method": payment_method,
+                    "reference": reference,
+                    "subscription_activated": subscription_activated,
+                    "invoice_number": getattr(invoice, "invoice_number", None),
+                    "notes": notes,
+                },
+                request=request,
+            )
+
+            row = self._payment_row(
+                SubscriptionPayment.objects.select_related(
+                    "subscription__company", "subscription__plan", "intended_plan"
+                ).get(id=payment.id)
+            )
+
+        return Response(
+            {
+                "detail": (
+                    "Manual payment recorded and subscription updated."
+                    if subscription_activated
+                    else "Manual payment recorded."
+                ),
+                "subscription_activated": subscription_activated,
+                "invoice_fully_paid": invoice_fully_paid,
+                "invoice_number": getattr(invoice, "invoice_number", None),
+                "payment": row,
+            },
+            status=status.HTTP_201_CREATED,
+        )
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 #  LEADS
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
