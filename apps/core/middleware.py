@@ -8,7 +8,7 @@ import logging
 from django.utils.deprecation import MiddlewareMixin
 from django.db import connection
 from django.conf import settings
-from django.http import JsonResponse
+from django.http import JsonResponse, HttpResponseNotFound
 from django.core.exceptions import PermissionDenied
 from django.utils import timezone
 
@@ -31,6 +31,12 @@ PUBLIC_ROUTER_PATHS = (
     '/api/v1/hotspot/login-page/',
     '/api/v1/hotspot/purchase/',
     '/api/v1/hotspot/routers/',
+)
+
+# Known exploit/secret-scanning probes — reject before any DB/schema work
+BOT_SCAN_PREFIXES = (
+    '/.env', '/.git', '/.aws', '/.docker', '/wp-admin', '/wp-login',
+    '/xmlrpc.php', '/config.php', '/.ssh', '/vendor/', '/.well-known/security.txt',
 )
 
 
@@ -88,6 +94,10 @@ class TenantMainMiddleware(MiddlewareMixin):
         return tenant, company
 
     def process_request(self, request):
+        # Block known exploit/secret-scanning probes before any DB/schema work
+        if request.path.startswith(BOT_SCAN_PREFIXES):
+            return HttpResponseNotFound()
+
         # Skip public machine-to-server endpoints
         if any(request.path.startswith(p) for p in PUBLIC_ROUTER_PATHS):
             connection.set_schema_to_public()
