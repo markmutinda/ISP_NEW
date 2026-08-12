@@ -133,6 +133,7 @@ if DEBUG and not RUNNING_TESTS:
 MIDDLEWARE = [
     'corsheaders.middleware.CorsMiddleware',
     'apps.core.middleware.TenantMainMiddleware',
+    'apps.core.middleware.DemoModeReadOnlyMiddleware',
     'django.middleware.security.SecurityMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
     'django.middleware.common.CommonMiddleware',
@@ -156,6 +157,9 @@ if DEBUG and not RUNNING_TESTS:
 TENANT_MODEL = "core.Tenant"
 PUBLIC_SCHEMA_NAME = 'public'
 TENANT_DOMAIN_MODEL = "core.Domain"  # 🚨 ADD THIS - YOU WERE MISSING IT!
+
+DEMO_MODE_HOSTS = ["demo.netily.co.ke"]
+DEMO_MODE_TENANTS = ["demo"]
 
 DATABASE_ROUTERS = [
     'django_tenants.routers.TenantSyncRouter',

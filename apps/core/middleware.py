@@ -147,6 +147,75 @@ class TenantMainMiddleware(MiddlewareMixin):
         return None
 
 
+class DemoModeReadOnlyMiddleware(MiddlewareMixin):
+    """
+    Keeps demo workspaces fully browsable while preventing persistent changes.
+
+    This is enforced server-side so direct API calls, stale clients, and hidden
+    controls cannot mutate demo tenant data.
+    """
+
+    SAFE_METHODS = {'GET', 'HEAD', 'OPTIONS'}
+    DEFAULT_DEMO_HOSTS = {'demo.netily.co.ke'}
+    DEFAULT_DEMO_TENANTS = {'demo'}
+    ALLOWED_WRITE_PATH_PREFIXES = (
+        '/api/v1/core/auth/login/',
+        '/api/v1/core/auth/login/otp/resend/',
+        '/api/v1/core/auth/login/legacy/',
+        '/api/v1/core/auth/logout/',
+        '/api/v1/core/auth/token/refresh/',
+        '/api/v1/core/auth/otp/send/',
+        '/api/v1/core/auth/otp/verify/',
+        '/api/v1/core/auth/passkey/login/',
+    )
+
+    def process_request(self, request):
+        if request.method in self.SAFE_METHODS:
+            return None
+
+        if not self._is_demo_request(request):
+            return None
+
+        if any(request.path.startswith(p) for p in self.ALLOWED_WRITE_PATH_PREFIXES):
+            return None
+
+        logger.info(
+            "Blocked demo mode write request method=%s path=%s host=%s",
+            request.method,
+            request.path,
+            request.get_host(),
+        )
+        return JsonResponse({
+            'error': 'demo_mode_read_only',
+            'code': 'DEMO_MODE_READ_ONLY',
+            'message': 'You are in demo mode. Changes are disabled for this workspace.',
+            'detail': 'You are in demo mode. Changes are disabled for this workspace.',
+            'demo_mode': True,
+        }, status=403)
+
+    def _is_demo_request(self, request):
+        host = request.get_host().split(':')[0].lower()
+        demo_hosts = {
+            str(value).strip().lower()
+            for value in getattr(settings, 'DEMO_MODE_HOSTS', self.DEFAULT_DEMO_HOSTS)
+            if str(value).strip()
+        }
+        if host in demo_hosts or host.startswith('demo.'):
+            return True
+
+        tenant = getattr(request, 'tenant', None)
+        tenant_identifiers = {
+            str(getattr(tenant, 'schema_name', '') or '').lower(),
+            str(getattr(tenant, 'subdomain', '') or '').lower(),
+        }
+        demo_tenants = {
+            str(value).strip().lower()
+            for value in getattr(settings, 'DEMO_MODE_TENANTS', self.DEFAULT_DEMO_TENANTS)
+            if str(value).strip()
+        }
+        return bool(tenant_identifiers & demo_tenants)
+
+
 class CompanyContextMiddleware(MiddlewareMixin):
     """
     Attaches request.company and request.tenant for authenticated users.
