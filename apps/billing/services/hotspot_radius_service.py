@@ -8,6 +8,7 @@ Also handles:
 - MAC-based auto-authentication for authorized devices (Smart TVs)
 - Session expiration (FreeRADIUS Expiration attribute)
 - Bandwidth limits (Mikrotik-Rate-Limit reply attribute)
+- Debounced RADIUS reseed to prevent reconnect storms after mass router reboots
 """
 
 import logging
@@ -15,6 +16,7 @@ from datetime import datetime, timedelta
 from typing import Optional
 
 from django.conf import settings
+from django.core.cache import cache
 from django.db import connection
 from django.utils import timezone
 
@@ -22,6 +24,9 @@ from apps.radius.models import RadCheck, RadReply, RadUserGroup, RadAcct
 from apps.radius.services.radius_sync_service import RadiusSyncService
 
 logger = logging.getLogger(__name__)
+
+# Debounce window for RADIUS reseed — absorbs reconnect storms after a mass router reboot
+RADIUS_RESYNC_DEBOUNCE_SECONDS = 15
 
 
 class HotspotRadiusService:
@@ -84,9 +89,19 @@ class HotspotRadiusService:
             True if credentials were created successfully
         """
         try:
-            # ─── FIX: close any stale open radacct row for this user BEFORE
-            # re-issuing credentials, so Simultaneous-Use doesn't block reconnects ───
+            # ─── FIX: ALWAYS run this — closes stale radacct rows ───
+            # This is what actually fixes "no more sessions are allowed":
+            # a ghost radacct row from before the reboot blocks 
+            # Simultaneous-Use=1 until it's closed.
             self._close_stale_sessions_for_user(username)
+            
+            # ─── NEW: Debounce ONLY the expensive RadCheck/RadReply rewrite ───
+            # So N devices polling/reconnecting within the same few seconds after
+            # a reboot don't each trigger a full delete+recreate cycle.
+            debounce_key = f"hotspot_radius_sync:{username}"
+            if cache.get(debounce_key):
+                logger.debug(f"Hotspot RADIUS reseed debounced for {username}")
+                return True
             
             # Build check attributes (authentication)
             check_attributes = {
@@ -214,6 +229,10 @@ class HotspotRadiusService:
                 logger.warning(f"No expires_at for hotspot session {username}, relying on Session-Timeout only")
             # --- END FIX ---
             
+            # ─── NEW: Set debounce cache so we don't recreate on every poll ───
+            cache.set(debounce_key, True, timeout=RADIUS_RESYNC_DEBOUNCE_SECONDS)
+            
+            logger.info(f"Hotspot RADIUS credentials synced: user={username} mac={mac_address}")
             return True
             
         except Exception as e:

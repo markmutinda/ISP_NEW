@@ -119,6 +119,9 @@ class RadiusSyncService:
     ) -> Dict[str, Any]:
         """
         Create a RADIUS user with check and reply attributes in the tenant schema.
+        
+        OPTIMIZED: Uses bulk_create to reduce N individual INSERT statements
+        down to 2 bulk operations, cutting DB round trips significantly.
         """
         attributes = attributes or {}
         reply_attributes = reply_attributes or {}
@@ -129,41 +132,54 @@ class RadiusSyncService:
             RadReply.objects.filter(username=username).delete()
             RadUserGroup.objects.filter(username=username).delete()
             
-            # Create password check
-            RadCheck.objects.create(
-                username=username,
-                attribute=self.ATTR_PASSWORD,
-                op=':=',
-                value=password,
-                customer=customer
-            )
+            # ─── OPTIMIZED: Build all check rows for bulk_create ───
+            check_rows = [
+                RadCheck(
+                    username=username,
+                    attribute=self.ATTR_PASSWORD,
+                    op=':=',
+                    value=password,
+                    customer=customer
+                )
+            ]
             
             # Add additional check attributes
             for attr, value in attributes.items():
-                RadCheck.objects.create(
-                    username=username,
-                    attribute=attr,
-                    op=':=',
-                    value=str(value),
-                    customer=customer
+                check_rows.append(
+                    RadCheck(
+                        username=username,
+                        attribute=attr,
+                        op=':=',
+                        value=str(value),
+                        customer=customer
+                    )
                 )
+            
+            # ─── BULK CREATE: Single INSERT for all check attributes ───
+            RadCheck.objects.bulk_create(check_rows)
             
             # Add reply attributes from profile
             if profile:
                 profile_attrs = profile.get_radius_attributes()
                 reply_attributes.update(profile_attrs)
             
-            # Create reply attributes
-            for attr, value in reply_attributes.items():
-                RadReply.objects.create(
-                    username=username,
-                    attribute=attr,
-                    op=':=',
-                    value=str(value),
-                    customer=customer
-                )
+            # ─── OPTIMIZED: Build all reply rows for bulk_create ───
+            if reply_attributes:
+                reply_rows = [
+                    RadReply(
+                        username=username,
+                        attribute=attr,
+                        op=':=',
+                        value=str(value),
+                        customer=customer
+                    )
+                    for attr, value in reply_attributes.items()
+                ]
+                
+                # ─── BULK CREATE: Single INSERT for all reply attributes ───
+                RadReply.objects.bulk_create(reply_rows)
             
-            # Assign to group if specified
+            # Assign to group if specified (single row, no bulk needed)
             if groupname:
                 RadUserGroup.objects.create(
                     username=username,
@@ -171,7 +187,7 @@ class RadiusSyncService:
                     priority=1
                 )
             
-            logger.info(f"Created RADIUS user strictly in tenant schema: {username}")
+            logger.info(f"Created RADIUS user strictly in tenant schema: {username} (bulk_create optimized)")
             
             return {
                 'username': username,
@@ -180,7 +196,8 @@ class RadiusSyncService:
                 'groupname': groupname,
                 'check_attributes': len(attributes) + 1,
                 'reply_attributes': len(reply_attributes),
-                'public_sync': False  # Explicitly state dual-write is dead
+                'public_sync': False,  # Explicitly state dual-write is dead
+                'bulk_optimized': True
             }
     
     def update_radius_user(
