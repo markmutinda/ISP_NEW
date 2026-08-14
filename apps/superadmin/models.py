@@ -89,6 +89,55 @@ class TenantDeletionJob(models.Model):
         return f"{self.company_name} ({self.schema_name}) - {self.status}"
 
 
+class PlatformExpenditure(models.Model):
+    CATEGORY_INFRASTRUCTURE = "infrastructure"
+    CATEGORY_SMS = "sms"
+    CATEGORY_PAYROLL = "payroll"
+    CATEGORY_MARKETING = "marketing"
+    CATEGORY_SOFTWARE = "software"
+    CATEGORY_OPERATIONS = "operations"
+    CATEGORY_TAX = "tax"
+    CATEGORY_OTHER = "other"
+
+    CATEGORY_CHOICES = (
+        (CATEGORY_INFRASTRUCTURE, "Infrastructure"),
+        (CATEGORY_SMS, "SMS Costs"),
+        (CATEGORY_PAYROLL, "Payroll"),
+        (CATEGORY_MARKETING, "Marketing"),
+        (CATEGORY_SOFTWARE, "Software"),
+        (CATEGORY_OPERATIONS, "Operations"),
+        (CATEGORY_TAX, "Tax"),
+        (CATEGORY_OTHER, "Other"),
+    )
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    category = models.CharField(max_length=40, choices=CATEGORY_CHOICES, default=CATEGORY_OPERATIONS)
+    title = models.CharField(max_length=160)
+    amount = models.DecimalField(max_digits=14, decimal_places=2)
+    currency = models.CharField(max_length=8, default="KES")
+    incurred_on = models.DateField(db_index=True)
+    notes = models.TextField(blank=True, default="")
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="platform_expenditures_created",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-incurred_on", "-created_at"]
+        indexes = [
+            models.Index(fields=["category", "incurred_on"], name="sadm_exp_cat_date_idx"),
+            models.Index(fields=["incurred_on"], name="sadm_exp_date_idx"),
+        ]
+
+    def __str__(self):
+        return f"{self.title} - {self.currency} {self.amount}"
+
+
 class SupportExecutiveProfile(models.Model):
     """Platform-owned support identity attached to a normal User account."""
 

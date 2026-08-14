@@ -12,7 +12,7 @@ from decimal import Decimal
 
 from apps.core.models import Tenant, Company, Domain, User
 from apps.subscriptions.models import BillingCycle, CompanySubscription, TenantUserLedger
-from apps.superadmin.models import SuperAdminActivityLog, SupportActivityLog, SupportExecutiveProfile
+from apps.superadmin.models import PlatformExpenditure, SuperAdminActivityLog, SupportActivityLog, SupportExecutiveProfile
 
 
 # ──────────────────────────────────────────
@@ -127,6 +127,26 @@ class SuperAdminActivityLogSerializer(serializers.ModelSerializer):
 # ──────────────────────────────────────────
 # TENANT / COMPANY
 # ──────────────────────────────────────────
+
+class PlatformExpenditureSerializer(serializers.ModelSerializer):
+    created_by_email = serializers.EmailField(source="created_by.email", read_only=True, allow_null=True)
+
+    class Meta:
+        model = PlatformExpenditure
+        fields = [
+            "id", "category", "title", "amount", "currency", "incurred_on",
+            "notes", "created_by", "created_by_email", "created_at", "updated_at",
+        ]
+        read_only_fields = ["id", "created_by", "created_by_email", "created_at", "updated_at"]
+
+    def validate_amount(self, value):
+        if value <= 0:
+            raise serializers.ValidationError("Amount must be greater than zero.")
+        return value
+
+    def validate_currency(self, value):
+        return (value or "KES").upper()
+
 
 class CompanyBriefSerializer(serializers.ModelSerializer):
     total_customers = serializers.SerializerMethodField()

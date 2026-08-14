@@ -32,7 +32,7 @@ from rest_framework.views import APIView
 from apps.core.models import Tenant, Company, Domain, User, AuditLog, GlobalSystemSettings, SystemSettings, Changelog, FeatureRequest
 from apps.core.rbac_defaults import normalize_role_access_policies
 from .permissions import IsSuperAdmin
-from .models import TenantDeletionJob
+from .models import PlatformExpenditure, TenantDeletionJob
 from .serializers import (
     TenantListSerializer,
     TenantDetailSerializer,
@@ -44,6 +44,7 @@ from .serializers import (
     UserDetailSerializer,
     DashboardKPISerializer,
     AuditLogSerializer,
+    PlatformExpenditureSerializer,
 )
 from apps.core.serializers import ChangelogSerializer, FeatureRequestSerializer
 from django_tenants.utils import schema_context, get_public_schema_name
@@ -4725,6 +4726,144 @@ class SubscriptionPaymentDetailView(SubscriptionPaymentListView):
                     ).get(pk=payment.pk)
                 ),
             })
+
+
+class PlatformExpenditureView(APIView):
+    """Hidden company expenditure workspace for superadmin profit tracking."""
+    permission_classes = SUPERADMIN_PERMS
+
+    def _parse_range(self, request):
+        start = parse_date(str(request.query_params.get("start") or "").strip())
+        end = parse_date(str(request.query_params.get("end") or "").strip())
+        if start and end and start > end:
+            start, end = end, start
+        return start, end
+
+    def _apply_date_filter(self, qs, field_name, start_date, end_date):
+        if start_date:
+            qs = qs.filter(**{f"{field_name}__date__gte": start_date})
+        if end_date:
+            qs = qs.filter(**{f"{field_name}__date__lte": end_date})
+        return qs
+
+    def _money(self, value):
+        return str((value or Decimal("0.00")).quantize(Decimal("0.01")))
+
+    def _subscription_total(self, start_date, end_date):
+        from apps.subscriptions.models import SubscriptionPayment
+
+        qs = SubscriptionPayment.objects.filter(status="completed")
+        qs = self._apply_date_filter(qs, "completed_at", start_date, end_date)
+        return qs.aggregate(total=Sum("amount"))["total"] or Decimal("0.00")
+
+    def _sms_topup_total(self, start_date, end_date):
+        total = Decimal("0.00")
+        tenants = Tenant.objects.filter(is_active=True).exclude(schema_name__in=PROTECTED_SCHEMAS)
+        for tenant in tenants.only("schema_name"):
+            try:
+                with schema_context(tenant.schema_name):
+                    qs = SMSUnitTopup.objects.filter(status="completed")
+                    qs = self._apply_date_filter(qs, "created_at", start_date, end_date)
+                    total += qs.aggregate(total=Sum("amount_paid"))["total"] or Decimal("0.00")
+            except Exception as exc:
+                logger.warning("Expenditure SMS total skipped schema %s: %s", tenant.schema_name, exc)
+        return total
+
+    def _manual_qs(self, start_date, end_date):
+        qs = PlatformExpenditure.objects.select_related("created_by").all()
+        if start_date:
+            qs = qs.filter(incurred_on__gte=start_date)
+        if end_date:
+            qs = qs.filter(incurred_on__lte=end_date)
+        return qs
+
+    def get(self, request):
+        _ensure_public()
+        start_date, end_date = self._parse_range(request)
+        page = max(int(request.query_params.get("page", 1)), 1)
+        page_size = min(max(int(request.query_params.get("page_size", PAGE_SIZE)), 1), 100)
+
+        manual_qs = self._manual_qs(start_date, end_date)
+        manual_total = manual_qs.aggregate(total=Sum("amount"))["total"] or Decimal("0.00")
+        subscription_total = self._subscription_total(start_date, end_date)
+        sms_total = self._sms_topup_total(start_date, end_date)
+        accrued_total = subscription_total + sms_total
+        net_profit = accrued_total - manual_total
+
+        count = manual_qs.count()
+        start = (page - 1) * page_size
+        results = PlatformExpenditureSerializer(manual_qs[start:start + page_size], many=True).data
+
+        return Response({
+            "summary": {
+                "currency": "KES",
+                "subscription_payments_total": self._money(subscription_total),
+                "sms_topups_total": self._money(sms_total),
+                "accrued_total": self._money(accrued_total),
+                "manual_expenditure_total": self._money(manual_total),
+                "net_profit": self._money(net_profit),
+            },
+            "count": count,
+            "page": page,
+            "page_size": page_size,
+            "total_pages": (count + page_size - 1) // page_size,
+            "results": results,
+        })
+
+    def post(self, request):
+        _ensure_public()
+        serializer = PlatformExpenditureSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        expenditure = serializer.save(created_by=request.user)
+        _log_action(
+            request.user,
+            "create",
+            "PlatformExpenditure",
+            object_repr=f"{expenditure.title} - {expenditure.currency} {expenditure.amount}",
+            object_id=expenditure.id,
+            changes=serializer.data,
+            request=request,
+        )
+        return Response(PlatformExpenditureSerializer(expenditure).data, status=status.HTTP_201_CREATED)
+
+
+class PlatformExpenditureDetailView(APIView):
+    permission_classes = SUPERADMIN_PERMS
+
+    def patch(self, request, pk):
+        _ensure_public()
+        expenditure = get_object_or_404(PlatformExpenditure, pk=pk)
+        before = PlatformExpenditureSerializer(expenditure).data
+        serializer = PlatformExpenditureSerializer(expenditure, data=request.data, partial=True)
+        serializer.is_valid(raise_exception=True)
+        expenditure = serializer.save()
+        _log_action(
+            request.user,
+            "update",
+            "PlatformExpenditure",
+            object_repr=f"{expenditure.title} - {expenditure.currency} {expenditure.amount}",
+            object_id=expenditure.id,
+            changes={"previous": before, "updated": serializer.data},
+            request=request,
+        )
+        return Response(serializer.data)
+
+    def delete(self, request, pk):
+        _ensure_public()
+        expenditure = get_object_or_404(PlatformExpenditure, pk=pk)
+        snapshot = PlatformExpenditureSerializer(expenditure).data
+        object_repr = f"{expenditure.title} - {expenditure.currency} {expenditure.amount}"
+        expenditure.delete()
+        _log_action(
+            request.user,
+            "delete",
+            "PlatformExpenditure",
+            object_repr=object_repr,
+            object_id=pk,
+            changes={"deleted": snapshot},
+            request=request,
+        )
+        return Response(status=status.HTTP_204_NO_CONTENT)
 
 
 class LeadListView(APIView):

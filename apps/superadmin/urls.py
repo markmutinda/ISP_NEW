@@ -96,6 +96,10 @@ urlpatterns = [
     path("subscription-payments/", views.SubscriptionPaymentListView.as_view(), name="subscription-payment-list"),
     path("subscription-payments/<uuid:pk>/", views.SubscriptionPaymentDetailView.as_view(), name="subscription-payment-detail"),
 
+    # Hidden company expenditure workspace
+    path("expenditure/", views.PlatformExpenditureView.as_view(), name="platform-expenditure"),
+    path("expenditure/<uuid:pk>/", views.PlatformExpenditureDetailView.as_view(), name="platform-expenditure-detail"),
+
     # Leads
     path("leads/", views.LeadListView.as_view(), name="lead-list"),
     path("leads/stats/", views.LeadStatsView.as_view(), name="lead-stats"),
