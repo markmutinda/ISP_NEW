@@ -421,6 +421,42 @@ class HasRoleAccessPolicy(permissions.BasePermission):
     }
 
     admin_roles = {"admin", "super_admin", "superadmin"}
+    message = "You do not have permission to perform this action. Ask an administrator to update your staff access."
+
+    api_path_map = (
+        ("/api/v1/customers/", "/admin/users"),
+        ("/api/v1/customer-services/", "/admin/users"),
+        ("/api/v1/network/routers/", "/admin/routers"),
+        ("/api/v1/network/ip-bindings/", "/admin/users"),
+        ("/api/v1/network/", "/admin/networks"),
+        ("/api/v1/radius/", "/admin/radius"),
+        ("/api/v1/billing/invoices/", "/admin/invoices"),
+        ("/api/v1/billing/payments/", "/admin/payments"),
+        ("/api/v1/billing/receipts/", "/admin/receipts"),
+        ("/api/v1/billing/vouchers/", "/admin/vouchers"),
+        ("/api/v1/billing/payment-methods/", "/admin/payment-methods"),
+        ("/api/v1/billing/billing-cycles/", "/admin/billing-cycles"),
+        ("/api/v1/payments/mpesa/", "/admin/payment-methods"),
+        ("/api/v1/payments/", "/admin/payments"),
+        ("/api/v1/hotspot/admin/ads/", "/admin/ads"),
+        ("/api/v1/hotspot/admin/plans/", "/admin/plans"),
+        ("/api/v1/hotspot/admin/usage/", "/admin/usage"),
+        ("/api/v1/hotspot/admin/analytics/", "/admin/analytics"),
+        ("/api/v1/hotspot/admin/", "/admin/users"),
+        ("/api/v1/support/tickets/", "/admin/tickets"),
+        ("/api/v1/core/leads/", "/admin/leads"),
+        ("/api/v1/core/users/", "/admin/users"),
+        ("/api/v1/core/role-access/", "/admin/staff"),
+        ("/api/v1/core/companies/", "/admin/settings"),
+        ("/api/v1/core/settings/", "/admin/settings"),
+        ("/api/v1/core/audit-logs/", "/admin/logs"),
+        ("/api/v1/core/dashboard/", "/admin"),
+        ("/api/v1/staff/dispatch/", "/admin/dispatch"),
+        ("/api/v1/staff/", "/admin/staff"),
+        ("/api/v1/inventory/", "/admin/inventory"),
+        ("/api/v1/messaging/", "/admin/sms"),
+        ("/api/v1/notifications/", "/admin/notifications"),
+    )
 
     def _normalize(self, value):
         return str(value or "").strip().lower().replace(" ", "_").replace("-", "_")
@@ -439,9 +475,18 @@ class HasRoleAccessPolicy(permissions.BasePermission):
             return "delete"
         return "view"
 
+    def _infer_required_path_from_request(self, request):
+        path = getattr(request, "path", "") or ""
+        for prefix, dashboard_path in self.api_path_map:
+            if path.startswith(prefix):
+                return dashboard_path
+        return None
+
     def _required_paths(self, request, view):
+        explicit_resolver_used = False
         many_resolver = getattr(view, "get_required_rbac_paths", None)
         if callable(many_resolver):
+            explicit_resolver_used = True
             try:
                 value = many_resolver(request)
             except TypeError:
@@ -449,14 +494,22 @@ class HasRoleAccessPolicy(permissions.BasePermission):
         else:
             resolver = getattr(view, "get_required_rbac_path", None)
             if callable(resolver):
+                explicit_resolver_used = True
                 try:
                     value = resolver(request)
                 except TypeError:
                     value = resolver()
             else:
+                explicit_resolver_used = (
+                    hasattr(view, "required_rbac_paths")
+                    or hasattr(view, "required_rbac_path")
+                )
                 value = getattr(view, "required_rbac_paths", None)
                 if value is None:
                     value = getattr(view, "required_rbac_path", None)
+
+        if not value and not explicit_resolver_used:
+            value = self._infer_required_path_from_request(request)
 
         if not value:
             return []

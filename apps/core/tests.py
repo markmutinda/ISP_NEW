@@ -209,6 +209,9 @@ class RoleAccessPermissionTests(SimpleTestCase):
     def _view(self, path, action="list"):
         return SimpleNamespace(required_rbac_path=path, action=action)
 
+    def _request(self, path, method="GET"):
+        return SimpleNamespace(user=self.user, method=method, path=path)
+
     @patch("apps.core.models.RoleAccessPolicy.objects.filter")
     def test_missing_policy_uses_safe_role_defaults(self, policy_filter):
         policy_filter.return_value.first.return_value = None
@@ -318,10 +321,83 @@ class RoleAccessPermissionTests(SimpleTestCase):
         with self.assertRaisesMessage(ValidationError, "cannot be delegated"):
             serializer.validate_custom_allowed_paths(["/admin/staff::view"])
 
+    def test_dashboard_access_tokens_are_normalized(self):
+        serializer = UserCreateSerializer()
+
+        self.assertEqual(
+            serializer.validate_custom_allowed_paths([
+                "/admin/users::edit",
+                "/admin/users::view",
+                "/admin/users::edit",
+                "/admin/leads",
+            ]),
+            [
+                "/admin/users::view",
+                "/admin/users::edit",
+                "/admin/leads::view",
+            ],
+        )
+
+    def test_dashboard_access_tokens_reject_unknown_actions(self):
+        serializer = UserCreateSerializer()
+
+        with self.assertRaisesMessage(ValidationError, "unknown action"):
+            serializer.validate_custom_allowed_paths(["/admin/users::approve_everything"])
+
     @patch("apps.core.models.RoleAccessPolicy.objects.filter", side_effect=RuntimeError("db unavailable"))
     def test_policy_lookup_error_does_not_grant_unrestricted_access(self, _policy_filter):
         self.assertFalse(
             self.permission.has_permission(self.request, self._view("/admin/settings"))
+        )
+
+    def test_missing_view_path_is_inferred_from_api_url(self):
+        self.user.custom_allowed_paths = ["/admin/payments::view"]
+        view = SimpleNamespace(action="list")
+
+        self.assertTrue(
+            self.permission.has_permission(
+                self._request("/api/v1/billing/payments/"),
+                view,
+            )
+        )
+        self.assertFalse(
+            self.permission.has_permission(
+                self._request("/api/v1/billing/invoices/"),
+                view,
+            )
+        )
+
+    def test_inferred_api_url_still_requires_matching_action(self):
+        self.user.custom_allowed_paths = ["/admin/payments::view"]
+        view = SimpleNamespace(action=None)
+
+        self.assertFalse(
+            self.permission.has_permission(
+                self._request("/api/v1/billing/payments/", method="POST"),
+                view,
+            )
+        )
+
+        self.user.custom_allowed_paths.append("/admin/payments::add")
+        self.assertTrue(
+            self.permission.has_permission(
+                self._request("/api/v1/billing/payments/", method="POST"),
+                view,
+            )
+        )
+
+    def test_explicit_none_path_remains_bootstrap_safe(self):
+        self.user.custom_allowed_paths = ["/admin/payments::view"]
+        view = SimpleNamespace(
+            action="me",
+            get_required_rbac_path=lambda request: None,
+        )
+
+        self.assertTrue(
+            self.permission.has_permission(
+                self._request("/api/v1/core/users/me/"),
+                view,
+            )
         )
 
 

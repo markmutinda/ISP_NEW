@@ -20,6 +20,7 @@ logger = logging.getLogger(__name__)
 
 
 NON_DELEGABLE_RBAC_PATHS = {"/admin/staff"}
+VALID_RBAC_ACTIONS = {"view", "view_details", "add", "edit", "delete"}
 
 
 def validate_dashboard_access_tokens(value):
@@ -27,7 +28,7 @@ def validate_dashboard_access_tokens(value):
         return None
     if not isinstance(value, list):
         raise serializers.ValidationError("Dashboard access must be a list of route tokens.")
-    cleaned = []
+    requested_by_route = {}
     for token in value:
         if not isinstance(token, str):
             raise serializers.ValidationError("Each dashboard access token must be an admin route path.")
@@ -36,8 +37,21 @@ def validate_dashboard_access_tokens(value):
             raise serializers.ValidationError("Each dashboard access token must be an admin route path.")
         if route in NON_DELEGABLE_RBAC_PATHS:
             raise serializers.ValidationError("Staff access management cannot be delegated.")
-        if token not in cleaned:
-            cleaned.append(token)
+        if "::" in token:
+            action = token.split("::", 1)[1]
+            if action not in VALID_RBAC_ACTIONS:
+                raise serializers.ValidationError("Dashboard access contains an unknown action.")
+        else:
+            action = "view"
+        requested_by_route.setdefault(route, set()).add(action)
+
+    cleaned = []
+    for route, actions in requested_by_route.items():
+        if actions and route not in NON_DELEGABLE_RBAC_PATHS:
+            actions.add("view")
+        for action in ("view", "view_details", "add", "edit", "delete"):
+            if action in actions:
+                cleaned.append(f"{route}::{action}")
     return cleaned
 
 
