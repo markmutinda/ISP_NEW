@@ -12,7 +12,7 @@ concurrency:
 jobs:
   deploy:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 35
 
     steps:
       - name: Checkout code
@@ -24,12 +24,39 @@ jobs:
           host: ${{ secrets.VPS_HOST }}
           username: ${{ secrets.VPS_USERNAME }}
           key: ${{ secrets.VPS_SSH_KEY }}
-          command_timeout: 14m
+          command_timeout: 32m
           script: |
+            set -Eeuo pipefail
+            export COMPOSE_HTTP_TIMEOUT=240
+
+            log() {
+              printf '\n[%s] %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$*"
+            }
+
+            run_step() {
+              local label="$1"
+              local max_duration="$2"
+              shift 2
+              log "$label"
+              timeout "$max_duration" "$@"
+            }
+
+            dump_backend_logs() {
+              cd ~/netily_cloud/docker || return 0
+              echo "==> Recent web logs"
+              docker compose logs --tail=80 web || true
+              echo "==> Recent worker logs"
+              docker compose logs --tail=60 celery-worker || true
+              echo "==> Compose status"
+              docker compose ps || true
+            }
+
+            trap 'echo "ERROR: backend deployment failed at line $LINENO"; dump_backend_logs' ERR
+
             echo "==> Pulling latest backend code..."
             cd ~/netily_cloud
-            git fetch origin prod-backend
-            git reset --hard origin/prod-backend
+            run_step "Fetching prod-backend" 2m git fetch origin prod-backend
+            run_step "Resetting working tree" 1m git reset --hard origin/prod-backend
 
             echo "==> Cleaning stale migration artifacts..."
             git clean -fd apps/*/migrations 2>/dev/null || true
@@ -47,23 +74,23 @@ jobs:
             cd docker
             # 🟢 OPTIMIZATION 1: No 'compose down' (Zero database/VPN downtime).
             # 🟢 OPTIMIZATION 2: Removed '--no-cache' to allow ultra-fast incremental builds.
-            docker compose build web celery-worker celery-beat
+            run_step "Building backend images" 18m docker compose build web celery-worker celery-beat
 
             echo "==> Checking for missing model migrations..."
-            docker compose run --rm web python manage.py makemigrations --check --dry-run
+            run_step "Checking missing migrations" 3m docker compose run --rm web python manage.py makemigrations --check --dry-run
 
             echo "==> Preparing migration history..."
-            docker compose run --rm web python manage.py prepare_migrations
+            run_step "Preparing migration history" 3m docker compose run --rm web python manage.py prepare_migrations
 
             echo "==> Running database migrations..."
-            docker compose run --rm web python manage.py migrate_schemas_resilient --shared
-            docker compose run --rm web python manage.py migrate_schemas_resilient --tenant
+            run_step "Migrating shared schema" 5m docker compose run --rm web python manage.py migrate_schemas_resilient --shared
+            run_step "Migrating tenant schemas" 8m docker compose run --rm web python manage.py migrate_schemas_resilient --tenant
             echo "==> Syncing subscription plan pricing..."
-            docker compose run --rm web python manage.py seed_plans
+            run_step "Seeding subscription plans" 3m docker compose run --rm web python manage.py seed_plans
 
             echo "==> Performing target rolling restart of backend services..."
             # 🟢 OPTIMIZATION 3: '--no-deps' updates ONLY the backend without touching Nginx, DB, or WireGuard.
-            docker compose up -d --no-deps web celery-worker celery-beat
+            run_step "Restarting backend services" 4m docker compose up -d --no-deps web celery-worker celery-beat
 
             echo "==> Injecting clean container-to-container network paths..."
             # 🟢 OPTIMIZATION 4: The Network Guard. Explicitly overrides any multi-line IP lookup bugs automatically.
@@ -78,10 +105,10 @@ jobs:
             sleep 4
 
             echo "==> Ensuring superadmin account exists (non-fatal)..."
-            docker compose exec web python manage.py ensure_superadmin || echo "WARN: ensure_superadmin skipped"
+            timeout 2m docker compose exec -T web python manage.py ensure_superadmin || echo "WARN: ensure_superadmin skipped"
 
             echo "==> Collecting static files..."
-            docker compose exec web python manage.py collectstatic --noinput || true
+            timeout 3m docker compose exec -T web python manage.py collectstatic --noinput || true
 
             echo "==> Verifying backend container health..."
             for i in 1 2 3 4 5; do
@@ -100,7 +127,7 @@ jobs:
             done
 
             echo "==> Health check: testing Django responds..."
-            docker compose exec web python -c "import django; django.setup(); print('Django OK')" || {
+            timeout 2m docker compose exec -T web python -c "import django; django.setup(); print('Django OK')" || {
               echo "❌ Django setup check failed. Dumping logs:"
               docker compose logs --tail=50 web
               exit 1
