@@ -232,6 +232,14 @@ class HotspotPlan(models.Model):
     )
     # Note: trial duration is determined by the plan's validity_type/validity_value
     # No separate trial_duration_minutes field needed
+
+    # ════════════════════════════════════════════════════════════════
+    # TV PLAN FIELD
+    # ════════════════════════════════════════════════════════════════
+    is_tv_plan = models.BooleanField(
+        default=False,
+        help_text="If True, this plan only appears under 'Pay for TV' in the captive portal (Smart TV / limited-browser devices)."
+    )
     
     # Metadata
     created_by = models.ForeignKey(
@@ -252,6 +260,11 @@ class HotspotPlan(models.Model):
             models.Index(
                 fields=['router', 'is_active', 'sort_order', 'price'],
                 name='hotspot_plan_fast_list_idx',
+            ),
+            # New index for TV plan filtering
+            models.Index(
+                fields=['router', 'is_active', 'is_tv_plan'],
+                name='hotspot_plan_tv_idx',
             ),
         ]
     
@@ -1055,7 +1068,7 @@ class HotspotBranding(models.Model):
     
     class Meta:
         verbose_name = 'Hotspot Branding'
-        verbose_name_plural = 'Hotspot Branding'
+        verbose_name_plural = 'Hotspot Brandings'
     
     def __str__(self):
         if self.router:
