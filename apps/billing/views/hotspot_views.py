@@ -242,7 +242,7 @@ class CaptivePortalView(APIView):
     permission_classes = [AllowAny]
     authentication_classes = []
 
-    # FIX 1: Optimized with caching, versioning, and stampede guard
+    # FIX 1: Optimized with caching, versioning, and stampede guard (non-blocking)
     def get(self, request):
         router_id = request.query_params.get('router')
         tenant_subdomain = request.query_params.get('tenant')
@@ -277,14 +277,18 @@ class CaptivePortalView(APIView):
             return Response(cached_payload)
 
         # Stampede guard: only one worker computes on a cold cache per (tenant, router)
+        # FIX: Non-blocking — serve stale if available instead of sleeping
         lock_key = f"{cache_key}:lock"
         if not cache.add(lock_key, "1", timeout=5):
-            import time
-            time.sleep(0.15)
-            cached_payload = cache.get(cache_key)
-            if cached_payload is not None:
-                return Response(cached_payload)
-            # fall through and compute anyway if lock holder was slow/died
+            # Someone else is computing it — don't block this worker.
+            # Serve the previous cached payload if it still exists (version bump
+            # only creates a NEW key, it doesn't delete the old one), else compute
+            # anyway. Never sleep synchronously.
+            stale_key = f"hotspot:captive:v2:{schema_name}:{router_id}:{version - 1}"
+            stale_payload = cache.get(stale_key)
+            if stale_payload is not None:
+                return Response(stale_payload)
+            # fall through and compute — accept the rare double-compute
 
         try:
             with schema_context(schema_name):
@@ -336,12 +340,21 @@ class CaptivePortalView(APIView):
                     branding_data = None
                     # Now joined via select_related, no extra query
                     branding = getattr(router, 'hotspot_branding', None)
+                    
+                    # FIX 7: Cached default branding fallback (no extra query on cache miss)
                     if branding is None:
-                        branding = HotspotBranding.objects.filter(is_default=True).only(
-                            'company_name', 'logo', 'background_image',
-                            'primary_color', 'secondary_color', 'text_color', 'background_color',
-                            'welcome_title', 'welcome_message', 'support_phone', 'support_email'
-                        ).first()
+                        default_branding_key = f"hotspot:default_branding:{schema_name}"
+                        branding = cache.get(default_branding_key)
+                        if branding is None:
+                            branding = HotspotBranding.objects.filter(is_default=True).only(
+                                'company_name', 'logo', 'background_image',
+                                'primary_color', 'secondary_color', 'text_color', 'background_color',
+                                'welcome_title', 'welcome_message', 'support_phone', 'support_email'
+                            ).first()
+                            cache.set(default_branding_key, branding or False, timeout=3600)
+                        elif branding is False:
+                            branding = None
+                            
                     if branding:
                         branding_data = {
                             'company_name': branding.company_name,
@@ -425,7 +438,12 @@ class CaptivePortalView(APIView):
 
         # Long TTL is safe: version-bump signals invalidate instantly on any write
         cache.set(cache_key, payload, timeout=3600)
-        return Response(payload)
+        
+        # FIX 2: Browser-level caching — skip network entirely on repeat loads
+        from django.http import JsonResponse
+        response = JsonResponse(payload)
+        response["Cache-Control"] = "public, max-age=15, stale-while-revalidate=60"
+        return response
 
 
 class HotspotPlansView(APIView):
@@ -445,7 +463,10 @@ class HotspotPlansView(APIView):
         cache_key = f"hotspot:plans:v1:{router_id}"
         cached_payload = cache.get(cache_key)
         if cached_payload is not None:
-            return Response(cached_payload)
+            from django.http import JsonResponse
+            response = JsonResponse(cached_payload)
+            response["Cache-Control"] = "public, max-age=15, stale-while-revalidate=60"
+            return response
 
         router_qs = Router.objects.filter(is_active=True).only(
             'id', 'name', 'location', 'template_id', 'hotspot_name',
@@ -551,7 +572,12 @@ class HotspotPlansView(APIView):
         }
 
         cache.set(cache_key, payload, timeout=30)
-        return Response(payload)
+        
+        # FIX 2: Browser-level caching
+        from django.http import JsonResponse
+        response = JsonResponse(payload)
+        response["Cache-Control"] = "public, max-age=15, stale-while-revalidate=60"
+        return response
 
 
 class HotspotPurchaseView(APIView):
@@ -638,7 +664,6 @@ class HotspotPurchaseView(APIView):
                 Q(tuma_configuration__isnull=False) |
                 Q(mpesa_configuration__isnull=False)
             )
-            .select_related('mpesa_configuration', 'tuma_configuration')
             .order_by('-is_default', '-updated_at')
             .first()
         )
