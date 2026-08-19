@@ -11,6 +11,13 @@ from urllib.parse import urlparse
 
 logger = logging.getLogger(__name__)
 
+# ────────────────────────────────────────────────────────────────
+# 🔥 VERSION STAMP — bump this every time generate_login_html()
+# changes meaningfully. Used by the diagnostic engine to detect
+# stale login.html on routers.
+# ────────────────────────────────────────────────────────────────
+LOGIN_HTML_VERSION = "2"  # bump this every time generate_login_html() changes meaningfully
+
 
 class MikrotikScriptGenerator:
     def __init__(self, router: Router, request=None):
@@ -549,7 +556,10 @@ class MikrotikScriptGenerator:
         tenant_name = self._escape_ros_string(r.tenant_subdomain or 'public')
         primary_color = "#2563eb"
 
+        # 🔥 VERSION STAMP — embedded as a comment so the diagnostic engine
+        # can detect stale login.html without parsing the JS.
         return f"""<!DOCTYPE html>
+<!-- NETILY_LOGIN_HTML_VERSION={LOGIN_HTML_VERSION} -->
 <html lang="en">
 <head>
     <meta charset="utf-8">

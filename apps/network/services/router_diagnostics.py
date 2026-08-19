@@ -74,6 +74,8 @@ def gather_live_state(api) -> dict:
         'ip_services': safe('/ip/service'),
         'users': safe('/user'),
         'dhcp_servers': safe('/ip/dhcp-server'),
+        # ── NEW: Read file list for login.html version check ──
+        'files': safe('/file'),
     }
 
 
@@ -88,6 +90,29 @@ def _own_domains(router) -> list[str]:
         if d and d not in domains:
             domains.append(d)
     return domains
+
+
+def _read_login_html_contents(api, live_files) -> str:
+    """Reads login.html contents from the router (small text file, safe to pull inline)."""
+    try:
+        # Find the netily-profile to get its html-directory
+        profiles = api._execute('/ip/hotspot/profile')
+        prof = next((p for p in profiles if p.get('name') == 'netily-profile'), None)
+        html_dir = (prof.get('html-directory') or 'hotspot') if prof else 'hotspot'
+        target = f"{html_dir}/login.html"
+        
+        # Find the file in the cached file list
+        f = next((x for x in live_files if x.get('name') == target), None)
+        if f:
+            # If contents not in the cached file list, fetch it directly
+            if 'contents' not in f:
+                file_data = api._execute('/file', get={'.proplist': '.id,name,contents'})
+                f = next((x for x in file_data if x.get('name') == target), None)
+            return (f.get('contents') or '') if f else ''
+        return ''
+    except Exception as e:
+        logger.warning(f"[DIAGNOSE] login.html read failed: {e}")
+        return ''
 
 
 # ════════════════════════════════════════════════════════════════
@@ -313,6 +338,62 @@ register_check(
     category='Security',
     severity='warning',
 )(_check_api_user_exists)
+
+
+# ────────────────────────────────────────────────────────────────
+# 🔥 NEW: Login HTML version check — ensures routers have the
+# fast-redirect optimization (removed 900ms setTimeout, preconnect)
+# ────────────────────────────────────────────────────────────────
+
+def _check_login_html_current(ctx: DiagnosticContext) -> bool:
+    from apps.network.services.mikrotik_script_generator import LOGIN_HTML_VERSION
+    content = _read_login_html_contents(ctx.api, ctx.live.get('files', []))
+    return f"NETILY_LOGIN_HTML_VERSION={LOGIN_HTML_VERSION}" in content
+
+
+def _fix_login_html_current(ctx: DiagnosticContext):
+    """Re-downloads login.html + status.html from the provisioning endpoint —
+    equivalent to re-running Section 11 of the full provisioning script,
+    without touching VPN/RADIUS/hotspot/firewall config."""
+    from apps.network.services.mikrotik_script_generator import MikrotikScriptGenerator
+    import time
+
+    router, api = ctx.router, ctx.api
+    gen = MikrotikScriptGenerator(router)
+
+    login_url = f"{gen.active_url}/api/v1/network/provision/{router.auth_key}/hotspot/login.html"
+    status_url = f"{gen.active_url}/api/v1/network/provision/{router.auth_key}/hotspot/status.html"
+
+    # Find the html-directory from the hotspot profile
+    prof = next((p for p in ctx.live['hotspot_profiles'] if p.get('name') == 'netily-profile'), None)
+    html_dir = (prof.get('html-directory') or 'hotspot') if prof else 'hotspot'
+
+    for url, filename in ((login_url, 'login.html'), (status_url, 'status.html')):
+        dst = f"{html_dir}/{filename}"
+        try:
+            api._execute('/tool/fetch', add={
+                'url': url,
+                'dst-path': dst,
+                'check-certificate': 'no',
+            })
+            # Small delay between fetches — RouterOS runs /tool/fetch async,
+            # this gives the first one time to land before the second starts.
+            time.sleep(1)
+        except Exception as e:
+            # librouteros treats /tool/fetch as an async command; some versions
+            # raise on the "finished" trap even on success — log and continue
+            logger.info(f"[DIAGNOSE FIX] fetch({filename}) call returned: {e}")
+
+    logger.info(f"[DIAGNOSE FIX] Refreshed hotspot HTML pages for router {router.id}")
+
+
+register_check(
+    id='login_html_current',
+    label='Hotspot login page is up to date (fast-redirect optimization)',
+    category='Performance',
+    severity='warning',
+    fix_fn=_fix_login_html_current,
+)(_check_login_html_current)
 
 
 # ────────────────────────────────────────────────────────────────
