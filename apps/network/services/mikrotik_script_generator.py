@@ -557,6 +557,11 @@ class MikrotikScriptGenerator:
     <meta http-equiv="cache-control" content="no-cache, no-store, must-revalidate">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Connecting...</title>
+    <!-- 🔥 OPTIMIZATION: Preconnect to portal & API domains — warms DNS/TCP/TLS in parallel -->
+    <link rel="dns-prefetch" href="{portal_base}">
+    <link rel="preconnect" href="{portal_base}" crossorigin>
+    <link rel="dns-prefetch" href="{self.api_url}">
+    <link rel="preconnect" href="{self.api_url}" crossorigin>
     <style>
         *, *::before, *::after {{ box-sizing: border-box; margin: 0; padding: 0; }}
         body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', sans-serif; background: linear-gradient(135deg, #eff6ff 0%, #dbeafe 50%, #e0e7ff 100%); min-height: 100vh; display: flex; align-items: center; justify-content: center; padding: 1rem; }}
@@ -566,7 +571,7 @@ class MikrotikScriptGenerator:
         h1 {{ font-size: 1.375rem; font-weight: 700; color: #111827; margin-bottom: 0.5rem; }}
         .subtitle {{ font-size: 0.875rem; color: #6b7280; margin-bottom: 2rem; line-height: 1.5; }}
         .progress-track {{ background: #f3f4f6; border-radius: 999px; height: 6px; overflow: hidden; margin-bottom: 1rem; }}
-        .progress-bar {{ height: 100%; background: linear-gradient(90deg, {primary_color}, #7c3aed); border-radius: 999px; animation: progress 2.5s ease-in-out forwards; width: 0%; }}
+        .progress-bar {{ height: 100%; background: linear-gradient(90deg, {primary_color}, #7c3aed); border-radius: 999px; animation: progress 1.8s ease-in-out forwards; width: 0%; }}
         @keyframes progress {{ 0% {{ width: 0%; }} 30% {{ width: 45%; }} 70% {{ width: 78%; }} 100% {{ width: 95%; }} }}
         .status-row {{ display: flex; align-items: center; gap: 0.625rem; padding: 0.75rem 1rem; background: #f9fafb; border-radius: 0.75rem; margin-bottom: 0.5rem; }}
         .dot {{ width: 8px; height: 8px; border-radius: 50%; background: {primary_color}; animation: pulse 1.5s ease-in-out infinite; flex-shrink: 0; }}
@@ -621,7 +626,25 @@ class MikrotikScriptGenerator:
         var params = ['mac=' + encodeURIComponent(mac), 'ip=' + encodeURIComponent(ip), 'router=' + encodeURIComponent(identity), 'login_url=' + encodeURIComponent(loginUrl), 'error=' + encodeURIComponent(error), 'tenant=' + '{tenant_name}', 'smart_tv=' + (finalIsTV ? '1' : '0')];
         var redirectUrl = portalBase + '?' + params.join('&');
         linkEl.href = redirectUrl;
-        setTimeout(function() {{ window.location.href = redirectUrl; }}, 900);
+
+        // 🔥 OPTIMIZATION 1: Kill the 900ms artificial delay — navigate on next frame instead
+        // Preconnect links in the <head> warm DNS/TCP/TLS in parallel with the tiny bit of JS above
+
+        // 🔥 OPTIMIZATION 2: Speculatively fetch the captive-portal payload
+        // so it sits in the browser cache before the page even mounts
+        try {{
+            fetch('{self.api_url}/api/v1/hotspot/captive-portal/?router={r.id}&tenant={tenant_name}', {{
+                mode: 'cors',
+                credentials: 'omit',
+            }}).catch(function() {{}});
+        }} catch (e) {{}}
+
+        // Navigate on the next frame instead of waiting ~1s for nothing
+        requestAnimationFrame(function() {{
+            requestAnimationFrame(function() {{
+                window.location.href = redirectUrl;
+            }});
+        }});
     }})();
     </script>
 </body>
