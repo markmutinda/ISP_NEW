@@ -189,8 +189,8 @@ def _close_prior_radacct_rows_for_renewal(session, username: str):
     Close open radacct rows that belong to a prior subscription period.
 
     We anchor on session.activated_at (the CURRENT session's start time).
-    Any open row that started BEFORE this session was activated belongs to
-    a previous period and must be closed so usage resets correctly.
+    Any open row that started BEFORE this session was activated belongs to a
+    previous period and must be closed so usage resets correctly.
     """
     from apps.radius.models import RadAcct
 
@@ -1252,12 +1252,9 @@ class HotspotPurchaseStatusView(APIView):
                     logger.error(f"RADIUS activation failed for paid session {session.session_id}: {e}")
                 
                 # ── SMS: welcome with access code ──
-                try:
-                    session.refresh_from_db()
-                    from apps.messaging.services.notification_sender import SMSNotifier
-                    SMSNotifier.hotspot_welcome(session, schema_name=tenant.schema_name)
-                except Exception as e:
-                    logger.warning(f"Hotspot welcome SMS failed: {e}")
+                # FIX: Fire-and-forget async task — SMS sending is off the critical path
+                from apps.messaging.tasks import send_hotspot_welcome_sms
+                send_hotspot_welcome_sms.delay(session.session_id, tenant.schema_name)
                 
                 return Response({
                     'status': 'success',
@@ -1314,12 +1311,9 @@ class HotspotPurchaseStatusView(APIView):
                         )
                     
                     # ── SMS: welcome ──
-                    try:
-                        session.refresh_from_db()
-                        from apps.messaging.services.notification_sender import SMSNotifier
-                        SMSNotifier.hotspot_welcome(session, schema_name=tenant.schema_name)
-                    except Exception as e:
-                        logger.warning(f"Hotspot welcome SMS failed: {e}")
+                    # FIX: Fire-and-forget async task — SMS sending is off the critical path
+                    from apps.messaging.tasks import send_hotspot_welcome_sms
+                    send_hotspot_welcome_sms.delay(session.session_id, tenant.schema_name)
                     
                     return Response({
                         'status': 'success',
@@ -1552,11 +1546,9 @@ class HotspotVoucherRedeemView(APIView):
                 logger.info(f"VOUCHER REDEEM: {voucher.code} -> user {friendly_username} at {router.name} (plan: {plan.name})")
                 
                 # ── SMS: welcome for voucher redemption ──
-                try:
-                    from apps.messaging.services.notification_sender import SMSNotifier
-                    SMSNotifier.hotspot_welcome(session, schema_name=tenant.schema_name)
-                except Exception as e:
-                    logger.warning(f"Hotspot voucher welcome SMS failed: {e}")
+                # FIX: Fire-and-forget async task — SMS sending is off the critical path
+                from apps.messaging.tasks import send_hotspot_welcome_sms
+                send_hotspot_welcome_sms.delay(session.session_id, tenant.schema_name)
                     
             except Exception as e:
                 logger.error(f"RADIUS activation failed for voucher: {e}")
@@ -2272,6 +2264,11 @@ class HotspotFreeTrialView(APIView):
                 )
             except Exception as e:
                 logger.error(f"Free trial RADIUS provisioning failed: {e}")
+
+            # ── SMS: welcome for free trial ──
+            # FIX: Fire-and-forget async task — SMS sending is off the critical path
+            from apps.messaging.tasks import send_hotspot_welcome_sms
+            send_hotspot_welcome_sms.delay(session.session_id, tenant.schema_name)
 
             return Response({
                 'status': 'success',

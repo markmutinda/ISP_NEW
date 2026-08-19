@@ -91,6 +91,41 @@ def _get_rendered_message(event_type: str, default_msg: str, **context) -> str:
     return msg
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# HOTSPOT WELCOME SMS — ASYNC TASK (off the critical path)
+# ─────────────────────────────────────────────────────────────────────────────
+
+@shared_task(name='apps.messaging.tasks.send_hotspot_welcome_sms', queue='default')
+def send_hotspot_welcome_sms(session_id: str, schema_name: str):
+    """
+    Fire-and-forget task to send hotspot welcome SMS.
+    Called from HotspotPurchaseStatusView.get() after payment is confirmed.
+    Runs asynchronously so it doesn't block the poll response.
+    
+    Args:
+        session_id: HotspotSession.session_id
+        schema_name: Tenant schema name
+    """
+    from django_tenants.utils import schema_context
+    from apps.billing.models.hotspot_models import HotspotSession
+    from apps.messaging.services.notification_sender import SMSNotifier
+
+    with schema_context(schema_name):
+        session = HotspotSession.objects.filter(session_id=session_id).first()
+        if not session:
+            logger.warning("Hotspot welcome SMS: Session %s not found in %s", session_id, schema_name)
+            return
+        try:
+            SMSNotifier.hotspot_welcome(session, schema_name=schema_name)
+            logger.info("Hotspot welcome SMS sent for session %s", session_id)
+        except Exception as e:
+            logger.warning("Async hotspot welcome SMS failed for %s: %s", session_id, e)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# EXISTING TASKS
+# ─────────────────────────────────────────────────────────────────────────────
+
 @shared_task(bind=True, max_retries=2, default_retry_delay=30)
 def send_payment_confirmation_sms(self, customer_id, amount, reference='', schema_name=None):
     """

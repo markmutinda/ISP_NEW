@@ -21,9 +21,62 @@ from celery import shared_task
 from datetime import timedelta
 
 from django.utils import timezone
+from decimal import Decimal
 
 logger = logging.getLogger(__name__)
 
+
+# ─────────────────────────────────────────────────────────────────────────────
+# HOTSPOT REVENUE RECORDING — ASYNC TASK (off the critical path)
+# ─────────────────────────────────────────────────────────────────────────────
+
+@shared_task(name='apps.billing.tasks.record_hotspot_revenue', queue='billing')
+def record_hotspot_revenue(tenant_schema: str, amount_str: str):
+    """
+    Fire-and-forget task to record hotspot revenue against the tenant's
+    active billing cycle. Called from HotspotSession.activate() via
+    transaction.on_commit() so it doesn't block the activation path.
+    
+    Args:
+        tenant_schema: The tenant's schema name
+        amount_str: The amount as a string (to avoid Decimal serialization issues)
+    """
+    from django_tenants.utils import schema_context, get_public_schema_name
+    from apps.subscriptions.models import BillingCycle
+    from apps.core.models import Tenant
+
+    try:
+        amount = Decimal(amount_str)
+    except (ValueError, TypeError):
+        logger.warning("record_hotspot_revenue: invalid amount %s for %s", amount_str, tenant_schema)
+        return
+
+    with schema_context(get_public_schema_name()):
+        try:
+            tenant = Tenant.objects.get(schema_name=tenant_schema)
+            active_cycle = BillingCycle.objects.filter(tenant=tenant, status='active').first()
+            if active_cycle:
+                BillingCycle.objects.filter(id=active_cycle.id).update(
+                    hotspot_revenue_accumulated=Decimal('F("hotspot_revenue_accumulated") + %s') % amount
+                )
+                logger.info(
+                    "Recorded hotspot revenue %s for %s (cycle %s)",
+                    amount, tenant_schema, active_cycle.id
+                )
+            else:
+                logger.warning(
+                    "No active billing cycle found for %s — revenue %s not recorded",
+                    tenant_schema, amount
+                )
+        except Tenant.DoesNotExist:
+            logger.warning("record_hotspot_revenue: tenant %s not found", tenant_schema)
+        except Exception as e:
+            logger.exception("record_hotspot_revenue failed for %s: %s", tenant_schema, e)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# EXISTING TASKS
+# ═══════════════════════════════════════════════════════════════════════════
 
 def _for_each_tenant(callback):
     """

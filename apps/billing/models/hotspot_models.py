@@ -849,6 +849,9 @@ class HotspotSession(models.Model):
         Mark session as active after successful payment.
         Uses select_for_update to prevent concurrent double-activation.
         Safe to call both inside and outside an existing transaction.
+        
+        FIXED: Revenue accounting moved off the critical path to async task
+        using transaction.on_commit() to ensure it runs AFTER the DB commit.
         """
         from django.db import transaction
         from apps.billing.models.hotspot_models import HotspotSession  # avoid circular at module level
@@ -891,30 +894,26 @@ class HotspotSession(models.Model):
         if self.hotspot_client:
             self.hotspot_client.update_analytics(self.amount)
 
-        # METERED BILLING HOOK (Hotspot Revenue) — runs only once due to row lock
-        try:
-            from django.db import connection
-            from django_tenants.utils import schema_context, get_public_schema_name
-            from apps.subscriptions.models import BillingCycle
-            from apps.core.models import Tenant
-            from decimal import Decimal
+        # ═══════════════════════════════════════════════════════════════
+        # METERED BILLING HOOK (Hotspot Revenue) — OFF THE CRITICAL PATH
+        # ═══════════════════════════════════════════════════════════════
+        #
+        # BEFORE: synchronous public-schema context switch + Tenant lookup +
+        # BillingCycle update, running inline during the exact request the
+        # poller/MikroTik flow is waiting on.
+        #
+        # AFTER: deferred until after commit, off the critical path entirely
+        # ═══════════════════════════════════════════════════════════════
 
-            tenant_schema = connection.schema_name
+        def _queue_revenue():
+            from apps.billing.tasks import record_hotspot_revenue
+            from django.db import connection as _conn
+            # Use the current connection's schema_name — still valid at
+            # transaction.on_commit() time because the connection hasn't
+            # been closed or changed.
+            record_hotspot_revenue.delay(_conn.schema_name, str(self.amount))
 
-            with schema_context(get_public_schema_name()):
-                current_tenant = Tenant.objects.get(schema_name=tenant_schema)
-                active_cycle = BillingCycle.objects.filter(
-                    tenant=current_tenant,
-                    status='active'
-                ).first()
-
-                if active_cycle:
-                    BillingCycle.objects.filter(id=active_cycle.id).update(
-                        hotspot_revenue_accumulated=F('hotspot_revenue_accumulated') + Decimal(str(self.amount))
-                    )
-        except Exception as e:
-            import logging as _log
-            _log.getLogger(__name__).error("Failed to record hotspot revenue: %s", e)
+        transaction.on_commit(_queue_revenue)
     
     def refund_or_cancel(self, reason: str = "Refunded"):
         """Reverses a previously active session and decrements the ledger."""
