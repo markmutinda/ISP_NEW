@@ -8,9 +8,12 @@ To add a new check in the future: write a function, decorate it with
 @register_check(...), done. No other file needs to change.
 """
 import logging
+import time
 from dataclasses import dataclass, field
 from typing import Callable, Optional, Any
 from urllib.parse import urlparse
+
+from librouteros.query import Key
 
 logger = logging.getLogger(__name__)
 
@@ -92,24 +95,36 @@ def _own_domains(router) -> list[str]:
     return domains
 
 
+# ────────────────────────────────────────────────────────────────
+# 🔥 FIX: _read_login_html_contents using librouteros's real query API
+# ────────────────────────────────────────────────────────────────
+
 def _read_login_html_contents(api, live_files) -> str:
-    """Reads login.html contents from the router (small text file, safe to pull inline)."""
+    """
+    Reads login.html contents from the router (small text file, safe to pull inline).
+    
+    Uses librouteros's real select() API via Key('name').select(name_k, contents_k)
+    instead of the broken _execute(get=...) which expects a different signature.
+    """
     try:
         # Find the netily-profile to get its html-directory
         profiles = api._execute('/ip/hotspot/profile')
         prof = next((p for p in profiles if p.get('name') == 'netily-profile'), None)
         html_dir = (prof.get('html-directory') or 'hotspot') if prof else 'hotspot'
         target = f"{html_dir}/login.html"
-        
-        # Find the file in the cached file list
+
+        # Check if we already have contents from the cached file list
         f = next((x for x in live_files if x.get('name') == target), None)
-        if f:
-            # If contents not in the cached file list, fetch it directly
-            if 'contents' not in f:
-                file_data = api._execute('/file', get={'.proplist': '.id,name,contents'})
-                f = next((x for x in file_data if x.get('name') == target), None)
-            return (f.get('contents') or '') if f else ''
-        return ''
+        if f and 'contents' in f:
+            return f.get('contents') or ''
+
+        # Contents weren't in the default listing — query for them explicitly
+        # via librouteros' real select() API (NOT api._execute(get=...), which
+        # is broken for anything but plain listings).
+        name_k, contents_k = Key('name'), Key('contents')
+        rows = list(api.api.path('file').select(name_k, contents_k))
+        match = next((r for r in rows if r.get('name') == target), None)
+        return (match.get('contents') or '') if match else ''
     except Exception as e:
         logger.warning(f"[DIAGNOSE] login.html read failed: {e}")
         return ''
@@ -352,11 +367,14 @@ def _check_login_html_current(ctx: DiagnosticContext) -> bool:
 
 
 def _fix_login_html_current(ctx: DiagnosticContext):
-    """Re-downloads login.html + status.html from the provisioning endpoint —
-    equivalent to re-running Section 11 of the full provisioning script,
-    without touching VPN/RADIUS/hotspot/firewall config."""
+    """
+    Re-downloads login.html + status.html via the proper RouterOS command call.
+    
+    Uses api.fetch_url() which calls self.api.path('tool')('fetch', **kwargs)
+    — the same pattern as reboot_device() — NOT _execute('/tool/fetch', add=...)
+    which fails with 'no such command' because fetch isn't a list resource.
+    """
     from apps.network.services.mikrotik_script_generator import MikrotikScriptGenerator
-    import time
 
     router, api = ctx.router, ctx.api
     gen = MikrotikScriptGenerator(router)
@@ -370,19 +388,11 @@ def _fix_login_html_current(ctx: DiagnosticContext):
 
     for url, filename in ((login_url, 'login.html'), (status_url, 'status.html')):
         dst = f"{html_dir}/{filename}"
-        try:
-            api._execute('/tool/fetch', add={
-                'url': url,
-                'dst-path': dst,
-                'check-certificate': 'no',
-            })
-            # Small delay between fetches — RouterOS runs /tool/fetch async,
-            # this gives the first one time to land before the second starts.
-            time.sleep(1)
-        except Exception as e:
-            # librouteros treats /tool/fetch as an async command; some versions
-            # raise on the "finished" trap even on success — log and continue
-            logger.info(f"[DIAGNOSE FIX] fetch({filename}) call returned: {e}")
+        ok = api.fetch_url(url, dst)
+        if not ok:
+            logger.warning(f"[DIAGNOSE FIX] fetch({filename}) failed to trigger")
+        # RouterOS runs fetch async — give it a beat before the next call
+        time.sleep(1)
 
     logger.info(f"[DIAGNOSE FIX] Refreshed hotspot HTML pages for router {router.id}")
 

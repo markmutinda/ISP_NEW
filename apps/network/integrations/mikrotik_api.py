@@ -158,7 +158,7 @@ class MikrotikAPI:
             self.disconnect()
     
     # ────────────────────────────────────────────────────────────────
-    # COMMAND EXECUTION (Reboot, Ping, Backup)
+    # COMMAND EXECUTION (Reboot, Ping, Backup, Fetch)
     # ────────────────────────────────────────────────────────────────
 
     def reboot_device(self) -> bool:
@@ -181,6 +181,34 @@ class MikrotikAPI:
             
     def reboot(self) -> bool:
         return self.reboot_device()
+
+    def fetch_url(self, url: str, dst_path: str, check_certificate: bool = False) -> bool:
+        """
+        Trigger RouterOS '/tool fetch' as an async download command.
+        NOT a list resource — must be called as a command via path(...)(cmd, **kwargs),
+        same pattern as reboot_device(). Using _execute(add=...) fails with
+        'no such command' because fetch isn't add-able.
+        
+        Args:
+            url: Full URL to fetch from
+            dst_path: Destination file path on the router (e.g., 'hotspot/login.html')
+            check_certificate: Whether to verify SSL certificates
+        
+        Returns:
+            True if the command was triggered successfully (download runs async)
+        """
+        try:
+            if not self.api and not self.connect():
+                return False
+            self.api.path('tool')('fetch', **{
+                'url': url,
+                'dst-path': dst_path,
+                'check-certificate': 'yes' if check_certificate else 'no',
+            })
+            return True
+        except Exception as e:
+            logger.error(f"tool fetch failed for {url}: {e}")
+            return False
 
     def backup_config(self) -> str:
         """Backup configuration"""
