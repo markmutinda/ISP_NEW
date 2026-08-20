@@ -31,21 +31,6 @@ PUBLIC_ROUTER_PATHS = (
     '/api/v1/hotspot/login-page/',
     '/api/v1/hotspot/purchase/',
     '/api/v1/hotspot/routers/',
-    # ── ADDED: these were falling through to full tenant DB resolution
-    # + SubscriptionEnforcementMiddleware's cross-schema CompanySubscription
-    # query on every single request — the actual cause of slowdowns under
-    # concurrent hotspot traffic. None of these need that check; they're
-    # anonymous end-customer captive-portal actions, not ISP admin actions.
-    '/api/v1/hotspot/auto-login/',
-    '/api/v1/hotspot/return-trip/',
-    '/api/v1/hotspot/phone-reconnect/',
-    '/api/v1/hotspot/voucher-redeem/',
-    '/api/v1/hotspot/free-trial/',
-    '/api/v1/hotspot/device-auth/',
-    '/api/v1/hotspot/ads/',
-    '/api/v1/hotspot/loyalty-info/',
-    '/api/v1/hotspot/loyalty-redeem/',
-    '/api/v1/hotspot/scan-devices/',
 )
 
 # Known exploit/secret-scanning probes — reject before any DB/schema work
