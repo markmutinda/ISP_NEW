@@ -190,7 +190,7 @@ class HotspotLoginPageView(APIView):
             '&smart_tv=' + smartTV;
 
     var url = '{portal_url}/hotspot/{router.id}?' + p;
-    window.location.href = url;
+    window.location.replace(url);
   }})();
   </script>
 </body>

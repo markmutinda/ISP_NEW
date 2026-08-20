@@ -652,7 +652,7 @@ class MikrotikScriptGenerator:
         // Navigate on the next frame instead of waiting ~1s for nothing
         requestAnimationFrame(function() {{
             requestAnimationFrame(function() {{
-                window.location.href = redirectUrl;
+                window.location.replace(redirectUrl);
             }});
         }});
     }})();
