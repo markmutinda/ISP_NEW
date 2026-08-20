@@ -96,7 +96,16 @@ services:
              echo 'Adding route for '$${VPN_NETWORK_CIDR:-10.8.0.0/16}' via '$$VPN_IP &&
              if [ -n \"$$VPN_IP\" ]; then ip route add $${VPN_NETWORK_CIDR:-10.8.0.0/16} via $$VPN_IP || true; fi &&
              echo 'Route added successfully!' &&
-             gunicorn config.wsgi:application --bind 0.0.0.0:8000 --workers 2 --timeout 300"
+             gunicorn config.wsgi:application \
+               --bind 0.0.0.0:8000 \
+               --workers 4 \
+               --worker-class gthread \
+               --threads 4 \
+               --worker-tmp-dir /dev/shm \
+               --timeout 60 \
+               --graceful-timeout 30 \
+               --max-requests 1000 \
+               --max-requests-jitter 100"
     working_dir: /app
     volumes:
       - ../:/app
@@ -109,7 +118,6 @@ services:
       - PYTHONPATH=/app
       - DJANGO_SETTINGS_MODULE=config.settings.production
       - DJANGO_SECRET_KEY=${SECRET_KEY:-changeme-generate-a-real-key}
-      # DJANGO_ALLOWED_HOSTS line REMOVED - now reads from env_file only
       - TENANT_BASE_DOMAIN=netily.co.ke
       - REDIS_URL=redis://netily_redis:6379/0
       - DB_HOST=netily_db
@@ -238,7 +246,6 @@ services:
       dockerfile: docker/Dockerfile.radius
     container_name: netily_radius
     restart: unless-stopped
-    # REMOVED: command: override - using the Dockerfile's native startup script
     cap_add:
       - NET_ADMIN
     env_file: ../.env
