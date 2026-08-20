@@ -373,8 +373,13 @@ def _fix_login_html_current(ctx: DiagnosticContext):
     Uses api.fetch_url() which calls self.api.path('tool')('fetch', **kwargs)
     — the same pattern as reboot_device() — NOT _execute('/tool/fetch', add=...)
     which fails with 'no such command' because fetch isn't a list resource.
+    
+    RouterOS /tool fetch is async — polls until login.html actually contains
+    the new version stamp (or gives up after ~16s) instead of guessing a
+    fixed sleep. This is what was causing "applied but unable to verify".
     """
     from apps.network.services.mikrotik_script_generator import MikrotikScriptGenerator
+    from apps.network.services.mikrotik_script_generator import LOGIN_HTML_VERSION
 
     router, api = ctx.router, ctx.api
     gen = MikrotikScriptGenerator(router)
@@ -386,13 +391,37 @@ def _fix_login_html_current(ctx: DiagnosticContext):
     prof = next((p for p in ctx.live['hotspot_profiles'] if p.get('name') == 'netily-profile'), None)
     html_dir = (prof.get('html-directory') or 'hotspot') if prof else 'hotspot'
 
+    # Trigger both fetches first (they run async)
     for url, filename in ((login_url, 'login.html'), (status_url, 'status.html')):
         dst = f"{html_dir}/{filename}"
         ok = api.fetch_url(url, dst)
         if not ok:
             logger.warning(f"[DIAGNOSE FIX] fetch({filename}) failed to trigger")
-        # RouterOS runs fetch async — give it a beat before the next call
-        time.sleep(1)
+
+    # RouterOS /tool fetch is async — poll until login.html actually contains
+    # the new version stamp (or give up after ~16s) instead of guessing a
+    # fixed sleep. This is what was causing "applied but unable to verify".
+    version_marker = f"NETILY_LOGIN_HTML_VERSION={LOGIN_HTML_VERSION}"
+
+    for attempt in range(8):  # up to ~16s total (8 * 2s)
+        time.sleep(2)
+        try:
+            fresh_files = list(api._execute('/file'))
+        except Exception:
+            fresh_files = []
+        content = _read_login_html_contents(api, fresh_files)
+        if version_marker in content:
+            logger.info(
+                f"[DIAGNOSE FIX] login.html confirmed updated on router "
+                f"{router.id} after {attempt + 1} check(s)"
+            )
+            break
+    else:
+        logger.warning(
+            f"[DIAGNOSE FIX] login.html did not show new version stamp "
+            f"within timeout for router {router.id} — fetch may still be "
+            f"downloading or failed silently on the router."
+        )
 
     logger.info(f"[DIAGNOSE FIX] Refreshed hotspot HTML pages for router {router.id}")
 
