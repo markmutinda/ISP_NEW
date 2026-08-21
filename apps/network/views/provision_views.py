@@ -348,6 +348,12 @@ class ProvisionHotspotHTMLView(APIView):
 
         if page == 'login.html':
             html = gen.generate_login_html()
+            # 🔥 Stamp DB the moment the router actually fetches this file —
+            # this is the only reliable signal that it has the new version,
+            # since reading file contents back via the RouterOS API is unreliable.
+            from apps.network.services.mikrotik_script_generator import LOGIN_HTML_VERSION
+            Router.objects.filter(pk=router.pk).update(last_login_html_version=LOGIN_HTML_VERSION)
+            logger.info(f"[PROVISION HTML] Stamped login.html version {LOGIN_HTML_VERSION} for router {router.id}")
         elif page == 'status.html':
             html = gen.generate_status_html()
         else:

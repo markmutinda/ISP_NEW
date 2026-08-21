@@ -270,6 +270,12 @@ class Router(AuditMixin):
         help_text="Detected RouterOS major version (6 or 7)"
     )
 
+    # 🔥 NEW: Version-tracking field for login.html
+    last_login_html_version = models.CharField(
+        max_length=10, blank=True, null=True,
+        help_text="LOGIN_HTML_VERSION stamp last confirmed served to this router"
+    )
+
     # Real-time Stats
     mac_address = models.CharField(max_length=17, null=True, blank=True)
     model = models.CharField(max_length=100, null=True, blank=True)

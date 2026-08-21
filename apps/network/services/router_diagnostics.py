@@ -77,7 +77,6 @@ def gather_live_state(api) -> dict:
         'ip_services': safe('/ip/service'),
         'users': safe('/user'),
         'dhcp_servers': safe('/ip/dhcp-server'),
-        # ── NEW: Read file list for login.html version check ──
         'files': safe('/file'),
     }
 
@@ -356,30 +355,37 @@ register_check(
 
 
 # ────────────────────────────────────────────────────────────────
-# 🔥 NEW: Login HTML version check — ensures routers have the
-# fast-redirect optimization (removed 900ms setTimeout, preconnect)
+# 🔥 FIXED: Login HTML version check — uses DB-stamped version
+# instead of unreliable file-content reading via RouterOS API
 # ────────────────────────────────────────────────────────────────
 
 def _check_login_html_current(ctx: DiagnosticContext) -> bool:
+    """
+    Checks if the router has the current login.html version by comparing
+    the DB-stamped version against the current LOGIN_HTML_VERSION.
+    
+    This is faster and more reliable than reading file contents over
+    the RouterOS API, which is broken on many v7 builds (contents field
+    returns empty for /file).
+    """
     from apps.network.services.mikrotik_script_generator import LOGIN_HTML_VERSION
-    content = _read_login_html_contents(ctx.api, ctx.live.get('files', []))
-    return f"NETILY_LOGIN_HTML_VERSION={LOGIN_HTML_VERSION}" in content
+    return ctx.router.last_login_html_version == LOGIN_HTML_VERSION
 
 
 def _fix_login_html_current(ctx: DiagnosticContext):
     """
-    Re-downloads login.html + status.html via the proper RouterOS command call.
-    
-    Uses api.fetch_url() which calls self.api.path('tool')('fetch', **kwargs)
-    — the same pattern as reboot_device() — NOT _execute('/tool/fetch', add=...)
-    which fails with 'no such command' because fetch isn't a list resource.
-    
-    RouterOS /tool fetch is async — polls until login.html actually contains
-    the new version stamp (or gives up after ~16s) instead of guessing a
-    fixed sleep. This is what was causing "applied but unable to verify".
+    Re-downloads login.html + status.html via RouterOS /tool fetch.
+
+    /tool fetch does NOT overwrite an existing file — it silently creates
+    'login.html1' if one already exists and the hotspot server keeps serving
+    the stale copy. So we delete the existing file first, then fetch.
+
+    Verification is done by polling the DB flag that the provisioning
+    endpoint stamps the instant the router's GET request lands — reading
+    file contents back over the RouterOS API is unreliable and was the
+    root cause of "fix applied but verification failed".
     """
-    from apps.network.services.mikrotik_script_generator import MikrotikScriptGenerator
-    from apps.network.services.mikrotik_script_generator import LOGIN_HTML_VERSION
+    from apps.network.services.mikrotik_script_generator import MikrotikScriptGenerator, LOGIN_HTML_VERSION
 
     router, api = ctx.router, ctx.api
     gen = MikrotikScriptGenerator(router)
@@ -387,41 +393,35 @@ def _fix_login_html_current(ctx: DiagnosticContext):
     login_url = f"{gen.active_url}/api/v1/network/provision/{router.auth_key}/hotspot/login.html"
     status_url = f"{gen.active_url}/api/v1/network/provision/{router.auth_key}/hotspot/status.html"
 
-    # Find the html-directory from the hotspot profile
     prof = next((p for p in ctx.live['hotspot_profiles'] if p.get('name') == 'netily-profile'), None)
     html_dir = (prof.get('html-directory') or 'hotspot') if prof else 'hotspot'
 
-    # Trigger both fetches first (they run async)
     for url, filename in ((login_url, 'login.html'), (status_url, 'status.html')):
         dst = f"{html_dir}/{filename}"
+
+        # Delete existing file first so /tool fetch actually overwrites it
+        try:
+            for f in api._execute('/file'):
+                if f.get('name') == dst:
+                    api._execute('/file', remove={'.id': f['.id']})
+                    logger.info(f"[DIAGNOSE FIX] Removed stale {dst} from router {router.id}")
+        except Exception as e:
+            logger.warning(f"[DIAGNOSE FIX] Could not clear stale {dst}: {e}")
+
         ok = api.fetch_url(url, dst)
         if not ok:
             logger.warning(f"[DIAGNOSE FIX] fetch({filename}) failed to trigger")
 
-    # RouterOS /tool fetch is async — poll until login.html actually contains
-    # the new version stamp (or give up after ~16s) instead of guessing a
-    # fixed sleep. This is what was causing "applied but unable to verify".
-    version_marker = f"NETILY_LOGIN_HTML_VERSION={LOGIN_HTML_VERSION}"
-
-    for attempt in range(8):  # up to ~16s total (8 * 2s)
-        time.sleep(2)
-        try:
-            fresh_files = list(api._execute('/file'))
-        except Exception:
-            fresh_files = []
-        content = _read_login_html_contents(api, fresh_files)
-        if version_marker in content:
-            logger.info(
-                f"[DIAGNOSE FIX] login.html confirmed updated on router "
-                f"{router.id} after {attempt + 1} check(s)"
-            )
+    # Poll for the DB stamp written by ProvisionHotspotHTMLView when the
+    # router's GET request for login.html actually lands.
+    for attempt in range(8):  # ~12s total
+        time.sleep(1.5)
+        router.refresh_from_db(fields=['last_login_html_version'])
+        if router.last_login_html_version == LOGIN_HTML_VERSION:
+            logger.info(f"[DIAGNOSE FIX] login.html confirmed for router {router.id} after {attempt + 1} check(s)")
             break
     else:
-        logger.warning(
-            f"[DIAGNOSE FIX] login.html did not show new version stamp "
-            f"within timeout for router {router.id} — fetch may still be "
-            f"downloading or failed silently on the router."
-        )
+        logger.warning(f"[DIAGNOSE FIX] login.html version stamp not confirmed for router {router.id} within timeout")
 
     logger.info(f"[DIAGNOSE FIX] Refreshed hotspot HTML pages for router {router.id}")
 
