@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 # changes meaningfully. Used by the diagnostic engine to detect
 # stale login.html on routers.
 # ────────────────────────────────────────────────────────────────
-LOGIN_HTML_VERSION = "2"  # bump this every time generate_login_html() changes meaningfully
+LOGIN_HTML_VERSION = "3"  # bump this every time generate_login_html() changes meaningfully
 
 
 class MikrotikScriptGenerator:
@@ -567,11 +567,9 @@ class MikrotikScriptGenerator:
     <meta http-equiv="cache-control" content="no-cache, no-store, must-revalidate">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Connecting...</title>
-    <!-- 🔥 OPTIMIZATION: Preconnect to portal & API domains — warms DNS/TCP/TLS in parallel -->
+    <!-- 🔥 OPTIMIZATION: Preconnect to portal domain only — same-origin as redirect target -->
     <link rel="dns-prefetch" href="{portal_base}">
     <link rel="preconnect" href="{portal_base}" crossorigin>
-    <link rel="dns-prefetch" href="{self.api_url}">
-    <link rel="preconnect" href="{self.api_url}" crossorigin>
     <style>
         *, *::before, *::after {{ box-sizing: border-box; margin: 0; padding: 0; }}
         body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', sans-serif; background: linear-gradient(135deg, #eff6ff 0%, #dbeafe 50%, #e0e7ff 100%); min-height: 100vh; display: flex; align-items: center; justify-content: center; padding: 1rem; }}
@@ -637,24 +635,29 @@ class MikrotikScriptGenerator:
         var redirectUrl = portalBase + '?' + params.join('&');
         linkEl.href = redirectUrl;
 
-        // 🔥 OPTIMIZATION 1: Kill the 900ms artificial delay — navigate on next frame instead
-        // Preconnect links in the <head> warm DNS/TCP/TLS in parallel with the tiny bit of JS above
-
-        // 🔥 OPTIMIZATION 2: Speculatively fetch the captive-portal payload
-        // so it sits in the browser cache before the page even mounts
-        try {{
-            fetch('{self.api_url}/api/v1/hotspot/captive-portal/?router={r.id}&tenant={tenant_name}', {{
-                mode: 'cors',
-                credentials: 'omit',
-            }}).catch(function() {{}});
-        }} catch (e) {{}}
-
-        // Navigate on the next frame instead of waiting ~1s for nothing
+        // Navigate on the next frame — preconnect links in <head> warm DNS/TCP/TLS in parallel
         requestAnimationFrame(function() {{
             requestAnimationFrame(function() {{
                 window.location.replace(redirectUrl);
             }});
         }});
+
+        // 🔥 Speculative fetch — SAME ORIGIN as the redirect target, so this is the
+        // ONLY DNS+TLS handshake this device needs to make before content shows.
+        // Result is stashed so the Next.js page skips its own fetch entirely.
+        try {{
+            var captiveUrl = '{portal_base}/api/v1/hotspot/captive-portal/?router={r.id}&tenant={tenant_name}';
+            fetch(captiveUrl, {{ credentials: 'omit' }})
+                .then(function(res) {{ return res.ok ? res.json() : null; }})
+                .then(function(data) {{
+                    if (!data) return;
+                    try {{
+                        data._cachedAt = Date.now();
+                        sessionStorage.setItem('portal_cache:{r.id}', JSON.stringify(data));
+                    }} catch (e) {{}}
+                }})
+                .catch(function() {{}});
+        }} catch (e) {{}}
     }})();
     </script>
 </body>
