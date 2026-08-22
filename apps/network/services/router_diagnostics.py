@@ -413,8 +413,10 @@ def _fix_login_html_current(ctx: DiagnosticContext):
             logger.warning(f"[DIAGNOSE FIX] fetch({filename}) failed to trigger")
 
     # Poll for the DB stamp written by ProvisionHotspotHTMLView when the
-    # router's GET request for login.html actually lands.
-    for attempt in range(8):  # ~12s total
+    # router's GET request for login.html actually lands. The router fetches
+    # over its own WAN (not the VPN tunnel), so DNS + TLS + download can
+    # take longer than a few seconds on slower connections — give it more room.
+    for attempt in range(20):  # ~30s total (20 x 1.5s)
         time.sleep(1.5)
         router.refresh_from_db(fields=['last_login_html_version'])
         if router.last_login_html_version == LOGIN_HTML_VERSION:
