@@ -78,7 +78,6 @@ def gather_live_state(api) -> dict:
         'users': safe('/user'),
         'dhcp_servers': safe('/ip/dhcp-server'),
         'files': safe('/file'),
-        'dns': safe('/ip/dns'),
     }
 
 
@@ -436,65 +435,6 @@ register_check(
     severity='warning',
     fix_fn=_fix_login_html_current,
 )(_check_login_html_current)
-
-
-# ────────────────────────────────────────────────────────────────
-# 🔥 NEW: DNS cache sizing check — prevents slowdowns over time
-# ────────────────────────────────────────────────────────────────
-
-def _check_dns_cache_optimized(ctx: DiagnosticContext) -> bool:
-    """
-    Default MikroTik DNS cache (2MB) evicts under sustained hotspot load,
-    forcing repeated re-resolution of the portal domain — this is why
-    captive-portal loads get slower the longer the router has been up
-    and the busier it gets.
-    """
-    try:
-        rows = ctx.live.get('dns', [])
-        if not rows:
-            return False
-        raw = str(rows[0].get('cache-size', '2048')).lower().replace('kib', '').strip()
-        return int(raw or 0) >= 8192
-    except Exception:
-        return False
-
-
-def _fix_dns_cache_optimized(ctx: DiagnosticContext):
-    """
-    Increases DNS cache size to 8MB with 1-day TTL to prevent cache churn
-    under sustained hotspot load.
-    """
-    api = ctx.api
-    try:
-        # Get the current DNS entry
-        dns_rows = api._execute('/ip/dns')
-        if dns_rows:
-            # Update using the .id from the existing entry
-            api._execute('/ip/dns', update={
-                '.id': dns_rows[0]['.id'],
-                'cache-size': '8192KiB',
-                'cache-max-ttl': '1d',
-            })
-            logger.info(f"[DIAGNOSE FIX] DNS cache updated for router {ctx.router.id}")
-        else:
-            # Fallback: no DNS entry found (shouldn't happen, but handle it)
-            api._execute('/ip/dns', set={
-                'cache-size': '8192KiB',
-                'cache-max-ttl': '1d',
-            })
-            logger.info(f"[DIAGNOSE FIX] DNS cache set (no existing entry) for router {ctx.router.id}")
-    except Exception as e:
-        logger.error(f"[DIAGNOSE FIX] Failed to update DNS cache for router {ctx.router.id}: {e}")
-        raise
-
-
-register_check(
-    id='dns_cache_optimized',
-    label='DNS cache is sized for hotspot traffic (prevents slowdowns over time)',
-    category='Performance',
-    severity='warning',
-    fix_fn=_fix_dns_cache_optimized,
-)(_check_dns_cache_optimized)
 
 
 # ────────────────────────────────────────────────────────────────
