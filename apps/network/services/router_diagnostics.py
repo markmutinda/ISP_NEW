@@ -438,6 +438,48 @@ register_check(
 
 
 # ────────────────────────────────────────────────────────────────
+# 🔥 FIX 3: Phantom DNS name check — the #1 cause of slow captive redirects
+# ────────────────────────────────────────────────────────────────
+
+def _check_hotspot_no_phantom_dns(ctx: DiagnosticContext) -> bool:
+    """
+    A dns-name on netily-profile that isn't independently resolved means
+    every captive-portal redirect eats a DNS lookup first. This is the
+    #1 cause of "randomly slow on some phones" — CNA/captive webviews are
+    far less tolerant of a stalled/failed DNS lookup than a real browser.
+    Blank dns-name = RouterOS redirects straight to its own IP, instantly.
+    """
+    for p in ctx.live['hotspot_profiles']:
+        if p.get('name') == 'netily-profile':
+            return not p.get('dns-name')
+    return True  # profile not provisioned yet — nothing to flag
+
+
+def _fix_hotspot_no_phantom_dns(ctx: DiagnosticContext):
+    api = ctx.api
+    for p in ctx.live['hotspot_profiles']:
+        if p.get('name') == 'netily-profile' and p.get('dns-name'):
+            api._execute('/ip/hotspot/profile', update={
+                '.id': p['.id'],
+                'dns-name': '',
+            })
+            logger.info(
+                f"[DIAGNOSE] Cleared phantom hotspot dns-name on router {ctx.router.id} "
+                f"(was: {p.get('dns-name')})"
+            )
+            return
+
+
+register_check(
+    id='hotspot_no_phantom_dns',
+    label='Captive redirect uses router IP, not an unresolvable DNS name',
+    category='Performance',
+    severity='critical',
+    fix_fn=_fix_hotspot_no_phantom_dns,
+)(_check_hotspot_no_phantom_dns)
+
+
+# ────────────────────────────────────────────────────────────────
 # RUNNER
 # ────────────────────────────────────────────────────────────────
 

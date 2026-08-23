@@ -371,8 +371,14 @@ class MikrotikScriptGenerator:
 """
 
     def _section_hotspot(self, r: Router, gateway_ip: str) -> str:
-        # Removed rate-limit="" (crashes v7 parser)
-        profile_cmd = f'/ip hotspot profile add name="netily-profile" hotspot-address="{gateway_ip}" dns-name="{self._escape_ros_string(r.dns_name)}" login-by=http-pap,mac-cookie use-radius=yes radius-accounting=yes http-cookie-lifetime=1d'
+        # 🔥 FIX: dns-name intentionally omitted — a custom hostname adds a DNS lookup
+        # (and a timeout when it's unresolvable) in front of every captive
+        # redirect. hotspot-address (raw IP) resolves instantly, always.
+        profile_cmd = (
+            f'/ip hotspot profile add name="netily-profile" '
+            f'hotspot-address="{gateway_ip}" login-by=http-pap,mac-cookie '
+            f'use-radius=yes radius-accounting=yes http-cookie-lifetime=1d'
+        )
         server_cmd = f'/ip hotspot add name="netily-hotspot" interface="netily-bridge" address-pool="netily-pool" profile="netily-profile" disabled=no'
         
         return f"""# ─────────────────────────────────────────────────────────────
@@ -409,7 +415,7 @@ class MikrotikScriptGenerator:
         addr_list_lines = []
         for domain in own_domains:
             addr_list_lines.append(
-                f'/ip firewall address-list add list=netily-portal-ips '
+                f'/ip firewall address-list add list="netily-portal-ips" '
                 f'address="{domain}" comment="Netily-Portal-Domain"'
             )
         addr_list_script = "\n".join(addr_list_lines) if addr_list_lines else ""
