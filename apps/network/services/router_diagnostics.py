@@ -460,12 +460,32 @@ def _check_dns_cache_optimized(ctx: DiagnosticContext) -> bool:
 
 
 def _fix_dns_cache_optimized(ctx: DiagnosticContext):
+    """
+    Increases DNS cache size to 8MB with 1-day TTL to prevent cache churn
+    under sustained hotspot load.
+    """
     api = ctx.api
-    api.api.path('ip', 'dns').set(**{
-        'cache-size': '8192KiB',
-        'cache-max-ttl': '1d',
-    })
-    logger.info(f"[DIAGNOSE FIX] DNS cache increased for router {ctx.router.id}")
+    try:
+        # Get the current DNS entry
+        dns_rows = api._execute('/ip/dns')
+        if dns_rows:
+            # Update using the .id from the existing entry
+            api._execute('/ip/dns', update={
+                '.id': dns_rows[0]['.id'],
+                'cache-size': '8192KiB',
+                'cache-max-ttl': '1d',
+            })
+            logger.info(f"[DIAGNOSE FIX] DNS cache updated for router {ctx.router.id}")
+        else:
+            # Fallback: no DNS entry found (shouldn't happen, but handle it)
+            api._execute('/ip/dns', set={
+                'cache-size': '8192KiB',
+                'cache-max-ttl': '1d',
+            })
+            logger.info(f"[DIAGNOSE FIX] DNS cache set (no existing entry) for router {ctx.router.id}")
+    except Exception as e:
+        logger.error(f"[DIAGNOSE FIX] Failed to update DNS cache for router {ctx.router.id}: {e}")
+        raise
 
 
 register_check(
