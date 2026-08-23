@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 # changes meaningfully. Used by the diagnostic engine to detect
 # stale login.html on routers.
 # ────────────────────────────────────────────────────────────────
-LOGIN_HTML_VERSION = "3"  # bump this every time generate_login_html() changes meaningfully
+LOGIN_HTML_VERSION = "4"  # bump this every time generate_login_html() changes meaningfully
 
 
 class MikrotikScriptGenerator:
@@ -554,10 +554,7 @@ class MikrotikScriptGenerator:
         r = self.router
         portal_base = self.get_tenant_portal_url().rstrip('/')
         tenant_name = self._escape_ros_string(r.tenant_subdomain or 'public')
-        primary_color = "#2563eb"
 
-        # 🔥 VERSION STAMP — embedded as a comment so the diagnostic engine
-        # can detect stale login.html without parsing the JS.
         return f"""<!DOCTYPE html>
 <!-- NETILY_LOGIN_HTML_VERSION={LOGIN_HTML_VERSION} -->
 <html lang="en">
@@ -567,99 +564,64 @@ class MikrotikScriptGenerator:
     <meta http-equiv="cache-control" content="no-cache, no-store, must-revalidate">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Connecting...</title>
-    <!-- 🔥 OPTIMIZATION: Preconnect to portal domain only — same-origin as redirect target -->
     <link rel="dns-prefetch" href="{portal_base}">
     <link rel="preconnect" href="{portal_base}" crossorigin>
-    <style>
-        *, *::before, *::after {{ box-sizing: border-box; margin: 0; padding: 0; }}
-        body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', sans-serif; background: linear-gradient(135deg, #eff6ff 0%, #dbeafe 50%, #e0e7ff 100%); min-height: 100vh; display: flex; align-items: center; justify-content: center; padding: 1rem; }}
-        .card {{ background: white; border-radius: 1.5rem; box-shadow: 0 25px 50px -12px rgba(0,0,0,0.15), 0 0 0 1px rgba(0,0,0,0.05); padding: 2.5rem 2rem; width: 100%; max-width: 380px; text-align: center; }}
-        .wifi-icon {{ width: 64px; height: 64px; background: linear-gradient(135deg, {primary_color}, #7c3aed); border-radius: 1rem; display: flex; align-items: center; justify-content: center; margin: 0 auto 1.5rem; }}
-        .wifi-icon svg {{ width: 36px; height: 36px; color: white; }}
-        h1 {{ font-size: 1.375rem; font-weight: 700; color: #111827; margin-bottom: 0.5rem; }}
-        .subtitle {{ font-size: 0.875rem; color: #6b7280; margin-bottom: 2rem; line-height: 1.5; }}
-        .progress-track {{ background: #f3f4f6; border-radius: 999px; height: 6px; overflow: hidden; margin-bottom: 1rem; }}
-        .progress-bar {{ height: 100%; background: linear-gradient(90deg, {primary_color}, #7c3aed); border-radius: 999px; animation: progress 1.8s ease-in-out forwards; width: 0%; }}
-        @keyframes progress {{ 0% {{ width: 0%; }} 30% {{ width: 45%; }} 70% {{ width: 78%; }} 100% {{ width: 95%; }} }}
-        .status-row {{ display: flex; align-items: center; gap: 0.625rem; padding: 0.75rem 1rem; background: #f9fafb; border-radius: 0.75rem; margin-bottom: 0.5rem; }}
-        .dot {{ width: 8px; height: 8px; border-radius: 50%; background: {primary_color}; animation: pulse 1.5s ease-in-out infinite; flex-shrink: 0; }}
-        @keyframes pulse {{ 0%, 100% {{ opacity: 1; transform: scale(1); }} 50% {{ opacity: 0.5; transform: scale(0.85); }} }}
-        .status-text {{ font-size: 0.8125rem; color: #374151; font-weight: 500; }}
-        .link-row {{ margin-top: 1.5rem; font-size: 0.75rem; color: #9ca3af; }}
-        .link-row a {{ color: {primary_color}; text-decoration: none; font-weight: 500; }}
-    </style>
-</head>
-<body>
-    <div class="card">
-        <div class="wifi-icon">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                <path d="M5 12.55a11 11 0 0 1 14.08 0"/>
-                <path d="M1.42 9a16 16 0 0 1 21.16 0"/>
-                <path d="M8.53 16.11a6 6 0 0 1 6.95 0"/>
-                <circle cx="12" cy="20" r="1" fill="currentColor"/>
-            </svg>
-        </div>
-        <h1 id="main-title">Connecting you...</h1>
-        <p class="subtitle" id="sub-title">Redirecting to the WiFi portal</p>
-        <div class="progress-track"><div class="progress-bar"></div></div>
-        <div class="status-row"><div class="dot"></div><span class="status-text" id="status-msg">Detecting your device...</span></div>
-        <div class="link-row">Not redirected? <a id="manual-link" href="#">Click here</a></div>
-    </div>
-    <form id="login-form" action="$(link-login-only)" method="post" style="display:none">
-        <input type="hidden" name="username" id="usr">
-        <input type="hidden" name="password" id="pwd">
-        <input type="hidden" name="dst" value="$(link-orig)">
-    </form>
     <script>
+    // Runs the instant this line is parsed — BEFORE any CSS/body parsing
+    // and before DOMContentLoaded. This is the single biggest lever on
+    // perceived speed: nothing below this tag blocks the redirect.
     (function() {{
-        var mac = '$(mac)', ip = '$(ip)', identity = '$(identity)', loginUrl = '$(link-login-only)', error = '$(error)';
-        var statusEl = document.getElementById('status-msg'), titleEl = document.getElementById('main-title'), subEl = document.getElementById('sub-title'), linkEl = document.getElementById('manual-link');
-        var urlParams = new URLSearchParams(window.location.search);
-        var inboundUser = urlParams.get('username'), inboundPass = urlParams.get('password');
+        var mac = '$(mac)', ip = '$(ip)', identity = '$(identity)';
+        var loginUrl = '$(link-login-only)', error = '$(error)';
+        var params = new URLSearchParams(window.location.search);
+        var inboundUser = params.get('username'), inboundPass = params.get('password');
+
+        // Return trip after payment: skip the portal hop entirely.
         if (inboundUser && inboundPass) {{
-            titleEl.textContent = 'Authenticating...'; subEl.textContent = 'Finalizing your connection'; statusEl.textContent = 'Logging you in now';
-            document.getElementById('usr').value = inboundUser; document.getElementById('pwd').value = inboundPass;
-            document.getElementById('login-form').submit(); return;
+            document.write(
+                '<form id="lf" method="post" action="' + loginUrl + '">' +
+                '<input type="hidden" name="username" value="' + inboundUser + '">' +
+                '<input type="hidden" name="password" value="' + inboundPass + '">' +
+                '<input type="hidden" name="dst" value="$(link-orig)"></form>' +
+                '<script>document.getElementById("lf").submit()<' + '/script>'
+            );
+            return;
         }}
-        var ua = navigator.userAgent.toLowerCase(), q = new URLSearchParams(window.location.search), forcedTV = null;
-        if (q.get('force_tv') === '1' || q.get('smart_tv') === '1') forcedTV = true;
-        else if (q.get('force_tv') === '0' || q.get('smart_tv') === '0') forcedTV = false;
-        var tvByUA = /(smart-?tv|webos|tizen|vidaa|hbbtv|roku|firetv|appletv|apple\\s?tv|bravia|netcast|viera|aft[a-z]|crkey|tv safari)/i.test(ua);
-        var isAndroidTV = /android/i.test(ua) && !/mobile/i.test(ua) && window.screen.width >= 1280;
-        var isDesktopOS = /(windows nt|macintosh|\\bx11\\b|linux x86_64|cros)/i.test(ua);
-        var geoTV = !isDesktopOS && window.screen.width >= 1280 && window.screen.height >= 720 && (window.screen.width / window.screen.height) >= 1.5 && !('ontouchstart' in window) && navigator.maxTouchPoints === 0;
-        var finalIsTV = forcedTV !== null ? forcedTV : (tvByUA || isAndroidTV || geoTV);
-        statusEl.textContent = finalIsTV ? 'Smart TV detected — opening pairing screen' : 'Redirecting to portal...';
+
+        var ua = navigator.userAgent.toLowerCase();
+        var smartTV = /smart-?tv|webos|tizen|vidaa|hbbtv|roku|firetv|apple\\s?tv/i.test(ua) ? '1' : '0';
         var portalBase = '{portal_base}/hotspot/{r.id}';
-        var params = ['mac=' + encodeURIComponent(mac), 'ip=' + encodeURIComponent(ip), 'router=' + encodeURIComponent(identity), 'login_url=' + encodeURIComponent(loginUrl), 'error=' + encodeURIComponent(error), 'tenant=' + '{tenant_name}', 'smart_tv=' + (finalIsTV ? '1' : '0')];
-        var redirectUrl = portalBase + '?' + params.join('&');
-        linkEl.href = redirectUrl;
+        var qs = [
+            'mac=' + encodeURIComponent(mac),
+            'ip=' + encodeURIComponent(ip),
+            'router=' + encodeURIComponent(identity),
+            'login_url=' + encodeURIComponent(loginUrl),
+            'error=' + encodeURIComponent(error),
+            'tenant={tenant_name}',
+            'smart_tv=' + smartTV,
+        ].join('&');
+        var redirectUrl = portalBase + '?' + qs;
 
-        // Navigate on the next frame — preconnect links in <head> warm DNS/TCP/TLS in parallel
-        requestAnimationFrame(function() {{
-            requestAnimationFrame(function() {{
-                window.location.replace(redirectUrl);
-            }});
-        }});
-
-        // 🔥 Speculative fetch — SAME ORIGIN as the redirect target, so this is the
-        // ONLY DNS+TLS handshake this device needs to make before content shows.
-        // Result is stashed so the Next.js page skips its own fetch entirely.
+        // Speculative same-origin fetch — warms the captive-portal payload
+        // in sessionStorage while the browser is still navigating, so the
+        // Next.js page renders from cache instead of fetching after hydration.
         try {{
-            var captiveUrl = '{portal_base}/api/v1/hotspot/captive-portal/?router={r.id}&tenant={tenant_name}';
-            fetch(captiveUrl, {{ credentials: 'omit' }})
+            fetch('{portal_base}/api/v1/hotspot/captive-portal/?router={r.id}&tenant={tenant_name}', {{ credentials: 'omit' }})
                 .then(function(res) {{ return res.ok ? res.json() : null; }})
                 .then(function(data) {{
                     if (!data) return;
-                    try {{
-                        data._cachedAt = Date.now();
-                        sessionStorage.setItem('portal_cache:{r.id}', JSON.stringify(data));
-                    }} catch (e) {{}}
+                    data._cachedAt = Date.now();
+                    try {{ sessionStorage.setItem('portal_cache:{r.id}', JSON.stringify(data)); }} catch (e) {{}}
                 }})
                 .catch(function() {{}});
         }} catch (e) {{}}
+
+        window.location.replace(redirectUrl);
     }})();
     </script>
+</head>
+<body>
+    <p>Connecting to WiFi&hellip; <a href="#" onclick="window.location.reload();return false;">Click here</a> if not redirected.</p>
 </body>
 </html>"""
 
