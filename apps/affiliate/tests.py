@@ -133,6 +133,43 @@ class AffiliateApiTests(TestCase):
         self.client.force_authenticate(self.user)
         self.assertEqual(self.client.get("/api/v1/affiliate/dashboard/").status_code, 403)
 
+    @patch("apps.core.otp_service.OTPService.send_otp_email")
+    def test_active_affiliate_can_reset_password_with_email_otp(self, send_otp):
+        requested = self.client.post(
+            "/api/v1/affiliate/password-reset/otp/request/",
+            {"email": self.user.email},
+            format="json",
+        )
+        self.assertEqual(requested.status_code, 200)
+        self.assertIn("otp_id", requested.data)
+        send_otp.assert_called_once()
+
+        otp = EmailOTP.objects.get(
+            user=self.user,
+            purpose=EmailOTP.PURPOSE_AFFILIATE_PASSWORD_RESET,
+            is_used=False,
+        )
+        confirmed = self.client.post(
+            "/api/v1/affiliate/password-reset/otp/confirm/",
+            {
+                "email": self.user.email,
+                "otp_id": str(otp.id),
+                "otp_code": otp.code,
+                "new_password": "New-Affiliate-Pass-982!",
+                "confirm_password": "New-Affiliate-Pass-982!",
+            },
+            format="json",
+        )
+        self.assertEqual(confirmed.status_code, 200)
+
+        login = self.client.post(
+            "/api/v1/affiliate/login/",
+            {"email": self.user.email, "password": "New-Affiliate-Pass-982!"},
+            format="json",
+        )
+        self.assertEqual(login.status_code, 200)
+        self.assertIn("access", login.data)
+
     def test_click_and_signup_are_automatic_but_commission_is_not(self):
         response = self.client.post(
             "/api/v1/affiliate/r/AMINA123/click/",
@@ -362,6 +399,64 @@ class AffiliateSuperadminTests(TestCase):
         replay = self.client.post(
             "/api/v1/affiliate/admin-access/exchange/",
             {"token": token},
+            format="json",
+        )
+        self.assertEqual(replay.status_code, 400)
+
+    @patch("apps.affiliate.views.send_transactional_email")
+    def test_superadmin_can_change_affiliate_password(self, delivery):
+        delivery.return_value = {"sent": True, "provider": "smtp"}
+        self.client.force_authenticate(self.superadmin)
+        response = self.client.post(
+            f"/api/v1/affiliate/admin/affiliates/{self.account.id}/password/",
+            {
+                "mode": "manual",
+                "new_password": "Admin-Set-Pass-439!",
+                "confirm_password": "Admin-Set-Pass-439!",
+                "send_email": True,
+            },
+            format="json",
+        )
+        self.assertEqual(response.status_code, 200)
+        delivery.assert_called_once()
+        self.affiliate_user.refresh_from_db()
+        self.assertTrue(self.affiliate_user.check_password("Admin-Set-Pass-439!"))
+
+    @patch("apps.affiliate.views.send_transactional_email")
+    def test_superadmin_temporary_password_must_be_replaced_by_affiliate(self, delivery):
+        delivery.return_value = {"sent": True, "provider": "smtp"}
+        self.client.force_authenticate(self.superadmin)
+        response = self.client.post(
+            f"/api/v1/affiliate/admin/affiliates/{self.account.id}/password/",
+            {"mode": "temporary"},
+            format="json",
+        )
+        self.assertEqual(response.status_code, 200)
+        temporary_password = delivery.call_args.kwargs["plain_message"].split("Temporary password: ")[1].split("\n")[0]
+
+        self.client.force_authenticate(user=None)
+        changed = self.client.post(
+            "/api/v1/affiliate/password-reset/temp/confirm/",
+            {
+                "email": self.affiliate_user.email,
+                "temporary_password": temporary_password,
+                "new_password": "Permanent-Affiliate-Pass-440!",
+                "confirm_password": "Permanent-Affiliate-Pass-440!",
+            },
+            format="json",
+        )
+        self.assertEqual(changed.status_code, 200)
+        self.affiliate_user.refresh_from_db()
+        self.assertTrue(self.affiliate_user.check_password("Permanent-Affiliate-Pass-440!"))
+
+        replay = self.client.post(
+            "/api/v1/affiliate/password-reset/temp/confirm/",
+            {
+                "email": self.affiliate_user.email,
+                "temporary_password": temporary_password,
+                "new_password": "Replay-Affiliate-Pass-440!",
+                "confirm_password": "Replay-Affiliate-Pass-440!",
+            },
             format="json",
         )
         self.assertEqual(replay.status_code, 400)

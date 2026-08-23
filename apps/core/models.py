@@ -917,9 +917,11 @@ class Lead(models.Model):
 class EmailOTP(models.Model):
     PURPOSE_LOGIN = "login"
     PURPOSE_PAYMENT_METHOD_CHANGE = "payment_method_change"
+    PURPOSE_AFFILIATE_PASSWORD_RESET = "affiliate_password_reset"
     PURPOSE_CHOICES = (
         (PURPOSE_LOGIN, "Tenant Login"),
         (PURPOSE_PAYMENT_METHOD_CHANGE, "Payment Method Verification"),
+        (PURPOSE_AFFILIATE_PASSWORD_RESET, "Affiliate Password Reset"),
     )
 
     user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="email_otps")

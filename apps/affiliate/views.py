@@ -3,12 +3,15 @@ import hashlib
 import ipaddress
 import io
 import logging
+import secrets
 import uuid
 from datetime import timedelta
 from decimal import Decimal
 
 from django.conf import settings
 from django.contrib.auth import authenticate
+from django.contrib.auth.password_validation import validate_password
+from django.core.exceptions import ValidationError
 from django.core import signing
 from django.core.cache import cache
 from django.db import connection
@@ -27,7 +30,7 @@ from apps.superadmin.permissions import IsSuperAdmin
 from apps.superadmin.models import SuperAdminActivityLog
 from apps.core.otp_service import OTPError, OTPRateLimitedError, OTPService
 from apps.core.email_delivery import send_transactional_email
-from apps.core.models import GlobalSystemSettings, User
+from apps.core.models import EmailOTP, GlobalSystemSettings, User
 
 from .models import AffiliateAccount, AffiliateClick, AffiliatePayout, AffiliateReferral
 from .permissions import IsActiveAffiliate
@@ -47,6 +50,7 @@ AFFILIATE_PERMS = [IsAuthenticated, IsActiveAffiliate]
 SUPERADMIN_PERMS = [IsAuthenticated, IsSuperAdmin]
 VERIFICATION_SALT = "affiliate-email-verification"
 ADMIN_ACCESS_SALT = "affiliate-admin-access"
+AFFILIATE_TEMP_PASSWORD_CACHE_PREFIX = "affiliate_temp_password"
 logger = logging.getLogger(__name__)
 
 
@@ -123,6 +127,37 @@ def _send_verification(account):
             result.get("error", "unknown"),
         )
     return result
+
+
+def _send_affiliate_password_email(*, account, subject: str, plain_message: str, html_message: str):
+    result = send_transactional_email(
+        subject=subject,
+        recipient=account.user.email,
+        plain_message=plain_message,
+        html_message=html_message,
+    )
+    if not result.get("sent"):
+        logger.error(
+            "Affiliate password email failed account_id=%s provider=%s error=%s",
+            account.id,
+            result.get("provider"),
+            result.get("error", "unknown"),
+        )
+    return result
+
+
+def _generate_temporary_password(length=14):
+    alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789"
+    special = "!@#$%?"
+    raw = [
+        secrets.choice("ABCDEFGHJKLMNPQRSTUVWXYZ"),
+        secrets.choice("abcdefghijkmnopqrstuvwxyz"),
+        secrets.choice("23456789"),
+        secrets.choice(special),
+    ]
+    raw.extend(secrets.choice(alphabet + special) for _ in range(max(length - 4, 8)))
+    secrets.SystemRandom().shuffle(raw)
+    return "".join(raw)
 
 
 def _period_start(value):
@@ -361,6 +396,103 @@ class AffiliateResendVerificationView(APIView):
                     status=status.HTTP_503_SERVICE_UNAVAILABLE,
                 )
         return Response({"detail": "If the account exists, a verification email has been sent."})
+
+
+class AffiliatePasswordResetOTPRequestView(APIView):
+    permission_classes = [AllowAny]
+    authentication_classes = []
+    throttle_scope = "affiliate_verify"
+
+    def post(self, request):
+        _ensure_public()
+        email = (request.data.get("email") or "").strip().lower()
+        account = AffiliateAccount.objects.select_related("user").filter(user__email__iexact=email).first()
+        if not account or not account.user.is_active or account.status != "active":
+            return Response({"detail": "If an active affiliate account exists, a reset code has been sent."})
+        try:
+            otp = OTPService.issue_otp(
+                account.user,
+                purpose=EmailOTP.PURPOSE_AFFILIATE_PASSWORD_RESET,
+                ip_address=_client_ip(request),
+            )
+        except OTPRateLimitedError as exc:
+            return Response({"detail": str(exc)}, status=429)
+        except Exception:
+            logger.exception("Affiliate password reset OTP failed account_id=%s", account.id)
+            return Response({"detail": "Password reset email is temporarily unavailable. Please try again."}, status=503)
+        return Response({
+            "detail": "If an active affiliate account exists, a reset code has been sent.",
+            "otp_id": str(otp.id),
+            "email": _masked_email(account.user.email),
+            "expires_in": int((otp.expires_at - timezone.now()).total_seconds()) if hasattr(otp, "expires_at") else int(getattr(settings, "OTP_EXPIRY_MINUTES", 10)) * 60,
+            "resend_available_in": int(getattr(settings, "OTP_RESEND_COOLDOWN_SECONDS", 60)),
+        })
+
+
+class AffiliatePasswordResetOTPConfirmView(APIView):
+    permission_classes = [AllowAny]
+    authentication_classes = []
+    throttle_scope = "affiliate_verify"
+
+    def post(self, request):
+        _ensure_public()
+        email = (request.data.get("email") or "").strip().lower()
+        otp_id = request.data.get("otp_id") or ""
+        otp_code = (request.data.get("otp_code") or "").strip()
+        new_password = request.data.get("new_password") or ""
+        confirm_password = request.data.get("confirm_password") or ""
+        if new_password != confirm_password:
+            return Response({"detail": "Passwords do not match."}, status=400)
+        account = AffiliateAccount.objects.select_related("user").filter(user__email__iexact=email).first()
+        if not account or not account.user.is_active or account.status != "active":
+            return Response({"detail": "Invalid reset session."}, status=400)
+        try:
+            validate_password(new_password, user=account.user)
+            OTPService.verify_and_consume(
+                user=account.user,
+                otp_id=otp_id,
+                code=otp_code,
+                purpose=EmailOTP.PURPOSE_AFFILIATE_PASSWORD_RESET,
+            )
+        except ValidationError as exc:
+            return Response({"detail": " ".join(exc.messages)}, status=400)
+        except OTPError as exc:
+            return Response({"detail": str(exc)}, status=400)
+        account.user.set_password(new_password)
+        account.user.save(update_fields=["password"])
+        cache.delete(f"{AFFILIATE_TEMP_PASSWORD_CACHE_PREFIX}:{account.user_id}")
+        return Response({"detail": "Password changed. You can now sign in with your new password."})
+
+
+class AffiliateTemporaryPasswordConfirmView(APIView):
+    permission_classes = [AllowAny]
+    authentication_classes = []
+    throttle_scope = "affiliate_login"
+
+    def post(self, request):
+        _ensure_public()
+        email = (request.data.get("email") or "").strip().lower()
+        temporary_password = request.data.get("temporary_password") or ""
+        new_password = request.data.get("new_password") or ""
+        confirm_password = request.data.get("confirm_password") or ""
+        if new_password != confirm_password:
+            return Response({"detail": "Passwords do not match."}, status=400)
+        user = authenticate(request=request, username=email, password=temporary_password)
+        if not user:
+            user = authenticate(email=email, password=temporary_password)
+        account = getattr(user, "affiliate_account", None) if user else None
+        if not user or not account or account.status != "active" or not user.is_active:
+            return Response({"detail": "Invalid temporary password."}, status=400)
+        if not cache.get(f"{AFFILIATE_TEMP_PASSWORD_CACHE_PREFIX}:{user.id}"):
+            return Response({"detail": "This account does not have an active temporary password reset."}, status=400)
+        try:
+            validate_password(new_password, user=user)
+        except ValidationError as exc:
+            return Response({"detail": " ".join(exc.messages)}, status=400)
+        user.set_password(new_password)
+        user.save(update_fields=["password"])
+        cache.delete(f"{AFFILIATE_TEMP_PASSWORD_CACHE_PREFIX}:{user.id}")
+        return Response({"detail": "Password changed. You can now sign in with your new password."})
 
 
 class AffiliateClickView(APIView):
@@ -876,6 +1008,98 @@ class AdminAffiliateAccessView(APIView):
             account,
         )
         return Response({"access_url": f"{frontend}/affiliate/admin-access?token={token}", "expires_in": 120})
+
+
+class AdminAffiliatePasswordView(APIView):
+    permission_classes = SUPERADMIN_PERMS
+
+    def post(self, request, pk):
+        _ensure_public()
+        account = _affiliate_or_404(pk)
+        if not account:
+            return Response({"detail": "Affiliate not found."}, status=404)
+        mode = (request.data.get("mode") or "manual").strip().lower()
+        send_email = bool(request.data.get("send_email", False))
+        if mode == "temporary":
+            temporary_password = _generate_temporary_password()
+            try:
+                validate_password(temporary_password, user=account.user)
+            except ValidationError:
+                temporary_password = _generate_temporary_password(18)
+            frontend = getattr(settings, "FRONTEND_URL", "https://netily.co.ke").rstrip("/")
+            plain_message = (
+                "Your Netily affiliate temporary password has been issued.\n\n"
+                f"Email: {account.user.email}\n"
+                f"Temporary password: {temporary_password}\n\n"
+                f"Open {frontend}/affiliate/login, choose temporary password reset, and set a new password. "
+                "This temporary password is valid for 24 hours. If you did not request this, contact support immediately."
+            )
+            html_message = (
+                "<h2>Your Netily affiliate temporary password</h2>"
+                "<p>A temporary password has been issued for your affiliate account.</p>"
+                f"<p><strong>Email:</strong> {account.user.email}</p>"
+                f"<p><strong>Temporary password:</strong> <code>{temporary_password}</code></p>"
+                f'<p><a href="{frontend}/affiliate/login">Open affiliate login</a>, choose temporary password reset, and set a new password.</p>'
+                "<p>This temporary password is valid for 24 hours.</p>"
+            )
+            delivery = _send_affiliate_password_email(
+                account=account,
+                subject="Your Netily affiliate temporary password",
+                plain_message=plain_message,
+                html_message=html_message,
+            )
+            if not delivery.get("sent"):
+                return Response({"detail": "Temporary password email could not be delivered. No password was changed."}, status=503)
+            account.user.set_password(temporary_password)
+            account.user.is_active = True
+            account.user.save(update_fields=["password", "is_active"])
+            cache.set(f"{AFFILIATE_TEMP_PASSWORD_CACHE_PREFIX}:{account.user_id}", True, timeout=86400)
+            _audit_admin(
+                request,
+                "affiliate_temporary_password_sent",
+                f"Sent temporary password to affiliate {account.referral_code}",
+                account,
+                {"email": account.user.email},
+            )
+            return Response({"detail": "Temporary password sent to the affiliate email."})
+
+        new_password = request.data.get("new_password") or ""
+        confirm_password = request.data.get("confirm_password") or ""
+        if new_password != confirm_password:
+            return Response({"detail": "Passwords do not match."}, status=400)
+        try:
+            validate_password(new_password, user=account.user)
+        except ValidationError as exc:
+            return Response({"detail": " ".join(exc.messages)}, status=400)
+        account.user.set_password(new_password)
+        account.user.is_active = True
+        account.user.save(update_fields=["password", "is_active"])
+        cache.delete(f"{AFFILIATE_TEMP_PASSWORD_CACHE_PREFIX}:{account.user_id}")
+        if send_email:
+            frontend = getattr(settings, "FRONTEND_URL", "https://netily.co.ke").rstrip("/")
+            _send_affiliate_password_email(
+                account=account,
+                subject="Your Netily affiliate password was changed",
+                plain_message=(
+                    "Your Netily affiliate password was changed by the platform admin.\n\n"
+                    f"You can sign in here: {frontend}/affiliate/login\n\n"
+                    "If this was unexpected, contact support immediately."
+                ),
+                html_message=(
+                    "<h2>Your Netily affiliate password was changed</h2>"
+                    "<p>Your password was changed by the platform admin.</p>"
+                    f'<p><a href="{frontend}/affiliate/login">Sign in to your affiliate account</a></p>'
+                    "<p>If this was unexpected, contact support immediately.</p>"
+                ),
+            )
+        _audit_admin(
+            request,
+            "affiliate_password_changed",
+            f"Changed password for affiliate {account.referral_code}",
+            account,
+            {"email": account.user.email, "email_notified": send_email},
+        )
+        return Response({"detail": "Affiliate password changed."})
 
 
 class AffiliateAdminAccessExchangeView(APIView):
