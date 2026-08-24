@@ -316,6 +316,7 @@ class CaptivePortalView(APIView):
                         'gateway_ip': '',
                         'router_logo_url': None,
                         'hide_plan_speed': False,
+                        'portal_font': 'outfit',
                     }
                     branding_data = None
                 else:
@@ -335,6 +336,7 @@ class CaptivePortalView(APIView):
                         'gateway_ip': router.gateway_ip,
                         'router_logo_url': router_logo_url,
                         'hide_plan_speed': getattr(router, 'hide_plan_speed', False),
+                        'portal_font': getattr(router, 'portal_font', 'outfit') or 'outfit',
                     }
 
                     branding_data = None
@@ -470,7 +472,7 @@ class HotspotPlansView(APIView):
 
         router_qs = Router.objects.filter(is_active=True).only(
             'id', 'name', 'location', 'template_id', 'hotspot_name',
-            'support_phone', 'announcement_text', 'hide_plan_speed'
+            'support_phone', 'announcement_text', 'hide_plan_speed', 'portal_font'
         )
 
         try:
@@ -558,6 +560,7 @@ class HotspotPlansView(APIView):
             'announcement_text': router.announcement_text or '',
             'router_logo_url': router_logo_url,
             'hide_plan_speed': getattr(router, 'hide_plan_speed', False),
+            'portal_font': getattr(router, 'portal_font', 'outfit') or 'outfit',
         }
 
         payload = {

@@ -26,6 +26,25 @@ class RouterEventSerializer(serializers.ModelSerializer):
 
 
 class RouterSerializer(serializers.ModelSerializer):
+    VALID_PORTAL_FONTS = {
+        "outfit",
+        "montserrat",
+        "space-grotesk",
+        "calibri",
+        "inter",
+        "roboto",
+        "lato",
+        "open-sans",
+        "source-sans-3",
+        "ibm-plex-sans",
+        "manrope",
+        "dm-sans",
+        "poppins",
+        "plus-jakarta-sans",
+        "work-sans",
+        "archivo",
+    }
+
     company_name = serializers.CharField(read_only=True)
     tenant_subdomain = serializers.CharField(read_only=True)  # This field is declared here
     router_type_display = serializers.CharField(source='get_router_type_display', read_only=True)
@@ -58,7 +77,7 @@ class RouterSerializer(serializers.ModelSerializer):
             'config_type',
             # Captive Portal Customisation
             'template_id', 'hotspot_name', 'support_phone', 'announcement_text', 'logo',
-            'hide_plan_speed',
+            'hide_plan_speed', 'portal_font',
             # Remote access ports (HAProxy managed)
             'winbox_remote_port', 'api_remote_port', 'remote_access_url',
             'created_at', 'updated_at',
@@ -106,6 +125,7 @@ class RouterSerializer(serializers.ModelSerializer):
             'support_phone': {'required': False, 'allow_blank': True},
             'announcement_text': {'required': False, 'allow_blank': True},
             'hide_plan_speed': {'required': False},
+            'portal_font': {'required': False, 'allow_blank': True},
             'logo': {'required': False, 'allow_null': True},
         }
 
@@ -115,6 +135,12 @@ class RouterSerializer(serializers.ModelSerializer):
         elif obj.auth_key:
             return "Pending Authentication"
         return "Not Configured"
+
+    def validate_portal_font(self, value):
+        normalized = (value or "outfit").strip().lower()
+        if normalized not in self.VALID_PORTAL_FONTS:
+            raise serializers.ValidationError("Choose a supported portal font.")
+        return normalized
     
     def get_magic_link(self, obj):
         """Generate the one-liner command for MikroTik terminal."""

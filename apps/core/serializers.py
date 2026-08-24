@@ -697,6 +697,12 @@ class GlobalSystemSettingsSerializer(serializers.ModelSerializer):
         "open-sans",
         "source-sans-3",
         "ibm-plex-sans",
+        "manrope",
+        "dm-sans",
+        "poppins",
+        "plus-jakarta-sans",
+        "work-sans",
+        "archivo",
     }
 
     class Meta:

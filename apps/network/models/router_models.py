@@ -229,6 +229,12 @@ class Router(AuditMixin):
         default=False,
         help_text="If true, hide download/upload speed info on captive portal plan cards"
     )
+    portal_font = models.CharField(
+        max_length=40,
+        blank=True,
+        default='outfit',
+        help_text="Typeface used on the captive portal"
+    )
     logo = models.ImageField(
         upload_to='router_logos/',
         null=True, blank=True,
