@@ -81,6 +81,17 @@ class MikrotikScriptGenerator:
             
         return f"{parsed.scheme}://{r.tenant_subdomain}.{netloc}"
 
+    def _get_own_domains(self) -> list:
+        """Helper to get all domains owned by Netily for DNS pre-warm and walled garden."""
+        tenant_domain = urlparse(self.get_tenant_portal_url()).netloc
+        api_domain = urlparse(self.api_url).netloc
+        portal_domain = self.portal_url.split('://')[-1]
+        domains = []
+        for d in (tenant_domain, api_domain, portal_domain):
+            if d and d not in domains:
+                domains.append(d)
+        return domains
+
     def get_magic_link(self) -> str:
         r = self.router
         url = f"{self.provision_base}/{r.auth_key}/{r.provision_slug}/script.rsc"
@@ -137,10 +148,12 @@ class MikrotikScriptGenerator:
             self._section_openvpn(r, ovpn_cipher, ovpn_auth, is_v6),
             self._section_firewall(r),
             self._section_bridge_ports(r, r_gateway_cidr),
+            self._section_dns(r),                       # ← NEW: Fast DNS for router
             self._section_dhcp(r, gateway_ip, pool_range, dhcp_network),
             self._section_radius(r),
             self._section_hotspot(r, gateway_ip),
             self._section_walled_garden(r, portal_domain),
+            self._section_dns_prewarm(r),               # ← NEW: DNS pre-warm scheduler
             self._section_ssl_certs(r),
             self._section_hotspot_html(r),
             self._section_pppoe(r, pppoe_local) if r.enable_pppoe else "",
@@ -341,6 +354,22 @@ class MikrotikScriptGenerator:
 {ports_script}
 """
 
+    def _section_dns(self, r: Router) -> str:
+        """
+        The router's OWN resolver — used for every walled-garden domain lookup
+        AND every OS captive-portal-detection probe before a client is online.
+        Left unset, this defaults to whatever slow/flaky DNS the WAN link
+        handed out, which is the #1 cause of "sometimes extremely slow"
+        unauthenticated portal loads.
+        """
+        return f"""# ─────────────────────────────────────────────────────────────
+# 5b. ROUTER DNS RESOLVER (fast + cached)
+# ─────────────────────────────────────────────────────────────
+:put "Configuring fast DNS resolver..."
+/ip dns set servers=1.1.1.1,8.8.8.8 cache-size=4096KiB cache-max-ttl=1d allow-remote-requests=no
+:put " + Fast DNS set to 1.1.1.1, 8.8.8.8 with 4MB cache"
+"""
+
     def _section_dhcp(self, r: Router, gateway_ip: str, pool_range: str, dhcp_network: str) -> str:
         return f"""# ─────────────────────────────────────────────────────────────
 # 6. IP POOL & DHCP (Bridge Mode)
@@ -371,8 +400,14 @@ class MikrotikScriptGenerator:
 """
 
     def _section_hotspot(self, r: Router, gateway_ip: str) -> str:
-        # Removed rate-limit="" (crashes v7 parser)
-        profile_cmd = f'/ip hotspot profile add name="netily-profile" hotspot-address="{gateway_ip}" dns-name="{self._escape_ros_string(r.dns_name)}" login-by=http-pap,mac-cookie use-radius=yes radius-accounting=yes http-cookie-lifetime=1d'
+        # 🔥 FIX: dns-name intentionally omitted — a custom hostname adds a DNS lookup
+        # (and a timeout when it's unresolvable) in front of every captive
+        # redirect. hotspot-address (raw IP) resolves instantly, always.
+        profile_cmd = (
+            f'/ip hotspot profile add name="netily-profile" '
+            f'hotspot-address="{gateway_ip}" login-by=http-pap,mac-cookie '
+            f'use-radius=yes radius-accounting=yes http-cookie-lifetime=1d'
+        )
         server_cmd = f'/ip hotspot add name="netily-hotspot" interface="netily-bridge" address-pool="netily-pool" profile="netily-profile" disabled=no'
         
         return f"""# ─────────────────────────────────────────────────────────────
@@ -396,20 +431,13 @@ class MikrotikScriptGenerator:
         RouterOS resolves them and keeps the IPs updated automatically.
         This stops SNI/Host spoofing while surviving Droplet IP changes.
         """
-        tenant_domain = urlparse(self.get_tenant_portal_url()).netloc
-        api_domain = urlparse(self.api_url).netloc
-
-        # Domains we own and want to IP-pin
-        own_domains = []
-        for d in (tenant_domain, api_domain, portal_domain):
-            if d and d not in own_domains:
-                own_domains.append(d)
+        own_domains = self._get_own_domains()
 
         # Build the address-list entries
         addr_list_lines = []
         for domain in own_domains:
             addr_list_lines.append(
-                f'/ip firewall address-list add list=netily-portal-ips '
+                f'/ip firewall address-list add list="netily-portal-ips" '
                 f'address="{domain}" comment="Netily-Portal-Domain"'
             )
         addr_list_script = "\n".join(addr_list_lines) if addr_list_lines else ""
@@ -440,6 +468,32 @@ class MikrotikScriptGenerator:
 /ip hotspot walled-garden ip add dst-address={self.vpn_network_cidr} action=accept comment="Netily-VPN-Network"
 
 :put "Walled Garden hardened (address-list style)."
+"""
+
+    def _section_dns_prewarm(self, r: Router) -> str:
+        """
+        DNS PRE-WARM SCHEDULER — Keeps walled-garden portal/API IPs resolved
+        and cached continuously so the FIRST unauthenticated device of the day
+        (or after a CDN IP rotation) never pays a cold-DNS penalty.
+        """
+        domains = self._get_own_domains()
+        resolve_lines = "\n".join(f':do {{ :resolve "{d}" }} on-error={{}}' for d in domains)
+        
+        return f"""# ─────────────────────────────────────────────────────────────
+# 9b. DNS PRE-WARM SCHEDULER
+# Keeps walled-garden portal/API IPs resolved & cached continuously so
+# the FIRST unauthenticated device of the day (or after a CDN IP
+# rotation) never pays a cold-DNS penalty inside the walled garden.
+# ─────────────────────────────────────────────────────────────
+:put "Installing DNS pre-warm scheduler..."
+:do {{ /system script remove [find name="netily-dns-warm"] }} on-error={{}}
+/system script add name="netily-dns-warm" comment="Netily-DNS-Prewarm" source={{
+{resolve_lines}
+}}
+:do {{ /system scheduler remove [find name="netily-dns-warm"] }} on-error={{}}
+/system scheduler add name="netily-dns-warm" interval=30s comment="Netily-DNS-Prewarm" on-event="/system script run netily-dns-warm"
+:do {{ /system script run netily-dns-warm }} on-error={{ :put " + DNS pre-warm script ran successfully" }}
+:put " + DNS pre-warm scheduler installed (runs every 30s)"
 """
 
     def _section_ssl_certs(self, r: Router) -> str:

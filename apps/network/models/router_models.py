@@ -124,10 +124,17 @@ class Router(AuditMixin):
         help_text="CIDR prefix length for hotspot subnet (e.g., 16 = /16 = 65,534 hosts)"
     )
     
+    # 🔥 FIX: dns_name now defaults to blank with explicit help text
     dns_name = models.CharField(
-        max_length=100, 
-        default='captive.netily.io',
-        help_text="DNS name for the hotspot (e.g., login.wifi)"
+        max_length=100,
+        blank=True,
+        default='',
+        help_text=(
+            "Optional. Leave blank — RouterOS then redirects unauthenticated "
+            "clients straight to its own gateway IP with zero DNS lookup. "
+            "A custom hostname here must resolve or every captive-portal "
+            "redirect stalls waiting on DNS timeout."
+        )
     )
 
     # Interface Assignments (The "Check Ports" Feature)
