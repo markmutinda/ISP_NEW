@@ -7,7 +7,6 @@ from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.filters import SearchFilter, OrderingFilter
 from datetime import timedelta, datetime
-import pandas as pd
 import calendar
 
 # Correct imports from your custom permissions

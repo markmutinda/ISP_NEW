@@ -68,6 +68,3 @@ pyrad>=2.4
 
 # Health checks
 django-health-check>=3.17.0
-
-# Data processing
-pandas>=2.0.0
