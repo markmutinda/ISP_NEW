@@ -7,7 +7,6 @@ from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.filters import SearchFilter, OrderingFilter
 from datetime import timedelta
-import pandas as pd
 
 # Correct permissions import
 from apps.core.permissions import IsAdmin, IsAdminOrStaff

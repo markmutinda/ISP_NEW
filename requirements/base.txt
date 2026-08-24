@@ -51,8 +51,6 @@ africastalking==1.2.2
 django-extensions==3.2.3
 setuptools==69.0.3
 
-# Developer Tools
-django-debug-toolbar==4.2.0
-pandas==2.2.1
+# Operations
 django-health-check==3.18.1
 psutil==5.9.8
