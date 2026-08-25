@@ -148,12 +148,12 @@ class MikrotikScriptGenerator:
             self._section_openvpn(r, ovpn_cipher, ovpn_auth, is_v6),
             self._section_firewall(r),
             self._section_bridge_ports(r, r_gateway_cidr),
-            self._section_dns(r),                       # ← NEW: Fast DNS for router
+            self._section_dns(r),                       # ← FAST DNS for router
             self._section_dhcp(r, gateway_ip, pool_range, dhcp_network),
             self._section_radius(r),
             self._section_hotspot(r, gateway_ip),
             self._section_walled_garden(r, portal_domain),
-            self._section_dns_prewarm(r),               # ← NEW: DNS pre-warm scheduler
+            self._section_dns_prewarm(r),               # ← DNS pre-warm scheduler
             self._section_ssl_certs(r),
             self._section_hotspot_html(r),
             self._section_pppoe(r, pppoe_local) if r.enable_pppoe else "",
