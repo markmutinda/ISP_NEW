@@ -1,0 +1,134 @@
+name: Deploy Backend to DigitalOcean VPS
+
+on:
+  push:
+    branches:
+      - prod-backend
+
+jobs:
+  deploy:
+    name: deploy
+    runs-on: ubuntu-latest
+    steps:
+      - name: Deploy backend via SSH
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.SSH_HOST }}
+          username: ${{ secrets.SSH_USERNAME }}
+          key: ${{ secrets.SSH_KEY }}
+          command_timeout: 30m
+          script: |
+            set -Eeuo pipefail
+            export COMPOSE_HTTP_TIMEOUT=240
+
+            log() {
+              printf '\n[%s] %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$*"
+            }
+
+            run_step() {
+              local label="$1"
+              local max_duration="$2"
+              shift 2
+              log "$label"
+              timeout "$max_duration" "$@"
+            }
+
+            dump_backend_logs() {
+              cd ~/netily_cloud/docker || return 0
+              echo "==> Recent web logs"
+              docker compose logs --tail=80 web || true
+              echo "==> Recent worker logs"
+              docker compose logs --tail=60 celery-worker || true
+              echo "==> Compose status"
+              docker compose ps || true
+            }
+
+            trap 'echo "ERROR: backend deployment failed at line $LINENO"; dump_backend_logs' ERR
+
+            echo "==> Pulling latest backend code..."
+            cd ~/netily_cloud
+            run_step "Fetching prod-backend" 2m git fetch origin prod-backend
+            run_step "Resetting working tree" 1m git reset --hard origin/prod-backend
+
+            echo "==> Cleaning stale migration artifacts..."
+            git clean -fd apps/*/migrations 2>/dev/null || true
+            find apps -type d -name __pycache__ -prune -exec rm -rf {} + 2>/dev/null || true
+            find apps -type f \( -name '*.pyc' -o -name '*.pyo' \) -delete 2>/dev/null || true
+
+            echo "==> Pre-build disk & image inventory..."
+            df -h / | tail -2
+            docker images --format "table {{.Repository}}\t{{.Tag}}\t{{.Size}}" 2>/dev/null | head -20 || true
+
+            echo "==> Freeing disk space before build (containers, networks, images, build cache)..."
+            docker system prune -f || true
+            docker builder prune -f || true
+            echo "==> Post-cleanup disk inventory..."
+            df -h / | tail -2
+
+            echo "==> Rebuilding ONLY backend application services..."
+            cd docker
+            # 🟢 OPTIMIZATION 1: No 'compose down' (Zero database/VPN downtime).
+            # 🟢 OPTIMIZATION 2: Removed '--no-cache' to allow ultra-fast incremental builds.
+            run_step "Building backend images" 18m docker compose build web celery-worker celery-beat
+
+            echo "==> Checking for missing model migrations..."
+            run_step "Checking missing migrations" 3m docker compose run --rm web python manage.py makemigrations --check --dry-run
+
+            echo "==> Preparing migration history..."
+            run_step "Preparing migration history" 3m docker compose run --rm web python manage.py prepare_migrations
+
+            echo "==> Running database migrations..."
+            run_step "Migrating shared schema" 5m docker compose run --rm web python manage.py migrate_schemas_resilient --shared
+            run_step "Migrating tenant schemas" 8m docker compose run --rm web python manage.py migrate_schemas_resilient --tenant
+            echo "==> Syncing subscription plan pricing..."
+            run_step "Seeding subscription plans" 3m docker compose run --rm web python manage.py seed_plans
+
+            echo "==> Performing target rolling restart of backend services..."
+            # 🟢 OPTIMIZATION 3: '--no-deps' updates ONLY the backend without touching Nginx, DB, or WireGuard.
+            run_step "Restarting backend services" 4m docker compose up -d --no-deps web celery-worker celery-beat
+
+            echo "==> Injecting clean container-to-container network paths..."
+            # 🟢 OPTIMIZATION 4: The Network Guard. Explicitly overrides any multi-line IP lookup bugs automatically.
+            TARGET_IP=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}} {{end}}' netily-openvpn | awk '{print $1}')
+            docker exec -u 0 netily_backend ip route del 10.8.0.0/16 2>/dev/null || true
+            docker exec -u 0 netily_backend ip route add 10.8.0.0/16 via $TARGET_IP || true
+            docker exec -u 0 netily_worker ip route del 10.8.0.0/16 2>/dev/null || true
+            docker exec -u 0 netily_worker ip route add 10.8.0.0/16 via $TARGET_IP || true
+            echo "    Paths locked via IP: $TARGET_IP"
+
+            echo "==> Waiting for web container to settle..."
+            sleep 4
+
+            echo "==> Ensuring superadmin account exists (non-fatal)..."
+            timeout 2m docker compose exec -T web python manage.py ensure_superadmin || echo "WARN: ensure_superadmin skipped"
+
+            echo "==> Collecting static files..."
+            timeout 3m docker compose exec -T web python manage.py collectstatic --noinput || true
+
+            echo "==> Verifying backend container health..."
+            for i in 1 2 3 4 5; do
+              STATUS=$(docker compose ps web --format '{{.Status}}' 2>/dev/null)
+              echo "  Attempt $i: web status = $STATUS"
+              if echo "$STATUS" | grep -q "Up"; then
+                echo "  ✅ Web application service is successfully running!"
+                break
+              fi
+              if [ "$i" = "5" ]; then
+                echo "  ❌ Backend container failed to start. Dumping logs:"
+                docker compose logs --tail=50 web
+                exit 1
+              fi
+              sleep 3
+            done
+
+            echo "==> Health check: testing Django responds..."
+            timeout 2m docker compose exec -T web python -c "import django; django.setup(); print('Django OK')" || {
+              echo "❌ Django setup check failed. Dumping logs:"
+              docker compose logs --tail=50 web
+              exit 1
+            }
+
+            echo "==> Cleaning up old Docker images..."
+            docker image prune -f
+
+            echo "==> Backend deployment complete!"
