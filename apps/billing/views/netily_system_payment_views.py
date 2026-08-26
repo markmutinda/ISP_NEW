@@ -87,6 +87,20 @@ class NetilySystemPaymentInitiateView(APIView):
     authentication_classes = []
     permission_classes = []
 
+    def get(self, request):
+        if not _simulation_enabled():
+            return Response(
+                {"success": False, "message": "Netily system payment simulator is disabled."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+        return Response(
+            {
+                "success": True,
+                "status": "ready",
+                "message": "Netily system payment simulator is online. Use POST to initiate a live STK push.",
+            }
+        )
+
     def post(self, request):
         if not _simulation_enabled():
             return Response(
