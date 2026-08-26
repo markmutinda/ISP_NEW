@@ -39,6 +39,8 @@ from apps.billing.integrations.mpesa_integration import MpesaSTKPush
 from apps.core.models import TumaCallbackMap
 from apps.network.models.router_models import Router
 from apps.subscriptions.models import CommissionLedger
+# --- CoA import added for pre-clear disconnect ---
+from apps.radius.services.coa_service import CoAService
 
 logger = logging.getLogger(__name__)
 
@@ -1723,6 +1725,14 @@ class HotspotPhoneReconnectView(APIView):
                             
                             access_code = base_session.access_code
                             try:
+                                # ── CoA pre‑clear (single‑device) ──
+                                try:
+                                    router_ip = router.vpn_ip_address or router.ip_address
+                                    if router_ip:
+                                        CoAService(nas_ip=router_ip).disconnect_user(access_code, nas_ip_address=router_ip)
+                                except Exception as coa_err:
+                                    logger.warning(f"Phone reconnect CoA pre-clear failed for {access_code}: {coa_err}")
+
                                 from apps.billing.services.hotspot_radius_service import HotspotRadiusService
                                 HotspotRadiusService().create_hotspot_credentials(
                                     username=access_code,
@@ -1778,6 +1788,14 @@ class HotspotPhoneReconnectView(APIView):
                         
                         access_code = direct_session.access_code
                         try:
+                            # ── CoA pre‑clear (single‑device) ──
+                            try:
+                                router_ip = router.vpn_ip_address or router.ip_address
+                                if router_ip:
+                                    CoAService(nas_ip=router_ip).disconnect_user(access_code, nas_ip_address=router_ip)
+                            except Exception as coa_err:
+                                logger.warning(f"Phone reconnect CoA pre-clear failed for {access_code}: {coa_err}")
+
                             from apps.billing.services.hotspot_radius_service import HotspotRadiusService
                             HotspotRadiusService().create_hotspot_credentials(
                                 username=access_code,
@@ -1920,6 +1938,14 @@ class HotspotPhoneReconnectView(APIView):
                 
                 access_code = base_session.access_code
                 try:
+                    # ── CoA pre‑clear (single‑device) ──
+                    try:
+                        router_ip = router.vpn_ip_address or router.ip_address
+                        if router_ip:
+                            CoAService(nas_ip=router_ip).disconnect_user(access_code, nas_ip_address=router_ip)
+                    except Exception as coa_err:
+                        logger.warning(f"Phone reconnect CoA pre-clear failed for {access_code}: {coa_err}")
+
                     from apps.billing.services.hotspot_radius_service import HotspotRadiusService
                     HotspotRadiusService().create_hotspot_credentials(
                         username=access_code,
@@ -1964,6 +1990,14 @@ class HotspotPhoneReconnectView(APIView):
                 # This MAC already has a slot — just reseed RADIUS credentials
                 access_code = existing_session_for_mac.access_code
                 try:
+                    # ── CoA pre‑clear (existing‑mac) ──
+                    try:
+                        router_ip = router.vpn_ip_address or router.ip_address
+                        if router_ip:
+                            CoAService(nas_ip=router_ip).disconnect_user(access_code, nas_ip_address=router_ip)
+                    except Exception as coa_err:
+                        logger.warning(f"Phone reconnect CoA pre-clear failed for {access_code}: {coa_err}")
+
                     from apps.billing.services.hotspot_radius_service import HotspotRadiusService
                     HotspotRadiusService().create_hotspot_credentials(
                         username=access_code,
@@ -2036,6 +2070,14 @@ class HotspotPhoneReconnectView(APIView):
                     # Reseed RADIUS with new MAC
                     access_code = oldest_stale.access_code
                     try:
+                        # ── CoA pre‑clear (mac‑rotation‑takeover) ──
+                        try:
+                            router_ip = router.vpn_ip_address or router.ip_address
+                            if router_ip:
+                                CoAService(nas_ip=router_ip).disconnect_user(access_code, nas_ip_address=router_ip)
+                        except Exception as coa_err:
+                            logger.warning(f"Phone reconnect CoA pre-clear failed for {access_code}: {coa_err}")
+
                         from apps.billing.services.hotspot_radius_service import HotspotRadiusService
                         HotspotRadiusService().create_hotspot_credentials(
                             username=access_code,
