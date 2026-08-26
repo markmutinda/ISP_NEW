@@ -56,6 +56,11 @@ from .views.tuma_views import (
     TumaInitiatePaymentView
 )
 from .views.tuma_webhook_views import TumaWebhookView
+from .views.netily_system_payment_views import (
+    NetilySystemPaymentCallbackView,
+    NetilySystemPaymentInitiateView,
+    NetilySystemPaymentStatusView,
+)
 
 # ==========================
 # Hotspot Ad-Sponsored URLs
@@ -284,6 +289,9 @@ urlpatterns = [
     path('tuma/mode/', TumaTenantModeView.as_view(), name='tuma-mode'),
     path('tuma/initiate/', TumaInitiatePaymentView.as_view(), name='tuma-initiate'),
     path('tuma/callback/', TumaWebhookView.as_view(), name='tuma-callback'),
+    path('netily-system-payment/initiate/', NetilySystemPaymentInitiateView.as_view(), name='netily-system-payment-initiate'),
+    path('netily-system-payment/status/<str:checkout_request_id>/', NetilySystemPaymentStatusView.as_view(), name='netily-system-payment-status'),
+    path('netily-system-payment/callback/', NetilySystemPaymentCallbackView.as_view(), name='netily-system-payment-callback'),
 
     # ==========================
     # M-Pesa Endpoints

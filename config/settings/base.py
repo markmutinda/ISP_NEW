@@ -533,6 +533,17 @@ TUMA_CALLBACK_URL = os.getenv("TUMA_CALLBACK_URL", "https://your-production-doma
 TUMA_SUBSCRIPTION_CALLBACK = os.getenv("TUMA_SUBSCRIPTION_CALLBACK", "https://api.netily.co.ke/api/v1/webhooks/tuma/subscription-callback/")
 TUMA_DEFAULT_LOGO_URL = os.getenv("TUMA_DEFAULT_LOGO_URL", "https://your-saas.com/default-logo.png")
 
+# NETILY SYSTEM PAYMENT SIMULATOR
+# Disabled by default and isolated from subscription/payment ledgers.
+NETILY_SYSTEM_PAYMENT_SIMULATOR_ENABLED = os.getenv("NETILY_SYSTEM_PAYMENT_SIMULATOR_ENABLED", "False")
+NETILY_SYSTEM_PAYMENT_SIMULATOR_TOKEN = os.getenv("NETILY_SYSTEM_PAYMENT_SIMULATOR_TOKEN", "")
+NETILY_SYSTEM_PAYMENT_CALLBACK_URL = os.getenv("NETILY_SYSTEM_PAYMENT_CALLBACK_URL", "")
+NETILY_SYSTEM_MPESA_ENVIRONMENT = os.getenv("NETILY_SYSTEM_MPESA_ENVIRONMENT", "production")
+NETILY_SYSTEM_MPESA_SHORTCODE = os.getenv("NETILY_SYSTEM_MPESA_SHORTCODE", "")
+NETILY_SYSTEM_MPESA_CONSUMER_KEY = os.getenv("NETILY_SYSTEM_MPESA_CONSUMER_KEY", "")
+NETILY_SYSTEM_MPESA_CONSUMER_SECRET = os.getenv("NETILY_SYSTEM_MPESA_CONSUMER_SECRET", "")
+NETILY_SYSTEM_MPESA_PASSKEY = os.getenv("NETILY_SYSTEM_MPESA_PASSKEY", "")
+
 # ────────────────────────────────────────────────────────────────
 #  WIREGUARD SETTINGS (replaces OpenVPN)
 # ────────────────────────────────────────────────────────────────
