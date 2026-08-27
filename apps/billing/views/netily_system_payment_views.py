@@ -6,6 +6,7 @@ from decimal import Decimal, InvalidOperation
 import requests
 from django.conf import settings
 from django.core.cache import cache
+from django.http import HttpResponse
 from django.utils import timezone
 from rest_framework import status
 from rest_framework.response import Response
@@ -283,3 +284,252 @@ class NetilySystemPaymentCallbackView(APIView):
         cache.set(_cache_key(checkout_id), state, SIM_TTL_SECONDS)
         logger.info("Netily system payment simulator callback: checkout=%s status=%s", checkout_id, state.get("status"))
         return Response({"ResultCode": 0, "ResultDesc": "Accepted"})
+
+
+def netily_system_payment_lab(request):
+    html = """
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Netily System Payment Lab</title>
+  <style>
+    :root { color-scheme: light; font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: #f6f7f2; color: #0f172a; }
+    main { width: min(1180px, calc(100% - 32px)); margin: 0 auto; padding: 32px 0; }
+    header { display: grid; grid-template-columns: 1fr; gap: 18px; margin-bottom: 24px; }
+    h1 { margin: 0; font-size: clamp(2rem, 5vw, 4rem); line-height: .95; letter-spacing: -.03em; }
+    p { color: #475569; line-height: 1.6; }
+    .pill { display: inline-flex; width: fit-content; border: 1px solid #bbf7d0; background: #ecfdf5; color: #166534; border-radius: 999px; padding: 7px 12px; font-weight: 800; font-size: 13px; }
+    .grid { display: grid; grid-template-columns: minmax(0, 1.05fr) minmax(320px, .95fr); gap: 22px; align-items: start; }
+    .card, form { background: #fff; border: 1px solid #e2e8f0; border-radius: 22px; box-shadow: 0 20px 50px rgba(15, 23, 42, .08); }
+    form { padding: 22px; }
+    .models { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; margin-bottom: 16px; }
+    .model { border: 1px solid #e2e8f0; border-radius: 18px; padding: 16px; cursor: pointer; background: #fff; text-align: left; }
+    .model.active { border-color: #0f172a; box-shadow: 0 12px 30px rgba(15, 23, 42, .12); }
+    label { display: grid; gap: 7px; font-weight: 800; font-size: 14px; color: #334155; }
+    input, select { width: 100%; height: 48px; border: 1px solid #cbd5e1; border-radius: 14px; padding: 0 14px; font: inherit; background: #f8fafc; color: #0f172a; }
+    input:focus, select:focus { outline: 3px solid rgba(37, 99, 235, .18); border-color: #2563eb; }
+    .fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
+    .wide { grid-column: 1 / -1; }
+    button.primary { width: 100%; height: 50px; margin-top: 18px; border: 0; border-radius: 14px; background: #0f172a; color: #fff; font-weight: 900; cursor: pointer; }
+    button.primary:disabled { background: #94a3b8; cursor: not-allowed; }
+    .summary { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; margin-top: 16px; padding: 14px; border-radius: 16px; background: #f8fafc; border: 1px solid #e2e8f0; }
+    .summary strong { display: block; margin-top: 4px; font-size: 18px; color: #0f172a; }
+    aside { display: grid; gap: 16px; }
+    .card { padding: 20px; }
+    .status { border-radius: 18px; padding: 18px; border: 1px solid #bfdbfe; background: #eff6ff; color: #1e3a8a; }
+    .status.success { border-color: #bbf7d0; background: #ecfdf5; color: #166534; }
+    .status.error { border-color: #fecaca; background: #fef2f2; color: #991b1b; }
+    .status.warn { border-color: #fde68a; background: #fffbeb; color: #92400e; }
+    .bar { height: 8px; border-radius: 999px; background: rgba(255,255,255,.75); overflow: hidden; margin-top: 14px; }
+    .bar span { display: block; height: 100%; width: 0; background: currentColor; transition: width .25s ease; }
+    dl { display: grid; gap: 10px; margin: 0; }
+    .row { background: #f8fafc; border-radius: 14px; padding: 12px; }
+    dt { font-size: 12px; font-weight: 800; color: #64748b; }
+    dd { margin: 4px 0 0; font-weight: 900; overflow-wrap: anywhere; }
+    .note { margin-top: 14px; border: 1px solid #fed7aa; background: #fff7ed; color: #9a3412; border-radius: 16px; padding: 13px; font-size: 14px; font-weight: 700; }
+    @media (max-width: 820px) { main { width: min(100% - 22px, 1180px); padding: 18px 0; } .grid, .models, .fields, .summary { grid-template-columns: 1fr; } .wide { grid-column: auto; } }
+  </style>
+</head>
+<body>
+  <main>
+    <header>
+      <span class="pill">Backend-hosted live STK simulator</span>
+      <div>
+        <h1>Netily system payment lab</h1>
+        <p>Use this page when the frontend deployment is stale or blocked. It is served by Django and posts directly to the live simulator endpoint on the API service.</p>
+      </div>
+    </header>
+
+    <section class="grid">
+      <div>
+        <div class="models">
+          <button class="model" id="directBtn" type="button">Direct-to-tenant model<br><small>BYOP settlement simulation.</small></button>
+          <button class="model active" id="passBtn" type="button">Netily passthrough model<br><small>Central collection with payout math.</small></button>
+        </div>
+        <form id="paymentForm">
+          <div class="fields">
+            <label class="wide">Simulator test key <input id="testKey" type="password" autocomplete="off" required placeholder="Private test key"></label>
+            <label>Phone number <input id="phone" inputmode="tel" required placeholder="2547XXXXXXXX"></label>
+            <label>Amount <input id="amount" inputmode="numeric" required value="10"></label>
+            <label>Tenant reference <input id="tenantCode" value="DEMO"></label>
+            <label>Passthrough fee % <input id="feeRate" inputmode="decimal" value="2"></label>
+          </div>
+          <div class="summary">
+            <div>Gross<strong id="gross">KES 10</strong></div>
+            <div>Netily fee<strong id="fee">KES 0</strong></div>
+            <div>Tenant payout<strong id="payout">KES 10</strong></div>
+          </div>
+          <button class="primary" id="submitBtn" type="submit">Send live STK push</button>
+          <div class="note">Simulation only. No tenant subscription payment, invoice, wallet, payout, or tenant unlock is created.</div>
+        </form>
+      </div>
+
+      <aside>
+        <div class="status" id="statusBox">
+          <strong id="statusTitle">Ready</strong>
+          <p id="statusText">Fill in the tester phone number and send a live STK push.</p>
+          <div class="bar"><span id="bar"></span></div>
+        </div>
+        <div class="card">
+          <h2>Simulation receipt</h2>
+          <dl>
+            <div class="row"><dt>Checkout ID</dt><dd id="checkout">Not started</dd></div>
+            <div class="row"><dt>Receipt</dt><dd id="receipt">Pending</dd></div>
+            <div class="row"><dt>Reference</dt><dd id="reference">NET-DEMO</dd></div>
+            <div class="row"><dt>Destination</dt><dd id="destination">Netily system Equity paybill</dd></div>
+          </dl>
+        </div>
+      </aside>
+    </section>
+  </main>
+
+  <script>
+    const initiateUrl = "/api/v1/billing/netily-system-payment/initiate/";
+    const statusBase = "/api/v1/billing/netily-system-payment/status/";
+    let model = "netily_passthrough";
+    let pollTimer = null;
+    let pollStart = 0;
+
+    const els = {
+      directBtn: document.getElementById("directBtn"),
+      passBtn: document.getElementById("passBtn"),
+      form: document.getElementById("paymentForm"),
+      testKey: document.getElementById("testKey"),
+      phone: document.getElementById("phone"),
+      amount: document.getElementById("amount"),
+      tenantCode: document.getElementById("tenantCode"),
+      feeRate: document.getElementById("feeRate"),
+      submitBtn: document.getElementById("submitBtn"),
+      gross: document.getElementById("gross"),
+      fee: document.getElementById("fee"),
+      payout: document.getElementById("payout"),
+      statusBox: document.getElementById("statusBox"),
+      statusTitle: document.getElementById("statusTitle"),
+      statusText: document.getElementById("statusText"),
+      bar: document.getElementById("bar"),
+      checkout: document.getElementById("checkout"),
+      receipt: document.getElementById("receipt"),
+      reference: document.getElementById("reference"),
+      destination: document.getElementById("destination"),
+    };
+
+    function money(value) {
+      const amount = Number(value || 0);
+      return new Intl.NumberFormat("en-KE", { style: "currency", currency: "KES", maximumFractionDigits: 0 }).format(Number.isFinite(amount) ? amount : 0);
+    }
+
+    function updatePreview() {
+      const gross = Number(els.amount.value || 0);
+      const rate = Number(els.feeRate.value || 0);
+      const fee = model === "netily_passthrough" ? Math.round((gross * rate) / 100) : 0;
+      els.gross.textContent = money(gross);
+      els.fee.textContent = money(fee);
+      els.payout.textContent = money(Math.max(gross - fee, 0));
+      els.feeRate.disabled = model === "direct_tenant";
+    }
+
+    function setModel(nextModel) {
+      model = nextModel;
+      els.directBtn.classList.toggle("active", model === "direct_tenant");
+      els.passBtn.classList.toggle("active", model === "netily_passthrough");
+      updatePreview();
+    }
+
+    function showStatus(type, title, text) {
+      els.statusBox.className = "status" + (type ? " " + type : "");
+      els.statusTitle.textContent = title;
+      els.statusText.textContent = text;
+    }
+
+    async function readJson(response) {
+      const text = await response.text();
+      try { return JSON.parse(text); }
+      catch { return { success: false, message: text.replace(/<[^>]+>/g, " ").replace(/\\s+/g, " ").trim().slice(0, 180) || "Unexpected non-JSON response." }; }
+    }
+
+    async function poll(checkoutId) {
+      pollStart = Date.now();
+      clearInterval(pollTimer);
+      pollTimer = setInterval(async () => {
+        const elapsed = Date.now() - pollStart;
+        els.bar.style.width = Math.min(100, Math.round((elapsed / 30000) * 100)) + "%";
+        if (elapsed >= 30000) {
+          clearInterval(pollTimer);
+          els.submitBtn.disabled = false;
+          showStatus("warn", "Still pending", "The 30 second window ended. The callback may still arrive, but no system records are changed.");
+          return;
+        }
+        try {
+          const response = await fetch(statusBase + encodeURIComponent(checkoutId) + "/", {
+            headers: { "X-Netily-System-Payment-Token": els.testKey.value.trim() },
+            cache: "no-store",
+          });
+          const data = await readJson(response);
+          if (!response.ok) throw new Error(data.message || "Could not read status.");
+          if (data.status === "completed") {
+            clearInterval(pollTimer);
+            els.submitBtn.disabled = false;
+            els.receipt.textContent = data.mpesa_receipt || "Received";
+            showStatus("success", "Payment received", data.last_result_desc || "Daraja confirmed the STK payment.");
+          } else if (data.status === "failed" || data.status === "cancelled") {
+            clearInterval(pollTimer);
+            els.submitBtn.disabled = false;
+            showStatus("error", data.status === "cancelled" ? "Prompt cancelled" : "Payment failed", data.last_result_desc || "You can retry safely.");
+          }
+        } catch (error) {
+          showStatus("warn", "Polling issue", error.message || "Could not poll status.");
+        }
+      }, 3000);
+    }
+
+    els.directBtn.addEventListener("click", () => setModel("direct_tenant"));
+    els.passBtn.addEventListener("click", () => setModel("netily_passthrough"));
+    els.amount.addEventListener("input", updatePreview);
+    els.feeRate.addEventListener("input", updatePreview);
+    els.tenantCode.addEventListener("input", () => { els.reference.textContent = "NET-" + (els.tenantCode.value || "DEMO").toUpperCase().replace(/\\s+/g, "").slice(0, 8); });
+
+    els.form.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      clearInterval(pollTimer);
+      els.submitBtn.disabled = true;
+      els.bar.style.width = "8%";
+      showStatus("", "Sending STK push", "Contacting Daraja through the Netily API service.");
+      try {
+        const response = await fetch(initiateUrl, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "X-Netily-System-Payment-Token": els.testKey.value.trim(),
+          },
+          body: JSON.stringify({
+            model,
+            phone_number: els.phone.value,
+            amount: els.amount.value,
+            tenant_code: els.tenantCode.value,
+            fee_rate: els.feeRate.value,
+            test_key: els.testKey.value.trim(),
+          }),
+        });
+        const data = await readJson(response);
+        if (!response.ok || data.success === false) throw new Error(data.message || "The STK request was not accepted.");
+        els.checkout.textContent = data.checkout_request_id || "Pending";
+        els.reference.textContent = data.account_reference || els.reference.textContent;
+        els.destination.textContent = data.destination_label || "Netily system Equity paybill";
+        showStatus("", "Awaiting M-Pesa PIN", data.customer_message || "Approve the prompt on the tester phone.");
+        poll(data.checkout_request_id);
+      } catch (error) {
+        els.submitBtn.disabled = false;
+        showStatus("error", "Could not send STK", error.message || "Payment simulation could not start.");
+      }
+    });
+
+    updatePreview();
+  </script>
+</body>
+</html>
+"""
+    return HttpResponse(html, content_type="text/html")

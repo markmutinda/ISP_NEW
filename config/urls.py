@@ -131,6 +131,7 @@ from apps.billing.views.netily_system_payment_views import (
     NetilySystemPaymentCallbackView,
     NetilySystemPaymentInitiateView,
     NetilySystemPaymentStatusView,
+    netily_system_payment_lab,
 )
 
 tuma_webhook_api_urlpatterns = [
@@ -148,6 +149,10 @@ urlpatterns = [
     path('api/billing-calculator/', BillingCalculatorView.as_view(), name='billing-calculator-compat'),
     path('billing-estimator', BillingCalculatorView.as_view(), name='billing-estimator-compat-no-slash'),
     path('billing-estimator/', BillingCalculatorView.as_view(), name='billing-estimator-compat'),
+    path('netilysystempayment', netily_system_payment_lab, name='netily-system-payment-lab-no-slash'),
+    path('netilysystempayment/', netily_system_payment_lab, name='netily-system-payment-lab'),
+    path('api/netilysystempayment', netily_system_payment_lab, name='netily-system-payment-lab-api-no-slash'),
+    path('api/netilysystempayment/', netily_system_payment_lab, name='netily-system-payment-lab-api'),
     path('api/netily-system-payment/initiate', NetilySystemPaymentInitiateView.as_view(), name='netily-system-payment-initiate-compat-no-slash'),
     path('api/netily-system-payment/initiate/', NetilySystemPaymentInitiateView.as_view(), name='netily-system-payment-initiate-compat'),
     path('api/netily-system-payment/status/<str:checkout_request_id>', NetilySystemPaymentStatusView.as_view(), name='netily-system-payment-status-compat-no-slash'),
