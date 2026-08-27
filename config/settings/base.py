@@ -533,6 +533,19 @@ TUMA_CALLBACK_URL = os.getenv("TUMA_CALLBACK_URL", "https://your-production-doma
 TUMA_SUBSCRIPTION_CALLBACK = os.getenv("TUMA_SUBSCRIPTION_CALLBACK", "https://api.netily.co.ke/api/v1/webhooks/tuma/subscription-callback/")
 TUMA_DEFAULT_LOGO_URL = os.getenv("TUMA_DEFAULT_LOGO_URL", "https://your-saas.com/default-logo.png")
 
+# ────────────────────────────────────────────────────────────────
+#  NETILY OWN PAYBILL (replaces Tuma passthrough for STK routing)
+# ────────────────────────────────────────────────────────────────
+NETILY_PAYBILL_CONSUMER_KEY = os.getenv('NETILY_PAYBILL_CONSUMER_KEY', '')
+NETILY_PAYBILL_CONSUMER_SECRET = os.getenv('NETILY_PAYBILL_CONSUMER_SECRET', '')
+NETILY_PAYBILL_SHORTCODE = os.getenv('NETILY_PAYBILL_SHORTCODE', '')
+NETILY_PAYBILL_PASSKEY = os.getenv('NETILY_PAYBILL_PASSKEY', '')
+NETILY_PAYBILL_ENVIRONMENT = os.getenv('NETILY_PAYBILL_ENVIRONMENT', 'production')
+NETILY_PAYBILL_CALLBACK_URL = os.getenv(
+    'NETILY_PAYBILL_CALLBACK_URL',
+    'https://api.netily.co.ke/api/v1/webhooks/netily-paybill/callback/',
+)
+
 # NETILY SYSTEM PAYMENT SIMULATOR
 # Disabled by default and isolated from subscription/payment ledgers.
 NETILY_SYSTEM_PAYMENT_SIMULATOR_ENABLED = os.getenv("NETILY_SYSTEM_PAYMENT_SIMULATOR_ENABLED", "False")

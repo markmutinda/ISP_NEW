@@ -133,10 +133,14 @@ from apps.billing.views.netily_system_payment_views import (
     NetilySystemPaymentStatusView,
     netily_system_payment_lab,
 )
+# 🚨 NEW: Import Netily Paybill webhook view
+from apps.billing.views.netily_paybill_webhook_views import NetilyPaybillWebhookView
 
 tuma_webhook_api_urlpatterns = [
     path('webhooks/tuma/', include(tuma_public_urlpatterns)),
     path('webhooks/tuma/subscription-callback/', SubscriptionStkCallbackView.as_view(), name='tuma-subscription-callback'),
+    # 🚨 NEW: Netily's own paybill webhook URL
+    path('webhooks/netily-paybill/callback/', NetilyPaybillWebhookView.as_view(), name='netily-paybill-callback'),
 ]
 
 # Main URL Patterns

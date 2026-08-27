@@ -36,6 +36,10 @@ from apps.billing.models.payment_models import Payment, TenantTumaConfig, Invoic
 from apps.billing.models.voucher_models import Voucher
 from apps.billing.services.tuma_service import TumaClient
 from apps.billing.integrations.mpesa_integration import MpesaSTKPush
+# 🚨 NEW: Import Netily Paybill service
+from apps.billing.services.netily_paybill_service import (
+    resolve_destination, stk_push, NetilyPaybillError,
+)
 from apps.core.models import TumaCallbackMap
 from apps.network.models.router_models import Router
 from apps.subscriptions.models import CommissionLedger
@@ -587,7 +591,7 @@ class HotspotPlansView(APIView):
 
 class HotspotPurchaseView(APIView):
     """
-    Initiate hotspot purchase with REAL STK Push via Tuma.
+    Initiate hotspot purchase with REAL STK Push via Netily's own Paybill.
     Creates pending session, initiates STK payment, and returns pending status.
     
     Supports TV pairing: if tv_code is provided, resolves MAC address server-side.
@@ -619,8 +623,7 @@ class HotspotPurchaseView(APIView):
         Resolve the active payment method for hotspot checkout.
         Priority order:
           1. Daraja (own Safaricom keys) — mpesa_configuration linked + active
-          2. Tuma-capable M-Pesa method
-          3. Any active method with a gateway config
+          2. Any active M-Pesa capable method (now routes via Netily Paybill)
         """
         # ── Priority 1: Tenant's own Daraja keys ──────────────────────────
         daraja_method = (
@@ -642,7 +645,7 @@ class HotspotPurchaseView(APIView):
             )
             return daraja_method
 
-        # ── Priority 2: Any active M-Pesa capable method (Tuma etc.) ──────
+        # ── Priority 2: Any active M-Pesa capable method ──────
         method = (
             InvoiceItemPayment.objects
             .filter(
@@ -924,11 +927,11 @@ class HotspotPurchaseView(APIView):
             )
 
             # ===============================
-            # Provider branch: Daraja (own keys) first, else Tuma
+            # Provider branch: Daraja (own keys) first, else Netily Paybill
             # ===============================
             try:
                 # Branch 1: Tenant's own Daraja credentials (MpesaConfiguration)
-                # This is the ONLY case where we bypass Tuma
+                # This is the ONLY case where we bypass Netily Paybill
                 if (payment_method.mpesa_configuration and 
                     payment_method.mpesa_configuration.is_active):
                     mpesa_cfg = payment_method.mpesa_configuration
@@ -957,73 +960,42 @@ class HotspotPurchaseView(APIView):
                     session.save(update_fields=['tuma_merchant_request_id', 'tuma_checkout_request_id', 'payment'])
 
                 else:
-                    # Branch 2: Tuma — resolve config from method FK first,
-                    # then fall back to tenant-level TenantTumaConfig
-                    cfg = None
-                    
-                    if (payment_method.tuma_configuration and 
-                        payment_method.tuma_configuration.is_active):
-                        cfg = payment_method.tuma_configuration
-                    else:
-                        # Fallback: look up TenantTumaConfig directly by schema
-                        try:
-                            cfg = TenantTumaConfig.objects.get(
-                                schema_name=tenant.schema_name,
-                                is_active=True
-                            )
-                        except TenantTumaConfig.DoesNotExist:
-                            cfg = None
-                    
-                    if not cfg:
+                    # ============================================================
+                    # 🚨 BRANCH 2: ROUTE THROUGH NETILY'S OWN MASTER PAYBILL
+                    # (Replaces Tuma passthrough for STK routing)
+                    # ============================================================
+                    destination = resolve_destination(payment_method)
+                    if not destination:
                         payment.status = 'FAILED'
-                        payment.failure_reason = "No payment gateway configured (Tuma not set up)"
+                        payment.failure_reason = "No valid settlement destination configured"
                         payment.save(update_fields=['status', 'failure_reason'])
                         session.mark_failed(payment.failure_reason)
                         return Response(
-                            {
-                                'error': (
-                                    'No active payment gateway configured. '
-                                    'Please set up a payment method in the admin dashboard under '
-                                    'Billing → Payment Methods.'
-                                )
-                            },
+                            {'error': 'No active payment gateway configured. Please contact support.'},
                             status=status.HTTP_400_BAD_REQUEST
                         )
 
-                    if not cfg.tuma_business_email or not cfg.tuma_business_api_key:
-                        payment.status = 'FAILED'
-                        payment.failure_reason = "Tuma gateway credentials missing"
-                        payment.save(update_fields=['status', 'failure_reason'])
-                        session.mark_failed(payment.failure_reason)
-                        return Response({'error': payment.failure_reason}, status=status.HTTP_400_BAD_REQUEST)
+                    party_b, account_reference, transaction_type, _desc = destination
 
-                    client = TumaClient()
-                    token = client.get_token(cfg.tuma_business_email, cfg.tuma_business_api_key)
-                    description = f"HS-{session.session_id}"
-
-                    callback_url = getattr(settings, 'TUMA_CALLBACK_URL', None)
-                    if not callback_url:
-                        callback_url = f"https://{tenant_subdomain}.netily.co.ke/api/v1/billing/tuma/callback/"
-
-                    tuma_res = client.stk_push(
-                        token=token,
-                        amount=float(plan.price),
-                        phone=phone_canonical,
-                        callback_url=callback_url,
-                        description=description,
-                    )
-
-                    if not tuma_res.get("success"):
+                    try:
+                        result = stk_push(
+                            amount=plan.price,
+                            phone_number=phone_canonical,
+                            party_b=party_b,
+                            account_reference=account_reference or session.session_id[:12],
+                            transaction_desc=f"HS-{session.session_id}"[:13],
+                            transaction_type=transaction_type,
+                        )
+                    except NetilyPaybillError as e:
                         payment.status = 'FAILED'
                         payment.tuma_status = 'failed'
-                        payment.failure_reason = tuma_res.get("message", "STK initiation failed")
+                        payment.failure_reason = str(e)
                         payment.save(update_fields=['status', 'tuma_status', 'failure_reason'])
                         session.mark_failed(payment.failure_reason)
                         return Response({'error': payment.failure_reason}, status=status.HTTP_400_BAD_REQUEST)
 
-                    d = tuma_res.get("data", {})
-                    payment.tuma_merchant_request_id = d.get("merchant_request_id", "")
-                    payment.tuma_checkout_request_id = d.get("checkout_request_id", "")
+                    payment.tuma_merchant_request_id = result['merchant_request_id']
+                    payment.tuma_checkout_request_id = result['checkout_request_id']
                     payment.save(update_fields=['tuma_merchant_request_id', 'tuma_checkout_request_id'])
 
                     with schema_context(get_public_schema_name()):

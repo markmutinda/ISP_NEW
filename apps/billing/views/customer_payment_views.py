@@ -2,7 +2,7 @@
 Customer Payment Views
 
 Endpoints for ISP customers to make payments (recharge, invoice payments).
-These payments go through the Tuma Payment Gateway.
+These payments go through the Netily Paybill Gateway (replaces Tuma).
 """
 
 import logging
@@ -27,7 +27,12 @@ from apps.billing.models.payment_models import (
     StkCancellationTracker
 )
 from apps.billing.models.billing_models import Invoice
-from apps.billing.services.tuma_service import TumaClient, TumaError
+# 🚨 NEW: Import Netily Paybill service (replaces Tuma)
+from apps.billing.services.netily_paybill_service import (
+    resolve_destination, stk_push, NetilyPaybillError,
+)
+# 🚨 NEW: Import TumaCallbackMap for tracking
+from apps.core.models import TumaCallbackMap
 from apps.core.otp_service import OTPService, OTPError
 
 logger = logging.getLogger(__name__)
@@ -49,7 +54,7 @@ def require_payment_method_otp(request):
 
 class InitiateCustomerPaymentView(APIView):
     """
-    Initiate customer payment via Tuma Gateway.
+    Initiate customer payment via Netily Paybill Gateway (replaces Tuma).
     
     POST /api/v1/billing/payments/initiate/
     {
@@ -62,11 +67,11 @@ class InitiateCustomerPaymentView(APIView):
     permission_classes = [IsAuthenticated]
     
     def _get_or_create_tuma_payment_method(self):
-        """Get or create generic STK payment method for Tuma"""
+        """Get or create generic STK payment method for Tuma (kept for backward compatibility)"""
         method, created = InvoiceItemPayment.objects.get_or_create(
             code='TUMA_STK',
             defaults={
-                'name': 'M-Pesa STK Push (Tuma)',
+                'name': 'M-Pesa STK Push (Netily)',
                 'method_type': 'MPESA_STK',
                 'is_active': True,
             }
@@ -76,21 +81,22 @@ class InitiateCustomerPaymentView(APIView):
     def _validate_tuma_configuration(self, cfg):
         """
         Validate that the Tuma configuration has complete child business credentials.
+        (Kept for backward compatibility - may be removed in future)
         
         Returns:
             tuple: (is_valid, error_message)
         """
         if not cfg.is_active:
-            return False, "Tuma payment gateway is not active for this ISP."
+            return False, "Payment gateway is not active for this ISP."
         
         if not cfg.tuma_business_id:
-            return False, "Tuma business profile not created. Please contact support to complete setup."
+            return False, "Business profile not created. Please contact support to complete setup."
         
         if not cfg.tuma_business_email:
-            return False, "Tuma business email missing. Please reconfigure your payment settings."
+            return False, "Business email missing. Please reconfigure your payment settings."
         
         if not cfg.tuma_business_api_key:
-            return False, "Tuma business API key missing. Please reconfigure your payment settings."
+            return False, "Business API key missing. Please reconfigure your payment settings."
         
         if not cfg.active_mode:
             return False, "No active payment collection mode set (Till/Bank). Please configure your payment method."
@@ -179,27 +185,29 @@ class InitiateCustomerPaymentView(APIView):
                 )
         
         # ============================================================
-        # CRITICAL: Validate Tuma configuration BEFORE initiating payment
+        # Get the active payment method
         # ============================================================
-        try:
-            cfg = TenantTumaConfig.objects.get(schema_name=schema, is_active=True)
-        except TenantTumaConfig.DoesNotExist:
+        payment_method = InvoiceItemPayment.objects.filter(
+            schema_name=schema, is_active=True,
+        ).exclude(code__startswith='HOTSPOT_').first()
+
+        if not payment_method:
             return Response(
-                {'error': 'Payment gateway is not configured for this ISP. Please contact support.'}, 
+                {'error': 'No active payment method configured. Please contact support.'},
                 status=status.HTTP_400_BAD_REQUEST
             )
         
-        # Validate configuration completeness
-        is_valid, error_message = self._validate_tuma_configuration(cfg)
-        if not is_valid:
-            logger.error(f"Tuma configuration invalid for tenant {schema}: {error_message}")
+        # ============================================================
+        # 🚨 VALIDATE: Resolve settlement destination
+        # ============================================================
+        destination = resolve_destination(payment_method)
+        if not destination:
             return Response(
-                {'error': error_message},
+                {'error': 'No valid settlement destination configured. Please contact support.'},
                 status=status.HTTP_400_BAD_REQUEST
             )
-
-        # Get or create Tuma payment method
-        payment_method = self._get_or_create_tuma_payment_method()
+        
+        party_b, account_reference, transaction_type, _desc = destination
         
         # Generate internal reference - ensure no spaces
         reference = f"PAY-{customer.customer_code}-{int(time.time())}".replace(" ", "-")
@@ -213,79 +221,72 @@ class InitiateCustomerPaymentView(APIView):
             payer_phone=phone_number,
             mpesa_phone=phone_number,
             payment_reference=reference,
-            status='PENDING',
+            status='PROCESSING',
             notes="Customer initiated payment via dashboard",
             schema_name=schema,
             service_type='PPPOE',   # Permanent classification for analytics
+            tuma_status='pending',
         )
         
         # ============================================================
-        # Initiate Tuma STK Push using CHILD credentials
+        # 🚨 Initiate STK Push via Netily Paybill (replaces Tuma)
         # ============================================================
         try:
-            client = TumaClient()
-            
-            logger.info(f"Initiating Tuma payment for tenant {schema} using business {cfg.tuma_business_id}")
-            
-            token = client.get_token(cfg.tuma_business_email, cfg.tuma_business_api_key)
-            
-            # Create a simple description with the payment reference (will be cleaned in service)
-            description = f"PAY-{customer.customer_code}"
-            
-            # Pass the raw amount, the service will clean it (convert to integer)
-            response = client.stk_push(
-                token=token,
-                amount=amount,  # Pass the raw amount, service will clean it
-                phone=phone_number,
-                callback_url=settings.TUMA_CALLBACK_URL,
-                description=description  # Only 5 arguments now
+            result = stk_push(
+                amount=amount,
+                phone_number=phone_number,
+                party_b=party_b,
+                account_reference=account_reference or customer.customer_code,
+                transaction_desc=f"PAY-{customer.customer_code}"[:13],
+                transaction_type=transaction_type,
             )
             
-            if response.get("success"):
-                data = response.get("data", {})
-                payment.tuma_merchant_request_id = data.get("merchant_request_id", "")
-                payment.tuma_checkout_request_id = data.get("checkout_request_id", "")
-                payment.tuma_status = "pending"
-                payment.status = 'PROCESSING'
-                payment.save()
-                
-                logger.info(f"Tuma STK Push initiated successfully: {payment.tuma_merchant_request_id}")
-                
-                return Response({
+            payment.tuma_merchant_request_id = result['merchant_request_id']
+            payment.tuma_checkout_request_id = result['checkout_request_id']
+            payment.tuma_status = "pending"
+            payment.status = 'PROCESSING'
+            payment.save()
+            
+            # ── Store mapping for webhook resolution ──
+            from django_tenants.utils import schema_context, get_public_schema_name
+            with schema_context(get_public_schema_name()):
+                TumaCallbackMap.objects.update_or_create(
+                    merchant_request_id=payment.tuma_merchant_request_id,
+                    defaults={
+                        "checkout_request_id": payment.tuma_checkout_request_id,
+                        "schema_name": schema,
+                        "payment_reference": payment.payment_number,
+                    },
+                )
+            
+            logger.info(
+                f"STK Push initiated for customer {customer.customer_code}: "
+                f"merchant_request_id={payment.tuma_merchant_request_id}"
+            )
+            
+            return Response({
+                'status': 'pending',
+                'payment_id': payment.id,
+                'payment_number': payment.payment_number,
+                'tuma_response': {
                     'status': 'pending',
-                    'payment_id': payment.id,
-                    'payment_number': payment.payment_number,
-                    'tuma_response': {
-                        'status': 'pending',
-                        'merchant_request_id': payment.tuma_merchant_request_id,
-                        'checkout_request_id': payment.tuma_checkout_request_id,
-                        'message': 'STK Push sent to your phone. Please enter your PIN.',
-                    }
-                })
-            else:
-                payment.status = 'FAILED'
-                payment.failure_reason = response.get("message", "Failed to initiate payment")
-                payment.tuma_status = "failed"
-                payment.save()
-                
-                logger.error(f"Tuma STK Push failed: {payment.failure_reason}")
-                
-                return Response({
-                    'status': 'error',
-                    'message': payment.failure_reason,
-                }, status=status.HTTP_400_BAD_REQUEST)
-        
-        except TumaError as e:
-            logger.error(f"Customer payment Tuma error: {str(e)}")
+                    'merchant_request_id': payment.tuma_merchant_request_id,
+                    'checkout_request_id': payment.tuma_checkout_request_id,
+                    'message': result.get('customer_message') or 'STK Push sent. Please enter your PIN.',
+                }
+            })
+            
+        except NetilyPaybillError as e:
+            logger.error(f"STK Push failed for customer {customer.customer_code}: {str(e)}")
             payment.status = 'FAILED'
             payment.failure_reason = str(e)
-            payment.tuma_status = "failed"
+            payment.tuma_status = 'failed'
             payment.save()
             
             return Response({
                 'status': 'error',
-                'message': 'Payment service unavailable. Please try again.',
-            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+                'message': payment.failure_reason,
+            }, status=status.HTTP_400_BAD_REQUEST)
         
         except Exception as e:
             logger.exception(f"Unexpected error in customer payment: {str(e)}")
@@ -302,8 +303,8 @@ class InitiateCustomerPaymentView(APIView):
 class CustomerPaymentStatusView(APIView):
     """
     Poll customer payment status.
-    Since Tuma operates purely via webhooks for resolution, we check our local database 
-    status which is updated asynchronously by the TumaWebhookView.
+    Since Netily Paybill operates purely via webhooks for resolution, we check our local database 
+    status which is updated asynchronously by the NetilyPaybillWebhookView.
     
     GET /api/v1/billing/payments/{id}/status/
     """
@@ -397,8 +398,6 @@ class CustomerPaymentMethodsView(APIView):
                 'description': method.description,
                 'is_active': method.is_active,
                 'is_default': method.is_default,
-                # REMOVED: 'is_payhero_enabled': method.is_payhero_enabled,
-                # REMOVED: 'channel_id': method.channel_id,
                 'till_number': method.till_number,
                 'paybill_number': method.paybill_number,
                 'account_number': method.account_number,
@@ -410,9 +409,6 @@ class CustomerPaymentMethodsView(APIView):
                 'transaction_fee': float(method.transaction_fee),
                 'fee_type': method.fee_type,
                 'status': method.status,
-                # ── FIX: these two were missing, which is why Daraja-linked
-                # methods were leaking into the "Netily/Tuma" method list on
-                # the frontend (the filter checks mpesa_configuration).
                 'mpesa_configuration': method.mpesa_configuration_id,
                 'mpesa_configuration_details': _mpesa_cfg(method),
                 'tuma_configuration': method.tuma_configuration_id,
@@ -438,6 +434,9 @@ class CustomerPaymentMethodsView(APIView):
         
         OTP verification is handled by the frontend OtpGuard at the page level,
         so no per-request OTP check is required here.
+        
+        🚨 REMOVED: Tuma provisioning calls (ensure_child_business, sync_active_method_to_tuma)
+        These are no longer needed since we route directly through Netily Paybill.
         """
         from apps.billing.models.payment_models import InvoiceItemPayment
         from apps.billing.serializers.payment_serializers import PaymentMethodSerializer
@@ -472,20 +471,9 @@ class CustomerPaymentMethodsView(APIView):
             is_active=is_first,
         )
 
-        # Auto-provision Tuma child business with real method data
-        from apps.billing.services.tuma_service import (
-            ensure_child_business, sync_active_method_to_tuma, TumaError,
-        )
-        try:
-            cfg = ensure_child_business(schema, method=method)
-            if not method.tuma_configuration:
-                method.tuma_configuration = cfg
-                method.save(update_fields=['tuma_configuration'])
-            # First method is auto-active → sync its settlement details to Tuma
-            if is_first:
-                sync_active_method_to_tuma(schema, method)
-        except TumaError as e:
-            logger.warning(f"Tuma provisioning/sync failed for {schema}: {e}")
+        # 🚨 REMOVED: Tuma provisioning (ensure_child_business, sync_active_method_to_tuma)
+        # These calls are dead weight now - we route directly through Netily Paybill
+        # No need to sync to Tuma since we bypass Tuma entirely
 
         return Response(serializer.data, status=status.HTTP_201_CREATED)
 
@@ -519,6 +507,9 @@ class PaymentMethodDetailView(APIView):
         
         OTP verification is handled by the frontend OtpGuard at the page level,
         so no per-request OTP check is required here.
+        
+        🚨 REMOVED: Tuma sync (sync_active_method_to_tuma)
+        No longer needed - we route directly through Netily Paybill.
         """
         from apps.billing.serializers.payment_serializers import PaymentMethodSerializer
         try:
@@ -529,18 +520,12 @@ class PaymentMethodDetailView(APIView):
         serializer.is_valid(raise_exception=True)
         method = serializer.save(updated_by=request.user)
 
-        # If the active method's settlement details changed, sync to Tuma (non-fatal)
-        tuma_synced = False
-        if method.is_active:
-            from apps.billing.services.tuma_service import sync_active_method_to_tuma, TumaError
-            try:
-                result = sync_active_method_to_tuma(method.schema_name, method)
-                tuma_synced = bool(result and result.get('tuma_synced'))
-            except Exception as e:
-                logger.warning(f"Tuma sync on update failed for {method.schema_name}: {e}")
+        # 🚨 REMOVED: Tuma sync (sync_active_method_to_tuma)
+        # No longer needed - we route directly through Netily Paybill.
+        # The resolve_destination() function reads from the local method config.
 
         data = serializer.data
-        data['tuma_synced'] = tuma_synced
+        data['tuma_synced'] = True  # Always true since we don't use Tuma
         return Response(data)
 
     def delete(self, request, pk):
@@ -549,6 +534,9 @@ class PaymentMethodDetailView(APIView):
         
         OTP verification is handled by the frontend OtpGuard at the page level,
         so no per-request OTP check is required here.
+        
+        🚨 REMOVED: Tuma deactivation (deactivate_tuma_collections, delete_tuma_business)
+        No longer needed - we route directly through Netily Paybill.
         """
         try:
             method = self._get_method(pk)
@@ -580,28 +568,11 @@ class PaymentMethodDetailView(APIView):
             Payment.objects.filter(payment_method=method).update(payment_method=None)
             method.delete()
 
-        # Tuma sync after delete
-        from apps.billing.services.tuma_service import (
-            deactivate_tuma_collections, delete_tuma_business, TumaError,
-        )
-        tuma_action = None
-        remaining = InvoiceItemPayment.objects.filter(schema_name=schema).count()
-        try:
-            if remaining == 0:
-                if delete_tuma_business(schema):
-                    tuma_action = 'business_deleted'
-            elif was_active:
-                has_remaining_active = InvoiceItemPayment.objects.filter(
-                    schema_name=schema, is_active=True,
-                ).exists()
-                if not has_remaining_active:
-                    deactivate_tuma_collections(schema)
-                    tuma_action = 'deactivated'
-        except TumaError as e:
-            logger.warning(f"Tuma sync after delete failed for {schema}: {e}")
+        # 🚨 REMOVED: Tuma sync after delete (deactivate_tuma_collections, delete_tuma_business)
+        # No longer needed - we route directly through Netily Paybill
 
         return Response(
-            {'tuma_action': tuma_action},
+            {'tuma_action': None},  # No Tuma action needed
             status=status.HTTP_200_OK,
         )
 
@@ -617,11 +588,11 @@ class PaymentMethodToggleActiveView(APIView):
         
         OTP verification is handled by the frontend OtpGuard at the page level,
         so no per-request OTP check is required here.
+        
+        🚨 REMOVED: Tuma sync (sync_active_method_to_tuma, deactivate_tuma_collections)
+        No longer needed - we route directly through Netily Paybill.
         """
         from apps.billing.models.payment_models import InvoiceItemPayment
-        from apps.billing.services.tuma_service import (
-            sync_active_method_to_tuma, deactivate_tuma_collections, TumaError,
-        )
         try:
             method = InvoiceItemPayment.objects.get(
                 pk=pk, schema_name=connection.schema_name,
@@ -640,31 +611,11 @@ class PaymentMethodToggleActiveView(APIView):
         method.is_active = new_state
         method.save(update_fields=['is_active', 'updated_at'])
 
-        # Sync to Tuma — return detailed feedback but NEVER crash the toggle
-        sync_details = {'tuma_synced': False}
-        try:
-            if new_state:
-                result = sync_active_method_to_tuma(connection.schema_name, method)
-                sync_details = result or {'tuma_synced': True}
-            else:
-                has_active = InvoiceItemPayment.objects.filter(
-                    schema_name=connection.schema_name, is_active=True,
-                ).exists()
-                if not has_active:
-                    try:
-                        deactivate_tuma_collections(connection.schema_name)
-                    except Exception as e:
-                        logger.warning(f"Tuma deactivate failed (non-fatal): {e}")
-                sync_details = {'tuma_synced': True, 'settlement_channel': 'None (all deactivated)'}
-        except TumaError as e:
-            logger.warning(f"Tuma sync on toggle failed for {connection.schema_name}: {e}")
-            sync_details = {'tuma_synced': False, 'tuma_error': str(e)}
-        except Exception as e:
-            # Catch-all: Tuma being down (503, ConnectionError, etc.) must not prevent toggling
-            logger.warning(f"Tuma sync unexpected error for {connection.schema_name}: {e}")
-            sync_details = {'tuma_synced': False, 'tuma_error': str(e)}
+        # 🚨 REMOVED: Tuma sync (sync_active_method_to_tuma, deactivate_tuma_collections)
+        # No longer needed - we route directly through Netily Paybill.
+        # The resolve_destination() function reads from the local method config.
 
         from apps.billing.serializers.payment_serializers import PaymentMethodSerializer
         data = PaymentMethodSerializer(method).data
-        data.update(sync_details)
+        data['tuma_synced'] = True  # Always true since we don't use Tuma
         return Response(data)

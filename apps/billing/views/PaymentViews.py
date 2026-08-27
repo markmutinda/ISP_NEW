@@ -588,18 +588,21 @@ class MpesaTransactionViewSet(viewsets.ReadOnlyModelViewSet):
 
 
 # ==========================
-# Payment Method Views (Updated - PayHero Removed)
+# Payment Method Views (Updated - Tuma Removed)
 # ==========================
 
 class PaymentMethodViewSet(viewsets.ModelViewSet):
     """
     ViewSet for managing payment methods (M-Pesa and Bank Transfers only)
+    
+    🚨 UPDATED: Removed all Tuma provisioning/sync calls.
+    Payment methods now route directly through Netily Paybill.
     """
     permission_classes = [IsAuthenticated, IsCompanyAdmin, HasRoleAccessPolicy]
     required_rbac_path = "/admin/payment-methods"
     filter_backends = [DjangoFilterBackend, filters.SearchFilter]
-    filterset_fields = ['method_type', 'is_active', 'status']  # REMOVED: 'is_payhero_enabled'
-    search_fields = ['name', 'code', 'description']  # REMOVED: 'channel_id'
+    filterset_fields = ['method_type', 'is_active', 'status']
+    search_fields = ['name', 'code', 'description']
 
     def get_queryset(self):
         from ..models.payment_models import InvoiceItemPayment
@@ -615,8 +618,14 @@ class PaymentMethodViewSet(viewsets.ModelViewSet):
         return PaymentMethodSerializer
 
     def perform_create(self, serializer):
+        """
+        Create a new payment method.
+        
+        🚨 REMOVED: Tuma provisioning (ensure_child_business, sync_active_method_to_tuma)
+        These calls are dead weight now - we route directly through Netily Paybill.
+        The resolve_destination() function reads from the local method config.
+        """
         from ..models.payment_models import InvoiceItemPayment
-        from ..services.tuma_service import ensure_child_business, sync_active_method_to_tuma, TumaError
         user = self.request.user
         schema = connection.schema_name
 
@@ -644,33 +653,28 @@ class PaymentMethodViewSet(viewsets.ModelViewSet):
             is_active=is_first,
         )
 
-        # Auto-provision Tuma child business with real method data
-        try:
-            cfg = ensure_child_business(schema, method=method)
-            if not method.tuma_configuration:
-                method.tuma_configuration = cfg
-                method.save(update_fields=['tuma_configuration'])
-            # First method is auto-active → sync its settlement details to Tuma
-            if is_first:
-                sync_active_method_to_tuma(schema, method)
-        except TumaError as e:
-            logger.warning(f"Tuma provisioning/sync failed for {schema}: {e}")
+        # 🚨 REMOVED: Tuma provisioning (ensure_child_business, sync_active_method_to_tuma)
+        # These calls are dead weight now - we route directly through Netily Paybill
+        # No need to sync to Tuma since we bypass Tuma entirely
 
     def perform_update(self, serializer):
-        from ..services.tuma_service import sync_active_method_to_tuma, TumaError
+        """
+        Update a payment method.
+        
+        🚨 REMOVED: Tuma sync (sync_active_method_to_tuma)
+        No longer needed - we route directly through Netily Paybill.
+        The resolve_destination() function reads from the local method config.
+        """
         method = serializer.save()
-
-        # If the active method's settlement details changed, sync to Tuma
-        if method.is_active:
-            try:
-                sync_active_method_to_tuma(method.schema_name, method)
-            except TumaError as e:
-                logger.warning(f"Tuma sync on update failed for {method.schema_name}: {e}")
+        # 🚨 REMOVED: Tuma sync - no longer needed
 
     def destroy(self, request, *args, **kwargs):
-        from ..services.tuma_service import (
-            deactivate_tuma_collections, delete_tuma_business, TumaError,
-        )
+        """
+        Delete a payment method.
+        
+        🚨 REMOVED: Tuma deactivation (deactivate_tuma_collections, delete_tuma_business)
+        No longer needed - we route directly through Netily Paybill.
+        """
         method = self.get_object()
         force = request.query_params.get('force', '').lower() == 'true'
 
@@ -697,35 +701,23 @@ class PaymentMethodViewSet(viewsets.ModelViewSet):
             Payment.objects.filter(payment_method=method).update(payment_method=None)
             method.delete()
 
-        # Tuma sync after delete
-        tuma_action = None
-        from ..models.payment_models import InvoiceItemPayment
-        remaining = InvoiceItemPayment.objects.filter(schema_name=schema).count()
-        try:
-            if remaining == 0:
-                # Last method deleted → delete the Tuma business entirely
-                if delete_tuma_business(schema):
-                    tuma_action = 'business_deleted'
-            elif was_active:
-                # Active method deleted but others remain → deactivate Tuma
-                has_remaining_active = InvoiceItemPayment.objects.filter(
-                    schema_name=schema, is_active=True,
-                ).exists()
-                if not has_remaining_active:
-                    deactivate_tuma_collections(schema)
-                    tuma_action = 'deactivated'
-        except TumaError as e:
-            logger.warning(f"Tuma sync after delete failed for {schema}: {e}")
+        # 🚨 REMOVED: Tuma sync after delete (deactivate_tuma_collections, delete_tuma_business)
+        # No longer needed - we route directly through Netily Paybill
 
         return Response(
-            {'tuma_action': tuma_action},
+            {'tuma_action': None},  # No Tuma action needed
             status=status.HTTP_200_OK,
         )
 
     @action(detail=True, methods=['post'])
     def toggle_active(self, request, pk=None):
+        """
+        Toggle the active state of a payment method.
+        
+        🚨 REMOVED: Tuma sync (sync_active_method_to_tuma, deactivate_tuma_collections)
+        No longer needed - we route directly through Netily Paybill.
+        """
         from ..models.payment_models import InvoiceItemPayment
-        from ..services.tuma_service import sync_active_method_to_tuma, deactivate_tuma_collections, TumaError
         method = self.get_object()
         new_state = not method.is_active
 
@@ -738,32 +730,19 @@ class PaymentMethodViewSet(viewsets.ModelViewSet):
         method.is_active = new_state
         method.save()
 
-        # Sync to Tuma — return detailed feedback
-        sync_details = {'tuma_synced': False}
-        try:
-            if new_state:
-                result = sync_active_method_to_tuma(connection.schema_name, method)
-                sync_details = result or {'tuma_synced': True}
-            else:
-                has_active = InvoiceItemPayment.objects.filter(
-                    schema_name=connection.schema_name, is_active=True,
-                ).exists()
-                if not has_active:
-                    deactivate_tuma_collections(connection.schema_name)
-                sync_details = {'tuma_synced': True, 'settlement_channel': 'None (all deactivated)'}
-        except TumaError as e:
-            logger.warning(f"Tuma sync on toggle failed for {connection.schema_name}: {e}")
-            sync_details = {'tuma_synced': False, 'tuma_error': str(e)}
+        # 🚨 REMOVED: Tuma sync (sync_active_method_to_tuma, deactivate_tuma_collections)
+        # No longer needed - we route directly through Netily Paybill.
+        # The resolve_destination() function reads from the local method config.
 
         return Response({
             'status': 'success',
             'is_active': method.is_active,
-            **sync_details,
+            'tuma_synced': True,  # Always true since we don't use Tuma
         })
 
     @action(detail=True, methods=['post'])
     def test_connection(self, request, pk=None):
-        """Test connection for M-Pesa payment methods only (PayHero removed)"""
+        """Test connection for M-Pesa payment methods only (Tuma removed)"""
         method = self.get_object()
 
         # Test M-Pesa connection if it's an M-Pesa method
@@ -798,12 +777,12 @@ class PaymentMethodViewSet(viewsets.ModelViewSet):
 
 
 # ==========================
-# Payment Views (Updated - PayHero Removed)
+# Payment Views (Updated - Tuma Removed)
 # ==========================
 
 class PaymentViewSet(viewsets.ModelViewSet):
     """
-    ViewSet for managing payments with M-Pesa support (PayHero removed)
+    ViewSet for managing payments with M-Pesa support (Tuma removed)
     """
     permission_classes = [IsAuthenticated, IsCompanyStaff, HasRoleAccessPolicy]
     required_rbac_path = "/admin/payments"
@@ -811,7 +790,7 @@ class PaymentViewSet(viewsets.ModelViewSet):
     filterset_fields = ['status', 'payment_method', 'customer', 'is_reconciled']
     search_fields = [
         'payment_number', 'customer__customer_code', 'transaction_id',
-        'mpesa_receipt'  # REMOVED: 'payhero_external_reference'
+        'mpesa_receipt'
     ]
     ordering_fields = ['payment_date', 'amount', 'created_at']
 
