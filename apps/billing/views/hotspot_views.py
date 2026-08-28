@@ -49,7 +49,7 @@ from apps.radius.services.coa_service import CoAService
 logger = logging.getLogger(__name__)
 
 
-# ── Constant for M-Pesa capable methods ──
+# ── Constant for M-Pesa capable methods (kept for compatibility, but no longer used in method resolution) ──
 MPESA_CAPABLE_METHOD_TYPES = [
     'MPESA_STK', 'MPESA_PAYBILL', 'MPESA_TILL', 'MOBILE_MONEY', 'MPESA',
 ]
@@ -616,14 +616,16 @@ class HotspotPurchaseView(APIView):
                 return code
 
     # ============================================================
-    # FIXED: _get_active_hotspot_payment_method with Daraja priority
+    # 🚨 UPDATED: _get_active_hotspot_payment_method
+    # Uses resolve_destination() as the single source of truth
     # ============================================================
     def _get_active_hotspot_payment_method(self, schema_name: str):
         """
         Resolve the active payment method for hotspot checkout.
         Priority order:
           1. Daraja (own Safaricom keys) — mpesa_configuration linked + active
-          2. Any active M-Pesa capable method (now routes via Netily Paybill)
+          2. Any active method that resolves to a real settlement destination
+             (bank/till/paybill) via the Netily Paybill routing service.
         """
         # ── Priority 1: Tenant's own Daraja keys ──────────────────────────
         daraja_method = (
@@ -645,43 +647,24 @@ class HotspotPurchaseView(APIView):
             )
             return daraja_method
 
-        # ── Priority 2: Any active M-Pesa capable method ──────
-        method = (
-            InvoiceItemPayment.objects
-            .filter(
-                schema_name=schema_name,
-                method_type__in=MPESA_CAPABLE_METHOD_TYPES,
-                is_active=True,
-            )
-            .select_related('mpesa_configuration', 'tuma_configuration')
-            .order_by('-is_default', '-updated_at')
-            .first()
-        )
-        if method:
-            logger.info(
-                f"[{schema_name}] Hotspot gateway → M-Pesa capable method "
-                f"(code={method.code}, type={method.method_type})"
-            )
-            return method
+        # ── Priority 2: Any active method that can route via Netily Paybill ──
+        from apps.billing.services.netily_paybill_service import resolve_destination
 
-        # ── Priority 3: Fallback — any active method with a gateway ────────
-        fallback_method = (
+        candidates = (
             InvoiceItemPayment.objects
             .filter(schema_name=schema_name, is_active=True)
-            .filter(
-                Q(tuma_configuration__isnull=False) |
-                Q(mpesa_configuration__isnull=False)
-            )
+            .filter(mpesa_configuration__isnull=True)
             .order_by('-is_default', '-updated_at')
-            .first()
         )
-        if fallback_method:
-            logger.info(
-                f"[{schema_name}] Hotspot gateway → fallback gateway method "
-                f"(code={fallback_method.code})"
-            )
-        
-        return fallback_method
+        for method in candidates:
+            if resolve_destination(method):
+                logger.info(
+                    f"[{schema_name}] Hotspot gateway → Netily Paybill "
+                    f"(code={method.code}, type={method.method_type})"
+                )
+                return method
+
+        return None
 
     def _ensure_mpesa_stk_callback_url(self, mpesa_cfg):
         """
@@ -900,7 +883,7 @@ class HotspotPurchaseView(APIView):
                 return Response(
                     {
                         'error': (
-                            'No active M-Pesa payment method configured. '
+                            'No active payment method configured. '
                             'Please set up a payment method in the admin dashboard under '
                             'Billing → Payment Methods.'
                         )
