@@ -57,6 +57,11 @@ def stk_push(*, amount, phone_number, party_b, account_reference, transaction_de
     """
     token = _get_access_token()
     timestamp = _timestamp()
+    
+    # ── FIX: Send FULL account reference (no truncation) ──
+    # Previously truncated to 12 chars which dropped digits from long account numbers
+    account_ref = account_reference or ""
+    
     payload = {
         "BusinessShortCode": settings.NETILY_PAYBILL_SHORTCODE,
         "Password": _password(timestamp),
@@ -67,7 +72,7 @@ def stk_push(*, amount, phone_number, party_b, account_reference, transaction_de
         "PartyB": party_b,
         "PhoneNumber": phone_number,
         "CallBackURL": settings.NETILY_PAYBILL_CALLBACK_URL,
-        "AccountReference": (account_reference or "")[:12],
+        "AccountReference": account_ref,
         "TransactionDesc": (transaction_desc or "Payment")[:13],
     }
 
