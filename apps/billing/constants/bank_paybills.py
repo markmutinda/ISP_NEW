@@ -24,4 +24,11 @@ BANK_PAYBILL_MAP = {
     "Sidian Bank": "111999",
     "SBM Bank": "552800",
     "Bank of Africa": "972900",
+    # ── New additions ──
+    "Ecobank Xpress": "700205",
+    "LOOP Business": "714777",
+    "Fortune Sacco": "852648",
+    "K Unity Sacco": "4082977",
+    "Tower Sacco Society": "506900",
+    "Post Bank": "200999",
 }
