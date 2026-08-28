@@ -5,6 +5,7 @@ from django.core.validators import MinValueValidator
 from django.core.exceptions import ValidationError
 from django.utils import timezone
 from decimal import Decimal
+from datetime import timedelta  # 🚨 ADDED: For auto-expiring block
 from apps.core.models import Company, AuditMixin
 #from apps.customers.models import Customer
 from .billing_models import Invoice
@@ -483,11 +484,24 @@ class StkCancellationTracker(models.Model):
         self.save()
         return self
 
-    def is_currently_blocked(self) -> bool:
-        """Check if this phone is currently blocked from STK Push"""
+    # 🚨 UPDATED: Auto-expiring block after 3 minutes
+    def is_currently_blocked(self, timeout_minutes: int = 3) -> bool:
+        """
+        Cooldown-based block — auto-expires after `timeout_minutes`.
+        We route through our own paybill now, so there's no need to
+        permanently lock a number out like the old Tuma flow required.
+        """
         if not self.is_blocked:
             return False
-        # No auto-unblock — block persists until manual reset
+
+        if self.blocked_at and timezone.now() >= self.blocked_at + timedelta(minutes=timeout_minutes):
+            # Cooldown expired — clear it so future checks skip this branch
+            self.is_blocked = False
+            self.consecutive_1032_count = 0
+            self.blocked_at = None
+            self.save(update_fields=['is_blocked', 'consecutive_1032_count', 'blocked_at', 'updated_at'])
+            return False
+
         return True
 
     def reset(self):

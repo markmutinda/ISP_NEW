@@ -32,7 +32,9 @@ from apps.billing.models.hotspot_models import (
     HotspotClient, HotspotClientDevice, HotspotFreeTrialUsage
 )
 from apps.billing.models.billing_models import Plan
-from apps.billing.models.payment_models import Payment, TenantTumaConfig, InvoiceItemPayment
+from apps.billing.models.payment_models import (
+    Payment, TenantTumaConfig, InvoiceItemPayment, StkCancellationTracker  # 🚨 ADDED: StkCancellationTracker
+)
 from apps.billing.models.voucher_models import Voucher
 from apps.billing.services.tuma_service import TumaClient
 from apps.billing.integrations.mpesa_integration import MpesaSTKPush
@@ -755,6 +757,19 @@ class HotspotPurchaseView(APIView):
             # CANONICALIZE PHONE NUMBER USING COUNTRY-AWARE UTILITY
             # ============================================================
             phone_canonical = _canonical_phone(phone_number, customer_country)
+
+            # ── 🚨 ANTI-ABUSE: Block STK for 3 min after 3 consecutive cancellations ──
+            stk_tracker = StkCancellationTracker.get_or_create_tracker(
+                tenant.schema_name, phone_canonical
+            )
+            if stk_tracker.is_currently_blocked():
+                return Response(
+                    {
+                        'error': 'Too many cancelled payment prompts. Please wait a few minutes and try again.',
+                        'retriable': True,
+                    },
+                    status=status.HTTP_429_TOO_MANY_REQUESTS
+                )
             
             # ══════════════════════════════════════════════════════════════
             # RESOLVE HOTSPOT IDENTITY
