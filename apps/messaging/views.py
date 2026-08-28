@@ -782,18 +782,23 @@ class SMSWalletView(APIView):
         return Response(data)
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# 🚨 UPDATED: SMSTopupInitiateView - Now uses Netily Paybill (replaces Tuma)
+# ─────────────────────────────────────────────────────────────────────────────
+
 class SMSTopupInitiateView(APIView):
     """
     POST /api/v1/messaging/topup/initiate/
     Body: { "units": 1000, "phone_number": "254712345678" } 
            OR { "amount_kes": 100, "phone_number": "254712345678" }
 
-    Calculates cost using tiered pricing, creates a pending topup record, initiates STK push.
+    Calculates cost using tiered pricing, creates a pending topup record, initiates STK push
+    via Netily's own paybill (no tenant/bank redirection).
     """
     permission_classes = [IsAuthenticated, IsAdminOrStaff, HasRoleAccessPolicy]
     required_rbac_path = "/admin/sms"
 
-    # FIX 7: Tiered pricing
+    # Tiered pricing
     TIERS = [
         (1000, Decimal('0.30')),   # 1000+ units
         (500,  Decimal('0.35')),   # 500–999 units
@@ -816,7 +821,6 @@ class SMSTopupInitiateView(APIView):
         amount_kes = request.data.get('amount_kes')
 
         if amount_kes:
-            # Calculate units from KES amount (use 0.40 base rate for custom amounts)
             try:
                 amount_kes = Decimal(str(amount_kes)).quantize(Decimal('0.01'))
             except Exception:
@@ -841,7 +845,7 @@ class SMSTopupInitiateView(APIView):
             
             if units < 25:
                 return Response(
-                    {'error': 'Minimum top-up is 25 units (KES 10)'},
+                    {'error': f'Minimum top-up is 25 units (KES 10)'},
                     status=status.HTTP_400_BAD_REQUEST
                 )
             price_per_unit = self._price_for(units)
@@ -873,7 +877,7 @@ class SMSTopupInitiateView(APIView):
                 status=status.HTTP_400_BAD_REQUEST
             )
 
-        # OPTIONAL HARDENING: Validate schema exists and is active in public Tenant table
+        # Validate schema exists and is active in public Tenant table
         try:
             from apps.core.models import Tenant
             from django_tenants.utils import schema_context, get_public_schema_name
@@ -897,88 +901,64 @@ class SMSTopupInitiateView(APIView):
             amount_paid=total_amount,
             payment_method='mpesa_stk',
             status='pending',
-            schema_name=current_schema,  # ← Uses the reliable schema from request.tenant
+            schema_name=current_schema,
         )
 
         # ─────────────────────────────────────────────────────────────────────
-        # FIX: Use Master Tuma Token (platform's account, not tenant's)
-        # This ensures SMS top-up payments go to the platform's bank/paybill
-        # instead of the tenant's individual account.
+        # 🚨 NEW: Use Netily Paybill (replaces Tuma)
+        # SMS top-up payments go directly into Netily's own paybill
         # ─────────────────────────────────────────────────────────────────────
         try:
             from django.conf import settings as _settings
-            from apps.billing.services.tuma_service import TumaClient
+            from apps.billing.services.netily_paybill_service import stk_push_own_paybill, NetilyPaybillError
+            from apps.core.models import TumaCallbackMap
+            from django_tenants.utils import schema_context, get_public_schema_name
 
-            # Instantiate the Tuma client
-            client = TumaClient()
-            
-            # --- USE MASTER TOKEN (platform's own Tuma account) ---
-            try:
-                token = client.get_master_token()
-            except Exception as e:
-                logger.error(f"Failed to get master token for SMS topup: {e}")
-                topup.status = 'failed'
-                topup.notes = 'Platform payment gateway error'
-                topup.save()
-                return Response(
-                    {'error': 'Platform payment gateway not configured correctly'},
-                    status=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                )
-
-            # FIX 1: Use dedicated SMS topup callback URL
-            # Route SMS-topup callbacks to the dedicated handler instead of the generic
-            # TumaWebhookView, which can fail silently because it looks for a Payment row
-            # that doesn't exist for SMS topups.
+            # Build callback URL for SMS topup
             base_url = getattr(_settings, 'BASE_URL', '').rstrip('/')
-            if base_url:
-                callback_url = f"{base_url}/api/v1/messaging/topup/callback/"
-            else:
-                callback_url = getattr(_settings, 'TUMA_CALLBACK_URL', '')
-            desc = f"SMS-UNITS-{topup.id}"
+            callback_url = f"{base_url}/api/v1/messaging/topup/callback/"
 
-            res = client.stk_push(
-                token=token,  # This now uses the master token
-                amount=float(total_amount),
-                phone=phone,
+            result = stk_push_own_paybill(
+                amount=total_amount,
+                phone_number=phone,
+                account_reference=f"SMS-{topup.id}",
+                transaction_desc=f"SMS-UNITS-{topup.id}",
                 callback_url=callback_url,
-                description=desc,
             )
 
-            if res.get('success'):
-                d = res.get('data', {})
-                topup.checkout_request_id = d.get('checkout_request_id', '')
-                topup.payment_reference = d.get('merchant_request_id', '')
-                topup.save()
-                
-                # Register for fast callback lookup
-                try:
-                    from apps.core.models import TumaCallbackMap
-                    from django_tenants.utils import schema_context, get_public_schema_name
-                    with schema_context(get_public_schema_name()):
-                        TumaCallbackMap.objects.update_or_create(
-                            checkout_request_id=topup.checkout_request_id,
-                            defaults={
-                                'merchant_request_id': topup.payment_reference,
-                                'schema_name': current_schema,  # ← Ensure accurate schema is saved here
-                                'payment_reference': f'SMS-TOPUP-{topup.id}',
-                            }
-                        )
-                except Exception as e:
-                    logger.warning(f"TumaCallbackMap registration failed for SMS topup: {e}")
-                
-                return Response({
-                    'topup_id': topup.id,
-                    'units': units,
-                    'amount': str(total_amount),
-                    'price_per_unit': str(price_per_unit),
-                    'checkout_request_id': topup.checkout_request_id,
-                    'message': 'STK push sent. Enter your M-Pesa PIN to complete.',
-                }, status=status.HTTP_202_ACCEPTED)
-            else:
-                topup.status = 'failed'
-                topup.notes = res.get('message', 'STK failed')
-                topup.save()
-                return Response({'error': topup.notes}, status=status.HTTP_400_BAD_REQUEST)
+            topup.checkout_request_id = result['checkout_request_id']
+            topup.payment_reference = result['merchant_request_id']
+            topup.save()
+
+            # Register for fast callback lookup
+            try:
+                with schema_context(get_public_schema_name()):
+                    TumaCallbackMap.objects.update_or_create(
+                        checkout_request_id=topup.checkout_request_id,
+                        defaults={
+                            'merchant_request_id': topup.payment_reference,
+                            'schema_name': current_schema,
+                            'payment_reference': f'SMS-TOPUP-{topup.id}',
+                        }
+                    )
+            except Exception as e:
+                logger.warning(f"TumaCallbackMap registration failed for SMS topup: {e}")
+
+            return Response({
+                'topup_id': topup.id,
+                'units': units,
+                'amount': str(total_amount),
+                'price_per_unit': str(price_per_unit),
+                'checkout_request_id': topup.checkout_request_id,
+                'message': result.get('customer_message') or 'STK push sent. Enter your M-Pesa PIN to complete.',
+            }, status=status.HTTP_202_ACCEPTED)
+
+        except NetilyPaybillError as e:
+            logger.error(f"SMS topup STK push failed: {e}")
+            topup.status = 'failed'
+            topup.notes = str(e)
+            topup.save()
+            return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
 
         except Exception as e:
             logger.error(f"SMS topup STK push failed: {e}")
@@ -988,31 +968,47 @@ class SMSTopupInitiateView(APIView):
             return Response({'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# 🚨 UPDATED: SMSTopupCallbackView - Now parses raw Daraja callback
+# ─────────────────────────────────────────────────────────────────────────────
+
 class SMSTopupCallbackView(APIView):
     """
     POST /api/v1/messaging/topup/callback/
-    Called by Tuma when the SMS top-up payment completes.
+    Called by Safaricom when the SMS top-up payment completes.
     PUBLIC — no auth.
+    
+    Now parses the raw Daraja callback format (Body.stkCallback) instead of
+    Tuma's flattened format.
     """
     authentication_classes = []
     permission_classes = []
 
     def post(self, request):
-        data = request.data
-        checkout_id = data.get('checkout_request_id', '')
-        result_code = str(data.get('result_code', ''))
+        # ── Parse raw Daraja callback format ──
+        body = request.data.get('Body', {}).get('stkCallback', {})
+        checkout_id = body.get('CheckoutRequestID', '')
+        result_code = str(body.get('ResultCode', ''))
+        result_desc = body.get('ResultDesc', '')
 
-        # FIX 2: Add logging for missing checkout_id
+        # Extract metadata items
+        items = {
+            item.get('Name'): item.get('Value')
+            for item in body.get('CallbackMetadata', {}).get('Item', [])
+        }
+        mpesa_receipt = items.get('MpesaReceiptNumber', '')
+
         if not checkout_id:
-            logger.warning("SMSTopupCallbackView: missing checkout_request_id in payload")
-            return Response({'ok': True})
+            logger.warning("SMSTopupCallbackView: missing CheckoutRequestID in payload")
+            # Safaricom expects this response format
+            return Response({'ResultCode': 0, 'ResultDesc': 'Accepted'})
 
         logger.info(
             f"SMSTopupCallbackView received: checkout_id={checkout_id}, "
-            f"result_code={result_code}"
+            f"result_code={result_code}, receipt={mpesa_receipt}"
         )
 
-        # FIX 6: Resolve tenant schema from the public callback map
+        # ── Resolve tenant schema from the public callback map ──
         target_schema = None
         try:
             from apps.core.models import TumaCallbackMap
@@ -1025,7 +1021,6 @@ class SMSTopupCallbackView(APIView):
                 if mapping:
                     target_schema = mapping.schema_name
         except Exception as e:
-            # FIX 2: Use error level logging with full traceback for TumaCallbackMap failures
             logger.error(
                 f"SMSTopup callback: TumaCallbackMap lookup failed for "
                 f"checkout_id={checkout_id}: {e}",
@@ -1052,14 +1047,11 @@ class SMSTopupCallbackView(APIView):
             except Exception as e:
                 logger.error(f"SMSTopup schema scan failed: {e}")
 
-        # ============================================================
-        # FIX: Validate target_schema is not public before switching
-        # ============================================================
         if not target_schema or target_schema in ('public', ''):
             logger.warning(f"SMSTopup callback: target_schema is '{target_schema}', rejecting safely")
-            return Response({'ok': True, 'warning': 'invalid_target_schema'})
+            return Response({'ResultCode': 0, 'ResultDesc': 'Accepted'})
 
-        # Process the topup in the correct tenant schema
+        # ── Process the topup in the correct tenant schema ──
         from django_tenants.utils import schema_context
         from django.db.utils import ProgrammingError
         
@@ -1068,13 +1060,14 @@ class SMSTopupCallbackView(APIView):
                 topup = SMSUnitTopup.objects.filter(checkout_request_id=checkout_id).first()
             except ProgrammingError:
                 logger.error(f"messaging_smsunittopup table missing in schema={target_schema}")
-                return Response({'ok': True, 'warning': 'schema_not_migrated'})
+                return Response({'ResultCode': 0, 'ResultDesc': 'Accepted'})
 
             if not topup or topup.status == 'completed':
-                return Response({'ok': True})  # idempotent
+                return Response({'ResultCode': 0, 'ResultDesc': 'Accepted'})
 
             if result_code == '0':
                 topup.status = 'completed'
+                topup.notes = f"Receipt: {mpesa_receipt}"
                 topup.save()
 
                 # Credit wallet in the correct tenant schema
@@ -1098,20 +1091,21 @@ class SMSTopupCallbackView(APIView):
                     units=Decimal(str(topup.units_purchased)),
                     unit_price=wallet.sell_price_per_unit,
                     amount=topup.amount_paid,
-                    reference=topup.payment_reference,
+                    reference=mpesa_receipt or topup.payment_reference,
                     notes=f'Top-up #{topup.id} ({topup.units_purchased} units)',
                 )
                 logger.info(f"Credited {topup.units_purchased} SMS units to {target_schema}")
             else:
                 topup.status = 'failed'
-                topup.notes = data.get('result_desc', 'Payment failed')
+                topup.notes = result_desc or 'Payment failed'
                 topup.save()
 
-        return Response({'ok': True})
+        # Safaricom expects this exact response format
+        return Response({'ResultCode': 0, 'ResultDesc': 'Accepted'})
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# FIX 4: Customer Search Endpoint
+# Customer Search Endpoint
 # ─────────────────────────────────────────────────────────────────────────────
 
 class CustomerSearchView(APIView):

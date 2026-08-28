@@ -50,10 +50,11 @@ def _password(timestamp):
     return base64.b64encode(raw.encode()).decode()
 
 
-def stk_push(*, amount, phone_number, party_b, account_reference, transaction_desc, transaction_type):
+def stk_push(*, amount, phone_number, party_b, account_reference, transaction_desc, transaction_type, callback_url=None):
     """
     party_b: destination shortcode — a bank's paybill, tenant's till, or tenant's paybill.
     transaction_type: 'CustomerPayBillOnline' or 'CustomerBuyGoodsOnline'
+    callback_url: override default Netily callback URL (optional)
     """
     token = _get_access_token()
     timestamp = _timestamp()
@@ -71,7 +72,7 @@ def stk_push(*, amount, phone_number, party_b, account_reference, transaction_de
         "PartyA": phone_number,
         "PartyB": party_b,
         "PhoneNumber": phone_number,
-        "CallBackURL": settings.NETILY_PAYBILL_CALLBACK_URL,
+        "CallBackURL": callback_url or settings.NETILY_PAYBILL_CALLBACK_URL,
         "AccountReference": account_ref,
         "TransactionDesc": (transaction_desc or "Payment")[:13],
     }
@@ -97,6 +98,23 @@ def stk_push(*, amount, phone_number, party_b, account_reference, transaction_de
         "checkout_request_id": data.get("CheckoutRequestID", ""),
         "customer_message": data.get("CustomerMessage", ""),
     }
+
+
+def stk_push_own_paybill(*, amount, phone_number, account_reference, transaction_desc, callback_url=None):
+    """
+    STK push collected directly into Netily's OWN paybill — no tenant/bank
+    party_b redirection. Use for platform-internal charges (SMS top-ups,
+    subscription fees, etc).
+    """
+    return stk_push(
+        amount=amount,
+        phone_number=phone_number,
+        party_b=settings.NETILY_PAYBILL_SHORTCODE,
+        account_reference=account_reference,
+        transaction_desc=transaction_desc,
+        transaction_type="CustomerPayBillOnline",
+        callback_url=callback_url,
+    )
 
 
 def _normalize_bank_name(text: str) -> str:
