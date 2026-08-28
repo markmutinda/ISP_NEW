@@ -26,6 +26,17 @@ class TumaWebhookView(APIView):
     authentication_classes = []
     permission_classes = []
 
+    def _tenant_label(self, schema_name):
+        """Get tenant company name for Telegram alerts."""
+        try:
+            with schema_context(get_public_schema_name()):
+                t = Tenant.objects.filter(schema_name=schema_name).select_related('company').first()
+                if t and t.company:
+                    return t.company.name
+                return schema_name
+        except Exception:
+            return schema_name
+
     def _find_payment_and_schema(self, merchant_id, checkout_id):
         """
         Locate payment and the tenant schema where it lives.
@@ -184,6 +195,21 @@ class TumaWebhookView(APIView):
                     payment.save()
                     
                     logger.info(f"Payment {payment.payment_number} marked as COMPLETED")
+                    
+                    # ── TELEGRAM SUCCESS ALERT ──
+                    try:
+                        from apps.notifications.tasks import send_telegram_payment_alert_task
+                        from apps.core.telegram_notify import build_payment_success_message
+                        send_telegram_payment_alert_task.apply_async(args=[
+                            build_payment_success_message(
+                                receipt=payment.mpesa_receipt or payment.transaction_id or "N/A",
+                                amount=payment.amount,
+                                phone=payment.payer_phone or payment.mpesa_phone or "",
+                                tenant_label=self._tenant_label(payment_schema),
+                            )
+                        ], retry=False)
+                    except Exception as e:
+                        logger.warning(f"Telegram success alert enqueue failed: {e}")
                     
                     # ============================================================
                     # HOTSPOT SESSION ACTIVATION - SERVER-SIDE
@@ -359,6 +385,21 @@ class TumaWebhookView(APIView):
                     payment.save()
                     
                     logger.warning(f"Payment {payment.payment_number} marked as FAILED: {payment.failure_reason}")
+                    
+                    # ── TELEGRAM FAILURE ALERT ──
+                    try:
+                        from apps.notifications.tasks import send_telegram_payment_alert_task
+                        from apps.core.telegram_notify import build_payment_failure_message
+                        send_telegram_payment_alert_task.apply_async(args=[
+                            build_payment_failure_message(
+                                phone=payment.payer_phone or payment.mpesa_phone or "",
+                                amount=payment.amount,
+                                tenant_label=self._tenant_label(payment_schema),
+                                reason=payment.failure_reason or "Transaction failed",
+                            )
+                        ], retry=False)
+                    except Exception as e:
+                        logger.warning(f"Telegram failure alert enqueue failed: {e}")
                     
                     # If linked hotspot session exists, mark as failed
                     hotspot_session = getattr(payment, 'hotspot_session', None)

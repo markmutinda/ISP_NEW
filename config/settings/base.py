@@ -573,3 +573,14 @@ WG_PEERS_DIR         = os.environ.get('WG_PEERS_DIR', '/etc/wireguard/peers')
 TELEGRAM_BOT_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN', '')
 _tg_admins = os.environ.get('TELEGRAM_ADMIN_CHAT_IDS', '')
 TELEGRAM_ADMIN_CHAT_IDS = [x.strip() for x in _tg_admins.split(',') if x.strip()]
+
+# ────────────────────────────────────────────────────────────────
+#  TELEGRAM — PAYMENT NOTIFICATIONS (separate bot from lead alerts)
+# ────────────────────────────────────────────────────────────────
+TELEGRAM_PAYMENTS_BOT_TOKEN = os.environ.get('TELEGRAM_PAYMENTS_BOT_TOKEN', '')
+# Reuses the same admin chat IDs as leads unless overridden
+_tg_payment_admins = os.environ.get('TELEGRAM_PAYMENTS_ADMIN_CHAT_IDS', '')
+TELEGRAM_PAYMENTS_ADMIN_CHAT_IDS = (
+    [x.strip() for x in _tg_payment_admins.split(',') if x.strip()]
+    or TELEGRAM_ADMIN_CHAT_IDS
+)

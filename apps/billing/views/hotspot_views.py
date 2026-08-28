@@ -975,6 +975,23 @@ class HotspotPurchaseView(APIView):
                         payment.failure_reason = str(e)
                         payment.save(update_fields=['status', 'tuma_status', 'failure_reason'])
                         session.mark_failed(payment.failure_reason)
+                        
+                        # ── TELEGRAM FAILURE ALERT ──
+                        try:
+                            from apps.notifications.tasks import send_telegram_payment_alert_task
+                            from apps.core.telegram_notify import build_payment_failure_message
+                            tenant_label = tenant.company.name if hasattr(tenant, 'company') and tenant.company else tenant.subdomain
+                            send_telegram_payment_alert_task.apply_async(args=[
+                                build_payment_failure_message(
+                                    phone=phone_canonical,
+                                    amount=plan.price,
+                                    tenant_label=tenant_label,
+                                    reason=str(e),
+                                )
+                            ], retry=False)
+                        except Exception as alert_err:
+                            logger.warning(f"Telegram failure alert enqueue failed: {alert_err}")
+                        
                         return Response({'error': payment.failure_reason}, status=status.HTTP_400_BAD_REQUEST)
 
                     payment.tuma_merchant_request_id = result['merchant_request_id']

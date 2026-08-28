@@ -286,6 +286,29 @@ class PaymentView(APIView):
                 payment.tuma_status = 'failed'
                 payment.failure_reason = str(e)
                 payment.save(update_fields=['status', 'tuma_status', 'failure_reason'])
+                
+                # ── TELEGRAM FAILURE ALERT ──
+                try:
+                    from apps.notifications.tasks import send_telegram_payment_alert_task
+                    from apps.core.telegram_notify import build_payment_failure_message
+                    from apps.core.models import Tenant
+                    from django_tenants.utils import schema_context, get_public_schema_name
+                    
+                    with schema_context(get_public_schema_name()):
+                        tenant = Tenant.objects.filter(schema_name=schema).select_related('company').first()
+                        tenant_label = tenant.company.name if tenant and tenant.company else schema
+                    
+                    send_telegram_payment_alert_task.apply_async(args=[
+                        build_payment_failure_message(
+                            phone=normalized_phone,
+                            amount=actual_amount,
+                            tenant_label=tenant_label,
+                            reason=str(e),
+                        )
+                    ], retry=False)
+                except Exception as alert_err:
+                    logger.warning(f"Telegram failure alert enqueue failed: {alert_err}")
+                
                 return Response({'error': payment.failure_reason}, status=status.HTTP_400_BAD_REQUEST)
             except Exception as e:
                 logger.exception(f"Unexpected Netily Paybill error for customer {customer.customer_code}: {e}")

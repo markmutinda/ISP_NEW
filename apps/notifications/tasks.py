@@ -441,3 +441,25 @@ def send_telegram_lead_alert_by_id(self, lead_id: int):
             exc,
         )
         raise self.retry(exc=exc)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# TELEGRAM PAYMENT ALERT TASK
+# ─────────────────────────────────────────────────────────────────────────────
+
+@shared_task(name='apps.notifications.tasks.send_telegram_payment_alert_task')
+def send_telegram_payment_alert_task(message: str):
+    """
+    Send a payment alert via Telegram using the dedicated payments bot.
+    
+    This runs asynchronously so the payment flow doesn't wait for the Telegram API.
+    """
+    from apps.core.telegram_notify import send_telegram_payment_alert
+    
+    try:
+        send_telegram_payment_alert(message)
+        logger.info(f"Telegram payment alert task completed: {message[:50]}...")
+        return {"success": True, "message": message[:50] + "..."}
+    except Exception as e:
+        logger.error(f"Error sending Telegram payment alert: {str(e)}")
+        return {"success": False, "error": str(e)}
