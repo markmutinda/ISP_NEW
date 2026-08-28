@@ -16,6 +16,21 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+
+def _normalize_ke_phone_for_stk(value: str) -> str:
+    """Normalize local/international KE phone numbers to 2547XXXXXXXX / 2541XXXXXXXX."""
+    digits = ''.join(ch for ch in str(value or '') if ch.isdigit())
+    if digits.startswith('0') and len(digits) == 10:
+        digits = '254' + digits[1:]
+    elif digits.startswith('254') and len(digits) == 12:
+        pass
+    elif (digits.startswith('7') or digits.startswith('1')) and len(digits) == 9:
+        digits = '254' + digits
+    if len(digits) != 12 or not digits.startswith('254') or digits[3] not in ('1', '7'):
+        raise ValueError('Enter a valid Safaricom phone number, e.g. 0712345678 or 2547XXXXXXXX.')
+    return digits
+
+
 from .models import SMSMessage, SMSTemplate, SMSCampaign, SMSGatewayConfig
 from .serializers import (
     SMSMessageSerializer,
@@ -816,6 +831,12 @@ class SMSTopupInitiateView(APIView):
     def post(self, request):
         phone = request.data.get('phone_number', '').strip()
 
+        # ── NORMALIZE PHONE NUMBER BEFORE ANYTHING ELSE ──
+        try:
+            phone = _normalize_ke_phone_for_stk(phone)
+        except ValueError as e:
+            return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
         # Support both units-based and amount-based topup
         units = request.data.get('units')
         amount_kes = request.data.get('amount_kes')
@@ -854,12 +875,6 @@ class SMSTopupInitiateView(APIView):
             return Response(
                 {'error': 'Provide either units or amount_kes'},
                 status=status.HTTP_400_BAD_REQUEST
-            )
-
-        if not phone:
-            return Response(
-                {'error': 'phone_number is required'},
-                status=status.HTTP_400_BAD_REQUEST,
             )
 
         # ─────────────────────────────────────────────────────────────────────
@@ -920,7 +935,7 @@ class SMSTopupInitiateView(APIView):
 
             result = stk_push_own_paybill(
                 amount=total_amount,
-                phone_number=phone,
+                phone_number=phone,  # Now normalized!
                 account_reference=f"SMS-{topup.id}",
                 transaction_desc=f"SMS-UNITS-{topup.id}",
                 callback_url=callback_url,
