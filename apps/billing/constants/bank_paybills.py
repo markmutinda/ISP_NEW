@@ -26,7 +26,7 @@ BANK_PAYBILL_MAP = {
     "Bank of Africa": "972900",
     # ── New additions ──
     "Ecobank Xpress": "700205",
-    "LOOP Business": "714777",
+    "LOOP Business": "714888",
     "Fortune Sacco": "852648",
     "K Unity Sacco": "4082977",
     "Tower Sacco Society": "506900",
