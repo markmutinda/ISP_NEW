@@ -13,6 +13,59 @@ from apps.core.models import Tenant, TumaCallbackMap
 from apps.billing.models.payment_models import Payment, StkCancellationTracker
 
 
+# ── Safaricom/Daraja result code mapping ──
+DARAJA_RESULT_CODES = {
+    "0": "Success",
+    "1": "Insufficient balance in M-Pesa account",
+    "1032": "Transaction cancelled by user",
+    "1037": "Timeout - no response from user",
+    "2001": "Invalid M-Pesa PIN entered",
+    "1025": "Duplicated MSISDN. MSISDN has an existing USSD Session",
+    "1019": "Error occurred while sending push request",
+    "1001": "Internal system error",
+    "1002": "Invalid request parameters",
+    "1003": "Service unavailable",
+    "1004": "Duplicate transaction",
+    "1005": "Transaction not found",
+    "1006": "Invalid shortcode",
+    "1007": "Invalid phone number",
+    "1008": "Invalid amount",
+    "1009": "Invalid account reference",
+    "1010": "Invalid transaction description",
+    "1011": "Invalid callback URL",
+    "1012": "Invalid security credential",
+    "1013": "Invalid access token",
+    "1014": "Invalid consumer key/secret",
+    "1015": "Invalid IP address",
+    "1016": "Invalid timestamp",
+    "1017": "Invalid signature",
+    "1018": "Invalid encryption",
+    "1020": "Invalid transaction type",
+    "1021": "Invalid party B",
+    "1022": "Invalid party A",
+    "1023": "Invalid phone number format",
+    "1024": "Invalid amount format",
+    "1026": "MSISDN is not registered on M-Pesa",
+    "1027": "MSISDN has insufficient balance",
+    "1028": "MSISDN is not active",
+    "1029": "MSISDN is blocked",
+    "1030": "MSISDN is not allowed",
+    "1031": "MSISDN not found",
+    "1033": "Transaction already completed",
+    "1034": "Transaction already failed",
+    "1035": "Transaction already cancelled",
+    "1036": "Transaction expired",
+    "1038": "Network error",
+    "1039": "System error",
+    "1040": "Invalid security answer",
+    "1041": "Invalid security question",
+    "1042": "Invalid security challenge",
+    "1043": "Invalid security response",
+    "1044": "Invalid security token",
+    "1045": "Invalid security signature",
+}
+
+
 class TumaWebhookView(APIView):
     """
     Webhook endpoint for Tuma payment gateway callbacks.
@@ -25,6 +78,11 @@ class TumaWebhookView(APIView):
     """
     authentication_classes = []
     permission_classes = []
+
+    def _humanize_result_code(self, result_code):
+        """Convert Safaricom result code to human-readable message."""
+        code = str(result_code)
+        return DARAJA_RESULT_CODES.get(code, f"Failed due to an unresolved reason type. (Error code: {code})")
 
     def _tenant_label(self, schema_name):
         """Get tenant company name for Telegram alerts."""
@@ -380,8 +438,15 @@ class TumaWebhookView(APIView):
                     # ================================================================
                     
                 else:
+                    # ── Get human-readable failure reason ──
+                    failure_reason = (
+                        data.get("failure_reason") 
+                        or data.get("result_desc") 
+                        or self._humanize_result_code(result_code)
+                    )
+                    
                     payment.status = "FAILED"
-                    payment.failure_reason = data.get("failure_reason") or data.get("result_desc") or "Transaction failed"
+                    payment.failure_reason = failure_reason
                     payment.save()
                     
                     logger.warning(f"Payment {payment.payment_number} marked as FAILED: {payment.failure_reason}")
