@@ -7,6 +7,7 @@ from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
 from django.shortcuts import get_object_or_404
+from django.db import connection
 import json
 import time
 import logging
@@ -16,12 +17,19 @@ from apps.billing.models import Invoice, Payment
 from apps.billing.models.payment_models import InvoiceItemPayment
 from apps.billing.serializers import InvoiceSerializer, PaymentSerializer
 
+# 🚨 NEW: Netily Paybill service imports (replaces Tuma)
+from apps.billing.services.netily_paybill_service import (
+    resolve_destination, stk_push, NetilyPaybillError,
+)
+from apps.core.models import TumaCallbackMap
+from django_tenants.utils import schema_context, get_public_schema_name
+
 logger = logging.getLogger(__name__)
 
 
 class PaymentView(APIView):
     """
-    Customer payment operations - dynamically routes to Daraja or Tuma based on tenant config.
+    Customer payment operations - dynamically routes to Daraja or Netily Paybill.
     
     POST /api/v1/self-service/payments/initiate/
     {
@@ -34,7 +42,7 @@ class PaymentView(APIView):
     
     def _normalize_msisdn(self, value):
         """
-        Normalize to Tuma/Safaricom's required 2547XXXXXXXX format.
+        Normalize to Safaricom's required 2547XXXXXXXX format.
         
         Handles various input formats:
         - 0712345678 -> 254712345678
@@ -62,6 +70,16 @@ class PaymentView(APIView):
         # If it's already in correct format, leave as is
         
         return phone
+    
+    def _get_active_payment_method(self, schema_name):
+        """
+        Get the active payment method for the tenant.
+        Excludes hotspot-internal methods.
+        """
+        return InvoiceItemPayment.objects.filter(
+            schema_name=schema_name,
+            is_active=True,
+        ).exclude(code__startswith='HOTSPOT_').first()
     
     def get(self, request):
         """Get customer invoices and payments"""
@@ -101,10 +119,10 @@ class PaymentView(APIView):
         })
     
     def post(self, request):
-        """Initiate M-Pesa STK Push payment dynamically via Daraja or Tuma"""
-        from django.db import connection
+        """Initiate M-Pesa STK Push payment dynamically via Daraja or Netily Paybill"""
         user = request.user
         customer = user.customer_profile
+        schema = connection.schema_name
         
         amount = request.data.get('amount')
         phone_number = request.data.get('phone_number')
@@ -128,7 +146,12 @@ class PaymentView(APIView):
         if not phone_number:
             return Response({'error': 'Phone number is required'}, status=status.HTTP_400_BAD_REQUEST)
             
-        # 3. Get Invoice if specified
+        # 3. Normalize phone
+        normalized_phone = self._normalize_msisdn(phone_number)
+        if len(normalized_phone) != 12 or not normalized_phone.startswith('254'):
+            return Response({'error': f'Invalid phone number format: {phone_number}'}, status=status.HTTP_400_BAD_REQUEST)
+        
+        # 4. Get Invoice if specified
         invoice = None
         if invoice_id:
             try:
@@ -136,18 +159,15 @@ class PaymentView(APIView):
             except Invoice.DoesNotExist:
                 return Response({'error': 'Invoice not found'}, status=status.HTTP_404_NOT_FOUND)
 
-        # 4. Get Active Payment Method for this Tenant (No PayHero!)
-        payment_method = InvoiceItemPayment.objects.filter(
-            schema_name=connection.schema_name, 
-            is_active=True
-        ).first()
+        # 5. Get Active Payment Method (exclude hotspot-internal methods)
+        payment_method = self._get_active_payment_method(schema)
 
         if not payment_method:
             return Response({
-                'error': 'No active payment method configured. The ISP must set up M-Pesa or Tuma in the admin dashboard.'
+                'error': 'No active payment method configured. The ISP must set up a payment method in the admin dashboard.'
             }, status=status.HTTP_400_BAD_REQUEST)
 
-        # 5. Generate Reference & Create Payment
+        # 6. Generate Reference & Create Payment
         reference = f"PAY-{customer.customer_code}-{int(time.time())}"
         full_name = getattr(customer, 'full_name', None) or f"{user.first_name} {user.last_name}".strip()
         description = f"Account Recharge - {full_name}"
@@ -181,19 +201,21 @@ class PaymentView(APIView):
         
         # ============================================================
         # FIX 2: Create Payment with enhanced notes to identify it as 
-        # a customer portal payment (per Claude's instruction)
+        # a customer portal payment
         # ============================================================
         payment = Payment.objects.create(
-            schema_name=connection.schema_name,
+            schema_name=schema,
             customer=customer,
             invoice=invoice,
             amount=actual_amount,  # Use the actual amount (plan amount if matched)
             payment_method=payment_method,
-            payer_phone=phone_number,
-            mpesa_phone=phone_number,
+            payer_phone=normalized_phone,
+            mpesa_phone=normalized_phone,
             payment_reference=reference,
-            status='PENDING',
-            notes=f"Customer portal STK payment. Plan: {invoice.invoice_number if invoice else 'account recharge'}. Schema: {connection.schema_name}",
+            status='PROCESSING',
+            notes=f"Customer portal STK payment. Plan: {invoice.invoice_number if invoice else 'account recharge'}. Schema: {schema}",
+            service_type='PPPOE',  # Self-service payments are for PPPoE services
+            tuma_status='pending',
         )
 
         # ==========================================
@@ -205,7 +227,7 @@ class PaymentView(APIView):
                 mpesa_service = MpesaSTKPush(config=payment_method.mpesa_configuration)
                 
                 result = mpesa_service.initiate_stk_push(
-                    phone_number=phone_number,
+                    phone_number=normalized_phone,
                     amount=actual_amount,  # Use the actual amount
                     account_reference=reference,
                     transaction_desc=description,
@@ -213,6 +235,9 @@ class PaymentView(APIView):
                 )
                 
                 if result['success']:
+                    payment.tuma_status = 'pending'
+                    payment.save(update_fields=['tuma_status'])
+                    
                     return Response({
                         'status': 'pending',
                         'payment_id': payment.id,
@@ -221,100 +246,85 @@ class PaymentView(APIView):
                     })
                 else:
                     payment.status = 'FAILED'
+                    payment.tuma_status = 'failed'
                     payment.failure_reason = result.get('message', 'Failed to initiate M-Pesa')
-                    payment.save()
+                    payment.save(update_fields=['status', 'tuma_status', 'failure_reason'])
                     return Response({'error': payment.failure_reason}, status=status.HTTP_400_BAD_REQUEST)
             except Exception as e:
                 logger.error(f"Daraja initiation error: {e}")
                 payment.status = 'FAILED'
+                payment.tuma_status = 'failed'
                 payment.failure_reason = str(e)
-                payment.save()
+                payment.save(update_fields=['status', 'tuma_status', 'failure_reason'])
                 return Response({'error': 'Payment service unavailable. Please try again.'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
         # ==========================================
-        # ROUTE 2: TUMA GATEWAY (FIXED VERSION)
+        # ROUTE 2: NETILY PAYBILL (Bank / Till / Paybill — no tenant API keys)
         # ==========================================
-        elif payment_method.tuma_configuration and payment_method.tuma_configuration.is_active:
-            tuma_cfg = payment_method.tuma_configuration
-            
-            # ==========================================
-            # FIX: Validate Tuma configuration before proceeding
-            # ==========================================
-            if not tuma_cfg.tuma_business_email or not tuma_cfg.tuma_business_api_key:
-                payment.status = 'FAILED'
-                payment.failure_reason = "Tuma business not fully configured for this ISP."
-                payment.save()
-                return Response({'error': payment.failure_reason}, status=status.HTTP_400_BAD_REQUEST)
-            
-            # ==========================================
-            # FIX: Normalize phone number to 2547XXXXXXXX format
-            # ==========================================
-            normalized_phone = self._normalize_msisdn(phone_number)
-            
-            # Validate the normalized phone number
-            if len(normalized_phone) != 12 or not normalized_phone.startswith('254'):
-                payment.status = 'FAILED'
-                payment.failure_reason = f"Invalid phone number format: {phone_number}"
-                payment.save()
-                return Response({'error': payment.failure_reason}, status=status.HTTP_400_BAD_REQUEST)
-            
-            try:
-                from apps.billing.services.tuma_service import TumaClient, TumaError
-                client = TumaClient()
-                
-                # Authenticate as the Child Business
-                child_token = client.get_token(
-                    tuma_cfg.tuma_business_email, 
-                    tuma_cfg.tuma_business_api_key
-                )
-                
-                # Build the dynamic Webhook URL for this tenant
-                callback_url = getattr(settings, 'TUMA_CALLBACK_URL', None)
-                if not callback_url:
-                    sub_domain = connection.schema_name.replace('tenant_', '')
-                    callback_url = f"https://{sub_domain}.netily.co.ke/api/v1/billing/tuma/callback/"
-                
-                # Push to Tuma with normalized phone number
-                tuma_response = client.stk_push(
-                    token=child_token,
-                    amount=int(actual_amount),
-                    phone=normalized_phone,  # FIX: Use normalized phone number
-                    callback_url=callback_url,
-                    description=reference,
-                )
-                
-                checkout_id = tuma_response.get("data", {}).get("checkout_request_id", "")
-                payment.tuma_merchant_request_id = tuma_response.get("data", {}).get("merchant_request_id", "")
-                payment.tuma_checkout_request_id = checkout_id
-                payment.transaction_id = checkout_id
-                payment.status = 'PROCESSING'
-                payment.save()
-                
-                return Response({
-                    'status': 'pending',
-                    'payment_id': payment.id,
-                    'checkout_request_id': checkout_id,
-                    'message': 'Please check your phone and enter your PIN to complete payment'
-                })
-                
-            except TumaError as e:
-                logger.error(f"Tuma initiation error: {e}")
-                payment.status = 'FAILED'
-                payment.failure_reason = str(e)
-                payment.save()
-                return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
-            
-            except Exception as e:
-                logger.error(f"Unexpected Tuma error: {e}")
-                payment.status = 'FAILED'
-                payment.failure_reason = f"Unexpected error: {str(e)}"
-                payment.save()
-                return Response({'error': 'Payment service unavailable. Please try again.'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-                
         else:
+            destination = resolve_destination(payment_method)
+            if not destination:
+                payment.status = 'FAILED'
+                payment.failure_reason = "No valid settlement destination configured for this payment method."
+                payment.save(update_fields=['status', 'failure_reason'])
+                return Response({'error': payment.failure_reason}, status=status.HTTP_400_BAD_REQUEST)
+
+            party_b, account_reference, transaction_type, _desc = destination
+
+            try:
+                result = stk_push(
+                    amount=actual_amount,
+                    phone_number=normalized_phone,
+                    party_b=party_b,
+                    account_reference=account_reference or reference[:12],
+                    transaction_desc=description[:13],
+                    transaction_type=transaction_type,
+                )
+            except NetilyPaybillError as e:
+                logger.error(f"Netily Paybill STK error for customer {customer.customer_code}: {e}")
+                payment.status = 'FAILED'
+                payment.tuma_status = 'failed'
+                payment.failure_reason = str(e)
+                payment.save(update_fields=['status', 'tuma_status', 'failure_reason'])
+                return Response({'error': payment.failure_reason}, status=status.HTTP_400_BAD_REQUEST)
+            except Exception as e:
+                logger.exception(f"Unexpected Netily Paybill error for customer {customer.customer_code}: {e}")
+                payment.status = 'FAILED'
+                payment.tuma_status = 'failed'
+                payment.failure_reason = f"Unexpected error: {str(e)}"
+                payment.save(update_fields=['status', 'tuma_status', 'failure_reason'])
+                return Response(
+                    {'error': 'Payment service unavailable. Please try again.'},
+                    status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                )
+
+            payment.tuma_merchant_request_id = result['merchant_request_id']
+            payment.tuma_checkout_request_id = result['checkout_request_id']
+            payment.transaction_id = result['checkout_request_id']
+            payment.tuma_status = 'pending'
+            payment.status = 'PROCESSING'
+            payment.save(update_fields=[
+                'tuma_merchant_request_id', 'tuma_checkout_request_id',
+                'transaction_id', 'tuma_status', 'status',
+            ])
+
+            # Store mapping so the shared webhook can route the callback back to this schema
+            with schema_context(get_public_schema_name()):
+                TumaCallbackMap.objects.update_or_create(
+                    merchant_request_id=payment.tuma_merchant_request_id,
+                    defaults={
+                        "checkout_request_id": payment.tuma_checkout_request_id,
+                        "schema_name": schema,
+                        "payment_reference": payment.payment_number,
+                    },
+                )
+
             return Response({
-                'error': 'Payment method configuration is incomplete.'
-            }, status=status.HTTP_400_BAD_REQUEST)
+                'status': 'pending',
+                'payment_id': payment.id,
+                'checkout_request_id': payment.tuma_checkout_request_id,
+                'message': result.get('customer_message') or 'Please check your phone and enter your PIN to complete payment',
+            })
     
     def _get_payment_methods(self):
         """Get available payment methods"""
