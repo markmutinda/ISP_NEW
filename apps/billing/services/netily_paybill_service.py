@@ -2,17 +2,46 @@
 import base64
 import time
 import logging
+import threading
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 from django.conf import settings
 from django.core.cache import cache
 
 logger = logging.getLogger(__name__)
 
 TOKEN_CACHE_KEY = "netily_paybill_access_token"
+TOKEN_LOCK_KEY = "netily_paybill_token_fetch_lock"
+CIRCUIT_BREAKER_KEY = "netily_paybill_circuit_open"
+CIRCUIT_BREAKER_TTL = 20  # seconds — stop hammering Safaricom for a short cooldown
 
 
 class NetilyPaybillError(Exception):
     pass
+
+
+# ── Shared session: reuses TCP/TLS connections instead of opening one per call ──
+_session = requests.Session()
+_adapter = HTTPAdapter(
+    pool_connections=20,
+    pool_maxsize=20,
+    max_retries=Retry(
+        total=2,
+        connect=2,
+        read=1,
+        backoff_factor=0.5,          # 0.5s, 1s
+        status_forcelist=[502, 503, 504],
+        allowed_methods=frozenset(["GET", "POST"]),
+        raise_on_status=False,
+    ),
+)
+_session.mount("https://", _adapter)
+_session.mount("http://", _adapter)
+
+# Short connect timeout — fail fast instead of blocking a worker for 25s.
+# (connect_timeout, read_timeout)
+_REQUEST_TIMEOUT = (5, 15)
 
 
 def _api_base():
@@ -23,22 +52,58 @@ def _api_base():
     )
 
 
+def _circuit_open() -> bool:
+    return bool(cache.get(CIRCUIT_BREAKER_KEY))
+
+
+def _trip_circuit():
+    cache.set(CIRCUIT_BREAKER_KEY, True, timeout=CIRCUIT_BREAKER_TTL)
+
+
 def _get_access_token():
     cached = cache.get(TOKEN_CACHE_KEY)
     if cached:
         return cached
-    auth = base64.b64encode(
-        f"{settings.NETILY_PAYBILL_CONSUMER_KEY}:{settings.NETILY_PAYBILL_CONSUMER_SECRET}".encode()
-    ).decode()
-    resp = requests.get(
-        f"{_api_base()}/oauth/v1/generate?grant_type=client_credentials",
-        headers={"Authorization": f"Basic {auth}"},
-        timeout=20,
-    )
-    resp.raise_for_status()
-    token = resp.json()["access_token"]
-    cache.set(TOKEN_CACHE_KEY, token, timeout=3300)  # Safaricom tokens last 3600s
-    return token
+
+    if _circuit_open():
+        raise NetilyPaybillError("Payment gateway is temporarily unavailable. Please retry shortly.")
+
+    # Prevent thundering herd: only one process fetches a fresh token at a time.
+    got_lock = cache.add(TOKEN_LOCK_KEY, "1", timeout=15)
+    if not got_lock:
+        # Someone else is fetching — wait briefly for them to populate the cache.
+        for _ in range(20):
+            time.sleep(0.25)
+            cached = cache.get(TOKEN_CACHE_KEY)
+            if cached:
+                return cached
+        raise NetilyPaybillError("Payment gateway is busy. Please retry.")
+
+    try:
+        cached = cache.get(TOKEN_CACHE_KEY)
+        if cached:
+            return cached
+
+        auth = base64.b64encode(
+            f"{settings.NETILY_PAYBILL_CONSUMER_KEY}:{settings.NETILY_PAYBILL_CONSUMER_SECRET}".encode()
+        ).decode()
+        try:
+            resp = _session.get(
+                f"{_api_base()}/oauth/v1/generate?grant_type=client_credentials",
+                headers={"Authorization": f"Basic {auth}"},
+                timeout=_REQUEST_TIMEOUT,
+            )
+            resp.raise_for_status()
+        except requests.exceptions.RequestException as exc:
+            _trip_circuit()
+            logger.error("Netily paybill token fetch failed: %s", exc)
+            raise NetilyPaybillError("Could not authenticate with payment gateway.") from exc
+
+        token = resp.json()["access_token"]
+        cache.set(TOKEN_CACHE_KEY, token, timeout=3300)
+        return token
+    finally:
+        cache.delete(TOKEN_LOCK_KEY)
 
 
 def _timestamp():
@@ -56,13 +121,13 @@ def stk_push(*, amount, phone_number, party_b, account_reference, transaction_de
     transaction_type: 'CustomerPayBillOnline' or 'CustomerBuyGoodsOnline'
     callback_url: override default Netily callback URL (optional)
     """
+    if _circuit_open():
+        raise NetilyPaybillError("Payment gateway is temporarily unavailable. Please retry shortly.")
+
     token = _get_access_token()
     timestamp = _timestamp()
-    
-    # ── FIX: Send FULL account reference (no truncation) ──
-    # Previously truncated to 12 chars which dropped digits from long account numbers
     account_ref = account_reference or ""
-    
+
     payload = {
         "BusinessShortCode": settings.NETILY_PAYBILL_SHORTCODE,
         "Password": _password(timestamp),
@@ -77,12 +142,24 @@ def stk_push(*, amount, phone_number, party_b, account_reference, transaction_de
         "TransactionDesc": (transaction_desc or "Payment")[:13],
     }
 
-    resp = requests.post(
-        f"{_api_base()}/mpesa/stkpush/v1/processrequest",
-        json=payload,
-        headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
-        timeout=25,
-    )
+    try:
+        resp = _session.post(
+            f"{_api_base()}/mpesa/stkpush/v1/processrequest",
+            json=payload,
+            headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+            timeout=_REQUEST_TIMEOUT,
+        )
+    except requests.exceptions.ConnectTimeout as exc:
+        _trip_circuit()
+        logger.warning("Netily paybill STK connect timeout: %s", exc)
+        raise NetilyPaybillError(
+            "Payment gateway is temporarily unavailable. Please retry in a few seconds."
+        ) from exc
+    except requests.exceptions.RequestException as exc:
+        _trip_circuit()
+        logger.error("Netily paybill STK request failed: %s", exc)
+        raise NetilyPaybillError("Payment gateway error. Please retry.") from exc
+
     try:
         data = resp.json()
     except ValueError:
