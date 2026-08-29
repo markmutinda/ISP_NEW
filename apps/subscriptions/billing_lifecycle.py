@@ -69,7 +69,6 @@ def sync_subscription_invoice_payment(payment, *, notify=True):
 
         unpaid = (
             Invoice.objects.filter(invoice_number__startswith="NET-BILL")
-            .exclude(status__iexact="PAID")
             .exclude(status__in=["VOIDED", "WRITTEN_OFF", "CANCELLED"])
             .order_by("created_at", "id")
         )

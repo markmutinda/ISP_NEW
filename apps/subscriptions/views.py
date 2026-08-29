@@ -814,7 +814,6 @@ class InitiateSubscriptionPaymentView(APIView):
                 from apps.billing.models import Invoice
                 invoice = (
                     Invoice.objects.filter(invoice_number__startswith='NET-BILL')
-                    .exclude(status__iexact='PAID')
                     .exclude(status__in=['VOIDED', 'WRITTEN_OFF', 'CANCELLED'])
                     .filter(balance__gt=0)
                     .order_by('created_at', 'id')
