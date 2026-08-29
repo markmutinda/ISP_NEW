@@ -546,6 +546,12 @@ NETILY_PAYBILL_CALLBACK_URL = os.getenv(
     'https://api.netily.co.ke/api/v1/webhooks/netily-paybill/callback/',
 )
 
+# 🚨 NEW: Netily subscription paybill callback (replaces Tuma subscription callback)
+NETILY_SUBSCRIPTION_PAYBILL_CALLBACK = os.getenv(
+    'NETILY_SUBSCRIPTION_PAYBILL_CALLBACK',
+    'https://api.netily.co.ke/api/v1/webhooks/netily-paybill/subscription-callback/',
+)
+
 # NETILY SYSTEM PAYMENT SIMULATOR
 # Disabled by default and isolated from subscription/payment ledgers.
 NETILY_SYSTEM_PAYMENT_SIMULATOR_ENABLED = os.getenv("NETILY_SYSTEM_PAYMENT_SIMULATOR_ENABLED", "False")

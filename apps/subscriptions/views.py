@@ -22,7 +22,7 @@ from rest_framework.permissions import IsAuthenticated, AllowAny
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from apps.billing.services.tuma_service import TumaClient, TumaError
+from apps.billing.services.netily_paybill_service import stk_push_own_paybill, NetilyPaybillError
 from requests.exceptions import RequestException
 from apps.core.models import Company
 
@@ -911,113 +911,53 @@ class InitiateSubscriptionPaymentView(APIView):
         )
     
     def _handle_stk_push(self, payment, phone_number, amount, plan):
-        """Initiate M-Pesa STK Push via Tuma parent/master account.
+        """Initiate M-Pesa STK Push via Netily's OWN paybill (replaces Tuma passthrough).
 
-        This runs OUTSIDE any DB transaction so that:
-        - External API failures do not taint the DB transaction
-        - payment.save() calls in the except handler always succeed
-
-        All payment.save() calls run inside schema_context('public') because
+        Runs outside any DB transaction — external API calls must never be
+        wrapped in transaction.atomic(). payment.save() below is safe because
         SubscriptionPayment lives in the public schema only.
         """
-        # ── Pre-flight: verify Tuma credentials are configured ───────
-        master_email = getattr(settings, 'TUMA_MASTER_EMAIL', '').strip()
-        master_key = getattr(settings, 'TUMA_MASTER_API_KEY', '').strip()
-        if not master_email or not master_key:
-            err_msg = "Payment gateway not configured. Contact support."
-            logger.error("STK push aborted: TUMA_MASTER_EMAIL or TUMA_MASTER_API_KEY not set in environment.")
-            with schema_context('public'):
-                payment.status = 'failed'
-                payment.failure_reason = 'Missing Tuma credentials'
-                payment.save()
-            return Response({
-                'status': 'error',
-                'message': err_msg,
-            }, status=status.HTTP_503_SERVICE_UNAVAILABLE)
-
         try:
-            client = TumaClient()
-            token = client.get_master_token()
+            reference = f"NETILY-{plan.code.upper()}-{payment.id.hex[:8].upper()}"[:20]
+            callback_url = getattr(settings, 'NETILY_SUBSCRIPTION_PAYBILL_CALLBACK', '') or settings.NETILY_PAYBILL_CALLBACK_URL
 
-            reference = f"NETILY-{plan.code.upper()}-{payment.id.hex[:8].upper()}"
-
-            callback_url = getattr(settings, 'TUMA_SUBSCRIPTION_CALLBACK', '')
             logger.info(
-                "Initiating Tuma STK Push: phone=%s, amount=%s, ref=%s, callback=%s",
-                phone_number, amount, reference, callback_url,
+                "Initiating Netily paybill STK push: phone=%s, amount=%s, ref=%s",
+                phone_number, amount, reference,
             )
 
-            if not callback_url or 'your-actual-domain' in callback_url or 'your-production-domain' in callback_url:
-                logger.error("TUMA_SUBSCRIPTION_CALLBACK is not configured or still has a placeholder URL: %s", callback_url)
-
-            response = client.stk_push(
-                token=token,
-                amount=int(amount),
-                phone=phone_number,
+            result = stk_push_own_paybill(
+                amount=amount,
+                phone_number=phone_number,
+                account_reference=reference,
+                transaction_desc=f"Netily {plan.name}"[:13],
                 callback_url=callback_url,
-                description=f"Netily {plan.name} Subscription",
             )
 
-            logger.info(f"Tuma STK Push response: {response}")
+            with schema_context('public'):
+                payment.payhero_checkout_id = result['checkout_request_id']
+                payment.payhero_reference = reference
+                payment.status = 'processing'
+                payment.save()
 
-            resp_data = response.get('data', response)
-            merchant_request_id = resp_data.get('merchant_request_id', '')
-            checkout_request_id = resp_data.get('checkout_request_id', '')
+            return Response({
+                'status': 'pending',
+                'payment_id': str(payment.id),
+                'checkout_request_id': result['checkout_request_id'],
+                'merchant_request_id': result['merchant_request_id'],
+                'message': result.get('customer_message') or 'STK Push sent. Check your phone and enter your M-Pesa PIN.',
+            })
 
-            if merchant_request_id or checkout_request_id:
-                with schema_context('public'):
-                    payment.payhero_checkout_id = checkout_request_id or merchant_request_id
-                    payment.payhero_reference = reference
-                    payment.status = 'processing'
-                    payment.save()
-
-                return Response({
-                    'status': 'pending',
-                    'payment_id': str(payment.id),
-                    'checkout_request_id': checkout_request_id,
-                    'merchant_request_id': merchant_request_id,
-                    'message': 'STK Push sent. Check your phone and enter your M-Pesa PIN.',
-                })
-            else:
-                error_msg = resp_data.get('message') or resp_data.get('error') or 'STK Push failed.'
-                logger.error(f"Tuma STK Push returned no IDs. Full response: {response}")
-                with schema_context('public'):
-                    payment.status = 'failed'
-                    payment.failure_reason = error_msg
-                    payment.save()
-
-                return Response({
-                    'status': 'error',
-                    'message': f'STK Push failed: {error_msg}',
-                }, status=status.HTTP_502_BAD_GATEWAY)
-
-        except TumaError as e:
-            logger.error(f"TumaError during STK push: {e}", exc_info=True)
-            failure = str(e)
+        except NetilyPaybillError as e:
+            logger.error(f"Netily paybill STK push failed for subscription payment {payment.id}: {e}")
             with schema_context('public'):
                 payment.status = 'failed'
-                payment.failure_reason = failure
+                payment.failure_reason = str(e)
                 payment.save()
-            return Response({
-                'status': 'error',
-                'message': f'Payment gateway error: {failure}',
-            }, status=status.HTTP_502_BAD_GATEWAY)
-
-        except RequestException as e:
-            # Network / HTTP errors from the requests library
-            logger.error(f"RequestException during STK push: {e}", exc_info=True)
-            failure = f"Network error contacting payment gateway: {e}"
-            with schema_context('public'):
-                payment.status = 'failed'
-                payment.failure_reason = failure
-                payment.save()
-            return Response({
-                'status': 'error',
-                'message': 'Failed to reach payment gateway. Please try again.',
-            }, status=status.HTTP_502_BAD_GATEWAY)
+            return Response({'status': 'error', 'message': str(e)}, status=status.HTTP_502_BAD_GATEWAY)
 
         except Exception as e:
-            logger.exception(f"Unexpected error during STK push: {e}")
+            logger.exception(f"Unexpected error during subscription STK push: {e}")
             with schema_context('public'):
                 payment.status = 'failed'
                 payment.failure_reason = str(e)
@@ -1142,20 +1082,12 @@ class SubscriptionPaymentViewSet(viewsets.ReadOnlyModelViewSet):
     @action(detail=True, methods=['get'])
     def status(self, request, pk=None):
         """
-        Poll payment status.
-        GET /api/v1/subscriptions/payments/{id}/status/
-        
-        FIXED: Now uses the unified lifecycle engine to prevent split-brain.
-        This ensures that whether the webhook processes first or the user polls,
-        the subscription is only extended ONCE with proper transaction locking.
-
-        All ORM calls run inside schema_context('public') because
-        subscription models are shared-schema only.
+        Poll payment status. Source of truth is the webhook — this endpoint
+        only reads DB state, it never calls out to a payment gateway.
         """
         with schema_context('public'):
             payment = self.get_object()
-            
-            # If already completed or failed, return current status
+
             if payment.status in ['completed', 'failed', 'cancelled']:
                 subscription_activated = self._subscription_is_current(payment.subscription)
                 return Response({
@@ -1171,97 +1103,7 @@ class SubscriptionPaymentViewSet(viewsets.ReadOnlyModelViewSet):
                     'subscription_activated': subscription_activated,
                     **self._billing_cycle_payload(payment),
                 })
-            
-            # If pending with Tuma, check status via Tuma query API
-            if payment.payhero_checkout_id:
-                try:
-                    client = TumaClient()
-                    token = client.get_master_token()
-                    status_response = client.query_payment_status(
-                        token=token,
-                        checkout_request_id=payment.payhero_checkout_id,
-                    )
 
-                    resp_data = status_response.get('data', status_response)
-                    result_code = str(resp_data.get('result_code', ''))
-                    is_success = result_code == '0'
-                    is_failed = result_code != '' and result_code != '0'
-
-                    if is_success:
-                        receipt = resp_data.get('mpesa_receipt_number', '')
-                        # ─── UNIFIED LIFECYCLE ENGINE ───
-                        with transaction.atomic():
-                            locked_payment = SubscriptionPayment.objects.select_for_update().get(id=payment.id)
-
-                            if locked_payment.status in ['pending', 'processing']:
-                                locked_payment.mark_completed(mpesa_receipt=receipt)
-                                payment = locked_payment
-
-                        from .billing_lifecycle import sync_subscription_invoice_payment, subscription_invoice_is_fully_paid
-
-                        invoice = sync_subscription_invoice_payment(payment, notify=True)
-                        invoice_fully_paid = subscription_invoice_is_fully_paid(invoice)
-
-                        if invoice_fully_paid:
-                            with transaction.atomic():
-                                locked_payment = SubscriptionPayment.objects.select_for_update().get(id=payment.id)
-                                locked_payment.apply_intended_plan()
-
-                                subscription = locked_payment.subscription
-                                if subscription.is_trial or subscription.status in ('trialing', 'expired', 'pending'):
-                                    subscription.convert_from_trial(
-                                        billing_period=subscription.billing_period,
-                                        defer_to_trial_end=locked_payment.defer_billing_to_trial_end,
-                                    )
-                                    logger.info(f"Trial converted to paid via Polling: {subscription.company.name} (deferred={locked_payment.defer_billing_to_trial_end})")
-                                else:
-                                    subscription.extend_subscription()
-                                    logger.info(f"Subscription extended via Polling: {subscription.company.name}")
-
-                                from .tasks import send_cycle_activated_email
-                                send_cycle_activated_email.delay(subscription.company_id)
-
-                                payment = locked_payment
-                        else:
-                            logger.warning(
-                                "Subscription payment %s completed but invoice %s has remaining balance %s; subscription not extended.",
-                                payment.id,
-                                getattr(invoice, 'invoice_number', None),
-                                getattr(invoice, 'balance', None),
-                            )
-
-                        return Response({
-                            'payment_id': str(payment.id),
-                            'status': 'completed',
-                            'message': (
-                                'Payment successful! Your subscription is now active.'
-                                if invoice_fully_paid
-                                else f"Payment received, but invoice balance remains KES {getattr(invoice, 'balance', '0.00')}. Please settle the remaining balance to reactivate."
-                            ),
-                            'mpesa_receipt': payment.mpesa_receipt,
-                            'completed_at': payment.completed_at,
-                            'subscription_activated': invoice_fully_paid,
-                            'invoice_balance_remaining': str(getattr(invoice, 'balance', '0.00') or '0.00'),
-                            **self._billing_cycle_payload(payment),
-                        })
-
-                    elif is_failed:
-                        reason = resp_data.get('result_desc', '') or 'Payment failed'
-                        payment.mark_failed(reason)
-                        return Response({
-                            'payment_id': str(payment.id),
-                            'status': 'failed',
-                            'message': reason,
-                            'mpesa_receipt': None,
-                            'completed_at': None,
-                        })
-
-                except TumaError as e:
-                    logger.error(f"Error checking Tuma payment status: {e}")
-                except Exception as e:
-                    logger.error(f"Error checking payment status: {e}")
-            
-            # Still pending
             return Response({
                 'payment_id': str(payment.id),
                 'status': 'pending',

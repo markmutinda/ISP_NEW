@@ -142,6 +142,80 @@ def subscription_invoice_is_fully_paid(invoice):
     return bool(invoice and money(getattr(invoice, "balance", 0)) <= 0 and str(getattr(invoice, "status", "")).upper() == "PAID")
 
 
+def complete_subscription_stk_payment(payment, mpesa_receipt=""):
+    """
+    Idempotently mark a subscription STK payment completed, sync the tenant
+    NET-BILL invoice, and advance the subscription lifecycle (trial
+    conversion or cycle extension). Safe to call from the webhook — it
+    locks the row so a duplicate Safaricom callback is a no-op.
+    """
+    from django.db import transaction
+    from .models import SubscriptionPayment
+
+    with schema_context(get_public_schema_name()):
+        with transaction.atomic():
+            locked = SubscriptionPayment.objects.select_for_update().get(id=payment.id)
+            if locked.status == 'completed':
+                return locked, None
+            locked.mark_completed(mpesa_receipt=mpesa_receipt)
+            payment = locked
+
+    invoice = sync_subscription_invoice_payment(payment, notify=True)
+    invoice_fully_paid = subscription_invoice_is_fully_paid(invoice)
+
+    if invoice_fully_paid:
+        with schema_context(get_public_schema_name()):
+            with transaction.atomic():
+                locked = SubscriptionPayment.objects.select_for_update().get(id=payment.id)
+                locked.apply_intended_plan()
+                subscription = locked.subscription
+                if subscription.is_trial or subscription.status in ('trialing', 'expired', 'pending'):
+                    subscription.convert_from_trial(
+                        billing_period=subscription.billing_period,
+                        defer_to_trial_end=locked.defer_billing_to_trial_end,
+                    )
+                else:
+                    subscription.extend_subscription()
+
+                from .tasks import send_cycle_activated_email
+                send_cycle_activated_email.delay(subscription.company_id)
+                payment = locked
+
+        notify_telegram_subscription_payment(payment, invoice)
+
+    return payment, invoice
+
+
+def notify_telegram_subscription_payment(payment, invoice=None):
+    """Send a highlighted Telegram alert when a tenant pays their Netily subscription."""
+    try:
+        from apps.notifications.tasks import send_telegram_payment_alert_task
+
+        subscription = payment.subscription
+        company_name = subscription.company.name
+        plan_name = subscription.plan.name if subscription.plan else "Netily Plan"
+        amount = money(payment.amount)
+        receipt = payment.mpesa_receipt or "N/A"
+        balance = money(getattr(invoice, 'balance', 0)) if invoice else Decimal("0.00")
+
+        message = (
+            "💰 <b>SUBSCRIPTION PAYMENT RECEIVED</b>\n\n"
+            f"🏢 Tenant: <b>{company_name}</b>\n"
+            f"📦 Plan: {plan_name}\n"
+            f"💵 Amount: <b>KES {amount:,.2f}</b>\n"
+            f"🧾 Receipt: {receipt}\n"
+            f"📞 Phone: {payment.phone_number or 'N/A'}\n"
+            + (
+                f"⚠️ Remaining balance: KES {balance:,.2f}\n"
+                if balance > 0
+                else "✅ Subscription invoice fully settled\n"
+            )
+        )
+        send_telegram_payment_alert_task.apply_async(args=[message], retry=False)
+    except Exception as exc:
+        logger.warning("Telegram subscription payment alert failed: %s", exc)
+
+
 def notify_subscription_payment_received(tenant, payment, invoice):
     """Send email + in-app receipt feedback to tenant admins after payment success."""
     subject = f"Payment received - {invoice.invoice_number}"
