@@ -69,7 +69,13 @@ class AccessPointViewSet(viewsets.ModelViewSet):
             if router:
                 get_or_refresh_router_ap_status(router)
 
-        qs = self.get_queryset().only('id', 'status', 'last_seen')
+        # ✅ FIXED: Use a fresh queryset without select_related
+        # The .only() and select_related() were conflicting
+        qs = AccessPoint.objects.filter(
+            is_active=True,
+            router_id=router_id if router_id else None
+        ).only('id', 'status', 'last_seen')
+        
         return Response({
             str(ap.id): {
                 'status': ap.status,
