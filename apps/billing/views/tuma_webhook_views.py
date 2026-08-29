@@ -11,6 +11,7 @@ from django_tenants.utils import schema_context, get_public_schema_name
 from apps.core.models import Tenant, TumaCallbackMap
 
 from apps.billing.models.payment_models import Payment, StkCancellationTracker
+from apps.billing.utils.payment_errors import humanize_payment_failure
 
 
 # ── Safaricom/Daraja result code mapping ──
@@ -439,17 +440,18 @@ class TumaWebhookView(APIView):
                     
                 else:
                     # ── Get human-readable failure reason ──
-                    failure_reason = (
+                    raw_reason = (
                         data.get("failure_reason") 
                         or data.get("result_desc") 
                         or self._humanize_result_code(result_code)
                     )
                     
                     payment.status = "FAILED"
-                    payment.failure_reason = failure_reason
+                    # Store the friendly version for users, raw version stays in logs above
+                    payment.failure_reason = humanize_payment_failure(raw_reason)
                     payment.save()
                     
-                    logger.warning(f"Payment {payment.payment_number} marked as FAILED: {payment.failure_reason}")
+                    logger.warning(f"Payment {payment.payment_number} marked as FAILED: {raw_reason}")
                     
                     # ── TELEGRAM FAILURE ALERT ──
                     try:

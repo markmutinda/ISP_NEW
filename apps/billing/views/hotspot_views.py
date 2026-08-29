@@ -42,6 +42,7 @@ from apps.billing.integrations.mpesa_integration import MpesaSTKPush
 from apps.billing.services.netily_paybill_service import (
     resolve_destination, stk_push, NetilyPaybillError,
 )
+from apps.billing.utils.payment_errors import humanize_payment_failure
 from apps.core.models import TumaCallbackMap
 from apps.network.models.router_models import Router
 from apps.subscriptions.models import CommissionLedger
@@ -946,7 +947,9 @@ class HotspotPurchaseView(APIView):
 
                     if not mpesa_result.get('success'):
                         payment.status = 'FAILED'
-                        payment.failure_reason = mpesa_result.get('message', 'M-Pesa STK initiation failed')
+                        payment.failure_reason = humanize_payment_failure(
+                            mpesa_result.get('message', 'M-Pesa STK initiation failed')
+                        )
                         payment.save(update_fields=['status', 'failure_reason'])
                         session.mark_failed(payment.failure_reason)
                         return Response({'error': payment.failure_reason}, status=status.HTTP_400_BAD_REQUEST)
@@ -987,7 +990,7 @@ class HotspotPurchaseView(APIView):
                     except NetilyPaybillError as e:
                         payment.status = 'FAILED'
                         payment.tuma_status = 'failed'
-                        payment.failure_reason = str(e)
+                        payment.failure_reason = humanize_payment_failure(str(e))
                         payment.save(update_fields=['status', 'tuma_status', 'failure_reason'])
                         session.mark_failed(payment.failure_reason)
                         
@@ -1001,7 +1004,7 @@ class HotspotPurchaseView(APIView):
                                     phone=phone_canonical,
                                     amount=plan.price,
                                     tenant_label=tenant_label,
-                                    reason=str(e),
+                                    reason=payment.failure_reason,
                                 )
                             ], retry=False)
                         except Exception as alert_err:
@@ -1050,7 +1053,7 @@ class HotspotPurchaseView(APIView):
                 is_retriable = any(m in err_text.lower() for m in retriable_markers)
 
                 if is_retriable:
-                    payment.failure_reason = err_text[:250]
+                    payment.failure_reason = humanize_payment_failure(err_text)[:250]
                     payment.save(update_fields=['failure_reason'])
 
                     return Response(
@@ -1063,7 +1066,7 @@ class HotspotPurchaseView(APIView):
 
                 payment.status = 'FAILED'
                 payment.tuma_status = 'failed'
-                payment.failure_reason = err_text
+                payment.failure_reason = humanize_payment_failure(err_text)
                 payment.save(update_fields=['status', 'tuma_status', 'failure_reason'])
                 session.mark_failed(payment.failure_reason)
 
@@ -1166,7 +1169,7 @@ class HotspotPurchaseStatusView(APIView):
                     payment.save()
                 return ('completed', 'Payment successful', payment)
             elif payment.tuma_status == 'failed' or (payment.tuma_result_code and str(payment.tuma_result_code) != '0'):
-                return ('failed', payment.tuma_result_desc or 'Payment failed', None)
+                return ('failed', humanize_payment_failure(payment.tuma_result_desc), None)
             else:
                 return ('pending', 'Waiting for payment confirmation...', None)
     

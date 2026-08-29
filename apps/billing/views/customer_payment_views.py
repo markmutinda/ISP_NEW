@@ -34,6 +34,7 @@ from apps.billing.services.netily_paybill_service import (
 # 🚨 NEW: Import TumaCallbackMap for tracking
 from apps.core.models import TumaCallbackMap
 from apps.core.otp_service import OTPService, OTPError
+from apps.billing.utils.payment_errors import humanize_payment_failure
 
 logger = logging.getLogger(__name__)
 
@@ -279,7 +280,8 @@ class InitiateCustomerPaymentView(APIView):
         except NetilyPaybillError as e:
             logger.error(f"STK Push failed for customer {customer.customer_code}: {str(e)}")
             payment.status = 'FAILED'
-            payment.failure_reason = str(e)
+            # Store the friendly version for users, raw version stays in logs above
+            payment.failure_reason = humanize_payment_failure(str(e))
             payment.tuma_status = 'failed'
             payment.save()
             
@@ -299,7 +301,7 @@ class InitiateCustomerPaymentView(APIView):
                         phone=phone_number,
                         amount=amount,
                         tenant_label=tenant_label,
-                        reason=str(e),
+                        reason=payment.failure_reason,
                     )
                 ], retry=False)
             except Exception as alert_err:
@@ -313,7 +315,7 @@ class InitiateCustomerPaymentView(APIView):
         except Exception as e:
             logger.exception(f"Unexpected error in customer payment: {str(e)}")
             payment.status = 'FAILED'
-            payment.failure_reason = f"Unexpected error: {str(e)}"
+            payment.failure_reason = humanize_payment_failure(f"Unexpected error: {str(e)}")
             payment.save()
             
             return Response({

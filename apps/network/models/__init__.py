@@ -2,6 +2,7 @@
 
 from .router_models import Router, RouterEvent  # NEW: Import Router and RouterEvent
 from .ip_binding_models import IPBinding  # NEW: Import IPBinding
+from .access_point_models import AccessPoint  # NEW: Import AccessPoint
 
 from .olt_models import (
     OLTDevice, OLTPort, PONPort, ONUDevice, OLTConfig
@@ -24,10 +25,11 @@ from .ipam_models import (
     IPPool, IPAddress, DHCPRange, Subnet, VLAN
 )
 
-# Updated __all__ - Added IPBinding
+# Updated __all__ - Added IPBinding and AccessPoint
 __all__ = [
     'Router', 'RouterEvent',                     # NEW
     'IPBinding',                                 # NEW
+    'AccessPoint',                               # NEW - Access Point model
     'OLTDevice', 'OLTPort', 'PONPort', 'ONUDevice', 'OLTConfig',
     'CPEDevice', 'TR069Parameter', 'TR069Session', 'ACSConfiguration',
     'MikrotikInterface', 'HotspotUser', 'PPPoEUser', 'MikrotikQueue',

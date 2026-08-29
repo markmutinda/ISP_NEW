@@ -60,6 +60,9 @@ from apps.network.views.tr069_views import (
 # ===== IP BINDING =====
 from apps.network.views.ip_binding_views import IPBindingViewSet, RouterKnownHostsView
 
+# ===== ACCESS POINTS (NEW) =====
+from apps.network.views.access_point_views import AccessPointViewSet
+
 # =========================
 # DRF ROUTER
 # =========================
@@ -84,6 +87,9 @@ router.register(r'tr069-sessions', TR069SessionViewSet)
 
 # Register IP Binding ViewSet
 router.register(r'ip-bindings', IPBindingViewSet, basename='ip-binding')
+
+# Register Access Point ViewSet (NEW)
+router.register(r'access-points', AccessPointViewSet, basename='access-point')
 
 # =========================
 # URLPATTERNS - Clean & Conflict-Free
