@@ -400,20 +400,20 @@ class MikrotikScriptGenerator:
 """
 
     def _section_hotspot(self, r: Router, gateway_ip: str) -> str:
-        # 🔥 FIX: Added html-directory="netily-hotspot" so RouterOS looks in our custom folder
+        # 🔥 FIX: dns-name intentionally omitted — a custom hostname adds a DNS lookup
+        # (and a timeout when it's unresolvable) in front of every captive
+        # redirect. hotspot-address (raw IP) resolves instantly, always.
         profile_cmd = (
             f'/ip hotspot profile add name="netily-profile" '
             f'hotspot-address="{gateway_ip}" login-by=http-pap,mac-cookie '
-            f'use-radius=yes radius-accounting=yes http-cookie-lifetime=1d '
-            f'html-directory="netily-hotspot"'
+            f'use-radius=yes radius-accounting=yes http-cookie-lifetime=1d'
         )
         server_cmd = f'/ip hotspot add name="netily-hotspot" interface="netily-bridge" address-pool="netily-pool" profile="netily-profile" disabled=no'
-
+        
         return f"""# ─────────────────────────────────────────────────────────────
 # 8. HOTSPOT PROFILE & SERVER (Bridge Mode)
 # ─────────────────────────────────────────────────────────────
 :put "Configuring Hotspot..."
-:do {{ /file remove [find name="netily-hotspot" type="directory"] }} on-error={{}}
 {profile_cmd}
 {server_cmd}
 
@@ -524,22 +524,20 @@ class MikrotikScriptGenerator:
 """
 
     def _section_hotspot_html(self, r: Router) -> str:
-        # 🔥 FIX: Fetch ALL 5 required files into netily-hotspot/ folder
-        base = f"{self.active_url}/api/v1/network/provision/{r.auth_key}/hotspot"
-        pages = ["login.html", "rlogin.html", "alogin.html", "redirect.html", "error.html", "status.html"]
-
-        fetch_lines = "\n".join(
-            f':do {{ /tool fetch url="{base}/{p}" dst-path=("netily-hotspot/" . "{p}") check-certificate=no }} '
-            f'on-error={{ :put "ERROR: {p} failed" }}'
-            for p in pages
-        )
+        login_url = f"{self.active_url}/api/v1/network/provision/{r.auth_key}/hotspot/login.html"
+        status_url = f"{self.active_url}/api/v1/network/provision/{r.auth_key}/hotspot/status.html"
 
         return f"""# ─────────────────────────────────────────────────────────────
 # 11. HOTSPOT HTML PAGES (Cloud Portal Redirectors)
 # ─────────────────────────────────────────────────────────────
-:put "Downloading hotspot pages into netily-hotspot/..."
-:do {{ /file add name="netily-hotspot" type="directory" }} on-error={{}}
-{fetch_lines}
+:put "Downloading hotspot pages..."
+
+:local dir "hotspot"
+:do {{ :set dir [/ip hotspot profile get [find name="netily-profile"] html-directory] }} on-error={{}}
+:if ($dir = "") do={{ :set dir "hotspot" }}
+
+:do {{ /tool fetch url="{login_url}" dst-path=($dir . "/login.html") check-certificate=no }} on-error={{ :put "ERROR: login.html failed" }}
+:do {{ /tool fetch url="{status_url}" dst-path=($dir . "/status.html") check-certificate=no }} on-error={{ :put "ERROR: status.html failed" }}
 """
 
     def _section_pppoe(self, r: Router, pppoe_local: str) -> str:
@@ -714,149 +712,6 @@ class MikrotikScriptGenerator:
                 }})
                 .catch(function() {{}});
         }} catch (e) {{}}
-    }})();
-    </script>
-</body>
-</html>"""
-
-    def generate_rlogin_html(self) -> str:
-        """Shown on intercepted/redirected pre-auth requests — same portal
-        redirect as login.html, but a lightweight loading page (no TV
-        detection needed, RouterOS already knows this is a redirect)."""
-        r = self.router
-        portal_base = self.get_tenant_portal_url().rstrip('/')
-        tenant_name = self._escape_ros_string(r.tenant_subdomain or 'public')
-        primary_color = "#2563eb"
-
-        return f"""<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="utf-8">
-    <meta http-equiv="pragma" content="no-cache">
-    <meta http-equiv="cache-control" content="no-cache, no-store, must-revalidate">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <meta http-equiv="refresh" content="2; url={portal_base}/hotspot/{r.id}">
-    <title>Connecting...</title>
-    <link rel="dns-prefetch" href="{portal_base}">
-    <link rel="preconnect" href="{portal_base}" crossorigin>
-    <style>
-        *, *::before, *::after {{ box-sizing: border-box; margin: 0; padding: 0; }}
-        body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: linear-gradient(135deg, #eff6ff 0%, #dbeafe 50%, #e0e7ff 100%); min-height: 100vh; display: flex; align-items: center; justify-content: center; padding: 1rem; }}
-        .card {{ background: white; border-radius: 1.5rem; box-shadow: 0 25px 50px -12px rgba(0,0,0,0.15); padding: 2.25rem 2rem; width: 100%; max-width: 340px; text-align: center; }}
-        .spinner {{ width: 40px; height: 40px; border: 3px solid #e5e7eb; border-top-color: {primary_color}; border-radius: 50%; margin: 0 auto 1.25rem; animation: spin 0.8s linear infinite; }}
-        @keyframes spin {{ to {{ transform: rotate(360deg); }} }}
-        h1 {{ font-size: 1.125rem; font-weight: 700; color: #111827; margin-bottom: 0.375rem; }}
-        p {{ font-size: 0.8125rem; color: #6b7280; }}
-    </style>
-</head>
-<body>
-    <div class="card">
-        <div class="spinner"></div>
-        <h1>Connecting you...</h1>
-        <p>Redirecting to the WiFi portal</p>
-    </div>
-    <script>
-    (function() {{
-        var mac = '$(mac)', ip = '$(ip)', identity = '$(identity)', loginUrl = '$(link-login-only)', error = '$(error)';
-        var params = ['mac=' + encodeURIComponent(mac), 'ip=' + encodeURIComponent(ip), 'router=' + encodeURIComponent(identity), 'login_url=' + encodeURIComponent(loginUrl), 'error=' + encodeURIComponent(error), 'tenant=' + '{tenant_name}'];
-        var redirectUrl = '{portal_base}/hotspot/{r.id}?' + params.join('&');
-        try {{
-            var inbound = new URLSearchParams(window.location.search);
-            if (inbound.get('username') && inbound.get('password')) return; // let login.html handle it
-        }} catch (e) {{}}
-        window.location.replace(redirectUrl);
-    }})();
-    </script>
-</body>
-</html>"""
-
-    def generate_alogin_html(self) -> str:
-        """Shown briefly after a successful auto-login (MAC-cookie / trial)."""
-        return f"""<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <meta http-equiv="pragma" content="no-cache">
-    <meta http-equiv="expires" content="-1">
-    <meta http-equiv="refresh" content="1; url=$(link-redirect)">
-    <title>Connected</title>
-    <style>
-        body {{ margin: 0; min-height: 100vh; display: flex; align-items: center; justify-content: center; background: #fafafa; color: #52525b; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; font-size: 13.5px; }}
-    </style>
-</head>
-<body>
-<p>You're connected — taking you online…</p>
-<script>
-(function () {{
-    var redirect = '$(link-redirect)';
-    if (!redirect || !/^https?:\\/\\//i.test(redirect) || redirect.indexOf('hot.spot') !== -1) {{
-        redirect = 'https://www.google.com';
-    }}
-    window.location.replace(redirect);
-}})();
-</script>
-</body>
-</html>"""
-
-    def generate_redirect_html(self) -> str:
-        """RouterOS-mandated redirect shim. The two $(if ...) header lines
-        MUST stay exactly as-is and MUST be the first two lines — RouterOS
-        parses them to build the raw HTTP 302 response before any HTML."""
-        return """$(if http-status == 302)Hotspot redirect$(endif)
-$(if http-header == "Location")$(link-redirect)$(endif)
-<!doctype html>
-<html lang="en">
-<head>
-    <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
-    <meta http-equiv="refresh" content="0; url=$(link-redirect)">
-    <meta http-equiv="pragma" content="no-cache">
-    <meta http-equiv="expires" content="-1">
-    <title>Redirecting</title>
-</head>
-<body></body>
-</html>"""
-
-    def generate_error_html(self) -> str:
-        r = self.router
-        portal_base = self.get_tenant_portal_url().rstrip('/')
-        tenant_name = self._escape_ros_string(r.tenant_subdomain or 'public')
-
-        return f"""<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <meta http-equiv="refresh" content="3; url={portal_base}/hotspot/{r.id}?tenant={tenant_name}&mikrotik_error=$(error)">
-    <title>Sign-in problem</title>
-    <style>
-        *, *::before, *::after {{ box-sizing: border-box; margin: 0; padding: 0; }}
-        body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #fafafa; min-height: 100vh; display: flex; align-items: center; justify-content: center; padding: 1rem; }}
-        .card {{ background: white; border: 1px solid #e4e4e7; border-radius: 1.125rem; padding: 2rem 1.5rem; max-width: 340px; width: 100%; text-align: center; }}
-        .badge {{ width: 44px; height: 44px; margin: 0 auto 1.125rem; border-radius: 999px; background: #fef2f2; color: #dc2626; display: flex; align-items: center; justify-content: center; font-size: 22px; font-weight: 700; }}
-        h1 {{ font-size: 1.1875rem; font-weight: 600; color: #18181b; margin-bottom: 0.375rem; }}
-        p {{ font-size: 0.84375rem; color: #52525b; margin-bottom: 1.125rem; }}
-        a {{ display: block; padding: 0.75rem 1.125rem; border-radius: 0.625rem; background: #18181b; color: #fff; font-weight: 600; font-size: 0.875rem; text-decoration: none; }}
-    </style>
-</head>
-<body>
-    <div class="card">
-        <div class="badge">!</div>
-        <h1>We couldn't sign you in</h1>
-        <p id="reason">$(error)</p>
-        <a id="retry" href="{portal_base}/hotspot/{r.id}?tenant={tenant_name}&mikrotik_error=$(error)">Back to packages</a>
-    </div>
-    <script>
-    (function() {{
-        var el = document.getElementById('reason');
-        if (el && (!el.textContent.trim() || el.textContent.indexOf('$(') === 0)) {{
-            el.textContent = 'Your session could not be started.';
-        }}
-        var url = '{portal_base}/hotspot/{r.id}?mac=' + encodeURIComponent('$(mac)') + '&ip=' + encodeURIComponent('$(ip)') + '&tenant={tenant_name}';
-        var retry = document.getElementById('retry');
-        if (retry) retry.href = url;
-        setTimeout(function() {{ window.location.replace(url); }}, 3000);
     }})();
     </script>
 </body>

@@ -24,10 +24,6 @@ Certs:
 
 Hotspot HTML:
     GET /api/v1/network/provision/{auth_key}/hotspot/login.html
-    GET /api/v1/network/provision/{auth_key}/hotspot/rlogin.html
-    GET /api/v1/network/provision/{auth_key}/hotspot/alogin.html
-    GET /api/v1/network/provision/{auth_key}/hotspot/redirect.html
-    GET /api/v1/network/provision/{auth_key}/hotspot/error.html
     GET /api/v1/network/provision/{auth_key}/hotspot/status.html
 """
 
@@ -334,12 +330,8 @@ class ProvisionHotspotHTMLView(APIView):
     Downloads hotspot HTML pages.
 
     page options:
-        login.html    — Cloud portal redirector (MikroTik captive portal intercept)
-        rlogin.html   — Intercepted/redirected pre-auth requests (lightweight loading)
-        alogin.html   — Post-auto-login success (MAC-cookie / trial)
-        redirect.html — RouterOS-mandated 302 redirect shim
-        error.html    — Error page with retry logic
-        status.html   — Post-authentication status page
+        login.html  — Cloud portal redirector (MikroTik captive portal intercept)
+        status.html — Post-authentication status page
     """
     permission_classes = [AllowAny]
     throttle_classes = [ProvisionRateThrottle]
@@ -354,28 +346,19 @@ class ProvisionHotspotHTMLView(APIView):
 
         gen = MikrotikScriptGenerator(router)
 
-        # 🔥 FIX: Dispatch all 6 pages
-        generators = {
-            'login.html': gen.generate_login_html,
-            'rlogin.html': gen.generate_rlogin_html,
-            'alogin.html': gen.generate_alogin_html,
-            'redirect.html': gen.generate_redirect_html,
-            'error.html': gen.generate_error_html,
-            'status.html': gen.generate_status_html,
-        }
-
-        handler = generators.get(page)
-        if not handler:
-            logger.warning(f"[PROVISION HTML] Unknown hotspot page: {page} for router '{router.name}'")
-            raise Http404(f"Unknown hotspot page: {page}")
-
-        html = handler()
-
-        # 🔥 Stamp DB the moment the router actually fetches login.html
         if page == 'login.html':
+            html = gen.generate_login_html()
+            # 🔥 Stamp DB the moment the router actually fetches this file —
+            # this is the only reliable signal that it has the new version,
+            # since reading file contents back via the RouterOS API is unreliable.
             from apps.network.services.mikrotik_script_generator import LOGIN_HTML_VERSION
             Router.objects.filter(pk=router.pk).update(last_login_html_version=LOGIN_HTML_VERSION)
             logger.info(f"[PROVISION HTML] Stamped login.html version {LOGIN_HTML_VERSION} for router {router.id}")
+        elif page == 'status.html':
+            html = gen.generate_status_html()
+        else:
+            logger.warning(f"[PROVISION HTML] Unknown hotspot page: {page} for router '{router.name}'")
+            raise Http404(f"Unknown hotspot page: {page}")
 
         logger.info(
             f"Provision HTML: Router '{router.name}' downloaded {page} "

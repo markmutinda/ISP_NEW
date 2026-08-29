@@ -374,15 +374,12 @@ def _check_login_html_current(ctx: DiagnosticContext) -> bool:
 
 def _fix_login_html_current(ctx: DiagnosticContext):
     """
-    🔥 FIX: Refresh ALL hotspot HTML pages (all 6 files) into netily-hotspot/
-    
-    Re-downloads login.html, rlogin.html, alogin.html, redirect.html,
-    error.html, and status.html via RouterOS /tool fetch.
-    
+    Re-downloads login.html + status.html via RouterOS /tool fetch.
+
     /tool fetch does NOT overwrite an existing file — it silently creates
     'login.html1' if one already exists and the hotspot server keeps serving
     the stale copy. So we delete the existing file first, then fetch.
-    
+
     Verification is done by polling the DB flag that the provisioning
     endpoint stamps the instant the router's GET request lands — reading
     file contents back over the RouterOS API is unreliable and was the
@@ -393,16 +390,14 @@ def _fix_login_html_current(ctx: DiagnosticContext):
     router, api = ctx.router, ctx.api
     gen = MikrotikScriptGenerator(router)
 
-    # 🔥 FIX: Determine the html-directory from the hotspot profile
+    login_url = f"{gen.active_url}/api/v1/network/provision/{router.auth_key}/hotspot/login.html"
+    status_url = f"{gen.active_url}/api/v1/network/provision/{router.auth_key}/hotspot/status.html"
+
     prof = next((p for p in ctx.live['hotspot_profiles'] if p.get('name') == 'netily-profile'), None)
-    html_dir = (prof.get('html-directory') or 'netily-hotspot') if prof else 'netily-hotspot'
+    html_dir = (prof.get('html-directory') or 'hotspot') if prof else 'hotspot'
 
-    # 🔥 FIX: Fetch ALL 6 required files
-    pages = ['login.html', 'rlogin.html', 'alogin.html', 'redirect.html', 'error.html', 'status.html']
-
-    for filename in pages:
+    for url, filename in ((login_url, 'login.html'), (status_url, 'status.html')):
         dst = f"{html_dir}/{filename}"
-        url = f"{gen.active_url}/api/v1/network/provision/{router.auth_key}/hotspot/{filename}"
 
         # Delete existing file first so /tool fetch actually overwrites it
         try:
