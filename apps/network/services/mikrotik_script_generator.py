@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 # changes meaningfully. Used by the diagnostic engine to detect
 # stale login.html on routers.
 # ────────────────────────────────────────────────────────────────
-LOGIN_HTML_VERSION = "3"  # bump this every time generate_login_html() changes meaningfully
+LOGIN_HTML_VERSION = "5"  # bump this every time generate_login_html() changes meaningfully
 
 
 class MikrotikScriptGenerator:
@@ -148,12 +148,12 @@ class MikrotikScriptGenerator:
             self._section_openvpn(r, ovpn_cipher, ovpn_auth, is_v6),
             self._section_firewall(r),
             self._section_bridge_ports(r, r_gateway_cidr),
-            self._section_dns(r, gateway_ip),
+            self._section_dns(r),                       # ← FAST DNS for router
             self._section_dhcp(r, gateway_ip, pool_range, dhcp_network),
             self._section_radius(r),
             self._section_hotspot(r, gateway_ip),
             self._section_walled_garden(r, portal_domain),
-            self._section_dns_prewarm(r),
+            self._section_dns_prewarm(r),               # ← DNS pre-warm scheduler
             self._section_ssl_certs(r),
             self._section_hotspot_html(r),
             self._section_pppoe(r, pppoe_local) if r.enable_pppoe else "",
@@ -314,9 +314,6 @@ class MikrotikScriptGenerator:
 :put "RADIUS accounting traffic allowed via tunnel (stable + long-term compatible)"
 """
 
-    # ================================================================
-    # UPDATED: _section_firewall now includes HTTPS fast-fail rule
-    # ================================================================
     def _section_firewall(self, r: Router) -> str:
         return f"""# ─────────────────────────────────────────────────────────────
 # 4. FIREWALL (VPN & Management)
@@ -326,18 +323,6 @@ class MikrotikScriptGenerator:
 /ip firewall filter add chain=input action=accept src-address={self.vpn_network_cidr} comment="Netily-VPN-Input-Allow"
 /ip firewall filter add chain=forward action=accept src-address={self.vpn_network_cidr} comment="Netily-VPN-Forward-Allow"
 /ip firewall filter add chain=forward action=accept dst-address={self.vpn_network_cidr} comment="Netily-VPN-Forward-Return"
-
-# ── FAST-FAIL HTTPS CAPTIVE-PROBE (fixes ~10s Android/iOS TLS-timeout stall) ──
-# The Netily-Captive-Probe DNS shortcuts (see _section_dns) point OS captive-check
-# domains at this router's own gateway IP. Nothing listens on :443 there, and
-# Hotspot's unauth policy silently drops rather than resets the SYN, so the
-# client's TLS connect() hangs for its full OS timeout (~10s, deterministic)
-# before falling back to the HTTP probe. Rejecting with tcp-reset makes that
-# fallback instant. Scoped to in-interface + port only — cannot affect real
-# internet traffic post-authentication, since that never targets this bridge IP.
-:do {{ /ip firewall filter remove [find comment="Netily-Fast-Fail-HTTPS-Probe"] }} on-error={{}}
-/ip firewall filter add chain=input protocol=tcp in-interface="netily-bridge" dst-port=443 \\
-    action=reject reject-with=tcp-reset comment="Netily-Fast-Fail-HTTPS-Probe" place-before=0
 """
 
     def _section_bridge_ports(self, r: Router, gateway_cidr: str) -> str:
@@ -369,50 +354,24 @@ class MikrotikScriptGenerator:
 {ports_script}
 """
 
-    # ================================================================
-    # UPDATED: _section_dns now accepts gateway_ip parameter
-    # ================================================================
-    def _section_dns(self, r: Router, gateway_ip: str) -> str:
+    def _section_dns(self, r: Router) -> str:
         """
-        Router's OWN resolver + static shortcuts for OS captive-portal probe domains.
+        The router's OWN resolver — used for every walled-garden domain lookup
+        AND every OS captive-portal-detection probe before a client is online.
+        Left unset, this defaults to whatever slow/flaky DNS the WAN link
+        handed out, which is the #1 cause of "sometimes extremely slow"
+        unauthenticated portal loads.
 
-        Root cause of the intermittent 5-15s delay BEFORE login.html even starts loading:
-        the client must DNS-resolve its OS captivity-check domain over the router's live
-        WAN uplink before it can send the HTTP GET that the hotspot intercepts. That WAN
-        round trip is what's inconsistent — never visible on laptops, which skip the OS
-        probe/relaunch cycle entirely.
-
-        Fix: answer these domains locally, pointing at the bridge gateway IP. Resolution
-        never leaves the LAN, so the HTTP GET fires immediately and hits the same dst-nat
-        redirect rule as always.
+        🔥 FIX 1: allow-remote-requests=yes so client devices can use the router
+        as their DNS resolver, preventing 9.5s timeouts from walled-garden
+        blocking direct 8.8.8.8 queries.
         """
-        probe_domains = [
-            'connectivitycheck.gstatic.com',
-            'connectivitycheck.android.com',
-            'clients3.google.com',
-            'clients.l.google.com',
-            'www.gstatic.com',
-            'captive.apple.com',
-            'www.apple.com',
-            'www.msftconnecttest.com',
-            'www.msftncsi.com',
-            'msftconnecttest.com',
-        ]
-        static_entries = "\n".join(
-            f'/ip dns static add name="{d}" address={gateway_ip} comment="Netily-Captive-Probe" ttl=1m'
-            for d in probe_domains
-        )
-
         return f"""# ─────────────────────────────────────────────────────────────
-# 5b. ROUTER DNS RESOLVER (fast + cached) + CAPTIVE-PROBE SHORTCUTS
+# 5b. ROUTER DNS RESOLVER (fast + cached)
 # ─────────────────────────────────────────────────────────────
 :put "Configuring fast DNS resolver..."
-/ip dns set servers=1.1.1.1,8.8.8.8 cache-size=4096KiB cache-max-ttl=1d allow-remote-requests=no
-
-:put "Adding local shortcuts for OS captive-portal probes..."
-:do {{ /ip dns static remove [find comment="Netily-Captive-Probe"] }} on-error={{}}
-{static_entries}
-:put " + Captive-probe domains resolve instantly to {gateway_ip} — no WAN DNS round trip"
+/ip dns set servers=1.1.1.1,8.8.8.8 cache-size=4096KiB cache-max-ttl=1d allow-remote-requests=yes
+:put " + Fast DNS set to 1.1.1.1, 8.8.8.8 with 4MB cache"
 """
 
     def _section_dhcp(self, r: Router, gateway_ip: str, pool_range: str, dhcp_network: str) -> str:
@@ -623,13 +582,26 @@ class MikrotikScriptGenerator:
 """
 
     def _section_nat(self, r: Router) -> str:
+        """
+        🔥 FIX 2: Add force-DNS redirect rules so client DNS queries (UDP/TCP 53)
+        are intercepted and answered by the router, preventing the 9.5s timeout
+        from walled-garden blocking direct 8.8.8.8 queries.
+        """
         return f"""# ─────────────────────────────────────────────────────────────
-# 14. MASQUERADE & NAT
+# 14. MASQUERADE & NAT + FORCE DNS
 # ─────────────────────────────────────────────────────────────
 :put "Configuring NAT..."
 
 :do {{ /ip firewall nat remove [find comment="Netily-Masquerade"] }} on-error={{}}
 /ip firewall nat add chain=srcnat action=masquerade comment="Netily-Masquerade"
+
+# 🔥 FIX 2: Force client DNS through the router
+# Without these rules, clients try 8.8.8.8 directly, which the walled garden# blocks, causing ~9.5s timeouts before the OS falls back to the router.
+:do {{ /ip firewall nat remove [find comment="Netily-Force-DNS"] }} on-error={{}}
+:do {{ /ip firewall nat remove [find comment="Netily-Force-DNS-TCP"] }} on-error={{}}
+/ip firewall nat add chain=dstnat action=redirect to-ports=53 protocol=udp dst-port=53 in-interface="netily-bridge" comment="Netily-Force-DNS"
+/ip firewall nat add chain=dstnat action=redirect to-ports=53 protocol=tcp dst-port=53 in-interface="netily-bridge" comment="Netily-Force-DNS-TCP"
+:put " + Force-DNS rules added (UDP/TCP port 53 → router)"
 """
 
     def _section_schedulers(self, r: Router) -> str:
@@ -671,6 +643,13 @@ class MikrotikScriptGenerator:
     <!-- 🔥 OPTIMIZATION: Preconnect to portal domain only — same-origin as redirect target -->
     <link rel="dns-prefetch" href="{portal_base}">
     <link rel="preconnect" href="{portal_base}" crossorigin>
+    <!-- 🔥 FIX 4: rel=prefetch stores in the shared HTTP cache, which — unlike
+         sessionStorage — is NOT partitioned to this page's own origin, so
+         it is actually usable once we navigate to portal_base. This directly
+         replaces the old sessionStorage-based "prewarm", which was silently
+         non-functional: sessionStorage set on the router's hotspot origin
+         is invisible to JS running on portal_base's origin. -->
+    <link rel="prefetch" href="{portal_base}/hotspot/{r.id}" as="document">
     <style>
         *, *::before, *::after {{ box-sizing: border-box; margin: 0; padding: 0; }}
         body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', sans-serif; background: linear-gradient(135deg, #eff6ff 0%, #dbeafe 50%, #e0e7ff 100%); min-height: 100vh; display: flex; align-items: center; justify-content: center; padding: 1rem; }}
@@ -743,22 +722,12 @@ class MikrotikScriptGenerator:
             }});
         }});
 
-        // 🔥 Speculative fetch — SAME ORIGIN as the redirect target, so this is the
-        // ONLY DNS+TLS handshake this device needs to make before content shows.
-        // Result is stashed so the Next.js page skips its own fetch entirely.
-        try {{
-            var captiveUrl = '{portal_base}/api/v1/hotspot/captive-portal/?router={r.id}&tenant={tenant_name}';
-            fetch(captiveUrl, {{ credentials: 'omit' }})
-                .then(function(res) {{ return res.ok ? res.json() : null; }})
-                .then(function(data) {{
-                    if (!data) return;
-                    try {{
-                        data._cachedAt = Date.now();
-                        sessionStorage.setItem('portal_cache:{r.id}', JSON.stringify(data));
-                    }} catch (e) {{}}
-                }})
-                .catch(function() {{}});
-        }} catch (e) {{}}
+        // 🔥 FIX 4: REMOVED the old speculative fetch() + sessionStorage.setItem(...) block.
+        // It could never be read back — sessionStorage is same-origin only, and
+        // this page's origin is never the same as portal_base's. It was a pure
+        // cost: one extra HTTP request on an already bandwidth-limited captive
+        // network, with zero payoff. The <link rel="prefetch"> in the <head> above
+        // is the correct replacement.
     }})();
     </script>
 </body>

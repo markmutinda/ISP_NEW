@@ -74,12 +74,14 @@ def gather_live_state(api) -> dict:
         'hotspot_servers': safe('/ip/hotspot'),
         'firewall_mangle': safe('/ip/firewall/mangle'),
         'firewall_nat': safe('/ip/firewall/nat'),
-        'firewall_filter': safe('/ip/firewall/filter'),      # ← ADDED for HTTPS fast-fail check
+        'firewall_filter': safe('/ip/firewall/filter'),
         'ip_services': safe('/ip/service'),
         'users': safe('/user'),
         'dhcp_servers': safe('/ip/dhcp-server'),
         'files': safe('/file'),
         'dns_static': safe('/ip/dns/static'),
+        # 🔥 FIX 3: Add DNS settings so we can check allow-remote-requests
+        'dns_settings': (lambda: (safe('/ip/dns') or [{}])[0])(),
     }
 
 
@@ -190,13 +192,28 @@ register_check(
 
 
 # ── Force-DNS through router (blocks the DNS-tunnel bypass variant) ──
+# 🔥 FIX 3: Updated to also check allow-remote-requests=yes
 def _check_force_dns(ctx: DiagnosticContext) -> bool:
     comments = {r.get('comment') for r in ctx.live['firewall_nat']}
-    return 'Netily-Force-DNS' in comments and 'Netily-Force-DNS-TCP' in comments
+    dns_settings = ctx.live.get('dns_settings') or {}
+    return (
+        'Netily-Force-DNS' in comments
+        and 'Netily-Force-DNS-TCP' in comments
+        and str(dns_settings.get('allow-remote-requests', 'no')).lower() == 'yes'
+    )
 
 
+# 🔥 FIX 3: Updated to also set allow-remote-requests=yes
 def _fix_force_dns(ctx: DiagnosticContext):
     api = ctx.api
+    
+    # Ensure the router's DNS server will actually answer client queries
+    try:
+        api._execute('/ip/dns', update={'allow-remote-requests': 'yes'})
+        logger.info(f"[DIAGNOSE FIX] Set allow-remote-requests=yes on router {ctx.router.id}")
+    except Exception as e:
+        logger.warning(f"[DIAGNOSE FIX] Failed to set allow-remote-requests=yes: {e}")
+
     existing = {r.get('comment') for r in ctx.live['firewall_nat']}
     if 'Netily-Force-DNS' not in existing:
         api._execute('/ip/firewall/nat', add={
