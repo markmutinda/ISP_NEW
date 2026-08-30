@@ -78,6 +78,7 @@ def gather_live_state(api) -> dict:
         'users': safe('/user'),
         'dhcp_servers': safe('/ip/dhcp-server'),
         'files': safe('/file'),
+        'dns_static': safe('/ip/dns/static'),      # ← ADDED for captive-probe check
     }
 
 
@@ -482,6 +483,80 @@ register_check(
     severity='critical',
     fix_fn=_fix_hotspot_no_phantom_dns,
 )(_check_hotspot_no_phantom_dns)
+
+
+# ────────────────────────────────────────────────────────────────
+# 🔥 FIX 4: Captive-probe DNS shortcuts — eliminate WAN DNS delay
+# ────────────────────────────────────────────────────────────────
+
+def _check_captive_probe_dns_shortcut(ctx: DiagnosticContext) -> bool:
+    """OS captive-portal probe domains resolve locally instead of over WAN."""
+    shortcut_names = {
+        e.get('name') for e in ctx.live.get('dns_static', [])
+        if e.get('comment') == 'Netily-Captive-Probe'
+    }
+    required = {
+        'connectivitycheck.gstatic.com',
+        'captive.apple.com',
+        'www.msftconnecttest.com'
+    }
+    return required.issubset(shortcut_names)
+
+
+def _fix_captive_probe_dns_shortcut(ctx: DiagnosticContext):
+    from apps.network.services.ipam_calculator import calculate_mikrotik_hotspot_network
+
+    router, api = ctx.router, ctx.api
+    
+    # Calculate the gateway IP for this router
+    base_ip = getattr(router, 'hotspot_base_ip', None) or '172.12.0.1'
+    cidr = getattr(router, 'hotspot_subnet_cidr', None) or 16
+    math = calculate_mikrotik_hotspot_network(base_ip, cidr)
+    gateway_ip = math['gateway']
+
+    probe_domains = [
+        'connectivitycheck.gstatic.com',
+        'connectivitycheck.android.com',
+        'clients3.google.com',
+        'clients.l.google.com',
+        'www.gstatic.com',
+        'captive.apple.com',
+        'www.apple.com',
+        'www.msftconnecttest.com',
+        'www.msftncsi.com',
+        'msftconnecttest.com',
+    ]
+
+    # Remove existing entries first (idempotent)
+    for e in ctx.live.get('dns_static', []):
+        if e.get('comment') == 'Netily-Captive-Probe':
+            try:
+                api._execute('/ip/dns/static', remove={'.id': e['.id']})
+            except Exception as ex:
+                logger.warning(f"[DIAGNOSE] Failed to remove stale DNS static entry: {ex}")
+
+    # Add new entries for all probe domains
+    for domain in probe_domains:
+        try:
+            api._execute('/ip/dns/static', add={
+                'name': domain,
+                'address': gateway_ip,
+                'comment': 'Netily-Captive-Probe',
+                'ttl': '1m',
+            })
+        except Exception as ex:
+            logger.warning(f"[DIAGNOSE] Failed to add DNS static entry for {domain}: {ex}")
+
+    logger.info(f"[DIAGNOSE] Captive-probe DNS shortcuts applied for router {router.id} → {gateway_ip}")
+
+
+register_check(
+    id='captive_probe_dns_shortcut',
+    label='OS captive-portal probe domains resolve locally (no WAN DNS delay)',
+    category='Performance',
+    severity='warning',
+    fix_fn=_fix_captive_probe_dns_shortcut,
+)(_check_captive_probe_dns_shortcut)
 
 
 # ────────────────────────────────────────────────────────────────

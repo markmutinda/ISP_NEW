@@ -148,7 +148,7 @@ class MikrotikScriptGenerator:
             self._section_openvpn(r, ovpn_cipher, ovpn_auth, is_v6),
             self._section_firewall(r),
             self._section_bridge_ports(r, r_gateway_cidr),
-            self._section_dns(r),                       # ← FAST DNS for router
+            self._section_dns(r, gateway_ip),                       # ← UPDATED: passes gateway_ip
             self._section_dhcp(r, gateway_ip, pool_range, dhcp_network),
             self._section_radius(r),
             self._section_hotspot(r, gateway_ip),
@@ -354,20 +354,50 @@ class MikrotikScriptGenerator:
 {ports_script}
 """
 
-    def _section_dns(self, r: Router) -> str:
+    # ================================================================
+    # UPDATED: _section_dns now accepts gateway_ip parameter
+    # ================================================================
+    def _section_dns(self, r: Router, gateway_ip: str) -> str:
         """
-        The router's OWN resolver — used for every walled-garden domain lookup
-        AND every OS captive-portal-detection probe before a client is online.
-        Left unset, this defaults to whatever slow/flaky DNS the WAN link
-        handed out, which is the #1 cause of "sometimes extremely slow"
-        unauthenticated portal loads.
+        Router's OWN resolver + static shortcuts for OS captive-portal probe domains.
+
+        Root cause of the intermittent 5-15s delay BEFORE login.html even starts loading:
+        the client must DNS-resolve its OS captivity-check domain over the router's live
+        WAN uplink before it can send the HTTP GET that the hotspot intercepts. That WAN
+        round trip is what's inconsistent — never visible on laptops, which skip the OS
+        probe/relaunch cycle entirely.
+
+        Fix: answer these domains locally, pointing at the bridge gateway IP. Resolution
+        never leaves the LAN, so the HTTP GET fires immediately and hits the same dst-nat
+        redirect rule as always.
         """
+        probe_domains = [
+            'connectivitycheck.gstatic.com',
+            'connectivitycheck.android.com',
+            'clients3.google.com',
+            'clients.l.google.com',
+            'www.gstatic.com',
+            'captive.apple.com',
+            'www.apple.com',
+            'www.msftconnecttest.com',
+            'www.msftncsi.com',
+            'msftconnecttest.com',
+        ]
+        static_entries = "\n".join(
+            f'/ip dns static add name="{d}" address={gateway_ip} comment="Netily-Captive-Probe" ttl=1m'
+            for d in probe_domains
+        )
+
         return f"""# ─────────────────────────────────────────────────────────────
-# 5b. ROUTER DNS RESOLVER (fast + cached)
+# 5b. ROUTER DNS RESOLVER (fast + cached) + CAPTIVE-PROBE SHORTCUTS
 # ─────────────────────────────────────────────────────────────
 :put "Configuring fast DNS resolver..."
 /ip dns set servers=1.1.1.1,8.8.8.8 cache-size=4096KiB cache-max-ttl=1d allow-remote-requests=no
-:put " + Fast DNS set to 1.1.1.1, 8.8.8.8 with 4MB cache"
+
+:put "Adding local shortcuts for OS captive-portal probes..."
+:do {{ /ip dns static remove [find comment="Netily-Captive-Probe"] }} on-error={{}}
+{static_entries}
+:put " + Captive-probe domains resolve instantly to {gateway_ip} — no WAN DNS round trip"
 """
 
     def _section_dhcp(self, r: Router, gateway_ip: str, pool_range: str, dhcp_network: str) -> str:
