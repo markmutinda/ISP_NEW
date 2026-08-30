@@ -74,11 +74,12 @@ def gather_live_state(api) -> dict:
         'hotspot_servers': safe('/ip/hotspot'),
         'firewall_mangle': safe('/ip/firewall/mangle'),
         'firewall_nat': safe('/ip/firewall/nat'),
+        'firewall_filter': safe('/ip/firewall/filter'),      # ← ADDED for HTTPS fast-fail check
         'ip_services': safe('/ip/service'),
         'users': safe('/user'),
         'dhcp_servers': safe('/ip/dhcp-server'),
         'files': safe('/file'),
-        'dns_static': safe('/ip/dns/static'),      # ← ADDED for captive-probe check
+        'dns_static': safe('/ip/dns/static'),
     }
 
 
@@ -557,6 +558,59 @@ register_check(
     severity='warning',
     fix_fn=_fix_captive_probe_dns_shortcut,
 )(_check_captive_probe_dns_shortcut)
+
+
+# ────────────────────────────────────────────────────────────────
+# 🔥 FIX 5: HTTPS probe fast-fail — eliminate ~10s OS TLS timeout
+# ────────────────────────────────────────────────────────────────
+
+def _check_https_probe_fast_fail(ctx: DiagnosticContext) -> bool:
+    """HTTPS captive-probe SYNs get instant TCP reset (no 10s OS timeout)."""
+    return any(
+        f.get('comment') == 'Netily-Fast-Fail-HTTPS-Probe'
+        and f.get('chain') == 'input'
+        and f.get('action') == 'reject'
+        for f in ctx.live.get('firewall_filter', [])
+    )
+
+
+def _fix_https_probe_fast_fail(ctx: DiagnosticContext):
+    """Add firewall rule to reject HTTPS probe SYNs with TCP reset."""
+    api = ctx.api
+    # Remove existing rule first (idempotent)
+    for f in ctx.live.get('firewall_filter', []):
+        if f.get('comment') == 'Netily-Fast-Fail-HTTPS-Probe':
+            try:
+                api._execute('/ip/firewall/filter', remove={'.id': f['.id']})
+                logger.info(f"[DIAGNOSE] Removed existing HTTPS fast-fail rule from router {ctx.router.id}")
+            except Exception as ex:
+                logger.warning(f"[DIAGNOSE] Failed to remove existing HTTPS fast-fail rule: {ex}")
+
+    # Add the new rule at the top of the input chain
+    try:
+        api._execute('/ip/firewall/filter', add={
+            'chain': 'input',
+            'protocol': 'tcp',
+            'in-interface': 'netily-bridge',
+            'dst-port': '443',
+            'action': 'reject',
+            'reject-with': 'tcp-reset',
+            'comment': 'Netily-Fast-Fail-HTTPS-Probe',
+            'place-before': '0',
+        })
+        logger.info(f"[DIAGNOSE] HTTPS fast-fail rule applied for router {ctx.router.id}")
+    except Exception as ex:
+        logger.error(f"[DIAGNOSE] Failed to add HTTPS fast-fail rule: {ex}")
+        raise
+
+
+register_check(
+    id='https_probe_fast_fail',
+    label='HTTPS captive-probe SYNs get instant TCP reset (no 10s OS timeout)',
+    category='Performance',
+    severity='critical',
+    fix_fn=_fix_https_probe_fast_fail,
+)(_check_https_probe_fast_fail)
 
 
 # ────────────────────────────────────────────────────────────────

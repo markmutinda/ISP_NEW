@@ -148,12 +148,12 @@ class MikrotikScriptGenerator:
             self._section_openvpn(r, ovpn_cipher, ovpn_auth, is_v6),
             self._section_firewall(r),
             self._section_bridge_ports(r, r_gateway_cidr),
-            self._section_dns(r, gateway_ip),                       # ← UPDATED: passes gateway_ip
+            self._section_dns(r, gateway_ip),
             self._section_dhcp(r, gateway_ip, pool_range, dhcp_network),
             self._section_radius(r),
             self._section_hotspot(r, gateway_ip),
             self._section_walled_garden(r, portal_domain),
-            self._section_dns_prewarm(r),               # ← DNS pre-warm scheduler
+            self._section_dns_prewarm(r),
             self._section_ssl_certs(r),
             self._section_hotspot_html(r),
             self._section_pppoe(r, pppoe_local) if r.enable_pppoe else "",
@@ -314,6 +314,9 @@ class MikrotikScriptGenerator:
 :put "RADIUS accounting traffic allowed via tunnel (stable + long-term compatible)"
 """
 
+    # ================================================================
+    # UPDATED: _section_firewall now includes HTTPS fast-fail rule
+    # ================================================================
     def _section_firewall(self, r: Router) -> str:
         return f"""# ─────────────────────────────────────────────────────────────
 # 4. FIREWALL (VPN & Management)
@@ -323,6 +326,18 @@ class MikrotikScriptGenerator:
 /ip firewall filter add chain=input action=accept src-address={self.vpn_network_cidr} comment="Netily-VPN-Input-Allow"
 /ip firewall filter add chain=forward action=accept src-address={self.vpn_network_cidr} comment="Netily-VPN-Forward-Allow"
 /ip firewall filter add chain=forward action=accept dst-address={self.vpn_network_cidr} comment="Netily-VPN-Forward-Return"
+
+# ── FAST-FAIL HTTPS CAPTIVE-PROBE (fixes ~10s Android/iOS TLS-timeout stall) ──
+# The Netily-Captive-Probe DNS shortcuts (see _section_dns) point OS captive-check
+# domains at this router's own gateway IP. Nothing listens on :443 there, and
+# Hotspot's unauth policy silently drops rather than resets the SYN, so the
+# client's TLS connect() hangs for its full OS timeout (~10s, deterministic)
+# before falling back to the HTTP probe. Rejecting with tcp-reset makes that
+# fallback instant. Scoped to in-interface + port only — cannot affect real
+# internet traffic post-authentication, since that never targets this bridge IP.
+:do {{ /ip firewall filter remove [find comment="Netily-Fast-Fail-HTTPS-Probe"] }} on-error={{}}
+/ip firewall filter add chain=input protocol=tcp in-interface="netily-bridge" dst-port=443 \\
+    action=reject reject-with=tcp-reset comment="Netily-Fast-Fail-HTTPS-Probe" place-before=0
 """
 
     def _section_bridge_ports(self, r: Router, gateway_cidr: str) -> str:
