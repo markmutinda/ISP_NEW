@@ -74,14 +74,10 @@ def gather_live_state(api) -> dict:
         'hotspot_servers': safe('/ip/hotspot'),
         'firewall_mangle': safe('/ip/firewall/mangle'),
         'firewall_nat': safe('/ip/firewall/nat'),
-        'firewall_filter': safe('/ip/firewall/filter'),
         'ip_services': safe('/ip/service'),
         'users': safe('/user'),
         'dhcp_servers': safe('/ip/dhcp-server'),
         'files': safe('/file'),
-        'dns_static': safe('/ip/dns/static'),
-        # 🔥 FIX 3: Add DNS settings so we can check allow-remote-requests
-        'dns_settings': (lambda: (safe('/ip/dns') or [{}])[0])(),
     }
 
 
@@ -192,28 +188,13 @@ register_check(
 
 
 # ── Force-DNS through router (blocks the DNS-tunnel bypass variant) ──
-# 🔥 FIX 3: Updated to also check allow-remote-requests=yes
 def _check_force_dns(ctx: DiagnosticContext) -> bool:
     comments = {r.get('comment') for r in ctx.live['firewall_nat']}
-    dns_settings = ctx.live.get('dns_settings') or {}
-    return (
-        'Netily-Force-DNS' in comments
-        and 'Netily-Force-DNS-TCP' in comments
-        and str(dns_settings.get('allow-remote-requests', 'no')).lower() == 'yes'
-    )
+    return 'Netily-Force-DNS' in comments and 'Netily-Force-DNS-TCP' in comments
 
 
-# 🔥 FIX 3: Updated to also set allow-remote-requests=yes
 def _fix_force_dns(ctx: DiagnosticContext):
     api = ctx.api
-    
-    # Ensure the router's DNS server will actually answer client queries
-    try:
-        api._execute('/ip/dns', update={'allow-remote-requests': 'yes'})
-        logger.info(f"[DIAGNOSE FIX] Set allow-remote-requests=yes on router {ctx.router.id}")
-    except Exception as e:
-        logger.warning(f"[DIAGNOSE FIX] Failed to set allow-remote-requests=yes: {e}")
-
     existing = {r.get('comment') for r in ctx.live['firewall_nat']}
     if 'Netily-Force-DNS' not in existing:
         api._execute('/ip/firewall/nat', add={
@@ -501,133 +482,6 @@ register_check(
     severity='critical',
     fix_fn=_fix_hotspot_no_phantom_dns,
 )(_check_hotspot_no_phantom_dns)
-
-
-# ────────────────────────────────────────────────────────────────
-# 🔥 FIX 4: Captive-probe DNS shortcuts — eliminate WAN DNS delay
-# ────────────────────────────────────────────────────────────────
-
-def _check_captive_probe_dns_shortcut(ctx: DiagnosticContext) -> bool:
-    """OS captive-portal probe domains resolve locally instead of over WAN."""
-    shortcut_names = {
-        e.get('name') for e in ctx.live.get('dns_static', [])
-        if e.get('comment') == 'Netily-Captive-Probe'
-    }
-    required = {
-        'connectivitycheck.gstatic.com',
-        'captive.apple.com',
-        'www.msftconnecttest.com'
-    }
-    return required.issubset(shortcut_names)
-
-
-def _fix_captive_probe_dns_shortcut(ctx: DiagnosticContext):
-    from apps.network.services.ipam_calculator import calculate_mikrotik_hotspot_network
-
-    router, api = ctx.router, ctx.api
-    
-    # Calculate the gateway IP for this router
-    base_ip = getattr(router, 'hotspot_base_ip', None) or '172.12.0.1'
-    cidr = getattr(router, 'hotspot_subnet_cidr', None) or 16
-    math = calculate_mikrotik_hotspot_network(base_ip, cidr)
-    gateway_ip = math['gateway']
-
-    probe_domains = [
-        'connectivitycheck.gstatic.com',
-        'connectivitycheck.android.com',
-        'clients3.google.com',
-        'clients.l.google.com',
-        'www.gstatic.com',
-        'captive.apple.com',
-        'www.apple.com',
-        'www.msftconnecttest.com',
-        'www.msftncsi.com',
-        'msftconnecttest.com',
-    ]
-
-    # Remove existing entries first (idempotent)
-    for e in ctx.live.get('dns_static', []):
-        if e.get('comment') == 'Netily-Captive-Probe':
-            try:
-                api._execute('/ip/dns/static', remove={'.id': e['.id']})
-            except Exception as ex:
-                logger.warning(f"[DIAGNOSE] Failed to remove stale DNS static entry: {ex}")
-
-    # Add new entries for all probe domains
-    for domain in probe_domains:
-        try:
-            api._execute('/ip/dns/static', add={
-                'name': domain,
-                'address': gateway_ip,
-                'comment': 'Netily-Captive-Probe',
-                'ttl': '1m',
-            })
-        except Exception as ex:
-            logger.warning(f"[DIAGNOSE] Failed to add DNS static entry for {domain}: {ex}")
-
-    logger.info(f"[DIAGNOSE] Captive-probe DNS shortcuts applied for router {router.id} → {gateway_ip}")
-
-
-register_check(
-    id='captive_probe_dns_shortcut',
-    label='OS captive-portal probe domains resolve locally (no WAN DNS delay)',
-    category='Performance',
-    severity='warning',
-    fix_fn=_fix_captive_probe_dns_shortcut,
-)(_check_captive_probe_dns_shortcut)
-
-
-# ────────────────────────────────────────────────────────────────
-# 🔥 FIX 5: HTTPS probe fast-fail — eliminate ~10s OS TLS timeout
-# ────────────────────────────────────────────────────────────────
-
-def _check_https_probe_fast_fail(ctx: DiagnosticContext) -> bool:
-    """HTTPS captive-probe SYNs get instant TCP reset (no 10s OS timeout)."""
-    return any(
-        f.get('comment') == 'Netily-Fast-Fail-HTTPS-Probe'
-        and f.get('chain') == 'input'
-        and f.get('action') == 'reject'
-        for f in ctx.live.get('firewall_filter', [])
-    )
-
-
-def _fix_https_probe_fast_fail(ctx: DiagnosticContext):
-    """Add firewall rule to reject HTTPS probe SYNs with TCP reset."""
-    api = ctx.api
-    # Remove existing rule first (idempotent)
-    for f in ctx.live.get('firewall_filter', []):
-        if f.get('comment') == 'Netily-Fast-Fail-HTTPS-Probe':
-            try:
-                api._execute('/ip/firewall/filter', remove={'.id': f['.id']})
-                logger.info(f"[DIAGNOSE] Removed existing HTTPS fast-fail rule from router {ctx.router.id}")
-            except Exception as ex:
-                logger.warning(f"[DIAGNOSE] Failed to remove existing HTTPS fast-fail rule: {ex}")
-
-    # Add the new rule at the top of the input chain
-    try:
-        api._execute('/ip/firewall/filter', add={
-            'chain': 'input',
-            'protocol': 'tcp',
-            'in-interface': 'netily-bridge',
-            'dst-port': '443',
-            'action': 'reject',
-            'reject-with': 'tcp-reset',
-            'comment': 'Netily-Fast-Fail-HTTPS-Probe',
-            'place-before': '0',
-        })
-        logger.info(f"[DIAGNOSE] HTTPS fast-fail rule applied for router {ctx.router.id}")
-    except Exception as ex:
-        logger.error(f"[DIAGNOSE] Failed to add HTTPS fast-fail rule: {ex}")
-        raise
-
-
-register_check(
-    id='https_probe_fast_fail',
-    label='HTTPS captive-probe SYNs get instant TCP reset (no 10s OS timeout)',
-    category='Performance',
-    severity='critical',
-    fix_fn=_fix_https_probe_fast_fail,
-)(_check_https_probe_fast_fail)
 
 
 # ────────────────────────────────────────────────────────────────

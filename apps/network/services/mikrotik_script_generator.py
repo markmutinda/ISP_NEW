@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 # changes meaningfully. Used by the diagnostic engine to detect
 # stale login.html on routers.
 # ────────────────────────────────────────────────────────────────
-LOGIN_HTML_VERSION = "5"  # bump this every time generate_login_html() changes meaningfully
+LOGIN_HTML_VERSION = "3"  # bump this every time generate_login_html() changes meaningfully
 
 
 class MikrotikScriptGenerator:
@@ -361,16 +361,12 @@ class MikrotikScriptGenerator:
         Left unset, this defaults to whatever slow/flaky DNS the WAN link
         handed out, which is the #1 cause of "sometimes extremely slow"
         unauthenticated portal loads.
-
-        🔥 FIX 1: allow-remote-requests=yes so client devices can use the router
-        as their DNS resolver, preventing 9.5s timeouts from walled-garden
-        blocking direct 8.8.8.8 queries.
         """
         return f"""# ─────────────────────────────────────────────────────────────
 # 5b. ROUTER DNS RESOLVER (fast + cached)
 # ─────────────────────────────────────────────────────────────
 :put "Configuring fast DNS resolver..."
-/ip dns set servers=1.1.1.1,8.8.8.8 cache-size=4096KiB cache-max-ttl=1d allow-remote-requests=yes
+/ip dns set servers=1.1.1.1,8.8.8.8 cache-size=4096KiB cache-max-ttl=1d allow-remote-requests=no
 :put " + Fast DNS set to 1.1.1.1, 8.8.8.8 with 4MB cache"
 """
 
@@ -582,26 +578,13 @@ class MikrotikScriptGenerator:
 """
 
     def _section_nat(self, r: Router) -> str:
-        """
-        🔥 FIX 2: Add force-DNS redirect rules so client DNS queries (UDP/TCP 53)
-        are intercepted and answered by the router, preventing the 9.5s timeout
-        from walled-garden blocking direct 8.8.8.8 queries.
-        """
         return f"""# ─────────────────────────────────────────────────────────────
-# 14. MASQUERADE & NAT + FORCE DNS
+# 14. MASQUERADE & NAT
 # ─────────────────────────────────────────────────────────────
 :put "Configuring NAT..."
 
 :do {{ /ip firewall nat remove [find comment="Netily-Masquerade"] }} on-error={{}}
 /ip firewall nat add chain=srcnat action=masquerade comment="Netily-Masquerade"
-
-# 🔥 FIX 2: Force client DNS through the router
-# Without these rules, clients try 8.8.8.8 directly, which the walled garden# blocks, causing ~9.5s timeouts before the OS falls back to the router.
-:do {{ /ip firewall nat remove [find comment="Netily-Force-DNS"] }} on-error={{}}
-:do {{ /ip firewall nat remove [find comment="Netily-Force-DNS-TCP"] }} on-error={{}}
-/ip firewall nat add chain=dstnat action=redirect to-ports=53 protocol=udp dst-port=53 in-interface="netily-bridge" comment="Netily-Force-DNS"
-/ip firewall nat add chain=dstnat action=redirect to-ports=53 protocol=tcp dst-port=53 in-interface="netily-bridge" comment="Netily-Force-DNS-TCP"
-:put " + Force-DNS rules added (UDP/TCP port 53 → router)"
 """
 
     def _section_schedulers(self, r: Router) -> str:
@@ -643,13 +626,6 @@ class MikrotikScriptGenerator:
     <!-- 🔥 OPTIMIZATION: Preconnect to portal domain only — same-origin as redirect target -->
     <link rel="dns-prefetch" href="{portal_base}">
     <link rel="preconnect" href="{portal_base}" crossorigin>
-    <!-- 🔥 FIX 4: rel=prefetch stores in the shared HTTP cache, which — unlike
-         sessionStorage — is NOT partitioned to this page's own origin, so
-         it is actually usable once we navigate to portal_base. This directly
-         replaces the old sessionStorage-based "prewarm", which was silently
-         non-functional: sessionStorage set on the router's hotspot origin
-         is invisible to JS running on portal_base's origin. -->
-    <link rel="prefetch" href="{portal_base}/hotspot/{r.id}" as="document">
     <style>
         *, *::before, *::after {{ box-sizing: border-box; margin: 0; padding: 0; }}
         body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', sans-serif; background: linear-gradient(135deg, #eff6ff 0%, #dbeafe 50%, #e0e7ff 100%); min-height: 100vh; display: flex; align-items: center; justify-content: center; padding: 1rem; }}
@@ -722,12 +698,22 @@ class MikrotikScriptGenerator:
             }});
         }});
 
-        // 🔥 FIX 4: REMOVED the old speculative fetch() + sessionStorage.setItem(...) block.
-        // It could never be read back — sessionStorage is same-origin only, and
-        // this page's origin is never the same as portal_base's. It was a pure
-        // cost: one extra HTTP request on an already bandwidth-limited captive
-        // network, with zero payoff. The <link rel="prefetch"> in the <head> above
-        // is the correct replacement.
+        // 🔥 Speculative fetch — SAME ORIGIN as the redirect target, so this is the
+        // ONLY DNS+TLS handshake this device needs to make before content shows.
+        // Result is stashed so the Next.js page skips its own fetch entirely.
+        try {{
+            var captiveUrl = '{portal_base}/api/v1/hotspot/captive-portal/?router={r.id}&tenant={tenant_name}';
+            fetch(captiveUrl, {{ credentials: 'omit' }})
+                .then(function(res) {{ return res.ok ? res.json() : null; }})
+                .then(function(data) {{
+                    if (!data) return;
+                    try {{
+                        data._cachedAt = Date.now();
+                        sessionStorage.setItem('portal_cache:{r.id}', JSON.stringify(data));
+                    }} catch (e) {{}}
+                }})
+                .catch(function() {{}});
+        }} catch (e) {{}}
     }})();
     </script>
 </body>
