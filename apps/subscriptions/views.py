@@ -1090,6 +1090,19 @@ class SubscriptionPaymentViewSet(viewsets.ReadOnlyModelViewSet):
 
             if payment.status in ['completed', 'failed', 'cancelled']:
                 subscription_activated = self._subscription_is_current(payment.subscription)
+                if payment.status == 'completed' and not subscription_activated:
+                    try:
+                        from .billing_lifecycle import complete_subscription_stk_payment
+
+                        payment, _invoice = complete_subscription_stk_payment(
+                            payment,
+                            mpesa_receipt=payment.mpesa_receipt or "",
+                        )
+                        payment.refresh_from_db()
+                        subscription_activated = self._subscription_is_current(payment.subscription)
+                    except Exception:
+                        logger.exception("Failed repairing completed subscription payment %s during status polling", payment.id)
+
                 return Response({
                     'payment_id': str(payment.id),
                     'status': payment.status,

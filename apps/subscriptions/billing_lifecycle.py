@@ -75,6 +75,12 @@ def sync_subscription_invoice_payment(payment, *, notify=True):
 
         amount_remaining = money(payment.amount)
         for candidate in unpaid:
+            existing_notes = candidate.internal_notes or ""
+            if receipt_number and receipt_number in existing_notes:
+                invoice = candidate
+                amount_remaining = Decimal("0.00")
+                break
+
             candidate_balance = money(candidate.balance if candidate.balance is not None else candidate.total_amount)
             if candidate_balance <= 0:
                 continue
@@ -156,9 +162,24 @@ def complete_subscription_stk_payment(payment, mpesa_receipt=""):
         with transaction.atomic():
             locked = SubscriptionPayment.objects.select_for_update().get(id=payment.id)
             if locked.status == 'completed':
-                return locked, None
-            locked.mark_completed(mpesa_receipt=mpesa_receipt)
-            payment = locked
+                subscription = locked.subscription
+                if (
+                    subscription.status == 'active'
+                    and subscription.current_period_end
+                    and subscription.current_period_end > timezone.now()
+                ):
+                    return locked, None
+                logger.warning(
+                    "Repairing completed subscription payment without active cycle: payment=%s subscription=%s status=%s period_end=%s",
+                    locked.id,
+                    subscription.id,
+                    subscription.status,
+                    subscription.current_period_end,
+                )
+                payment = locked
+            else:
+                locked.mark_completed(mpesa_receipt=mpesa_receipt)
+                payment = locked
 
     invoice = sync_subscription_invoice_payment(payment, notify=True)
     invoice_fully_paid = subscription_invoice_is_fully_paid(invoice)

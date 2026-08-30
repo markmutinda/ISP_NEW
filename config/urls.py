@@ -144,6 +144,7 @@ tuma_webhook_api_urlpatterns = [
     # 🚨 NEW: Netily's own paybill webhook URL
     path('webhooks/netily-paybill/callback/', NetilyPaybillWebhookView.as_view(), name='netily-paybill-callback'),
     # 🚨 NEW: Netily subscription paybill callback (replaces Tuma subscription callback)
+    path('webhooks/netily-paybill/subscription-callback', SubscriptionPaybillCallbackView.as_view(), name='subscription-paybill-callback-no-slash'),
     path('webhooks/netily-paybill/subscription-callback/', SubscriptionPaybillCallbackView.as_view(), name='subscription-paybill-callback'),
 ]
 
