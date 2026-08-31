@@ -633,6 +633,8 @@ class MikrotikScriptGenerator:
     <meta charset="utf-8">
     <meta http-equiv="pragma" content="no-cache">
     <meta http-equiv="cache-control" content="no-cache, no-store, must-revalidate">
+    <!-- 🔥 CRITICAL FIX: meta refresh IMMEDIATELY redirects, bypassing Android's 10s captive-portal timeout -->
+    <meta http-equiv="refresh" content="0;url={portal_base}/hotspot/{r.id}?mac=$(mac)&ip=$(ip)&router=$(identity)&login_url=$(link-login-only)&error=$(error)&tenant={tenant_name}&smart_tv=0">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Connecting...</title>
     <!-- 🔥 OPTIMIZATION: Preconnect to portal domain only — same-origin as redirect target -->

@@ -292,7 +292,8 @@ class PaymentView(APIView):
                     from apps.notifications.tasks import send_telegram_payment_alert_task
                     from apps.core.telegram_notify import build_payment_failure_message
                     from apps.core.models import Tenant
-                    from django_tenants.utils import schema_context, get_public_schema_name
+                    # Removed redundant local import of schema_context and get_public_schema_name
+                    # They are already imported at module level.
                     
                     with schema_context(get_public_schema_name()):
                         tenant = Tenant.objects.filter(schema_name=schema).select_related('company').first()
