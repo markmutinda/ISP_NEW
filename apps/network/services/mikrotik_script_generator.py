@@ -214,6 +214,7 @@ class MikrotikScriptGenerator:
 :do {{ /ip firewall filter remove [find comment~"Netily"] }} on-error={{}}
 :do {{ /ip firewall nat remove [find comment~"Netily"] }} on-error={{}}
 :do {{ /ip firewall mangle remove [find comment~"Netily"] }} on-error={{}}
+:do {{ /ip firewall nat remove [find comment~"Netily-Force-DNS"] }} on-error={{}}
 
 :put "Cleanup complete."
 """
@@ -585,6 +586,17 @@ class MikrotikScriptGenerator:
 
 :do {{ /ip firewall nat remove [find comment="Netily-Masquerade"] }} on-error={{}}
 /ip firewall nat add chain=srcnat action=masquerade comment="Netily-Masquerade"
+
+# Force ALL unauthenticated clients' DNS through the router's own resolver.
+# Without this, phones using a private/hardcoded DNS server (very common —
+# Private DNS, 8.8.8.8, carrier DoH) get their pre-auth DNS queries silently
+# dropped by the walled garden, causing a ~10s resolver timeout/retry before
+# the captive-portal redirect URL can even be reached.
+:do {{ /ip firewall nat remove [find comment~"Netily-Force-DNS"] }} on-error={{}}
+/ip firewall nat add chain=dstnat action=redirect to-ports=53 protocol=udp dst-port=53 \\
+    in-interface="netily-bridge" comment="Netily-Force-DNS"
+/ip firewall nat add chain=dstnat action=redirect to-ports=53 protocol=tcp dst-port=53 \\
+    in-interface="netily-bridge" comment="Netily-Force-DNS-TCP"
 """
 
     def _section_schedulers(self, r: Router) -> str:
