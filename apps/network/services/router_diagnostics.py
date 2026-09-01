@@ -374,48 +374,48 @@ def _check_login_html_current(ctx: DiagnosticContext) -> bool:
 
 def _fix_login_html_current(ctx: DiagnosticContext):
     """
-    🔥 FIX: Refresh ALL hotspot HTML pages (all 6 files) into netily-hotspot/
+    🔥 FIX: Refresh ALL hotspot HTML pages into BOTH root and flash locations.
     
-    Re-downloads login.html, rlogin.html, alogin.html, redirect.html,
-    error.html, and status.html via RouterOS /tool fetch.
+    Downloads login.html, rlogin.html, alogin.html, redirect.html,
+    error.html, and status.html into both netily-hotspot/ and flash/netily-hotspot/
+    so that flash-based boards (hEX, RB750Gr3) get their pages as well.
     
-    /tool fetch does NOT overwrite an existing file — it silently creates
-    'login.html1' if one already exists and the hotspot server keeps serving
-    the stale copy. So we delete the existing file first, then fetch.
+    Each file is deleted before fetching to avoid RouterOS appending a number
+    (login.html1) and serving the stale copy.
     
     Verification is done by polling the DB flag that the provisioning
-    endpoint stamps the instant the router's GET request lands — reading
-    file contents back over the RouterOS API is unreliable and was the
-    root cause of "fix applied but verification failed".
+    endpoint stamps when the router's GET request lands.
     """
     from apps.network.services.mikrotik_script_generator import MikrotikScriptGenerator, LOGIN_HTML_VERSION
 
     router, api = ctx.router, ctx.api
     gen = MikrotikScriptGenerator(router)
 
-    # 🔥 FIX: Determine the html-directory from the hotspot profile
     prof = next((p for p in ctx.live['hotspot_profiles'] if p.get('name') == 'netily-profile'), None)
     html_dir = (prof.get('html-directory') or 'netily-hotspot') if prof else 'netily-hotspot'
 
-    # 🔥 FIX: Fetch ALL 6 required files
     pages = ['login.html', 'rlogin.html', 'alogin.html', 'redirect.html', 'error.html', 'status.html']
+    # Refresh both storage locations — flash-based boards (hEX, RB750Gr3)
+    # serve from flash/<dir>/, everything else from <dir>/ directly.
+    targets = [html_dir, f"flash/{html_dir}"]
 
-    for filename in pages:
-        dst = f"{html_dir}/{filename}"
-        url = f"{gen.active_url}/api/v1/network/provision/{router.auth_key}/hotspot/{filename}"
+    for base_dir in targets:
+        for filename in pages:
+            dst = f"{base_dir}/{filename}"
+            url = f"{gen.active_url}/api/v1/network/provision/{router.auth_key}/hotspot/{filename}"
 
-        # Delete existing file first so /tool fetch actually overwrites it
-        try:
-            for f in api._execute('/file'):
-                if f.get('name') == dst:
-                    api._execute('/file', remove={'.id': f['.id']})
-                    logger.info(f"[DIAGNOSE FIX] Removed stale {dst} from router {router.id}")
-        except Exception as e:
-            logger.warning(f"[DIAGNOSE FIX] Could not clear stale {dst}: {e}")
+            # Delete existing file first so /tool fetch actually overwrites it
+            try:
+                for f in api._execute('/file'):
+                    if f.get('name') == dst:
+                        api._execute('/file', remove={'.id': f['.id']})
+                        logger.info(f"[DIAGNOSE FIX] Removed stale {dst} from router {router.id}")
+            except Exception as e:
+                logger.warning(f"[DIAGNOSE FIX] Could not clear stale {dst}: {e}")
 
-        ok = api.fetch_url(url, dst)
-        if not ok:
-            logger.warning(f"[DIAGNOSE FIX] fetch({filename}) failed to trigger")
+            ok = api.fetch_url(url, dst)
+            if not ok:
+                logger.warning(f"[DIAGNOSE FIX] fetch({dst}) failed to trigger")
 
     # Poll for the DB stamp written by ProvisionHotspotHTMLView when the
     # router's GET request for login.html actually lands. The router fetches
@@ -430,7 +430,7 @@ def _fix_login_html_current(ctx: DiagnosticContext):
     else:
         logger.warning(f"[DIAGNOSE FIX] login.html version stamp not confirmed for router {router.id} within timeout")
 
-    logger.info(f"[DIAGNOSE FIX] Refreshed hotspot HTML pages for router {router.id}")
+    logger.info(f"[DIAGNOSE FIX] Refreshed hotspot HTML pages (root + flash) for router {router.id}")
 
 
 register_check(

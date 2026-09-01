@@ -198,6 +198,8 @@ class MikrotikScriptGenerator:
 
 :do {{ :foreach i in=[/ip hotspot find name="netily-hotspot"] do={{ /ip hotspot remove $i }} }} on-error={{}}
 :do {{ :foreach i in=[/ip hotspot profile find name="netily-profile"] do={{ /ip hotspot profile remove $i }} }} on-error={{}}
+# 🔥 Clean up stale flash copies (hEX/RB750 boards)
+:do {{ :foreach i in=[/file find name~"flash/netily-hotspot/"] do={{ /file remove $i }} }} on-error={{}}
 :do {{ :foreach i in=[/ip pool find name="netily-pool"] do={{ /ip pool remove $i }} }} on-error={{}}
 :do {{ :foreach i in=[/ip pool find name="netily-pppoe-pool"] do={{ /ip pool remove $i }} }} on-error={{}}
 :do {{ :foreach i in=[/ip dhcp-server find name="netily-dhcp"] do={{ /ip dhcp-server remove $i }} }} on-error={{}}
@@ -525,22 +527,34 @@ class MikrotikScriptGenerator:
 """
 
     def _section_hotspot_html(self, r: Router) -> str:
-        # 🔥 FIX: Fetch ALL 5 required files into netily-hotspot/ folder
+        # Fetch ALL required files into BOTH netily-hotspot/ (root/NAND boards)
+        # AND flash/netily-hotspot/ (boards like hEX, RB750Gr3 that store files
+        # under a "flash" storage alias). Both are attempted; failures on one
+        # path are non-fatal since most boards only have one of the two.
         base = f"{self.active_url}/api/v1/network/provision/{r.auth_key}/hotspot"
         pages = ["login.html", "rlogin.html", "alogin.html", "redirect.html", "error.html", "status.html"]
 
-        fetch_lines = "\n".join(
-            f':do {{ /tool fetch url="{base}/{p}" dst-path=("netily-hotspot/" . "{p}") check-certificate=no }} '
-            f'on-error={{ :put "ERROR: {p} failed" }}'
-            for p in pages
-        )
+        fetch_lines = []
+        for p in pages:
+            fetch_lines.append(
+                f':do {{ /tool fetch url="{base}/{p}" dst-path=("netily-hotspot/" . "{p}") check-certificate=no }} '
+                f'on-error={{ :put "Note: {p} -> netily-hotspot/ not applicable on this board" }}'
+            )
+            fetch_lines.append(
+                f':do {{ /tool fetch url="{base}/{p}" dst-path=("flash/netily-hotspot/" . "{p}") check-certificate=no }} '
+                f'on-error={{ :put "Note: {p} -> flash/netily-hotspot/ not applicable on this board" }}'
+            )
+        fetch_block = "\n".join(fetch_lines)
 
         return f"""# ─────────────────────────────────────────────────────────────
 # 11. HOTSPOT HTML PAGES (Cloud Portal Redirectors)
+# Downloaded to BOTH root and flash/ storage — some boards (hEX,
+# RB750Gr3, etc.) only expose files under the "flash" alias.
 # ─────────────────────────────────────────────────────────────
-:put "Downloading hotspot pages into netily-hotspot/..."
+:put "Downloading hotspot pages into netily-hotspot/ and flash/netily-hotspot/..."
 :do {{ /file add name="netily-hotspot" type="directory" }} on-error={{}}
-{fetch_lines}
+:do {{ /file add name="flash/netily-hotspot" type="directory" }} on-error={{}}
+{fetch_block}
 """
 
     def _section_pppoe(self, r: Router, pppoe_local: str) -> str:
