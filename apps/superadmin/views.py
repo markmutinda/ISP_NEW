@@ -47,6 +47,7 @@ from .serializers import (
     PlatformExpenditureSerializer,
 )
 from apps.core.serializers import ChangelogSerializer, FeatureRequestSerializer
+from apps.subscriptions.models import BillingCycle
 from django_tenants.utils import schema_context, get_public_schema_name
 from django.shortcuts import get_object_or_404
 from .tasks import queue_changelog_notifications, queue_tenant_deletion
@@ -123,35 +124,109 @@ def _serialize_deletion_job(job: TenantDeletionJob) -> dict:
 class DashboardView(APIView):
     permission_classes = SUPERADMIN_PERMS
 
+    def _get_subscription(self, tenant):
+        try:
+            return tenant.company.subscription
+        except Exception:
+            return None
+
+    def _tenant_subscription_health(self, tenant, now):
+        subscription = self._get_subscription(tenant)
+
+        if tenant.status in {"suspended", "cancelled"}:
+            return tenant.status, tenant.subscription_expiry, Decimal("0.00")
+
+        if not subscription:
+            return tenant.status, tenant.subscription_expiry, tenant.monthly_rate or Decimal("0.00")
+
+        expiry = None
+        if subscription.status == "trialing":
+            expiry = subscription.trial_ends_at
+            health = "trial" if expiry and expiry > now else "trial_expired"
+        elif subscription.status == "active":
+            expiry = subscription.current_period_end
+            health = "active" if expiry and expiry > now else "expired"
+        elif subscription.status in {"past_due", "expired", "cancelled"}:
+            expiry = subscription.current_period_end or subscription.trial_ends_at
+            health = subscription.status
+        else:
+            expiry = subscription.current_period_end or subscription.trial_ends_at
+            health = subscription.status or tenant.status
+
+        mrr = subscription.current_price
+        try:
+            latest_cycle = BillingCycle.objects.filter(
+                tenant=tenant,
+                subscription=subscription,
+            ).order_by("-start_date", "-end_date").first()
+            if latest_cycle:
+                mrr = latest_cycle.calculate_total_charge()
+        except Exception:
+            pass
+
+        return health, expiry.date() if hasattr(expiry, "date") else expiry, mrr
+
     def get(self, request):
         _ensure_public()
         now = timezone.now()
         thirty_days_ago = now - timedelta(days=30)
 
-        tenants = Tenant.objects.exclude(schema_name__in=PROTECTED_SCHEMAS)
+        tenants = Tenant.objects.select_related("company", "company__subscription", "company__subscription__plan").exclude(schema_name__in=PROTECTED_SCHEMAS)
         total_tenants = tenants.count()
-        active_tenants = tenants.filter(status="active").count()
-        trial_tenants = tenants.filter(status="trial").count()
-        suspended_tenants = tenants.filter(status="suspended").count()
+        tenant_health_rows = []
+        health_counts = {
+            "active": 0,
+            "trial": 0,
+            "trial_expired": 0,
+            "past_due": 0,
+            "expired": 0,
+            "suspended": 0,
+            "cancelled": 0,
+            "inactive": 0,
+        }
+        mrr = Decimal("0.00")
+
+        for tenant in tenants:
+            health, expiry, tenant_mrr = self._tenant_subscription_health(tenant, now)
+            if health in {"active", "trial"}:
+                pass
+            elif health not in {"suspended", "cancelled", "past_due", "expired", "trial_expired"}:
+                health = "inactive"
+
+            health_counts[health] = health_counts.get(health, 0) + 1
+            if health == "active":
+                mrr += tenant_mrr or Decimal("0.00")
+
+            days_left = None
+            if expiry:
+                days_left = (expiry - now.date()).days
+            tenant_health_rows.append({
+                "id": str(tenant.id),
+                "company_name": getattr(getattr(tenant, "company", None), "name", "") or tenant.schema_name,
+                "subdomain": tenant.subdomain,
+                "status": health,
+                "subscription_plan": subscription.plan.name if subscription and subscription.plan else getattr(getattr(tenant, "company", None), "subscription_plan", ""),
+                "subscription_expiry": expiry.isoformat() if expiry else None,
+                "days_left": days_left,
+                "mrr": str(tenant_mrr or Decimal("0.00")),
+                "company_email": getattr(getattr(tenant, "company", None), "email", ""),
+            })
+
+        active_tenants = health_counts["active"]
+        trial_tenants = health_counts["trial"]
+        suspended_tenants = health_counts["suspended"]
 
         total_users = User.objects.count()
         recent_signups = tenants.filter(created_at__gte=thirty_days_ago).count()
 
         # Revenue from subscriptions (public schema)
         total_revenue = Decimal("0.00")
-        mrr = Decimal("0.00")
         try:
-            from apps.subscriptions.models import SubscriptionPayment, CompanySubscription
+            from apps.subscriptions.models import SubscriptionPayment
             total_revenue = (
                 SubscriptionPayment.objects
                 .filter(status="completed")
                 .aggregate(total=Sum("amount"))["total"]
-                or Decimal("0.00")
-            )
-            mrr = (
-                CompanySubscription.objects
-                .filter(status="active")
-                .aggregate(total=Sum("plan__price_monthly"))["total"]
                 or Decimal("0.00")
             )
         except Exception:
@@ -162,10 +237,19 @@ class DashboardView(APIView):
             "active_tenants": active_tenants,
             "trial_tenants": trial_tenants,
             "suspended_tenants": suspended_tenants,
+            "expired_tenants": health_counts["expired"] + health_counts["past_due"] + health_counts["trial_expired"],
+            "past_due_tenants": health_counts["past_due"],
+            "trial_expired_tenants": health_counts["trial_expired"],
+            "inactive_tenants": health_counts["inactive"] + health_counts["cancelled"],
             "total_users": total_users,
             "total_revenue": total_revenue,
             "mrr": mrr,
             "recent_signups": recent_signups,
+            "subscription_health": health_counts,
+            "tenant_subscription_health": sorted(
+                tenant_health_rows,
+                key=lambda row: (row["status"] not in {"expired", "past_due", "trial_expired"}, row["days_left"] if row["days_left"] is not None else 99999),
+            )[:12],
         }
 
         # ── Cross-tenant aggregates ──
@@ -233,7 +317,26 @@ class TenantListView(ListAPIView):
         # Filter by status
         tenant_status = self.request.query_params.get("status")
         if tenant_status:
-            qs = qs.filter(status=tenant_status)
+            now = timezone.now()
+            if tenant_status == "active":
+                qs = qs.filter(company__subscription__status="active", company__subscription__current_period_end__gt=now).exclude(status__in=["suspended", "cancelled"])
+            elif tenant_status == "trial":
+                qs = qs.filter(company__subscription__status="trialing", company__subscription__trial_ends_at__gt=now).exclude(status__in=["suspended", "cancelled"])
+            elif tenant_status == "expired":
+                qs = qs.filter(
+                    Q(company__subscription__status="expired")
+                    | Q(company__subscription__status="past_due")
+                    | Q(company__subscription__status="active", company__subscription__current_period_end__lte=now)
+                    | Q(company__subscription__status="trialing", company__subscription__trial_ends_at__lte=now)
+                ).exclude(status__in=["suspended", "cancelled"])
+            elif tenant_status == "past_due":
+                qs = qs.filter(company__subscription__status="past_due").exclude(status__in=["suspended", "cancelled"])
+            elif tenant_status == "trial_expired":
+                qs = qs.filter(company__subscription__status="trialing", company__subscription__trial_ends_at__lte=now).exclude(status__in=["suspended", "cancelled"])
+            elif tenant_status == "inactive":
+                qs = qs.filter(Q(status="cancelled") | Q(is_active=False))
+            else:
+                qs = qs.filter(status=tenant_status)
 
         # Ordering
         ordering = self.request.query_params.get("ordering", "-created_at")

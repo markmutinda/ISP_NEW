@@ -190,6 +190,7 @@ class TenantListSerializer(serializers.ModelSerializer):
     """Lightweight serializer for the tenant table."""
     status = serializers.SerializerMethodField()
     subscription_expiry = serializers.SerializerMethodField()
+    monthly_rate = serializers.SerializerMethodField()
     company_name = serializers.CharField(source="company.name", read_only=True)
     company_email = serializers.EmailField(source="company.email", read_only=True)
     company_phone = serializers.CharField(source="company.phone_number", read_only=True)
@@ -233,17 +234,37 @@ class TenantListSerializer(serializers.ModelSerializer):
         except Exception:
             return None
 
+    def _get_latest_cycle(self, obj):
+        try:
+            return BillingCycle.objects.filter(tenant=obj).select_related('subscription__plan').order_by('-start_date', '-end_date').first()
+        except Exception:
+            return None
+
     def _get_effective_expiry(self, obj):
         sub = self._get_subscription(obj)
         if sub:
-            if sub.is_trial and sub.trial_ends_at:
+            if sub.status == 'trialing' and sub.trial_ends_at:
                 return sub.trial_ends_at.date()
             if sub.current_period_end:
                 return sub.current_period_end.date()
         return obj.subscription_expiry
 
     def get_status(self, obj):
-        return obj.status
+        if obj.status in {'suspended', 'cancelled'}:
+            return obj.status
+
+        sub = self._get_subscription(obj)
+        if not sub:
+            return obj.status
+
+        now = timezone.now()
+        if sub.status == 'active':
+            return 'active' if sub.current_period_end and sub.current_period_end > now else 'expired'
+        if sub.status == 'trialing':
+            return 'trial' if sub.trial_ends_at and sub.trial_ends_at > now else 'trial_expired'
+        if sub.status in {'past_due', 'expired', 'cancelled'}:
+            return sub.status
+        return sub.status or obj.status
 
     def get_subscription_expiry(self, obj):
         return self._get_effective_expiry(obj)
@@ -253,7 +274,19 @@ class TenantListSerializer(serializers.ModelSerializer):
         if not expiry:
             return None
         delta = expiry - timezone.now().date()
-        return max(delta.days, 0)
+        return delta.days
+
+    def get_monthly_rate(self, obj):
+        sub = self._get_subscription(obj)
+        if sub and sub.plan:
+            latest_cycle = self._get_latest_cycle(obj)
+            if latest_cycle:
+                try:
+                    return latest_cycle.calculate_total_charge()
+                except Exception:
+                    pass
+            return sub.current_price
+        return obj.monthly_rate
 
     def get_subscription_plan(self, obj):
         """Read plan name from CompanySubscription (authoritative source)."""
@@ -268,13 +301,14 @@ class TenantListSerializer(serializers.ModelSerializer):
     def get_subscription_status_code(self, obj):
         sub = self._get_subscription(obj)
         if sub:
-            return sub.status
+            return self.get_status(obj)
         return obj.status
 
     def get_subscription_status_display(self, obj):
         labels = {
             'active': 'Active',
             'trialing': 'Trial',
+            'trial_expired': 'Trial expired',
             'past_due': 'Payment overdue',
             'cancelled': 'Cancelled',
             'expired': 'Expired',
@@ -298,11 +332,12 @@ class TenantListSerializer(serializers.ModelSerializer):
     def get_active_cycle(self, obj):
         """Helper to get the active billing cycle for a tenant."""
         try:
-            # Get the most recent active cycle for this tenant
-            return BillingCycle.objects.filter(
-                tenant=obj,
-                status='active'
-            ).order_by('-start_date').first()
+            sub = self._get_subscription(obj)
+            if sub:
+                current = BillingCycle.get_current_active_cycle(obj, sub, create=False)
+                if current:
+                    return current
+            return self._get_latest_cycle(obj)
         except Exception:
             return None
     
