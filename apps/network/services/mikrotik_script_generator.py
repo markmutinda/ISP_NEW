@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 # changes meaningfully. Used by the diagnostic engine to detect
 # stale login.html on routers.
 # ────────────────────────────────────────────────────────────────
-LOGIN_HTML_VERSION = "4"  # bumped — alogin/redirect/rlogin rewritten for fast redirect (no 10s Android delay)
+LOGIN_HTML_VERSION = "5"  # fixed malformed redirect.html header syntax that broke the hotspot login POST/redirect chain
 
 
 class MikrotikScriptGenerator:
@@ -217,6 +217,8 @@ class MikrotikScriptGenerator:
 :do {{ /ip firewall nat remove [find comment~"Netily"] }} on-error={{}}
 :do {{ /ip firewall mangle remove [find comment~"Netily"] }} on-error={{}}
 :do {{ /ip firewall nat remove [find comment~"Netily-Force-DNS"] }} on-error={{}}
+# 🔥 FIX: Wipe the portal IP address-list at the very start of every reprovision
+:do {{ /ip firewall address-list remove [find list="netily-portal-ips"] }} on-error={{}}
 
 :put "Cleanup complete."
 """
@@ -843,46 +845,33 @@ class MikrotikScriptGenerator:
 </body>
 </html>"""
 
+    # ─── FIXED redirect.html ──────────────────────────────────────────────
+
     def generate_redirect_html(self) -> str:
-        """RouterOS-mandated redirect shim – keeps the two $(if ...) lines exactly as required."""
+        """
+        RouterOS-mandated redirect shim. RouterOS parses this file literally to emit
+        raw HTTP response headers when http-status==302. The $(if ...) block must wrap
+        ONLY valid header lines, with NO extra text, followed by a blank line before
+        $(endif) — otherwise RouterOS's internal hotspot redirect chain breaks and the
+        login POST never completes, so the router never marks the client authenticated.
+        """
         r = self.router
         portal_base = self.get_tenant_portal_url().rstrip('/')
         redirect_url = f"{portal_base}/hotspot/{r.id}?ip=$(ip)&mac=$(mac)&router={r.id}&mikrotik_error=$(error)"
 
-        return f"""$(if http-status == 302)Hotspot redirect$(endif)
-$(if http-header == "Location"){redirect_url}$(endif)
+        return f"""$(if http-status == 302)HTTP/1.1 302 Moved Temporarily
+Location: {redirect_url}
+
+$(endif)
 <!doctype html>
 <html lang="en">
 <head>
     <title>Redirecting</title>
     <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
-    <meta name="theme-color" content="#2563eb">
-    <meta content="0; url={redirect_url}" http-equiv="refresh">
-    <meta content="no-cache" http-equiv="pragma">
-    <meta content="-1" http-equiv="expires">
-    <style>
-        body {{
-            margin: 0; min-height: 100vh;
-            display: flex; align-items: center; justify-content: center;
-            background: #fafafa; color: #52525b;
-            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", system-ui, sans-serif;
-            font-size: 13.5px;
-        }}
-    </style>
+    <meta http-equiv="refresh" content="0; url={redirect_url}">
 </head>
 <body>
 <p>Redirecting…</p>
-<script>
-    (function () {{
-        var redirect = '$(link-redirect)';
-        var fallback = '{redirect_url}';
-        if (!redirect || !/^https?:\\/\\//i.test(redirect) || redirect.indexOf('hot.spot') !== -1) {{
-            redirect = fallback;
-        }}
-        window.location.replace(redirect);
-    }})();
-</script>
 </body>
 </html>"""
 
