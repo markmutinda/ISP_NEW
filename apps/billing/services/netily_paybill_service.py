@@ -194,6 +194,53 @@ def stk_push_own_paybill(*, amount, phone_number, account_reference, transaction
     )
 
 
+def query_stk_status(*, checkout_request_id):
+    """
+    Query Safaricom for an STK transaction result. Use this as a recovery path
+    when the customer has paid but the asynchronous callback is delayed or lost.
+    """
+    if not checkout_request_id:
+        raise NetilyPaybillError("Missing checkout request ID.")
+
+    if _circuit_open():
+        raise NetilyPaybillError("Payment gateway is temporarily unavailable. Please retry shortly.")
+
+    token = _get_access_token()
+    timestamp = _timestamp()
+    payload = {
+        "BusinessShortCode": settings.NETILY_PAYBILL_SHORTCODE,
+        "Password": _password(timestamp),
+        "Timestamp": timestamp,
+        "CheckoutRequestID": checkout_request_id,
+    }
+
+    try:
+        resp = _session.post(
+            f"{_api_base()}/mpesa/stkpushquery/v1/query",
+            json=payload,
+            headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+            timeout=_REQUEST_TIMEOUT,
+        )
+    except requests.exceptions.ConnectTimeout as exc:
+        _trip_circuit()
+        logger.warning("Netily paybill STK query connect timeout: %s", exc)
+        raise NetilyPaybillError("Payment status is temporarily unavailable. Please retry shortly.") from exc
+    except requests.exceptions.RequestException as exc:
+        _trip_circuit()
+        logger.error("Netily paybill STK query failed: %s", exc)
+        raise NetilyPaybillError("Payment status check failed. Please retry.") from exc
+
+    try:
+        data = resp.json()
+    except ValueError:
+        raise NetilyPaybillError(f"Invalid Daraja status response: {resp.text[:300]}")
+
+    if resp.status_code != 200:
+        raise NetilyPaybillError(data.get("errorMessage") or "Payment status check was rejected.")
+
+    return data
+
+
 def _normalize_bank_name(text: str) -> str:
     """Normalize bank name for fuzzy matching against BANK_PAYBILL_MAP keys."""
     t = text.lower().replace("bank", "").replace("-", "").replace(" ", "").replace("&", "")

@@ -10,6 +10,7 @@ from datetime import timedelta
 from decimal import Decimal
 
 from django.conf import settings
+from django.core.cache import cache
 from django.db import transaction, connection
 from django.db.models import Sum, Count
 from django.shortcuts import get_object_or_404
@@ -22,7 +23,7 @@ from rest_framework.permissions import IsAuthenticated, AllowAny
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from apps.billing.services.netily_paybill_service import stk_push_own_paybill, NetilyPaybillError
+from apps.billing.services.netily_paybill_service import query_stk_status, stk_push_own_paybill, NetilyPaybillError
 from requests.exceptions import RequestException
 from apps.core.models import Company
 
@@ -1078,15 +1079,62 @@ class SubscriptionPaymentViewSet(viewsets.ReadOnlyModelViewSet):
             and subscription.current_period_end
             and subscription.current_period_end > timezone.now()
         )
+
+    def _reconcile_gateway_status(self, payment):
+        """
+        Recover paid STK pushes when Daraja's callback is delayed or never reaches us.
+        The cache throttle keeps active payment modals from querying Safaricom on
+        every frontend poll.
+        """
+        if payment.status not in ['pending', 'processing'] or not payment.payhero_checkout_id:
+            return payment
+
+        cache_key = f"subscription-stk-query:{payment.id}:{payment.payhero_checkout_id}"
+        if cache.get(cache_key):
+            return payment
+        cache.set(cache_key, True, 8)
+
+        try:
+            gateway_status = query_stk_status(checkout_request_id=payment.payhero_checkout_id)
+        except NetilyPaybillError as exc:
+            logger.info("Subscription STK status query still pending for payment %s: %s", payment.id, exc)
+            return payment
+        except Exception as exc:
+            logger.warning("Unexpected subscription STK status query error for payment %s: %s", payment.id, exc)
+            return payment
+
+        result_code = str(gateway_status.get('ResultCode', '')).strip()
+        result_desc = gateway_status.get('ResultDesc') or gateway_status.get('errorMessage') or ''
+
+        if result_code == '0':
+            try:
+                from .billing_lifecycle import complete_subscription_stk_payment
+
+                payment, _invoice = complete_subscription_stk_payment(
+                    payment,
+                    mpesa_receipt=payment.mpesa_receipt or "",
+                )
+                payment.refresh_from_db()
+            except Exception:
+                logger.exception("Failed completing subscription payment %s from STK query", payment.id)
+            return payment
+
+        terminal_failure_codes = {'1', '1032', '1037', '2001'}
+        if result_code in terminal_failure_codes:
+            payment.mark_failed(result_desc or 'M-Pesa did not complete the payment.')
+            payment.refresh_from_db()
+
+        return payment
     
     @action(detail=True, methods=['get'])
     def status(self, request, pk=None):
         """
-        Poll payment status. Source of truth is the webhook — this endpoint
-        only reads DB state, it never calls out to a payment gateway.
+        Poll payment status. Webhooks remain the primary path, but polling also
+        queries Daraja as a recovery path for paid STKs whose callbacks are late.
         """
         with schema_context('public'):
             payment = self.get_object()
+            payment = self._reconcile_gateway_status(payment)
 
             if payment.status in ['completed', 'failed', 'cancelled']:
                 subscription_activated = self._subscription_is_current(payment.subscription)
@@ -1120,7 +1168,7 @@ class SubscriptionPaymentViewSet(viewsets.ReadOnlyModelViewSet):
             return Response({
                 'payment_id': str(payment.id),
                 'status': 'pending',
-                'message': 'Waiting for payment confirmation...',
+                'message': 'Waiting for M-Pesa confirmation. If you completed the PIN, we are checking Safaricom directly too.',
                 'mpesa_receipt': None,
                 'completed_at': None,
             })

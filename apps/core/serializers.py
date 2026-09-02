@@ -704,6 +704,22 @@ class GlobalSystemSettingsSerializer(serializers.ModelSerializer):
         "work-sans",
         "archivo",
     }
+    APPEARANCE_FONT_ALIASES = {
+        "space grotesk": "space-grotesk",
+        "open sans": "open-sans",
+        "source sans": "source-sans-3",
+        "source sans 3": "source-sans-3",
+        "source-sans": "source-sans-3",
+        "source_sans_3": "source-sans-3",
+        "ibm plex sans": "ibm-plex-sans",
+        "ibm_plex_sans": "ibm-plex-sans",
+        "dm sans": "dm-sans",
+        "dm_sans": "dm-sans",
+        "plus jakarta sans": "plus-jakarta-sans",
+        "plus_jakarta_sans": "plus-jakarta-sans",
+        "work sans": "work-sans",
+        "work_sans": "work-sans",
+    }
 
     class Meta:
         model = GlobalSystemSettings
@@ -712,6 +728,7 @@ class GlobalSystemSettingsSerializer(serializers.ModelSerializer):
 
     def validate_appearance_font(self, value):
         normalized = (value or "outfit").strip().lower()
+        normalized = self.APPEARANCE_FONT_ALIASES.get(normalized, normalized.replace("_", "-"))
         if normalized not in self.VALID_APPEARANCE_FONTS:
             raise serializers.ValidationError("Choose a supported appearance font.")
         return normalized
