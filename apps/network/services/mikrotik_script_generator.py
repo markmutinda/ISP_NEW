@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 # changes meaningfully. Used by the diagnostic engine to detect
 # stale login.html on routers.
 # ────────────────────────────────────────────────────────────────
-LOGIN_HTML_VERSION = "6"  # added login_url + tenant to redirect/rlogin/alogin/error pages
+LOGIN_HTML_VERSION = "7"  # fast rlogin.html (no login_url/tenant) — frontend reconstructs from gateway_ip
 
 
 class MikrotikScriptGenerator:
@@ -749,16 +749,15 @@ class MikrotikScriptGenerator:
 </body>
 </html>"""
 
-    # ─── NEW VERSIONS (Claude's changes) ─────────────────────────────
+    # ─── FAST VERSION (no login_url/tenant) ─────────────────────────────
 
     def generate_rlogin_html(self) -> str:
-        """Lightweight spinner + instant redirect (meta 1s) – now carries login_url and tenant."""
+        """Lightweight spinner + instant redirect (meta 1s) – NO login_url/tenant (they cause 10s delay)."""
         r = self.router
         portal_base = self.get_tenant_portal_url().rstrip('/')
-        tenant_name = self._escape_ros_string(r.tenant_subdomain or 'public')
         redirect_url = (
             f"{portal_base}/hotspot/{r.id}?ip=$(ip)&mac=$(mac)&router={r.id}"
-            f"&login_url=$(link-login-only)&tenant={tenant_name}&mikrotik_error=$(error)"
+            f"&mikrotik_error=$(error)"
         )
         primary_color = "#2563eb"
 
