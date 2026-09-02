@@ -7,6 +7,7 @@ from django.utils import timezone
 from apps.core.models import Company, Tenant
 from apps.subscriptions.models import CompanySubscription, NetilyPlan
 from apps.superadmin.serializers import TenantListSerializer
+from apps.superadmin.views import DashboardView
 
 
 class TenantListSerializerTests(TestCase):
@@ -58,3 +59,22 @@ class TenantListSerializerTests(TestCase):
         self.assertEqual(data["subscription_status"], "Trial")
         self.assertEqual(data["subscription_status_code"], "trialing")
         self.assertEqual(data["tenant_status_display"], "Trial")
+
+    def test_dashboard_plan_name_uses_company_subscription(self):
+        CompanySubscription.objects.create(
+            company=self.company,
+            plan=self.plan,
+            billing_period="monthly",
+            current_period_start=timezone.now(),
+            current_period_end=timezone.now() + timedelta(days=30),
+            status="active",
+        )
+        tenant = Tenant(
+            company=self.company,
+            subdomain="green",
+            schema_name="green",
+            database_name="green",
+            status="active",
+        )
+
+        self.assertEqual(DashboardView()._tenant_subscription_plan_name(tenant), "Starter")

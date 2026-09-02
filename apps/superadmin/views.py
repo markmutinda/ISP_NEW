@@ -130,6 +130,12 @@ class DashboardView(APIView):
         except Exception:
             return None
 
+    def _tenant_subscription_plan_name(self, tenant):
+        subscription = self._get_subscription(tenant)
+        if subscription and subscription.plan:
+            return subscription.plan.name
+        return getattr(getattr(tenant, "company", None), "subscription_plan", "")
+
     def _tenant_subscription_health(self, tenant, now):
         subscription = self._get_subscription(tenant)
 
@@ -205,7 +211,7 @@ class DashboardView(APIView):
                 "company_name": getattr(getattr(tenant, "company", None), "name", "") or tenant.schema_name,
                 "subdomain": tenant.subdomain,
                 "status": health,
-                "subscription_plan": subscription.plan.name if subscription and subscription.plan else getattr(getattr(tenant, "company", None), "subscription_plan", ""),
+                "subscription_plan": self._tenant_subscription_plan_name(tenant),
                 "subscription_expiry": expiry.isoformat() if expiry else None,
                 "days_left": days_left,
                 "mrr": str(tenant_mrr or Decimal("0.00")),
