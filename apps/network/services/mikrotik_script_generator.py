@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 # changes meaningfully. Used by the diagnostic engine to detect
 # stale login.html on routers.
 # ────────────────────────────────────────────────────────────────
-LOGIN_HTML_VERSION = "3"  # bump this every time generate_login_html() changes meaningfully
+LOGIN_HTML_VERSION = "4"  # bumped — alogin/redirect/rlogin rewritten for fast redirect (no 10s Android delay)
 
 
 class MikrotikScriptGenerator:
@@ -747,33 +747,44 @@ class MikrotikScriptGenerator:
 </body>
 </html>"""
 
+    # ─── NEW VERSIONS (Claude's changes) ─────────────────────────────
+
     def generate_rlogin_html(self) -> str:
-        """Shown on intercepted/redirected pre-auth requests — same portal
-        redirect as login.html, but a lightweight loading page (no TV
-        detection needed, RouterOS already knows this is a redirect)."""
+        """Lightweight spinner + instant redirect (meta 1s) – no TV detection, no fetch."""
         r = self.router
         portal_base = self.get_tenant_portal_url().rstrip('/')
-        tenant_name = self._escape_ros_string(r.tenant_subdomain or 'public')
+        redirect_url = f"{portal_base}/hotspot/{r.id}?ip=$(ip)&mac=$(mac)&router={r.id}&mikrotik_error=$(error)"
         primary_color = "#2563eb"
 
-        return f"""<!DOCTYPE html>
+        return f"""<!doctype html>
 <html lang="en">
 <head>
-    <meta charset="utf-8">
-    <meta http-equiv="pragma" content="no-cache">
-    <meta http-equiv="cache-control" content="no-cache, no-store, must-revalidate">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <meta http-equiv="refresh" content="2; url={portal_base}/hotspot/{r.id}">
     <title>Connecting...</title>
-    <link rel="dns-prefetch" href="{portal_base}">
-    <link rel="preconnect" href="{portal_base}" crossorigin>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="theme-color" content="{primary_color}">
+    <meta content="1; url={redirect_url}" http-equiv="refresh">
+    <meta content="no-cache" http-equiv="pragma">
+    <meta content="-1" http-equiv="expires">
     <style>
         *, *::before, *::after {{ box-sizing: border-box; margin: 0; padding: 0; }}
-        body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: linear-gradient(135deg, #eff6ff 0%, #dbeafe 50%, #e0e7ff 100%); min-height: 100vh; display: flex; align-items: center; justify-content: center; padding: 1rem; }}
-        .card {{ background: white; border-radius: 1.5rem; box-shadow: 0 25px 50px -12px rgba(0,0,0,0.15); padding: 2.25rem 2rem; width: 100%; max-width: 340px; text-align: center; }}
-        .spinner {{ width: 40px; height: 40px; border: 3px solid #e5e7eb; border-top-color: {primary_color}; border-radius: 50%; margin: 0 auto 1.25rem; animation: spin 0.8s linear infinite; }}
+        body {{
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", system-ui, sans-serif;
+            background: #fafafa; min-height: 100vh;
+            display: flex; align-items: center; justify-content: center; padding: 1rem;
+        }}
+        .card {{
+            background: #fff; border-radius: 1.25rem; border: 1px solid #e4e4e7;
+            padding: 2.25rem 2rem; width: 100%; max-width: 340px; text-align: center;
+            box-shadow: 0 8px 24px rgba(15,23,42,0.06);
+        }}
+        .spinner {{
+            width: 36px; height: 36px; margin: 0 auto 1.25rem;
+            border: 3px solid #e5e7eb; border-top-color: {primary_color};
+            border-radius: 50%; animation: spin 0.8s linear infinite;
+        }}
         @keyframes spin {{ to {{ transform: rotate(360deg); }} }}
-        h1 {{ font-size: 1.125rem; font-weight: 700; color: #111827; margin-bottom: 0.375rem; }}
+        h1 {{ font-size: 1.0625rem; font-weight: 600; color: #18181b; margin-bottom: 0.375rem; }}
         p {{ font-size: 0.8125rem; color: #6b7280; }}
     </style>
 </head>
@@ -784,67 +795,98 @@ class MikrotikScriptGenerator:
         <p>Redirecting to the WiFi portal</p>
     </div>
     <script>
-    (function() {{
-        var mac = '$(mac)', ip = '$(ip)', identity = '$(identity)', loginUrl = '$(link-login-only)', error = '$(error)';
-        var params = ['mac=' + encodeURIComponent(mac), 'ip=' + encodeURIComponent(ip), 'router=' + encodeURIComponent(identity), 'login_url=' + encodeURIComponent(loginUrl), 'error=' + encodeURIComponent(error), 'tenant=' + '{tenant_name}'];
-        var redirectUrl = '{portal_base}/hotspot/{r.id}?' + params.join('&');
-        try {{
-            var inbound = new URLSearchParams(window.location.search);
-            if (inbound.get('username') && inbound.get('password')) return; // let login.html handle it
-        }} catch (e) {{}}
-        window.location.replace(redirectUrl);
+    (function () {{
+        window.location.replace('{redirect_url}');
     }})();
     </script>
 </body>
 </html>"""
 
     def generate_alogin_html(self) -> str:
-        """Shown briefly after a successful auto-login (MAC-cookie / trial)."""
-        return f"""<!DOCTYPE html>
+        """Connected page – instant meta 0s redirect."""
+        r = self.router
+        portal_base = self.get_tenant_portal_url().rstrip('/')
+        redirect_url = f"{portal_base}/hotspot/{r.id}?ip=$(ip)&mac=$(mac)&router={r.id}&mikrotik_error=$(error)"
+
+        return f"""<!doctype html>
 <html lang="en">
 <head>
-    <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <meta http-equiv="pragma" content="no-cache">
-    <meta http-equiv="expires" content="-1">
-    <meta http-equiv="refresh" content="1; url=$(link-redirect)">
     <title>Connected</title>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="theme-color" content="#2563eb">
+    <meta content="0; url={redirect_url}" http-equiv="refresh">
+    <meta content="no-cache" http-equiv="pragma">
+    <meta content="-1" http-equiv="expires">
     <style>
-        body {{ margin: 0; min-height: 100vh; display: flex; align-items: center; justify-content: center; background: #fafafa; color: #52525b; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; font-size: 13.5px; }}
+        body {{
+            margin: 0; min-height: 100vh;
+            display: flex; align-items: center; justify-content: center;
+            background: #fafafa; color: #52525b;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", system-ui, sans-serif;
+            font-size: 13.5px;
+        }}
     </style>
 </head>
 <body>
 <p>You're connected — taking you online…</p>
 <script>
-(function () {{
-    var redirect = '$(link-redirect)';
-    if (!redirect || !/^https?:\\/\\//i.test(redirect) || redirect.indexOf('hot.spot') !== -1) {{
-        redirect = 'https://www.google.com';
-    }}
-    window.location.replace(redirect);
-}})();
+    (function () {{
+        var redirect = '$(link-redirect)';
+        var fallback = '{redirect_url}';
+        if (!redirect || !/^https?:\\/\\//i.test(redirect) || redirect.indexOf('hot.spot') !== -1) {{
+            redirect = fallback;
+        }}
+        window.location.replace(redirect);
+    }})();
 </script>
 </body>
 </html>"""
 
     def generate_redirect_html(self) -> str:
-        """RouterOS-mandated redirect shim. The two $(if ...) header lines
-        MUST stay exactly as-is and MUST be the first two lines — RouterOS
-        parses them to build the raw HTTP 302 response before any HTML."""
-        return """$(if http-status == 302)Hotspot redirect$(endif)
-$(if http-header == "Location")$(link-redirect)$(endif)
+        """RouterOS-mandated redirect shim – keeps the two $(if ...) lines exactly as required."""
+        r = self.router
+        portal_base = self.get_tenant_portal_url().rstrip('/')
+        redirect_url = f"{portal_base}/hotspot/{r.id}?ip=$(ip)&mac=$(mac)&router={r.id}&mikrotik_error=$(error)"
+
+        return f"""$(if http-status == 302)Hotspot redirect$(endif)
+$(if http-header == "Location"){redirect_url}$(endif)
 <!doctype html>
 <html lang="en">
 <head>
+    <title>Redirecting</title>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <meta http-equiv="refresh" content="0; url=$(link-redirect)">
-    <meta http-equiv="pragma" content="no-cache">
-    <meta http-equiv="expires" content="-1">
-    <title>Redirecting</title>
+    <meta name="theme-color" content="#2563eb">
+    <meta content="0; url={redirect_url}" http-equiv="refresh">
+    <meta content="no-cache" http-equiv="pragma">
+    <meta content="-1" http-equiv="expires">
+    <style>
+        body {{
+            margin: 0; min-height: 100vh;
+            display: flex; align-items: center; justify-content: center;
+            background: #fafafa; color: #52525b;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", system-ui, sans-serif;
+            font-size: 13.5px;
+        }}
+    </style>
 </head>
-<body></body>
+<body>
+<p>Redirecting…</p>
+<script>
+    (function () {{
+        var redirect = '$(link-redirect)';
+        var fallback = '{redirect_url}';
+        if (!redirect || !/^https?:\\/\\//i.test(redirect) || redirect.indexOf('hot.spot') !== -1) {{
+            redirect = fallback;
+        }}
+        window.location.replace(redirect);
+    }})();
+</script>
+</body>
 </html>"""
+
+    # ─── End of new methods ──────────────────────────────────────────
 
     def generate_error_html(self) -> str:
         r = self.router
