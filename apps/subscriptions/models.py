@@ -14,6 +14,7 @@ These models live in the PUBLIC schema and handle:
 10. TenantUserLedger - Immutable audit trail of PPPoE/Hotspot user lifecycle events
 """
 
+import calendar
 import secrets
 import uuid
 from datetime import timedelta
@@ -164,6 +165,11 @@ class CompanySubscription(models.Model):
     # Period tracking
     current_period_start = models.DateTimeField()
     current_period_end = models.DateTimeField()
+    billing_anchor_day = models.PositiveSmallIntegerField(
+        null=True,
+        blank=True,
+        help_text="Calendar day used for recurring subscription renewals. Set from the first paid activation date.",
+    )
     
     # Status
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='trialing')
@@ -261,6 +267,40 @@ class CompanySubscription(models.Model):
         if self.billing_period == 'yearly':
             return self.plan.price_yearly
         return self.plan.price_monthly
+
+    def _anchor_day_from(self, value=None) -> int:
+        value = value or self.current_period_start or self.current_period_end or timezone.now()
+        return max(1, min(31, int(self.billing_anchor_day or value.day)))
+
+    @staticmethod
+    def _add_months(value, months: int, anchor_day: int):
+        month_index = value.month - 1 + months
+        year = value.year + month_index // 12
+        month = month_index % 12 + 1
+        day = min(anchor_day, calendar.monthrange(year, month)[1])
+        return value.replace(year=year, month=month, day=day)
+
+    def next_period_end(self, start=None, periods: int = 1):
+        """
+        Return the next calendar-anchored period end.
+
+        Monthly billing advances by calendar month instead of a fixed 30 days,
+        so a tenant who first paid on the 12th keeps the 12th as the recurring
+        renewal date. Day 29-31 anchors clamp to shorter months.
+        """
+        start = start or self.current_period_end or timezone.now()
+        anchor_day = self._anchor_day_from(start)
+        months = 12 * periods if self.billing_period == 'yearly' else periods
+        end = self._add_months(start, months, anchor_day)
+        while end <= start:
+            end = self._add_months(end, months, anchor_day)
+        return end
+
+    def ensure_billing_anchor(self, paid_at=None):
+        if not self.billing_anchor_day:
+            anchor_source = paid_at or self.current_period_start or timezone.now()
+            self.billing_anchor_day = max(1, min(31, int(anchor_source.day)))
+        return self.billing_anchor_day
     
     def extend_subscription(self, periods: int = 1):
         """
@@ -278,18 +318,17 @@ class CompanySubscription(models.Model):
         from django.db import transaction
         
         with transaction.atomic():
-            if self.billing_period == 'yearly':
-                days = 365 * periods
-            else:
-                days = 30 * periods
-            
+            now = timezone.now()
+            self.ensure_billing_anchor(now)
+
             # If expired/past_due, start the new cycle from right now
-            if self.current_period_end < timezone.now():
-                self.current_period_start = timezone.now()
-                self.current_period_end = timezone.now() + timedelta(days=days)
+            if self.current_period_end < now:
+                self.current_period_start = now
+                self.current_period_end = self.next_period_end(now, periods)
             else:
                 # Extend from current end if they paid early
-                self.current_period_end += timedelta(days=days)
+                self.current_period_start = self.current_period_end
+                self.current_period_end = self.next_period_end(self.current_period_end, periods)
             
             # UNLOCK the account
             self.status = 'active'
@@ -331,7 +370,7 @@ class CompanySubscription(models.Model):
         
         self.save()
     
-    def convert_from_trial(self, billing_period: str = 'monthly', defer_to_trial_end: bool = False):
+    def convert_from_trial(self, billing_period: str = 'monthly', defer_to_trial_end: bool = False, paid_at=None):
         """
         Convert trial subscription to paid subscription.
         Called after successful payment.
@@ -351,9 +390,11 @@ class CompanySubscription(models.Model):
         
         with transaction.atomic():
             now = timezone.now()
+            paid_at = paid_at or now
             
             self.billing_period = billing_period
             self.converted_from_trial_at = now
+            self.ensure_billing_anchor(paid_at)
             
             if defer_to_trial_end and self.trial_ends_at and self.trial_ends_at > now:
                 # DEFERRED: Payment accepted but billing starts when trial expires
@@ -362,10 +403,7 @@ class CompanySubscription(models.Model):
                 self.is_trial = False
                 self.status = 'active'
                 
-                if billing_period == 'yearly':
-                    cycle_end = cycle_start + timedelta(days=365)
-                else:
-                    cycle_end = cycle_start + timedelta(days=30)
+                cycle_end = self.next_period_end(cycle_start)
                 
                 # Period starts at trial end
                 self.current_period_start = cycle_start
@@ -376,10 +414,7 @@ class CompanySubscription(models.Model):
                 self.status = 'active'
                 self.current_period_start = now
                 
-                if billing_period == 'yearly':
-                    self.current_period_end = now + timedelta(days=365)
-                else:
-                    self.current_period_end = now + timedelta(days=30)
+                self.current_period_end = self.next_period_end(now)
                 
                 cycle_start = now
                 cycle_end = self.current_period_end
@@ -1008,9 +1043,9 @@ class BillingCycle(models.Model):
             return cycle
 
         start = subscription.current_period_start or now
-        end = subscription.current_period_end or (start + timedelta(days=30))
+        end = subscription.current_period_end or subscription.next_period_end(start)
         if end <= now:
-            end = now + timedelta(days=30)
+            end = subscription.next_period_end(now)
         return cls.objects.create(
             tenant=tenant,
             subscription=subscription,

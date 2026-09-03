@@ -548,7 +548,7 @@ class MeteredBillingEstimateView(APIView):
                         tenant=tenant,
                         subscription=subscription,
                         start_date=subscription.current_period_start or timezone.now(),
-                        end_date=subscription.current_period_end or (timezone.now() + timedelta(days=30)),
+                        end_date=subscription.current_period_end or subscription.next_period_end(timezone.now()),
                         status='active',
                     )
                     minimum_charge = active_cycle.snapshot_base_fee or minimum_charge
@@ -879,6 +879,7 @@ class InitiateSubscriptionPaymentView(APIView):
                 # to prevent phantom plan changes from unpaid STK pushes.
                 
                 # Create payment record with intended plan
+                period_start = subscription.current_period_end or timezone.now()
                 payment = SubscriptionPayment.objects.create(
                     subscription=subscription,
                     intended_plan=plan,
@@ -888,10 +889,8 @@ class InitiateSubscriptionPaymentView(APIView):
                     phone_number=phone_number,
                     status='pending',
                     defer_billing_to_trial_end=defer_billing,
-                    period_start=subscription.current_period_end or timezone.now(),
-                    period_end=(subscription.current_period_end or timezone.now()) + timedelta(
-                        days=365 if billing_period == 'yearly' else 30
-                    ),
+                    period_start=period_start,
+                    period_end=subscription.next_period_end(period_start),
                 )
         # ── End atomic block — payment record is now committed ───────
         # External API calls happen below, outside any DB transaction.

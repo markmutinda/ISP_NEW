@@ -2916,7 +2916,7 @@ class TenantUserLedgerListView(APIView):
                     status='active',
                     defaults={
                         "start_date": subscription.current_period_start or timezone.now(),
-                        "end_date": subscription.current_period_end or (timezone.now() + timedelta(days=30)),
+                        "end_date": subscription.current_period_end or subscription.next_period_end(timezone.now()),
                     },
                 )
 
@@ -3890,8 +3890,9 @@ class SubscriptionInvoiceReconcileView(APIView):
                     update_fields.extend(["is_trial", "converted_from_trial_at"])
                 if not subscription.current_period_end or subscription.current_period_end <= now:
                     subscription.current_period_start = now
-                    subscription.current_period_end = now + timedelta(days=365 if subscription.billing_period == "yearly" else 30)
-                    update_fields.extend(["current_period_start", "current_period_end"])
+                    subscription.ensure_billing_anchor(now)
+                    subscription.current_period_end = subscription.next_period_end(now)
+                    update_fields.extend(["current_period_start", "current_period_end", "billing_anchor_day"])
             subscription.save(update_fields=list(dict.fromkeys(update_fields)))
         elif sync_tenant_access:
             current_balance = _decimal_money(getattr(tenant_invoice, "balance", 0))
@@ -3906,8 +3907,9 @@ class SubscriptionInvoiceReconcileView(APIView):
                     update_fields.extend(["is_trial", "converted_from_trial_at"])
                 if not subscription.current_period_end or subscription.current_period_end <= now:
                     subscription.current_period_start = now
-                    subscription.current_period_end = now + timedelta(days=365 if subscription.billing_period == "yearly" else 30)
-                    update_fields.extend(["current_period_start", "current_period_end"])
+                    subscription.ensure_billing_anchor(now)
+                    subscription.current_period_end = subscription.next_period_end(now)
+                    update_fields.extend(["current_period_start", "current_period_end", "billing_anchor_day"])
             subscription.save(update_fields=list(dict.fromkeys(update_fields)))
 
         if (
@@ -3925,13 +3927,13 @@ class SubscriptionInvoiceReconcileView(APIView):
             if cycle.status == "invoiced":
                 cycle.status = "paid"
 
-            period_days = 365 if subscription.billing_period == "yearly" else 30
             next_start = cycle.end_date
-            next_end = next_start + timedelta(days=period_days)
+            subscription.ensure_billing_anchor(next_start)
+            next_end = subscription.next_period_end(next_start)
             subscription.current_period_start = next_start
             subscription.current_period_end = next_end
             subscription.status = "active"
-            subscription.save(update_fields=["current_period_start", "current_period_end", "status", "updated_at"])
+            subscription.save(update_fields=["current_period_start", "current_period_end", "billing_anchor_day", "status", "updated_at"])
 
             BillingCycle.objects.filter(
                 tenant=cycle.tenant,
@@ -4261,7 +4263,10 @@ class SubscriptionStkCallbackView(APIView):
                             payment = SubscriptionPayment.objects.select_for_update().get(id=payment.id)
                             sub = payment.subscription
                             if sub.is_trial or sub.status in ('trialing', 'expired', 'pending'):
-                                sub.convert_from_trial(billing_period=sub.billing_period or 'monthly')
+                                sub.convert_from_trial(
+                                    billing_period=sub.billing_period or 'monthly',
+                                    paid_at=payment.completed_at,
+                                )
                             else:
                                 sub.extend_subscription()
                         logger.info(
@@ -4463,6 +4468,10 @@ class SubscriptionPaymentListView(APIView):
             if subscription.current_period_end and subscription.current_period_end > paid_at
             else paid_at
         )
+        previous_anchor_day = subscription.billing_anchor_day
+        subscription.ensure_billing_anchor(paid_at)
+        if subscription.billing_anchor_day != previous_anchor_day:
+            subscription.save(update_fields=["billing_anchor_day", "updated_at"])
         payment.subscription = subscription
         payment.intended_plan = intended_plan
         payment.intended_billing_period = billing_period
@@ -4476,7 +4485,7 @@ class SubscriptionPaymentListView(APIView):
         payment.status = "completed"
         payment.completed_at = paid_at
         payment.period_start = period_anchor
-        payment.period_end = period_anchor + timedelta(days=365 if billing_period == "yearly" else 30)
+        payment.period_end = subscription.next_period_end(period_anchor)
         update_fields = [
             "subscription",
             "intended_plan",
@@ -4651,7 +4660,10 @@ class SubscriptionPaymentListView(APIView):
                     subscription = payment.subscription
 
                     if subscription.is_trial or subscription.status in ("trialing", "expired", "pending", "past_due"):
-                        subscription.convert_from_trial(billing_period=subscription.billing_period or billing_period)
+                        subscription.convert_from_trial(
+                            billing_period=subscription.billing_period or billing_period,
+                            paid_at=payment.completed_at,
+                        )
                     else:
                         subscription.extend_subscription()
 

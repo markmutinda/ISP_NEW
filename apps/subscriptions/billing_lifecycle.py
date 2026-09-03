@@ -194,6 +194,7 @@ def complete_subscription_stk_payment(payment, mpesa_receipt=""):
                     subscription.convert_from_trial(
                         billing_period=subscription.billing_period,
                         defer_to_trial_end=locked.defer_billing_to_trial_end,
+                        paid_at=locked.completed_at,
                     )
                 else:
                     subscription.extend_subscription()

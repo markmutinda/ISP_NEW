@@ -1,13 +1,41 @@
-from datetime import timedelta
+from datetime import datetime, timedelta
 from decimal import Decimal
 
-from django.test import TestCase
+from django.test import SimpleTestCase, TestCase
 from django.utils import timezone
 
 from apps.core.models import Company, Tenant
 from apps.subscriptions.models import CompanySubscription, NetilyPlan
 from apps.superadmin.serializers import TenantListSerializer
 from apps.superadmin.views import DashboardView
+
+
+class CompanySubscriptionBillingAnchorTests(SimpleTestCase):
+    def test_monthly_period_keeps_anchor_day_after_short_month(self):
+        start = timezone.make_aware(datetime(2026, 1, 31, 9, 0))
+        subscription = CompanySubscription(
+            billing_period="monthly",
+            current_period_start=start,
+            current_period_end=start,
+            billing_anchor_day=31,
+        )
+
+        feb_end = subscription.next_period_end(start)
+        mar_end = subscription.next_period_end(feb_end)
+
+        self.assertEqual(feb_end.date().isoformat(), "2026-02-28")
+        self.assertEqual(mar_end.date().isoformat(), "2026-03-31")
+
+    def test_monthly_period_keeps_regular_paid_day(self):
+        start = timezone.make_aware(datetime(2026, 9, 12, 14, 30))
+        subscription = CompanySubscription(
+            billing_period="monthly",
+            current_period_start=start,
+            current_period_end=start,
+            billing_anchor_day=12,
+        )
+
+        self.assertEqual(subscription.next_period_end(start).date().isoformat(), "2026-10-12")
 
 
 class TenantListSerializerTests(TestCase):
