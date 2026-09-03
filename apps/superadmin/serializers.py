@@ -134,10 +134,10 @@ class PlatformExpenditureSerializer(serializers.ModelSerializer):
     class Meta:
         model = PlatformExpenditure
         fields = [
-            "id", "category", "title", "amount", "currency", "incurred_on",
+            "id", "ledger", "category", "title", "amount", "currency", "incurred_on",
             "notes", "created_by", "created_by_email", "created_at", "updated_at",
         ]
-        read_only_fields = ["id", "created_by", "created_by_email", "created_at", "updated_at"]
+        read_only_fields = ["id", "ledger", "created_by", "created_by_email", "created_at", "updated_at"]
 
     def validate_amount(self, value):
         if value <= 0:

@@ -99,6 +99,16 @@ urlpatterns = [
     # Hidden company expenditure workspace
     path("expenditure/", views.PlatformExpenditureView.as_view(), name="platform-expenditure"),
     path("expenditure/<uuid:pk>/", views.PlatformExpenditureDetailView.as_view(), name="platform-expenditure-detail"),
+    path(
+        "expenditure-2/",
+        views.PlatformExpenditureView.as_view(ledger_key="new_business"),
+        name="platform-expenditure-new-business",
+    ),
+    path(
+        "expenditure-2/<uuid:pk>/",
+        views.PlatformExpenditureDetailView.as_view(ledger_key="new_business"),
+        name="platform-expenditure-new-business-detail",
+    ),
 
     # Leads
     path("leads/", views.LeadListView.as_view(), name="lead-list"),

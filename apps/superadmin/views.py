@@ -4852,6 +4852,20 @@ class SubscriptionPaymentDetailView(SubscriptionPaymentListView):
 class PlatformExpenditureView(APIView):
     """Hidden company expenditure workspace for superadmin profit tracking."""
     permission_classes = SUPERADMIN_PERMS
+    ledger_key = PlatformExpenditure.LEDGER_PRIMARY
+
+    LEDGER_CONFIG = {
+        PlatformExpenditure.LEDGER_PRIMARY: {
+            "label": "Original Business Account",
+            "route": "/superadmin/expenditure",
+            "description": "Closed ledger ending at the final Bentrex subscription payment on the previous account.",
+        },
+        PlatformExpenditure.LEDGER_NEW_BUSINESS: {
+            "label": "New Business Account",
+            "route": "/superadmin/expenditure-2",
+            "description": "Current ledger for payments received after the gateway/business account change.",
+        },
+    }
 
     def _parse_range(self, request):
         start = parse_date(str(request.query_params.get("start") or "").strip())
@@ -4870,14 +4884,37 @@ class PlatformExpenditureView(APIView):
     def _money(self, value):
         return str((value or Decimal("0.00")).quantize(Decimal("0.01")))
 
-    def _subscription_total(self, start_date, end_date):
+    def _cutover_payment(self):
+        from apps.subscriptions.models import SubscriptionPayment
+
+        return (
+            SubscriptionPayment.objects
+            .select_related("subscription__company")
+            .filter(status="completed", completed_at__isnull=False)
+            .filter(
+                Q(subscription__company__name__icontains="bentrex")
+                | Q(subscription__company__slug__icontains="bentrex")
+            )
+            .order_by("-completed_at", "-created_at")
+            .first()
+        )
+
+    def _apply_ledger_window(self, qs, field_name, cutover_at):
+        if not cutover_at:
+            return qs.none() if self.ledger_key == PlatformExpenditure.LEDGER_NEW_BUSINESS else qs
+        if self.ledger_key == PlatformExpenditure.LEDGER_NEW_BUSINESS:
+            return qs.filter(**{f"{field_name}__gt": cutover_at})
+        return qs.filter(**{f"{field_name}__lte": cutover_at})
+
+    def _subscription_total(self, start_date, end_date, cutover_at):
         from apps.subscriptions.models import SubscriptionPayment
 
         qs = SubscriptionPayment.objects.filter(status="completed")
         qs = self._apply_date_filter(qs, "completed_at", start_date, end_date)
+        qs = self._apply_ledger_window(qs, "completed_at", cutover_at)
         return qs.aggregate(total=Sum("amount"))["total"] or Decimal("0.00")
 
-    def _sms_topup_total(self, start_date, end_date):
+    def _sms_topup_total(self, start_date, end_date, cutover_at):
         total = Decimal("0.00")
         tenants = Tenant.objects.filter(is_active=True).exclude(schema_name__in=PROTECTED_SCHEMAS)
         for tenant in tenants.only("schema_name"):
@@ -4885,13 +4922,14 @@ class PlatformExpenditureView(APIView):
                 with schema_context(tenant.schema_name):
                     qs = SMSUnitTopup.objects.filter(status="completed")
                     qs = self._apply_date_filter(qs, "created_at", start_date, end_date)
+                    qs = self._apply_ledger_window(qs, "created_at", cutover_at)
                     total += qs.aggregate(total=Sum("amount_paid"))["total"] or Decimal("0.00")
             except Exception as exc:
                 logger.warning("Expenditure SMS total skipped schema %s: %s", tenant.schema_name, exc)
         return total
 
     def _manual_qs(self, start_date, end_date):
-        qs = PlatformExpenditure.objects.select_related("created_by").all()
+        qs = PlatformExpenditure.objects.select_related("created_by").filter(ledger=self.ledger_key)
         if start_date:
             qs = qs.filter(incurred_on__gte=start_date)
         if end_date:
@@ -4901,23 +4939,42 @@ class PlatformExpenditureView(APIView):
     def get(self, request):
         _ensure_public()
         start_date, end_date = self._parse_range(request)
+        cutover_payment = self._cutover_payment()
+        cutover_at = cutover_payment.completed_at if cutover_payment else None
         page = max(int(request.query_params.get("page", 1)), 1)
         page_size = min(max(int(request.query_params.get("page_size", PAGE_SIZE)), 1), 100)
 
         manual_qs = self._manual_qs(start_date, end_date)
         manual_total = manual_qs.aggregate(total=Sum("amount"))["total"] or Decimal("0.00")
-        subscription_total = self._subscription_total(start_date, end_date)
-        sms_total = self._sms_topup_total(start_date, end_date)
+        subscription_total = self._subscription_total(start_date, end_date, cutover_at)
+        sms_total = self._sms_topup_total(start_date, end_date, cutover_at)
         accrued_total = subscription_total + sms_total
         net_profit = accrued_total - manual_total
 
         count = manual_qs.count()
         start = (page - 1) * page_size
         results = PlatformExpenditureSerializer(manual_qs[start:start + page_size], many=True).data
+        ledger_config = self.LEDGER_CONFIG.get(self.ledger_key, self.LEDGER_CONFIG[PlatformExpenditure.LEDGER_PRIMARY])
 
         return Response({
             "summary": {
                 "currency": "KES",
+                "ledger": self.ledger_key,
+                "ledger_label": ledger_config["label"],
+                "ledger_description": ledger_config["description"],
+                "ledger_route": ledger_config["route"],
+                "cutover_at": cutover_at.isoformat() if cutover_at else None,
+                "cutover_reference": (
+                    cutover_payment.mpesa_receipt
+                    or cutover_payment.bank_reference
+                    or cutover_payment.payhero_reference
+                    or ""
+                ) if cutover_payment else "",
+                "cutover_company": (
+                    cutover_payment.subscription.company.name
+                    if cutover_payment and cutover_payment.subscription and cutover_payment.subscription.company
+                    else ""
+                ),
                 "subscription_payments_total": self._money(subscription_total),
                 "sms_topups_total": self._money(sms_total),
                 "accrued_total": self._money(accrued_total),
@@ -4935,7 +4992,7 @@ class PlatformExpenditureView(APIView):
         _ensure_public()
         serializer = PlatformExpenditureSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
-        expenditure = serializer.save(created_by=request.user)
+        expenditure = serializer.save(created_by=request.user, ledger=self.ledger_key)
         _log_action(
             request.user,
             "create",
@@ -4950,10 +5007,11 @@ class PlatformExpenditureView(APIView):
 
 class PlatformExpenditureDetailView(APIView):
     permission_classes = SUPERADMIN_PERMS
+    ledger_key = PlatformExpenditure.LEDGER_PRIMARY
 
     def patch(self, request, pk):
         _ensure_public()
-        expenditure = get_object_or_404(PlatformExpenditure, pk=pk)
+        expenditure = get_object_or_404(PlatformExpenditure, pk=pk, ledger=self.ledger_key)
         before = PlatformExpenditureSerializer(expenditure).data
         serializer = PlatformExpenditureSerializer(expenditure, data=request.data, partial=True)
         serializer.is_valid(raise_exception=True)

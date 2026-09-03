@@ -90,6 +90,14 @@ class TenantDeletionJob(models.Model):
 
 
 class PlatformExpenditure(models.Model):
+    LEDGER_PRIMARY = "primary"
+    LEDGER_NEW_BUSINESS = "new_business"
+
+    LEDGER_CHOICES = (
+        (LEDGER_PRIMARY, "Original Business Account"),
+        (LEDGER_NEW_BUSINESS, "New Business Account"),
+    )
+
     CATEGORY_INFRASTRUCTURE = "infrastructure"
     CATEGORY_SMS = "sms"
     CATEGORY_PAYROLL = "payroll"
@@ -111,6 +119,7 @@ class PlatformExpenditure(models.Model):
     )
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    ledger = models.CharField(max_length=32, choices=LEDGER_CHOICES, default=LEDGER_PRIMARY, db_index=True)
     category = models.CharField(max_length=40, choices=CATEGORY_CHOICES, default=CATEGORY_OPERATIONS)
     title = models.CharField(max_length=160)
     amount = models.DecimalField(max_digits=14, decimal_places=2)
@@ -130,6 +139,7 @@ class PlatformExpenditure(models.Model):
     class Meta:
         ordering = ["-incurred_on", "-created_at"]
         indexes = [
+            models.Index(fields=["ledger", "incurred_on"], name="sadm_exp_ledger_date_idx"),
             models.Index(fields=["category", "incurred_on"], name="sadm_exp_cat_date_idx"),
             models.Index(fields=["incurred_on"], name="sadm_exp_date_idx"),
         ]
