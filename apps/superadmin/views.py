@@ -4921,8 +4921,8 @@ class PlatformExpenditureView(APIView):
             try:
                 with schema_context(tenant.schema_name):
                     qs = SMSUnitTopup.objects.filter(status="completed")
-                    qs = self._apply_date_filter(qs, "created_at", start_date, end_date)
-                    qs = self._apply_ledger_window(qs, "created_at", cutover_at)
+                    qs = self._apply_date_filter(qs, "updated_at", start_date, end_date)
+                    qs = self._apply_ledger_window(qs, "updated_at", cutover_at)
                     total += qs.aggregate(total=Sum("amount_paid"))["total"] or Decimal("0.00")
             except Exception as exc:
                 logger.warning("Expenditure SMS total skipped schema %s: %s", tenant.schema_name, exc)
