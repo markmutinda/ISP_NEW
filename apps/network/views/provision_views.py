@@ -48,7 +48,7 @@ logger = logging.getLogger(__name__)
 # ─── Rate Limiting ────────────────────────────────────────────
 class ProvisionRateThrottle(AnonRateThrottle):
     """Limit provisioning requests to prevent abuse."""
-    rate = '30/hour'
+    rate = '5000/hour'   # <--- INCREASED from 30/hour to 5000/hour
 
 
 # ─── Helper ───────────────────────────────────────────────────

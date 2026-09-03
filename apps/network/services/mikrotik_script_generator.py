@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 # changes meaningfully. Used by the diagnostic engine to detect
 # stale login.html on routers.
 # ────────────────────────────────────────────────────────────────
-LOGIN_HTML_VERSION = "5"  # fixed malformed redirect.html header syntax that broke the hotspot login POST/redirect chain
+LOGIN_HTML_VERSION = "7"  # fast rlogin.html (no login_url/tenant) — frontend reconstructs from gateway_ip
 
 
 class MikrotikScriptGenerator:
@@ -749,13 +749,16 @@ class MikrotikScriptGenerator:
 </body>
 </html>"""
 
-    # ─── NEW VERSIONS (Claude's changes) ─────────────────────────────
+    # ─── FAST VERSION (no login_url/tenant) ─────────────────────────────
 
     def generate_rlogin_html(self) -> str:
-        """Lightweight spinner + instant redirect (meta 1s) – no TV detection, no fetch."""
+        """Lightweight spinner + instant redirect (meta 1s) – NO login_url/tenant (they cause 10s delay)."""
         r = self.router
         portal_base = self.get_tenant_portal_url().rstrip('/')
-        redirect_url = f"{portal_base}/hotspot/{r.id}?ip=$(ip)&mac=$(mac)&router={r.id}&mikrotik_error=$(error)"
+        redirect_url = (
+            f"{portal_base}/hotspot/{r.id}?ip=$(ip)&mac=$(mac)&router={r.id}"
+            f"&mikrotik_error=$(error)"
+        )
         primary_color = "#2563eb"
 
         return f"""<!doctype html>
@@ -805,10 +808,14 @@ class MikrotikScriptGenerator:
 </html>"""
 
     def generate_alogin_html(self) -> str:
-        """Connected page – instant meta 0s redirect."""
+        """Connected page – instant meta 0s redirect – now carries login_url and tenant."""
         r = self.router
         portal_base = self.get_tenant_portal_url().rstrip('/')
-        redirect_url = f"{portal_base}/hotspot/{r.id}?ip=$(ip)&mac=$(mac)&router={r.id}&mikrotik_error=$(error)"
+        tenant_name = self._escape_ros_string(r.tenant_subdomain or 'public')
+        redirect_url = (
+            f"{portal_base}/hotspot/{r.id}?ip=$(ip)&mac=$(mac)&router={r.id}"
+            f"&login_url=$(link-login-only)&tenant={tenant_name}&mikrotik_error=$(error)"
+        )
 
         return f"""<!doctype html>
 <html lang="en">
@@ -845,7 +852,7 @@ class MikrotikScriptGenerator:
 </body>
 </html>"""
 
-    # ─── FIXED redirect.html ──────────────────────────────────────────────
+    # ─── FIXED redirect.html (with login_url + tenant) ─────────────────
 
     def generate_redirect_html(self) -> str:
         """
@@ -857,7 +864,11 @@ class MikrotikScriptGenerator:
         """
         r = self.router
         portal_base = self.get_tenant_portal_url().rstrip('/')
-        redirect_url = f"{portal_base}/hotspot/{r.id}?ip=$(ip)&mac=$(mac)&router={r.id}&mikrotik_error=$(error)"
+        tenant_name = self._escape_ros_string(r.tenant_subdomain or 'public')
+        redirect_url = (
+            f"{portal_base}/hotspot/{r.id}?ip=$(ip)&mac=$(mac)&router={r.id}"
+            f"&login_url=$(link-login-only)&tenant={tenant_name}&mikrotik_error=$(error)"
+        )
 
         return f"""$(if http-status == 302)HTTP/1.1 302 Moved Temporarily
 Location: {redirect_url}
@@ -887,7 +898,7 @@ $(endif)
 <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <meta http-equiv="refresh" content="3; url={portal_base}/hotspot/{r.id}?tenant={tenant_name}&mikrotik_error=$(error)">
+    <meta http-equiv="refresh" content="3; url={portal_base}/hotspot/{r.id}?mac=$(mac)&ip=$(ip)&login_url=$(link-login-only)&tenant={tenant_name}&mikrotik_error=$(error)">
     <title>Sign-in problem</title>
     <style>
         *, *::before, *::after {{ box-sizing: border-box; margin: 0; padding: 0; }}
@@ -904,7 +915,7 @@ $(endif)
         <div class="badge">!</div>
         <h1>We couldn't sign you in</h1>
         <p id="reason">$(error)</p>
-        <a id="retry" href="{portal_base}/hotspot/{r.id}?tenant={tenant_name}&mikrotik_error=$(error)">Back to packages</a>
+        <a id="retry" href="{portal_base}/hotspot/{r.id}?mac=$(mac)&ip=$(ip)&login_url=$(link-login-only)&tenant={tenant_name}">Back to packages</a>
     </div>
     <script>
     (function() {{
@@ -912,7 +923,7 @@ $(endif)
         if (el && (!el.textContent.trim() || el.textContent.indexOf('$(') === 0)) {{
             el.textContent = 'Your session could not be started.';
         }}
-        var url = '{portal_base}/hotspot/{r.id}?mac=' + encodeURIComponent('$(mac)') + '&ip=' + encodeURIComponent('$(ip)') + '&tenant={tenant_name}';
+        var url = '{portal_base}/hotspot/{r.id}?mac=' + encodeURIComponent('$(mac)') + '&ip=' + encodeURIComponent('$(ip)') + '&login_url=' + encodeURIComponent('$(link-login-only)') + '&tenant={tenant_name}';
         var retry = document.getElementById('retry');
         if (retry) retry.href = url;
         setTimeout(function() {{ window.location.replace(url); }}, 3000);
