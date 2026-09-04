@@ -32,6 +32,7 @@ import logging
 from django.http import Http404
 from django.shortcuts import get_object_or_404
 from django.db import DatabaseError, transaction
+from django.db.models import Q
 from .otp_service import OTPService, OTPError, OTPRateLimitedError
 from .email_delivery import send_transactional_email
 
@@ -337,6 +338,24 @@ class CustomTokenObtainPairView(TokenObtainPairView):
         refresh = issue_refresh_token(user)
         user.last_login = timezone.now()
         user.save(update_fields=["last_login"])
+        try:
+            AuditLog.log_action(
+                user=user,
+                action="login",
+                model_name="User",
+                object_id=str(user.id),
+                object_repr=user.get_full_name() or user.email or str(user.id),
+                changes={
+                    "role": getattr(user, "role", ""),
+                    "tenant_schema": tenant_scope,
+                    "otp_verified": bool(requires_otp),
+                },
+                ip_address=request.META.get("REMOTE_ADDR"),
+                user_agent=request.META.get("HTTP_USER_AGENT", ""),
+                tenant=getattr(request, "tenant", None),
+            )
+        except Exception:
+            logger.warning("Failed to write login audit log for user_id=%s", user.id, exc_info=True)
         return Response({
             "refresh": str(refresh),
             "access": str(refresh.access_token),
@@ -1288,8 +1307,14 @@ class AuditLogViewSet(viewsets.ReadOnlyModelViewSet):
     """
     queryset = AuditLog.objects.all().order_by('-timestamp')
     serializer_class = AuditLogSerializer
-    permission_classes = [IsAuthenticated, IsAdminOrStaff, HasRoleAccessPolicy]
+    permission_classes = [IsAuthenticated, IsAdmin]
     required_rbac_path = "/admin/logs"
+    sensitive_models = {
+        "user", "users", "customer", "customers", "customer-services",
+        "billing", "payment", "payments", "invoice", "invoices", "plan", "plans",
+        "hotspot", "network", "router", "radius", "messaging", "sms",
+        "staff", "role-access", "access policy", "voucher", "lead",
+    }
     
     def get_queryset(self):
         queryset = super().get_queryset()
@@ -1305,6 +1330,45 @@ class AuditLogViewSet(viewsets.ReadOnlyModelViewSet):
         model_name = self.request.query_params.get('model_name')
         if model_name:
             queryset = queryset.filter(model_name=model_name)
+
+        actor_type = self.request.query_params.get('actor_type')
+        if actor_type == "admin":
+            queryset = queryset.filter(
+                Q(user__is_superuser=True)
+                | Q(user__role__in=["admin", "superadmin", "super_admin"])
+                | Q(user__access_level__in=["admin", "superadmin", "super_admin"])
+            )
+        elif actor_type == "staff":
+            queryset = queryset.filter(
+                Q(user__role__in=["staff", "technician", "accountant", "support"])
+                | Q(user__is_staff=True)
+            ).exclude(
+                Q(user__is_superuser=True)
+                | Q(user__role__in=["admin", "superadmin", "super_admin"])
+                | Q(user__access_level__in=["admin", "superadmin", "super_admin"])
+            )
+        elif actor_type == "system":
+            queryset = queryset.filter(user__isnull=True)
+
+        search = (self.request.query_params.get("search") or "").strip()
+        if search:
+            queryset = queryset.filter(
+                Q(user__email__icontains=search)
+                | Q(user__first_name__icontains=search)
+                | Q(user__last_name__icontains=search)
+                | Q(action__icontains=search)
+                | Q(model_name__icontains=search)
+                | Q(object_repr__icontains=search)
+                | Q(object_id__icontains=search)
+                | Q(ip_address__icontains=search)
+            )
+
+        sensitive_only = str(self.request.query_params.get("sensitive_only") or "").lower() in {"1", "true", "yes"}
+        if sensitive_only:
+            query = Q(action__in=["create", "update", "delete", "import", "export"])
+            for model in self.sensitive_models:
+                query |= Q(model_name__icontains=model)
+            queryset = queryset.filter(query)
         
         date_from = self.request.query_params.get('date_from')
         if date_from:

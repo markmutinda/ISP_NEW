@@ -19,7 +19,7 @@ from utils.constants import COUNTRY_CHOICES, COUNTRY_CURRENCY_MAP
 logger = logging.getLogger(__name__)
 
 
-NON_DELEGABLE_RBAC_PATHS = {"/admin/staff"}
+NON_DELEGABLE_RBAC_PATHS = {"/admin/staff", "/admin/logs"}
 VALID_RBAC_ACTIONS = {"view", "view_details", "add", "edit", "delete"}
 
 
@@ -36,7 +36,7 @@ def validate_dashboard_access_tokens(value):
         if not (route == "/admin" or route.startswith("/admin/")):
             raise serializers.ValidationError("Each dashboard access token must be an admin route path.")
         if route in NON_DELEGABLE_RBAC_PATHS:
-            raise serializers.ValidationError("Staff access management cannot be delegated.")
+            raise serializers.ValidationError("Staff access management and audit logs cannot be delegated.")
         if "::" in token:
             action = token.split("::", 1)[1]
             if action not in VALID_RBAC_ACTIONS:
@@ -578,12 +578,16 @@ class AuditLogSerializer(serializers.ModelSerializer):
     
     user_email = serializers.EmailField(source='user.email', read_only=True)
     user_full_name = serializers.SerializerMethodField()
+    user_role = serializers.CharField(source='user.role', read_only=True, allow_null=True)
+    user_access_level = serializers.CharField(source='user.access_level', read_only=True, allow_null=True)
+    actor_type = serializers.SerializerMethodField()
     action_display = serializers.CharField(source='get_action_display', read_only=True)
     
     class Meta:
         model = AuditLog
         fields = [
-            'id', 'user', 'user_email', 'user_full_name',
+            'id', 'user', 'user_email', 'user_full_name', 'user_role',
+            'user_access_level', 'actor_type',
             'action', 'action_display', 'model_name', 'object_id',
             'object_repr', 'changes', 'ip_address', 'user_agent',
             'timestamp', 'tenant'
@@ -594,6 +598,18 @@ class AuditLogSerializer(serializers.ModelSerializer):
         if obj.user:
             return obj.user.get_full_name()
         return None
+
+    def get_actor_type(self, obj):
+        user = obj.user
+        if not user:
+            return "system"
+        role = str(getattr(user, "role", "") or "").lower()
+        access_level = str(getattr(user, "access_level", "") or "").lower()
+        if getattr(user, "is_superuser", False) or role in {"admin", "superadmin", "super_admin"} or access_level in {"admin", "superadmin", "super_admin"}:
+            return "admin"
+        if role in {"staff", "technician", "accountant", "support"} or getattr(user, "is_staff", False):
+            return "staff"
+        return "user"
 
 
 class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):

@@ -342,12 +342,56 @@ class AuditLogMiddleware(MiddlewareMixin):
             pass
 
     def extract_model_name(self, path):
-        match = re.search(r'/api/v\d+/(\w+)/', path)
-        return match.group(1) if match else 'unknown'
+        match = re.search(r'/api/v\d+/(.+)', path)
+        if not match:
+            return 'unknown'
+
+        segments = [
+            segment for segment in match.group(1).strip('/').split('/')
+            if segment and segment not in {'admin'}
+        ]
+        if not segments:
+            return 'unknown'
+
+        key = '/'.join(segments[:2])
+        resource = segments[1] if len(segments) > 1 and segments[0] in {'core', 'billing', 'network', 'hotspot'} else segments[0]
+        labels = {
+            'core/users': 'User',
+            'core/role-access': 'Staff Access Policy',
+            'core/leads': 'Lead',
+            'core/settings': 'Settings',
+            'core/dashboard': 'Dashboard',
+            'billing/payments': 'Payment',
+            'billing/invoices': 'Invoice',
+            'billing/receipts': 'Receipt',
+            'billing/vouchers': 'Voucher',
+            'billing/payment-methods': 'Payment Method',
+            'billing/billing-cycles': 'Billing Cycle',
+            'network/routers': 'Router',
+            'network/ip-bindings': 'IP Binding',
+            'hotspot/plans': 'Hotspot Plan',
+            'hotspot/ads': 'Hotspot Ad',
+            'support/tickets': 'Ticket',
+            'staff/dispatch': 'Dispatch Job',
+            'messaging/sms': 'SMS',
+            'messaging/templates': 'SMS Template',
+            'messaging/campaigns': 'SMS Campaign',
+            'messaging/gateway': 'SMS Gateway',
+            'messaging/wallet': 'SMS Wallet',
+            'notifications': 'Notification',
+            'inventory': 'Inventory',
+            'radius': 'RADIUS',
+        }
+        return labels.get(key) or labels.get(segments[0]) or resource.replace('-', ' ').title()
 
     def extract_object_id(self, path):
-        match = re.search(r'/api/v\d+/\w+/([^/]+)/', path)
-        return match.group(1) if match else None
+        match = re.search(r'/api/v\d+/(.+)', path)
+        if not match:
+            return None
+        for segment in match.group(1).strip('/').split('/'):
+            if re.fullmatch(r'\d+|[0-9a-fA-F-]{32,36}', segment):
+                return segment
+        return None
 
     def get_action_type(self, method):
         return {
