@@ -22,7 +22,8 @@ from apps.customers.serializers import (
 from apps.customers.permissions import (
     CustomerAccessPermission, CanManageCustomers
 )
-from apps.core.permissions import IsAdminOrStaff
+from apps.core.models import AuditLog
+from apps.core.permissions import HasRoleAccessPolicy, IsAdminOrStaff
 # FIX: Import LargeResultsSetPagination along with StandardResultsSetPagination
 from utils.pagination import StandardResultsSetPagination, LargeResultsSetPagination
 
@@ -67,6 +68,7 @@ class CustomerViewSet(viewsets.ModelViewSet):
     ).all()
     
     permission_classes = [IsAuthenticated, CanManageCustomers]
+    required_rbac_path = "/admin/users"
     # FIX: Add pagination_class to support large page sizes (up to 1000)
     pagination_class = LargeResultsSetPagination
     
@@ -103,7 +105,7 @@ class CustomerViewSet(viewsets.ModelViewSet):
         if self.action in ['create', 'update', 'partial_update', 'destroy',
                            'toggle_radius', 'change_status', 'available_plans',
                            'change_plan', 'retrieve', 'list', 'dashboard']:
-            permission_classes = [IsAuthenticated, IsAdminOrStaff]
+            permission_classes = [IsAuthenticated, IsAdminOrStaff, HasRoleAccessPolicy]
         else:
             permission_classes = [IsAuthenticated, CustomerAccessPermission]
         return [permission() for permission in permission_classes]
@@ -171,9 +173,75 @@ class CustomerViewSet(viewsets.ModelViewSet):
         
         # Set created_by if user is authenticated
         if user.is_authenticated:
-            serializer.save(created_by=user)
+            customer = serializer.save(created_by=user)
         else:
-            serializer.save()
+            customer = serializer.save()
+        AuditLog.log_action(
+            user=user if user.is_authenticated else None,
+            action="create",
+            model_name="Customer",
+            object_id=str(customer.id),
+            object_repr=getattr(customer, "full_name", None) or getattr(customer, "customer_code", "") or str(customer.id),
+            changes={
+                "customer_code": getattr(customer, "customer_code", ""),
+                "status": getattr(customer, "status", ""),
+                "phone": getattr(getattr(customer, "user", None), "phone_number", ""),
+                "email": getattr(getattr(customer, "user", None), "email", ""),
+            },
+            ip_address=self.request.META.get("REMOTE_ADDR"),
+            user_agent=self.request.META.get("HTTP_USER_AGENT", ""),
+            tenant=getattr(self.request, "tenant", None),
+        )
+
+    def perform_update(self, serializer):
+        before = {
+            "status": getattr(serializer.instance, "status", ""),
+            "customer_code": getattr(serializer.instance, "customer_code", ""),
+            "phone": getattr(getattr(serializer.instance, "user", None), "phone_number", ""),
+            "email": getattr(getattr(serializer.instance, "user", None), "email", ""),
+        }
+        customer = serializer.save(updated_by=self.request.user)
+        AuditLog.log_action(
+            user=self.request.user,
+            action="update",
+            model_name="Customer",
+            object_id=str(customer.id),
+            object_repr=getattr(customer, "full_name", None) or getattr(customer, "customer_code", "") or str(customer.id),
+            changes={
+                "before": before,
+                "after": {
+                    "status": getattr(customer, "status", ""),
+                    "customer_code": getattr(customer, "customer_code", ""),
+                    "phone": getattr(getattr(customer, "user", None), "phone_number", ""),
+                    "email": getattr(getattr(customer, "user", None), "email", ""),
+                },
+            },
+            ip_address=self.request.META.get("REMOTE_ADDR"),
+            user_agent=self.request.META.get("HTTP_USER_AGENT", ""),
+            tenant=getattr(self.request, "tenant", None),
+        )
+
+    def perform_destroy(self, instance):
+        object_repr = getattr(instance, "full_name", None) or getattr(instance, "customer_code", "") or str(instance.id)
+        changes = {
+            "customer_code": getattr(instance, "customer_code", ""),
+            "status": getattr(instance, "status", ""),
+            "phone": getattr(getattr(instance, "user", None), "phone_number", ""),
+            "email": getattr(getattr(instance, "user", None), "email", ""),
+        }
+        object_id = str(instance.id)
+        instance.delete()
+        AuditLog.log_action(
+            user=self.request.user,
+            action="delete",
+            model_name="Customer",
+            object_id=object_id,
+            object_repr=object_repr,
+            changes=changes,
+            ip_address=self.request.META.get("REMOTE_ADDR"),
+            user_agent=self.request.META.get("HTTP_USER_AGENT", ""),
+            tenant=getattr(self.request, "tenant", None),
+        )
     
     @action(detail=True, methods=['get'])
     def dashboard(self, request, pk=None):

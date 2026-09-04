@@ -555,8 +555,52 @@ class UserViewSet(viewsets.ModelViewSet):
             if hasattr(self.request.user, 'company') and self.request.user.company:
                 save_kwargs['company'] = self.request.user.company
         
-        serializer.save(**save_kwargs)
+        user = serializer.save(**save_kwargs)
+        AuditLog.log_action(
+            user=self.request.user,
+            action="create",
+            model_name="User",
+            object_id=str(user.id),
+            object_repr=user.get_full_name() or user.email or str(user.id),
+            changes={
+                "email": user.email,
+                "role": user.role,
+                "is_staff": user.is_staff,
+                "custom_access": user.custom_allowed_paths is not None,
+            },
+            ip_address=self.request.META.get("REMOTE_ADDR"),
+            user_agent=self.request.META.get("HTTP_USER_AGENT", ""),
+            tenant=getattr(self.request, "tenant", None),
+        )
         logger.info(f"UserViewSet: Created {role} user {serializer.instance.email}. is_staff={is_staff_status}")
+
+    def perform_update(self, serializer):
+        before = {
+            "email": serializer.instance.email,
+            "role": serializer.instance.role,
+            "is_active": serializer.instance.is_active,
+            "custom_allowed_paths": serializer.instance.custom_allowed_paths,
+        }
+        user = serializer.save()
+        AuditLog.log_action(
+            user=self.request.user,
+            action="update",
+            model_name="User",
+            object_id=str(user.id),
+            object_repr=user.get_full_name() or user.email or str(user.id),
+            changes={
+                "before": before,
+                "after": {
+                    "email": user.email,
+                    "role": user.role,
+                    "is_active": user.is_active,
+                    "custom_allowed_paths": user.custom_allowed_paths,
+                },
+            },
+            ip_address=self.request.META.get("REMOTE_ADDR"),
+            user_agent=self.request.META.get("HTTP_USER_AGENT", ""),
+            tenant=getattr(self.request, "tenant", None),
+        )
 
     @transaction.atomic
     def destroy(self, request, *args, **kwargs):

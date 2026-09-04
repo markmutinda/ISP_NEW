@@ -13,7 +13,7 @@ import json
 
 # Use your existing permissions
 from apps.core.permissions import HasRoleAccessPolicy, IsCompanyAdmin, IsCompanyStaff, IsCompanyMember
-from apps.core.models import Company
+from apps.core.models import AuditLog, Company
 from ..models.billing_models import Plan, BillingCycle, Invoice, InvoiceItem
 from ..serializers import (
     PlanSerializer, PlanCreateSerializer,
@@ -57,7 +57,23 @@ class PlanViewSet(viewsets.ModelViewSet):
         user = self.request.user
         
         try:
-            serializer.save(created_by=user)
+            plan = serializer.save(created_by=user)
+            AuditLog.log_action(
+                user=user,
+                action="create",
+                model_name="Plan",
+                object_id=str(plan.id),
+                object_repr=plan.name,
+                changes={
+                    "name": plan.name,
+                    "plan_type": plan.plan_type,
+                    "base_price": str(plan.base_price),
+                    "is_active": plan.is_active,
+                },
+                ip_address=self.request.META.get("REMOTE_ADDR"),
+                user_agent=self.request.META.get("HTTP_USER_AGENT", ""),
+                tenant=getattr(self.request, "tenant", None),
+            )
         except IntegrityError as e:
             # Intercept the database unique constraint violation smoothly
             if "billing_plan_code_key" in str(e):
@@ -68,7 +84,32 @@ class PlanViewSet(viewsets.ModelViewSet):
             raise e
 
     def perform_update(self, serializer):
-        serializer.save(updated_by=self.request.user)
+        before = {
+            "name": serializer.instance.name,
+            "plan_type": serializer.instance.plan_type,
+            "base_price": str(serializer.instance.base_price),
+            "is_active": serializer.instance.is_active,
+        }
+        plan = serializer.save(updated_by=self.request.user)
+        AuditLog.log_action(
+            user=self.request.user,
+            action="update",
+            model_name="Plan",
+            object_id=str(plan.id),
+            object_repr=plan.name,
+            changes={
+                "before": before,
+                "after": {
+                    "name": plan.name,
+                    "plan_type": plan.plan_type,
+                    "base_price": str(plan.base_price),
+                    "is_active": plan.is_active,
+                },
+            },
+            ip_address=self.request.META.get("REMOTE_ADDR"),
+            user_agent=self.request.META.get("HTTP_USER_AGENT", ""),
+            tenant=getattr(self.request, "tenant", None),
+        )
     
     @action(detail=True, methods=['post'])
     def toggle_active(self, request, pk=None):
@@ -77,6 +118,17 @@ class PlanViewSet(viewsets.ModelViewSet):
         plan.is_active = not plan.is_active
         plan.updated_by = request.user
         plan.save()
+        AuditLog.log_action(
+            user=request.user,
+            action="update",
+            model_name="Plan",
+            object_id=str(plan.id),
+            object_repr=plan.name,
+            changes={"is_active": plan.is_active, "event": "toggle_active"},
+            ip_address=request.META.get("REMOTE_ADDR"),
+            user_agent=request.META.get("HTTP_USER_AGENT", ""),
+            tenant=getattr(request, "tenant", None),
+        )
         
         return Response({
             'id': plan.id,

@@ -19,6 +19,7 @@ from django.db.models import ProtectedError
 
 # Custom permissions
 from ..models.payment_models import Payment
+from apps.core.models import AuditLog
 from apps.core.permissions import HasRoleAccessPolicy, IsCompanyAdmin, IsCompanyStaff
 from apps.customers.models import Customer
 from ..models.billing_models import Invoice
@@ -832,30 +833,69 @@ class PaymentViewSet(viewsets.ModelViewSet):
             return PaymentDetailSerializer
         return PaymentSerializer
 
+    def _payment_audit_changes(self, payment, extra=None):
+        customer = getattr(payment, "customer", None)
+        method = getattr(payment, "payment_method", None)
+        changes = {
+            "payment_number": payment.payment_number,
+            "customer": getattr(customer, "customer_code", None),
+            "amount": str(payment.amount),
+            "currency": payment.currency,
+            "status": payment.status,
+            "payment_method": getattr(method, "name", None),
+            "service_type": payment.service_type,
+            "mpesa_receipt": payment.mpesa_receipt,
+            "payment_reference": payment.payment_reference,
+            "is_reconciled": payment.is_reconciled,
+        }
+        if extra:
+            changes.update(extra)
+        return changes
+
+    def _log_payment_action(self, payment, action, extra=None, user_marker=None):
+        AuditLog.log_action(
+            user=user_marker if user_marker is not None else self.request.user,
+            action=action,
+            model_name="Payment",
+            object_id=str(payment.id),
+            object_repr=payment.payment_number,
+            changes=self._payment_audit_changes(payment, extra),
+            ip_address=self.request.META.get("REMOTE_ADDR"),
+            user_agent=self.request.META.get("HTTP_USER_AGENT", ""),
+            tenant=getattr(self.request, "tenant", None),
+        )
+
     def perform_create(self, serializer):
         user = self.request.user
         
-        serializer.save(
+        payment = serializer.save(
             created_by=user,
             schema_name=connection.schema_name
         )
+        self._log_payment_action(payment, "create", {"event": "manual_payment_created"})
 
     # === Standard Actions ===
     @action(detail=True, methods=['post'])
     def mark_completed(self, request, pk=None):
         payment = self.get_object()
-        if payment.mark_as_completed(request.user):
-            # SMS BLOCK REMOVED - Dead code cleanup
-            return Response({'status': 'success', 'message': 'Payment marked as completed'})
-        return Response({'error': 'Cannot mark payment as completed'}, status=status.HTTP_400_BAD_REQUEST)
+        if payment.status == 'COMPLETED':
+            return Response({'error': 'Payment is already completed'}, status=status.HTTP_400_BAD_REQUEST)
+
+        payment.mark_as_completed(processed_by=request.user)
+        self._log_payment_action(payment, "update", {"event": "marked_completed"})
+        # SMS BLOCK REMOVED - Dead code cleanup
+        return Response({'status': 'success', 'message': 'Payment marked as completed'})
 
     @action(detail=True, methods=['post'])
     def mark_failed(self, request, pk=None):
         payment = self.get_object()
         reason = request.data.get('reason', '')
-        if payment.mark_as_failed(reason):
-            return Response({'status': 'success', 'message': 'Payment marked as failed'})
-        return Response({'error': 'Cannot mark payment as failed'}, status=status.HTTP_400_BAD_REQUEST)
+        if payment.status == 'FAILED':
+            return Response({'error': 'Payment is already failed'}, status=status.HTTP_400_BAD_REQUEST)
+
+        payment.mark_as_failed(reason, processed_by=request.user)
+        self._log_payment_action(payment, "update", {"event": "marked_failed", "reason": reason})
+        return Response({'status': 'success', 'message': 'Payment marked as failed'})
 
     @action(detail=True, methods=['post'])
     def reconcile(self, request, pk=None):
@@ -865,6 +905,7 @@ class PaymentViewSet(viewsets.ModelViewSet):
             payment.reconciled_at = timezone.now()
             payment.reconciled_by = request.user
             payment.save()
+            self._log_payment_action(payment, "update", {"event": "reconciled"})
             return Response({'status': 'success', 'message': 'Payment reconciled'})
         return Response({'error': 'Payment already reconciled'}, status=status.HTTP_400_BAD_REQUEST)
 
@@ -874,8 +915,13 @@ class PaymentViewSet(viewsets.ModelViewSet):
         refund_amount = Decimal(request.data.get('refund_amount', 0)) or None
         refund_reason = request.data.get('refund_reason', '')
 
-        refund_payment = payment.refund(refund_amount, refund_reason)
+        refund_payment = payment.refund(refund_amount, refund_reason, refunded_by=request.user)
         if refund_payment:
+            self._log_payment_action(payment, "update", {
+                "event": "refund_processed",
+                "refund_amount": str(refund_amount or payment.net_amount),
+                "refund_reason": refund_reason,
+            })
             return Response({
                 'status': 'success',
                 'message': 'Refund processed',
@@ -968,6 +1014,10 @@ class PaymentViewSet(viewsets.ModelViewSet):
                 account_reference = invoice.invoice_number
             else:
                 account_reference = customer.customer_code
+        self._log_payment_action(payment, "create", {
+            "event": "mpesa_stk_initiated",
+            "account_reference": account_reference,
+        })
         
         # Initialize M-Pesa service with tenant configuration
         from ..integrations.mpesa_integration import MpesaSTKPush
@@ -994,6 +1044,10 @@ class PaymentViewSet(viewsets.ModelViewSet):
             payment.status = 'FAILED'
             payment.failure_reason = result.get('message', 'STK Push failed')
             payment.save()
+            self._log_payment_action(payment, "update", {
+                "event": "mpesa_stk_initiation_failed",
+                "reason": payment.failure_reason,
+            })
             
             return Response({
                 'status': 'error',
@@ -1040,6 +1094,24 @@ class PaymentViewSet(viewsets.ModelViewSet):
                             mpesa_txn.payment.status = 'FAILED'
                             mpesa_txn.payment.failure_reason = result.get('result_desc', 'STK Push failed or cancelled')
                             mpesa_txn.payment.save(update_fields=['status', 'failure_reason'])
+                            AuditLog.log_action(
+                                user=mpesa_txn.payment.created_by,
+                                action="update",
+                                model_name="Payment",
+                                object_id=str(mpesa_txn.payment.id),
+                                object_repr=mpesa_txn.payment.payment_number,
+                                changes={
+                                    "event": "mpesa_callback_failed",
+                                    "payment_number": mpesa_txn.payment.payment_number,
+                                    "amount": str(mpesa_txn.payment.amount),
+                                    "status": mpesa_txn.payment.status,
+                                    "reason": mpesa_txn.payment.failure_reason,
+                                    "checkout_request_id": checkout_request_id,
+                                },
+                                ip_address=request.META.get("REMOTE_ADDR"),
+                                user_agent=request.META.get("HTTP_USER_AGENT", ""),
+                                tenant=getattr(request, "tenant", None),
+                            )
                 except Exception as e:
                     logger.error(f"Error handling failed STK callback: {e}")
         
@@ -1101,6 +1173,26 @@ class PaymentViewSet(viewsets.ModelViewSet):
                         payment.transaction_id = mpesa_receipt
                         payment.payment_date = timezone.now()
                         payment.mark_as_completed()
+                        AuditLog.log_action(
+                            user=payment.created_by,
+                            action="update",
+                            model_name="Payment",
+                            object_id=str(payment.id),
+                            object_repr=payment.payment_number,
+                            changes={
+                                "event": "mpesa_callback_completed",
+                                "payment_number": payment.payment_number,
+                                "amount": str(payment.amount),
+                                "currency": payment.currency,
+                                "status": payment.status,
+                                "customer": getattr(payment.customer, "customer_code", None),
+                                "mpesa_receipt": payment.mpesa_receipt,
+                                "checkout_request_id": checkout_request_id,
+                            },
+                            ip_address=request.META.get("REMOTE_ADDR"),
+                            user_agent=request.META.get("HTTP_USER_AGENT", ""),
+                            tenant=getattr(request, "tenant", None),
+                        )
 
                         # ============================================================
                         # FIX: PPPoE Subscription Renewal (Customer Portal STK payments)
@@ -1291,6 +1383,11 @@ class PaymentViewSet(viewsets.ModelViewSet):
             created_by=request.user,
             service_type='PPPOE',   # Permanent classification for analytics
         )
+        self._log_payment_action(payment, "create", {
+            "event": "bank_transfer_recorded",
+            "bank_name": bank_name,
+            "transaction_reference": transaction_reference,
+        })
         
         return Response({
             'status': 'success',

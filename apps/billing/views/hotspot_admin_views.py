@@ -24,6 +24,7 @@ from apps.billing.serializers.hotspot_serializers import (
     HotspotClientSerializer,
 )
 from apps.network.models.router_models import Router
+from apps.core.models import AuditLog
 from apps.core.permissions import HasRoleAccessPolicy, IsAdminOrStaff
 from utils.pagination import StandardResultsSetPagination
 
@@ -59,6 +60,35 @@ class HotspotPlanViewSet(viewsets.ModelViewSet):
     def get_router(self):
         router_id = self.kwargs.get('router_id')
         return get_object_or_404(Router, id=router_id)
+
+    def _plan_audit_changes(self, plan, extra=None):
+        changes = {
+            "name": plan.name,
+            "router": getattr(plan.router, "name", None) or str(plan.router_id),
+            "price": str(plan.price),
+            "currency": plan.currency,
+            "validity": f"{plan.validity_value} {plan.validity_type}",
+            "speed": f"{plan.download_speed}/{plan.upload_speed} {plan.speed_unit}",
+            "is_active": plan.is_active,
+            "is_free_trial": plan.is_free_trial,
+            "is_global_template": plan.is_global_template,
+        }
+        if extra:
+            changes.update(extra)
+        return changes
+
+    def _log_plan_action(self, plan, action, extra=None):
+        AuditLog.log_action(
+            user=self.request.user,
+            action=action,
+            model_name="Hotspot Plan",
+            object_id=str(plan.id),
+            object_repr=plan.name,
+            changes=self._plan_audit_changes(plan, extra),
+            ip_address=self.request.META.get("REMOTE_ADDR"),
+            user_agent=self.request.META.get("HTTP_USER_AGENT", ""),
+            tenant=getattr(self.request, "tenant", None),
+        )
     
     def perform_create(self, serializer):
         """
@@ -75,10 +105,11 @@ class HotspotPlanViewSet(viewsets.ModelViewSet):
         router = self.get_router()
         
         try:
-            serializer.save(
+            plan = serializer.save(
                 router=router,
                 created_by=self.request.user
             )
+            self._log_plan_action(plan, "create")
         except ValidationError as e:
             # Catch validation errors from model.save() - primarily free trial duplicate
             # Extract the error message from ValidationError
@@ -103,6 +134,34 @@ class HotspotPlanViewSet(viewsets.ModelViewSet):
                 })
             # Re-raise any unrelated database integrity issues
             raise e
+
+    def perform_update(self, serializer):
+        before = {
+            "name": serializer.instance.name,
+            "price": str(serializer.instance.price),
+            "validity": f"{serializer.instance.validity_value} {serializer.instance.validity_type}",
+            "is_active": serializer.instance.is_active,
+            "is_free_trial": serializer.instance.is_free_trial,
+        }
+        plan = serializer.save()
+        self._log_plan_action(plan, "update", {"before": before})
+
+    def perform_destroy(self, instance):
+        object_id = str(instance.id)
+        object_repr = instance.name
+        changes = self._plan_audit_changes(instance)
+        instance.delete()
+        AuditLog.log_action(
+            user=self.request.user,
+            action="delete",
+            model_name="Hotspot Plan",
+            object_id=object_id,
+            object_repr=object_repr,
+            changes=changes,
+            ip_address=self.request.META.get("REMOTE_ADDR"),
+            user_agent=self.request.META.get("HTTP_USER_AGENT", ""),
+            tenant=getattr(self.request, "tenant", None),
+        )
     
     @action(detail=False, methods=['post'])
     def reorder(self, request, router_id=None):
@@ -125,6 +184,17 @@ class HotspotPlanViewSet(viewsets.ModelViewSet):
                     id=plan_id, 
                     router_id=router_id
                 ).update(sort_order=sort_order)
+        AuditLog.log_action(
+            user=request.user,
+            action="update",
+            model_name="Hotspot Plan",
+            object_id=str(router_id),
+            object_repr="Plan order",
+            changes={"event": "reordered", "items": order_data},
+            ip_address=request.META.get("REMOTE_ADDR"),
+            user_agent=request.META.get("HTTP_USER_AGENT", ""),
+            tenant=getattr(request, "tenant", None),
+        )
         
         return Response({'status': 'Plans reordered'})
     
@@ -134,6 +204,7 @@ class HotspotPlanViewSet(viewsets.ModelViewSet):
         plan = self.get_object()
         plan.is_active = not plan.is_active
         plan.save()
+        self._log_plan_action(plan, "update", {"event": "toggle_active"})
         
         return Response({
             'id': str(plan.id),

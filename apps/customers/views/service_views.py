@@ -16,7 +16,8 @@ from apps.customers.serializers import (
     ServiceActivationSerializer, ServiceSuspensionSerializer
 )
 from apps.customers.permissions import CustomerAccessPermission
-from apps.core.permissions import IsAdminOrStaff, IsTechnician
+from apps.core.models import AuditLog
+from apps.core.permissions import HasRoleAccessPolicy, IsAdminOrStaff, IsTechnician
 from apps.network.models import IPAddress, IPPool
 from apps.billing.models import Plan
 from utils.pagination import StandardResultsSetPagination
@@ -58,6 +59,7 @@ class ServiceConnectionViewSet(viewsets.ModelViewSet):
     
     serializer_class = ServiceConnectionSerializer
     permission_classes = [IsAuthenticated, CustomerAccessPermission]
+    required_rbac_path = "/admin/users"
     filter_backends = [DjangoFilterBackend]
     filterset_fields = ['service_type', 'status', 'connection_type']
     pagination_class = StandardResultsSetPagination
@@ -73,9 +75,9 @@ class ServiceConnectionViewSet(viewsets.ModelViewSet):
     
     def get_permissions(self):
         if self.action in ['create', 'update', 'partial_update', 'destroy', 'change_plan']:
-            return [IsAuthenticated(), IsAdminOrStaff()]
+            return [IsAuthenticated(), IsAdminOrStaff(), HasRoleAccessPolicy()]
         elif self.action in ['activate', 'suspend', 'terminate', 'extend', 'change_ip']:
-            return [IsAuthenticated(), IsAdminStaffOrTechnician()]
+            return [IsAuthenticated(), IsAdminStaffOrTechnician(), HasRoleAccessPolicy()]
         return [IsAuthenticated(), CustomerAccessPermission()]
     
     def get_queryset(self):
@@ -113,16 +115,77 @@ class ServiceConnectionViewSet(viewsets.ModelViewSet):
         customer_pk = self.kwargs.get('customer_pk')
         if customer_pk:
             customer = get_object_or_404(Customer, pk=customer_pk)
-            serializer.save(customer=customer)
+            service = serializer.save(customer=customer)
         else:
-            serializer.save()
+            service = serializer.save()
+        AuditLog.log_action(
+            user=self.request.user,
+            action="create",
+            model_name="Customer Service",
+            object_id=str(service.id),
+            object_repr=f"{service.customer.customer_code} - {service.service_type}",
+            changes={
+                "customer": service.customer.customer_code,
+                "service_type": service.service_type,
+                "status": service.status,
+                "plan": getattr(service.plan, "name", None),
+            },
+            ip_address=self.request.META.get("REMOTE_ADDR"),
+            user_agent=self.request.META.get("HTTP_USER_AGENT", ""),
+            tenant=getattr(self.request, "tenant", None),
+        )
 
     def perform_update(self, serializer):
+        before = {
+            "status": serializer.instance.status,
+            "plan": getattr(serializer.instance.plan, "name", None),
+            "service_type": serializer.instance.service_type,
+        }
         service = serializer.save(updated_by=self.request.user)
         if 'plan' in serializer.validated_data and service.plan:
             sync_service_plan_fields(service, service.plan)
             service.updated_by = self.request.user
             service.save()
+        AuditLog.log_action(
+            user=self.request.user,
+            action="update",
+            model_name="Customer Service",
+            object_id=str(service.id),
+            object_repr=f"{service.customer.customer_code} - {service.service_type}",
+            changes={
+                "before": before,
+                "after": {
+                    "status": service.status,
+                    "plan": getattr(service.plan, "name", None),
+                    "service_type": service.service_type,
+                },
+            },
+            ip_address=self.request.META.get("REMOTE_ADDR"),
+            user_agent=self.request.META.get("HTTP_USER_AGENT", ""),
+            tenant=getattr(self.request, "tenant", None),
+        )
+
+    def perform_destroy(self, instance):
+        object_id = str(instance.id)
+        object_repr = f"{instance.customer.customer_code} - {instance.service_type}"
+        changes = {
+            "customer": instance.customer.customer_code,
+            "service_type": instance.service_type,
+            "status": instance.status,
+            "plan": getattr(instance.plan, "name", None),
+        }
+        instance.delete()
+        AuditLog.log_action(
+            user=self.request.user,
+            action="delete",
+            model_name="Customer Service",
+            object_id=object_id,
+            object_repr=object_repr,
+            changes=changes,
+            ip_address=self.request.META.get("REMOTE_ADDR"),
+            user_agent=self.request.META.get("HTTP_USER_AGENT", ""),
+            tenant=getattr(self.request, "tenant", None),
+        )
     
     def _assign_ip_from_pool(self, service, customer):
         """
@@ -483,6 +546,27 @@ class ServiceConnectionViewSet(viewsets.ModelViewSet):
                 'amount': float(payment_obj.amount),
                 'status': payment_obj.status,
             }
+
+        AuditLog.log_action(
+            user=request.user,
+            action="update",
+            model_name="Service Activation",
+            object_id=str(service.id),
+            object_repr=f"{customer.customer_code} - {getattr(service.plan, 'name', 'No plan')}",
+            changes={
+                "customer": customer.customer_code,
+                "was_activated": was_activated,
+                "plan": getattr(service.plan, "name", None),
+                "record_payment": bool(record_payment),
+                "payment_amount": str(payment_obj.amount) if payment_obj else None,
+                "payment_reference": getattr(payment_obj, "payment_reference", None) if payment_obj else None,
+                "expires_at": new_expiration.isoformat() if new_expiration else None,
+                "assigned_ip": assigned_ip,
+            },
+            ip_address=request.META.get("REMOTE_ADDR"),
+            user_agent=request.META.get("HTTP_USER_AGENT", ""),
+            tenant=getattr(request, "tenant", None),
+        )
         
         return Response(response_data)
     
