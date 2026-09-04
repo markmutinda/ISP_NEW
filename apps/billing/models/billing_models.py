@@ -30,6 +30,7 @@ class Plan(models.Model):
         ('HOURS', 'Hours'),
         ('MINUTES', 'Minutes'),
         ('MONTHS', 'Months'),
+        ('CALENDAR_MONTH', 'Same Day Monthly'),   # NEW
         ('UNLIMITED', 'Unlimited'),
     ]
     
@@ -172,6 +173,8 @@ class Plan(models.Model):
         """Human-readable validity string"""
         if self.validity_type == 'UNLIMITED':
             return 'Unlimited'
+        elif self.validity_type == 'CALENDAR_MONTH':
+            return 'Monthly (same date)'
         elif self.validity_type == 'MINUTES' and self.validity_minutes:
             if self.validity_minutes < 60:
                 return f'{self.validity_minutes} min'
@@ -213,6 +216,10 @@ class Plan(models.Model):
         """Get total validity in minutes for RADIUS timeout"""
         if self.validity_type == 'UNLIMITED':
             return None
+        elif self.validity_type == 'CALENDAR_MONTH':
+            # Calendar month is roughly 30.44 days in minutes
+            # We use 30 days as an approximation for RADIUS timeout
+            return 30 * 24 * 60
         elif self.validity_type == 'MINUTES':
             return self.validity_minutes
         elif self.validity_type == 'HOURS':
@@ -222,12 +229,13 @@ class Plan(models.Model):
         else:  # DAYS
             return (self.duration_days or 30) * 24 * 60
 
-    def calculate_expiration(self, start_time=None):
+    def calculate_expiration(self, start_time=None, anchor_day=None):
         """
         Calculate expiration datetime based on this plan's validity settings.
         
         Args:
             start_time: Optional start time (defaults to now)
+            anchor_day: Day of month to anchor CALENDAR_MONTH plans
             
         Returns:
             datetime: Expiration datetime, or None for unlimited plans
@@ -239,12 +247,15 @@ class Plan(models.Model):
         """
         from datetime import timedelta
         from django.utils import timezone as tz
-        
+        from utils.billing_dates import calendar_month_expiration
+
         now = start_time or tz.now()
         validity_type = (self.validity_type or 'DAYS').upper()
         
         if validity_type == 'UNLIMITED':
             return None
+        elif validity_type == 'CALENDAR_MONTH':
+            return calendar_month_expiration(now, anchor_day=anchor_day)
         elif validity_type == 'MINUTES' and self.validity_minutes:
             return now + timedelta(minutes=self.validity_minutes)
         elif validity_type == 'HOURS' and self.validity_hours:
@@ -263,7 +274,7 @@ class Plan(models.Model):
         Get the validity duration as a timedelta object.
         
         Returns:
-            timedelta: Duration of the plan, or None for unlimited
+            timedelta: Duration of the plan, or None for unlimited or calendar-month plans
             
         Example:
             >>> plan = Plan.objects.get(validity_type='HOURS', validity_hours=2)
@@ -275,6 +286,10 @@ class Plan(models.Model):
         validity_type = (self.validity_type or 'DAYS').upper()
         
         if validity_type == 'UNLIMITED':
+            return None
+        elif validity_type == 'CALENDAR_MONTH':
+            # CALENDAR_MONTH is not a fixed delta - returns None intentionally
+            # Callers must use calculate_expiration() or calendar_month_expiration()
             return None
         elif validity_type == 'MINUTES' and self.validity_minutes:
             return timedelta(minutes=self.validity_minutes)

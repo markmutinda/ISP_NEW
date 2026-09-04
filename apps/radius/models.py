@@ -671,6 +671,18 @@ class CustomerRadiusCredentials(models.Model):
                   "Resets on each renewal — used to calculate usage from zero."
     )
     
+    # ─── NEW: Billing Anchor Day for CALENDAR_MONTH plans ──────────────
+    billing_anchor_day = models.PositiveSmallIntegerField(
+        null=True,
+        blank=True,
+        help_text=(
+            "Day-of-month this subscription originally started/paid on. "
+            "Only used for CALENDAR_MONTH plans — keeps the renewal date "
+            "fixed instead of drifting after a clamped short month."
+        ),
+    )
+    # ─────────────────────────────────────────────────────────────────────
+    
     # Sync Status
     synced_to_radius = models.BooleanField(
         default=False,

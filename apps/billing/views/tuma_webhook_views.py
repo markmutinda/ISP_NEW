@@ -363,26 +363,42 @@ class TumaWebhookView(APIView):
                                 
                                 # 2. Calculate new expiration date using the Plan's exact settings
                                 now = timezone.now()
-                                
-                                # Fetch exact timedelta (minutes, hours, days, months)
-                                validity_delta = None
-                                if hasattr(plan, 'get_validity_timedelta'):
-                                    validity_delta = plan.get_validity_timedelta()
-                                else:
-                                    from datetime import timedelta
-                                    validity_delta = timedelta(days=getattr(plan, 'validity_days', 30))
-                                
                                 current_expiry = creds.expiration_date
                                 
-                                if validity_delta is None:
-                                    # Unlimited Plan
-                                    new_expiry = None
+                                # ─── NEW: CALENDAR_MONTH HANDLING ──────────────────────────
+                                is_calendar = getattr(plan, 'validity_type', None) == 'CALENDAR_MONTH'
+                                
+                                if is_calendar:
+                                    from utils.billing_dates import resolve_calendar_renewal
+                                    new_anchor, new_expiry = resolve_calendar_renewal(
+                                        current_expiry,
+                                        anchor_day=creds.billing_anchor_day,
+                                        now=now
+                                    )
+                                    creds.billing_anchor_day = new_anchor
+                                    logger.info(
+                                        f"STK Webhook: CALENDAR_MONTH renewal for {creds.username} "
+                                        f"anchor={new_anchor}, expiry={new_expiry}"
+                                    )
                                 else:
-                                    # If they still have active time, add to it. If expired, start from right now.
-                                    if current_expiry and current_expiry > now:
-                                        new_expiry = current_expiry + validity_delta
+                                    # Fetch exact timedelta (minutes, hours, days, months)
+                                    validity_delta = None
+                                    if hasattr(plan, 'get_validity_timedelta'):
+                                        validity_delta = plan.get_validity_timedelta()
                                     else:
-                                        new_expiry = now + validity_delta
+                                        from datetime import timedelta
+                                        validity_delta = timedelta(days=getattr(plan, 'validity_days', 30))
+                                    
+                                    if validity_delta is None:
+                                        # Unlimited Plan
+                                        new_expiry = None
+                                    else:
+                                        # If they still have active time, add to it. If expired, start from right now.
+                                        if current_expiry and current_expiry > now:
+                                            new_expiry = current_expiry + validity_delta
+                                        else:
+                                            new_expiry = now + validity_delta
+                                # ──────────────────────────────────────────────────────────
                                 
                                 # 3. Update Radius Credentials in the database
                                 creds.expiration_date = new_expiry
@@ -391,7 +407,8 @@ class TumaWebhookView(APIView):
                                 creds.save(update_fields=[
                                     'expiration_date', 
                                     'is_enabled', 
-                                    'subscription_activated_at'
+                                    'subscription_activated_at',
+                                    'billing_anchor_day',  # Added for CALENDAR_MONTH
                                 ])
                                 
                                 # 4. Sync updates to the FreeRADIUS SQL tables

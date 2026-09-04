@@ -154,6 +154,25 @@ class MpesaC2BWebhookView(APIView):
             # Payment is still recorded by the caller; this just signals "needs manual review".
             return None, 0, None
 
+        # ─── NEW: CALENDAR_MONTH plans always renew as exactly 1 cycle ──────────
+        if matched_plan.validity_type == 'CALENDAR_MONTH':
+            from utils.billing_dates import resolve_calendar_renewal
+            
+            # Get the customer's radius credentials to access billing_anchor_day
+            radius_cred = getattr(customer, 'radius_credentials', None) if customer else None
+            prior_anchor = getattr(radius_cred, 'billing_anchor_day', None)
+            
+            # Use resolve_calendar_renewal to handle on-time vs late payment
+            _, new_expiry = resolve_calendar_renewal(
+                current_expiry,
+                anchor_day=prior_anchor,
+                now=now
+            )
+            
+            # Note: quantity is always 1 for CALENDAR_MONTH (no stacking)
+            return matched_plan, 1, new_expiry
+        # ──────────────────────────────────────────────────────────────────────────
+
         plan_price = matched_plan.base_price
         start_time = current_expiry if (current_expiry and current_expiry > now) else now
         validity_delta = matched_plan.get_validity_timedelta()
@@ -510,6 +529,24 @@ class MpesaC2BWebhookView(APIView):
                                 radius_cred.subscription_activated_at = timezone.now()
                                 if new_expiry:
                                     radius_cred.expiration_date = new_expiry
+                                
+                                # ─── NEW: Update billing_anchor_day for CALENDAR_MONTH ──────────
+                                # The _calculate_renewal_expiry method already handled the
+                                # anchor resolution via resolve_calendar_renewal, but we need
+                                # to store the updated anchor on the credentials
+                                if matched_plan and matched_plan.validity_type == 'CALENDAR_MONTH':
+                                    from utils.billing_dates import resolve_calendar_renewal
+                                    new_anchor, _ = resolve_calendar_renewal(
+                                        current_expiry,
+                                        anchor_day=radius_cred.billing_anchor_day,
+                                        now=timezone.now()
+                                    )
+                                    radius_cred.billing_anchor_day = new_anchor
+                                    logger.info(
+                                        f"Updated billing_anchor_day={new_anchor} for {radius_cred.username} "
+                                        "(CALENDAR_MONTH renewal via C2B)"
+                                    )
+                                # ───────────────────────────────────────────────────────────────────
                                 
                                 if plan_changed:
                                     try:

@@ -1155,8 +1155,24 @@ class CustomerRadiusCredentialsViewSet(viewsets.ModelViewSet):
                 'message': 'No plan found for this customer. Please assign a plan first.'
             }, status=status.HTTP_400_BAD_REQUEST)
         
-        # Calculate new expiration
-        new_expiration = calculate_expiration_from_plan(service.plan)
+        # ─── NEW: CALENDAR_MONTH HANDLING ──────────────────────────────────
+        if service.plan.validity_type == 'CALENDAR_MONTH':
+            from utils.billing_dates import resolve_calendar_renewal
+            
+            now = timezone.now()
+            new_anchor, new_expiration = resolve_calendar_renewal(
+                credentials.expiration_date,
+                anchor_day=credentials.billing_anchor_day,
+                now=now
+            )
+            credentials.billing_anchor_day = new_anchor
+            logger.info(
+                f"Manual renew: CALENDAR_MONTH for {credentials.username} "
+                f"anchor={new_anchor}, expiry={new_expiration}"
+            )
+        else:
+            new_expiration = calculate_expiration_from_plan(service.plan)
+        # ──────────────────────────────────────────────────────────────────
         
         # Update credentials
         credentials.expiration_date = new_expiration

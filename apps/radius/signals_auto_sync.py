@@ -49,13 +49,14 @@ def get_radius_sync_service():
     return RadiusSyncService()
 
 
-def calculate_expiration_from_plan(plan, start_time=None):
+def calculate_expiration_from_plan(plan, start_time=None, anchor_day=None):
     """
     Calculate expiration datetime based on Plan validity settings.
     
     Args:
         plan: Plan instance with validity_type and validity fields
         start_time: Optional start time (defaults to now)
+        anchor_day: Day of month to anchor CALENDAR_MONTH plans
         
     Returns:
         datetime: Expiration datetime, or None for unlimited plans
@@ -64,17 +65,23 @@ def calculate_expiration_from_plan(plan, start_time=None):
         return None
     
     now = start_time or timezone.now()
-    
     validity_type = (plan.validity_type or 'DAYS').upper()
     
     if validity_type == 'UNLIMITED':
         return None
+    
+    elif validity_type == 'CALENDAR_MONTH':
+        from utils.billing_dates import calendar_month_expiration
+        return calendar_month_expiration(now, anchor_day=anchor_day)
     
     elif validity_type == 'MINUTES' and plan.validity_minutes:
         return now + timedelta(minutes=plan.validity_minutes)
     
     elif validity_type == 'HOURS' and plan.validity_hours:
         return now + timedelta(hours=plan.validity_hours)
+    
+    elif validity_type == 'MONTHS' and plan.validity_months:
+        return now + timedelta(days=plan.validity_months * 30)
     
     elif validity_type == 'DAYS':
         days = plan.duration_days or 30
@@ -215,7 +222,18 @@ def auto_create_radius_for_service(sender, instance, created, **kwargs):
                 
                 # 🎯 RENEWAL LOGIC: Recalculate expiration when re-activating
                 if instance.plan:
-                    new_expiration = calculate_expiration_from_plan(instance.plan)
+                    # ─── CALENDAR_MONTH RENEWAL HANDLING ─────────────
+                    if instance.plan.validity_type == 'CALENDAR_MONTH':
+                        from utils.billing_dates import resolve_calendar_renewal
+                        new_anchor, new_expiration = resolve_calendar_renewal(
+                            credentials.expiration_date,
+                            anchor_day=credentials.billing_anchor_day,
+                            now=timezone.now(),
+                        )
+                        credentials.billing_anchor_day = new_anchor
+                    else:
+                        new_expiration = calculate_expiration_from_plan(instance.plan)
+                    
                     credentials.expiration_date = new_expiration
                     if new_expiration:
                         logger.info(
@@ -224,6 +242,7 @@ def auto_create_radius_for_service(sender, instance, created, **kwargs):
                         )
                     else:
                         logger.info(f"Renewed RADIUS for {credentials.username}: Unlimited validity")
+                # ──────────────────────────────────────────────────────
                 
                 # 🎯 CRITICAL: Stamp subscription_activated_at on renewal
                 # This resets the usage counter for the new period
@@ -346,7 +365,11 @@ def auto_create_radius_for_service(sender, instance, created, **kwargs):
         profile = _get_or_create_bandwidth_profile(instance) if instance.plan else None
         
         # 🎯 Calculate Expiration Date based on Plan
-        expiration_date = calculate_expiration_from_plan(instance.plan)
+        # ─── CALENDAR_MONTH: Set anchor_day on first creation ──────────
+        is_calendar = instance.plan and instance.plan.validity_type == 'CALENDAR_MONTH'
+        anchor_day = timezone.now().day if is_calendar else None
+        expiration_date = calculate_expiration_from_plan(instance.plan, anchor_day=anchor_day)
+        # ─────────────────────────────────────────────────────────────────
         
         if expiration_date:
             logger.info(
@@ -376,6 +399,12 @@ def auto_create_radius_for_service(sender, instance, created, **kwargs):
             # 🎯 CRITICAL: Stamp subscription_activated_at on creation if service is ACTIVE
             subscription_activated_at=timezone.now() if instance.status == 'ACTIVE' else None,
         )
+        
+        # ─── CALENDAR_MONTH: Store anchor_day on creation ──────────────
+        if is_calendar:
+            create_kwargs['billing_anchor_day'] = anchor_day
+            logger.info(f"Set billing_anchor_day={anchor_day} for {username} (CALENDAR_MONTH)")
+        # ─────────────────────────────────────────────────────────────────
         
         if radius_router_id:
             from apps.network.models.router_models import Router
