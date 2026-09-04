@@ -1336,7 +1336,6 @@ class AuditLogViewSet(viewsets.ReadOnlyModelViewSet):
             queryset = queryset.filter(
                 Q(user__is_superuser=True)
                 | Q(user__role__in=["admin", "superadmin", "super_admin"])
-                | Q(user__access_level__in=["admin", "superadmin", "super_admin"])
             )
         elif actor_type == "staff":
             queryset = queryset.filter(
@@ -1345,7 +1344,6 @@ class AuditLogViewSet(viewsets.ReadOnlyModelViewSet):
             ).exclude(
                 Q(user__is_superuser=True)
                 | Q(user__role__in=["admin", "superadmin", "super_admin"])
-                | Q(user__access_level__in=["admin", "superadmin", "super_admin"])
             )
         elif actor_type == "system":
             queryset = queryset.filter(user__isnull=True)

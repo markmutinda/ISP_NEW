@@ -579,7 +579,6 @@ class AuditLogSerializer(serializers.ModelSerializer):
     user_email = serializers.EmailField(source='user.email', read_only=True)
     user_full_name = serializers.SerializerMethodField()
     user_role = serializers.CharField(source='user.role', read_only=True, allow_null=True)
-    user_access_level = serializers.CharField(source='user.access_level', read_only=True, allow_null=True)
     actor_type = serializers.SerializerMethodField()
     action_display = serializers.CharField(source='get_action_display', read_only=True)
     
@@ -587,7 +586,7 @@ class AuditLogSerializer(serializers.ModelSerializer):
         model = AuditLog
         fields = [
             'id', 'user', 'user_email', 'user_full_name', 'user_role',
-            'user_access_level', 'actor_type',
+            'actor_type',
             'action', 'action_display', 'model_name', 'object_id',
             'object_repr', 'changes', 'ip_address', 'user_agent',
             'timestamp', 'tenant'
@@ -604,8 +603,7 @@ class AuditLogSerializer(serializers.ModelSerializer):
         if not user:
             return "system"
         role = str(getattr(user, "role", "") or "").lower()
-        access_level = str(getattr(user, "access_level", "") or "").lower()
-        if getattr(user, "is_superuser", False) or role in {"admin", "superadmin", "super_admin"} or access_level in {"admin", "superadmin", "super_admin"}:
+        if getattr(user, "is_superuser", False) or role in {"admin", "superadmin", "super_admin"}:
             return "admin"
         if role in {"staff", "technician", "accountant", "support"} or getattr(user, "is_staff", False):
             return "staff"
