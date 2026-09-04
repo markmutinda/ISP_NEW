@@ -1,74 +1,23 @@
 # Netily ISP Management System
 
-A comprehensive multi-tenant ISP management system for the Kenyan market.
+Netily is an ISP operations platform for managing customers, billing, subscriptions, payments, network access, support workflows, and business reporting from one dashboard.
 
-## Features
-- 🏢 Multi-tenant architecture (schema-based isolation)
-- 👥 Customer Management with self-service portal
-- 💳 Billing & M-Pesa Integration
-- 🌐 Network Management (OLT, TR-069, Mikrotik, RADIUS)
-- 📡 PPPoE and Hotspot user management
-- 📊 Bandwidth Monitoring & Analytics
-- 🎫 Support Ticketing
-- 📈 Analytics & Reporting
+The system is built for internet service providers that need a cleaner way to run PPPoE, hotspot, customer care, and revenue operations without juggling disconnected tools.
 
-## Documentation
+## Key Capabilities
 
-📖 **For detailed setup instructions, see [DEVELOPER_SETUP.md](DEVELOPER_SETUP.md)**
+- Customer and subscription management
+- PPPoE and hotspot service workflows
+- Payment collection and billing oversight
+- Router and network operations support
+- Staff access control and activity logs
+- Reports, analytics, and operational dashboards
+- Customer-facing self-service experiences
 
-## Quick Start
+## Ownership
 
-### Backend (Django)
-```powershell
-# Option 1: Use the quick start script
-.\start_backend.ps1
-
-# Option 2: Manual setup
-python -m venv .venv
-.\.venv\Scripts\Activate.ps1
-pip install -r requirements/local.txt
-python manage.py migrate_schemas --shared
-python manage.py migrate_schemas --tenant
-python manage.py runserver
-```
-
-### Frontend (Next.js)
-```powershell
-cd ..\netily
-.\start_frontend.ps1
-# Or: npm install && npm run dev
-```
-
-## Tech Stack
-
-| Layer | Technology |
-|-------|------------|
-| Backend | Django 5.x, Django REST Framework |
-| Frontend | Next.js 14+, TypeScript, shadcn/ui |
-| Database | PostgreSQL with django-tenants |
-| Task Queue | Celery + Redis |
-| Auth | JWT (djangorestframework-simplejwt) |
-| RADIUS | FreeRADIUS (Docker containers) |
-
-## Project Structure
-
-```
-ISP_NEW/           # Django Backend
-├── apps/          # Django applications
-├── config/        # Django settings
-├── requirements/  # Python dependencies
-└── manage.py
-
-netily/            # Next.js Frontend
-├── app/           # Next.js pages
-├── components/    # React components
-└── lib/           # Utilities & types
-```
-
-## Environment Variables
-
-See `.env.example` or [DEVELOPER_SETUP.md](DEVELOPER_SETUP.md) for required environment variables.
+This repository contains proprietary Netily product code. Access, copying, modification, distribution, or deployment is restricted to authorized personnel only.
 
 ## License
 
-Proprietary - Ramco Group LTD
+Proprietary - by Mjengo Corporate
