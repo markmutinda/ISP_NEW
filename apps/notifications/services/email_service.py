@@ -462,11 +462,13 @@ class EmailService:
         """Log email sending attempt"""
         from apps.core.models import AuditLog
         
-        AuditLog.objects.create(
+        AuditLog.log_action(
             user=None,  # System action
-            action='EMAIL_SENT',
+            action='create',
+            model_name='Email',
+            object_repr=subject,
             ip_address='127.0.0.1',
-            details={
+            changes={
                 'recipients': recipients,
                 'subject': subject,
                 'success': success,

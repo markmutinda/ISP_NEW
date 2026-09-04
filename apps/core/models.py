@@ -3,7 +3,8 @@ Core models for ISP Management System
 """
 import uuid
 import json
-from django.db import models
+import logging
+from django.db import models, transaction
 from django.contrib.auth.models import AbstractUser, BaseUserManager
 from django.utils import timezone
 from django.core.validators import RegexValidator
@@ -12,6 +13,8 @@ from django_tenants.models import DomainMixin, TenantMixin
 
 # Import country/currency constants
 from utils.constants import COUNTRY_CHOICES, COUNTRY_CURRENCY_MAP
+
+logger = logging.getLogger(__name__)
 
 
 class Domain(DomainMixin):
@@ -573,18 +576,42 @@ class AuditLog(BaseModel):
     @classmethod
     def log_action(cls, user, action, model_name, object_id=None, object_repr=None, 
                    changes=None, ip_address=None, user_agent=None, tenant=None):
-        """Helper method to create audit log entries"""
-        return cls.objects.create(
-            user=user,
-            action=action,
-            model_name=model_name,
-            object_id=object_id,
-            object_repr=object_repr,
-            changes=changes,
-            ip_address=ip_address,
-            user_agent=user_agent,
-            tenant=tenant
-        )
+        """Create an audit log entry without ever breaking the source action."""
+        safe_user = user if getattr(user, "is_authenticated", False) else None
+        if safe_user is not None:
+            try:
+                if not User.objects.filter(id=safe_user.id).exists():
+                    safe_user = None
+            except Exception as exc:
+                logger.warning("Skipping audit user link for %s %s: %s", model_name, action, exc)
+                safe_user = None
+
+        safe_tenant = tenant
+        if safe_tenant is not None:
+            tenant_id = getattr(safe_tenant, "id", safe_tenant)
+            try:
+                if not Tenant.objects.filter(id=tenant_id).exists():
+                    safe_tenant = None
+            except Exception as exc:
+                logger.warning("Skipping audit tenant link for %s %s: %s", model_name, action, exc)
+                safe_tenant = None
+
+        try:
+            with transaction.atomic():
+                return cls.objects.create(
+                    user=safe_user,
+                    action=action,
+                    model_name=model_name,
+                    object_id=object_id,
+                    object_repr=object_repr,
+                    changes=changes,
+                    ip_address=ip_address,
+                    user_agent=user_agent,
+                    tenant=safe_tenant
+                )
+        except Exception as exc:
+            logger.warning("Audit log skipped for %s %s %s: %s", action, model_name, object_id, exc)
+            return None
 
 
 class GlobalSystemSettings(models.Model):

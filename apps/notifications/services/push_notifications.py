@@ -369,11 +369,13 @@ class PushNotificationService:
         """Log push notification attempt"""
         from apps.core.models import AuditLog
         
-        AuditLog.objects.create(
+        AuditLog.log_action(
             user=None,
-            action='PUSH_NOTIFICATION_SENT',
+            action='create',
+            model_name='Push Notification',
+            object_repr=title,
             ip_address='127.0.0.1',
-            details={
+            changes={
                 'tokens_count': len(tokens),
                 'title': title,
                 'success': success,

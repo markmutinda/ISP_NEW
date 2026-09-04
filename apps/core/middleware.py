@@ -326,7 +326,7 @@ class AuditLogMiddleware(MiddlewareMixin):
 
             tenant = getattr(request, 'tenant', None)
 
-            AuditLog.objects.create(
+            AuditLog.log_action(
                 user=request.user,
                 action=action,
                 model_name=model_name,

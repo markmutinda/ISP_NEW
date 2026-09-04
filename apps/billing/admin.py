@@ -316,11 +316,11 @@ class PaymentAdmin(admin.ModelAdmin):
 
     def mark_as_completed(self, request, queryset):
         for payment in queryset:
-            payment.mark_as_completed(request.user)
+            payment.mark_as_completed(processed_by=request.user)
 
     def mark_as_failed(self, request, queryset):
         for payment in queryset:
-            payment.mark_as_failed("Manually marked as failed by admin")
+            payment.mark_as_failed("Manually marked as failed by admin", processed_by=request.user)
 
     def reconcile_payments(self, request, queryset):
         for payment in queryset:
