@@ -33,19 +33,26 @@ def resolve_calendar_renewal(current_expiry, anchor_day=None, now=None):
     """
     Decide the (anchor_day, new_expiry) pair for a CALENDAR_MONTH renewal.
 
-    - On-time/early payment (now <= current_expiry): keep the existing
-      anchor day, extend one calendar month from current_expiry.
-    - Late payment (now > current_expiry, or no prior expiry): the
-      anchor resets to *today's* day-of-month — future renewals will
-      now track the new payment date.
+    - No anchor_day yet (first CALENDAR_MONTH cycle — e.g. just switched
+      from a DAYS/MONTHS plan): always anchor to *today's* payment date.
+      A leftover expiration_date from the old billing scheme is not a
+      valid calendar anchor and must never be used as the base.
+    - Anchor exists + on-time/early payment (now <= current_expiry):
+      keep the existing anchor day, extend one month from current_expiry.
+    - Anchor exists + late payment (now > current_expiry): reset the
+      anchor to today's day-of-month.
     """
     now = now or timezone.now()
 
-    if current_expiry and current_expiry > now:
-        resolved_anchor = anchor_day or current_expiry.day
-        new_expiry = calendar_month_expiration(current_expiry, anchor_day=resolved_anchor)
-    else:
+    if not anchor_day:
         resolved_anchor = now.day
         new_expiry = calendar_month_expiration(now, anchor_day=resolved_anchor)
+        return resolved_anchor, new_expiry
 
+    if current_expiry and current_expiry > now:
+        new_expiry = calendar_month_expiration(current_expiry, anchor_day=anchor_day)
+        return anchor_day, new_expiry
+
+    resolved_anchor = now.day
+    new_expiry = calendar_month_expiration(now, anchor_day=resolved_anchor)
     return resolved_anchor, new_expiry
