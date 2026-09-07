@@ -1390,175 +1390,211 @@ class HotspotVoucherRedeemView(APIView):
             if not router_id:
                 return Response({'error': 'Router ID is required'}, status=status.HTTP_400_BAD_REQUEST)
 
-            # ============================================================
-            # FIX: Auto-detect plan from voucher - no plan_id required!
-            # ============================================================
-            try:
-                voucher = Voucher.objects.select_related('batch', 'batch__hotspot_plan').get(code__iexact=voucher_code)
-            except Voucher.DoesNotExist:
-                return Response({'error': 'Invalid voucher code'}, status=status.HTTP_404_NOT_FOUND)
-
-            # Check if voucher is expired or used
-            if not voucher.is_valid():
-                if voucher.status == 'EXPIRED' or (voucher.valid_to and voucher.valid_to < timezone.now()):
-                    reason = 'Voucher has expired'
-                elif voucher.status in ('USED', 'REDEEMED') or voucher.use_count >= (voucher.max_uses or 1):
-                    reason = 'Voucher has already been used'
-                else:
-                    reason = 'Voucher is not available'
-                return Response({'error': reason}, status=status.HTTP_400_BAD_REQUEST)
-
-            # ============================================================
-            # Auto-detect the plan from the voucher
-            # ============================================================
-            plan = None
-            # First check if voucher has hotspot_plan directly
-            if hasattr(voucher, 'hotspot_plan') and voucher.hotspot_plan:
-                plan = voucher.hotspot_plan
-            # Then check the batch's hotspot_plan
-            elif voucher.batch and voucher.batch.hotspot_plan:
-                plan = voucher.batch.hotspot_plan
+            # ════════════════════════════════════════════════════════════════
+            # 🆕 IDEMPOTENCY GUARD: Return existing session if already redeemed
+            # ════════════════════════════════════════════════════════════════
+            existing_session = HotspotSession.objects.filter(
+                payhero_checkout_id=f'VOUCHER_{voucher_code}',
+                mac_address=mac_address,
+                status__in=('active', 'paid'),
+            ).select_related('plan').first()
             
-            if not plan:
-                return Response(
-                    {'error': 'This voucher is not linked to a valid plan'},
-                    status=status.HTTP_400_BAD_REQUEST
-                )
-
-            # Verify the plan is active
-            if not plan.is_active:
-                return Response(
-                    {'error': 'The plan linked to this voucher is no longer available'},
-                    status=status.HTTP_400_BAD_REQUEST
-                )
-
-            # Get the router
-            try:
-                router = Router.objects.get(id=router_id, is_active=True)
-            except (Router.DoesNotExist, ValueError):
-                try:
-                    router = Router.objects.get(name=router_id, is_active=True)
-                except Router.DoesNotExist:
-                    return Response({'error': 'Router not found'}, status=status.HTTP_404_NOT_FOUND)
-
-            # ============================================================
-            # FIX: Enforce voucher plan restriction (if voucher is plan-restricted)
-            # ============================================================
-            voucher_plan_id = getattr(voucher.batch, 'hotspot_plan_id', None)
-            if voucher_plan_id and str(voucher_plan_id) != str(plan.id):
-                logger.warning(
-                    f"Voucher {voucher.code} is restricted to plan {voucher_plan_id} "
-                    f"but the linked plan is {plan.id}"
-                )
-                return Response(
-                    {'error': 'This voucher is not valid for the selected plan'},
-                    status=status.HTTP_400_BAD_REQUEST
-                )
-
-            # Check if voucher has sufficient balance
-            if voucher.remaining_value is not None and voucher.remaining_value < plan.price:
+            if existing_session:
                 return Response({
-                    'error': f'Voucher balance (KES {voucher.remaining_value}) is insufficient for this plan (KES {plan.price})'
-                }, status=status.HTTP_400_BAD_REQUEST)
+                    'status': 'success',
+                    'message': f'Voucher already redeemed! You are connected with {existing_session.plan.name} plan.',
+                    'access_code': existing_session.access_code,
+                    'username': existing_session.access_code,
+                    'password': existing_session.access_code,
+                    'expires_at': existing_session.expires_at,
+                    'plan_name': existing_session.plan.name,
+                    'remaining_voucher_value': None,
+                })
 
-            # ══════════════════════════════════════════════════════════════
-            # RESOLVE HOTSPOT IDENTITY FOR VOUCHER (using new canonical_username)
-            # ══════════════════════════════════════════════════════════════
-            from apps.billing.models.hotspot_models import HotspotClient, HotspotClientDevice
-            
-            # Use MAC as a fallback identifier if real phone isn't provided
-            provided_phone = request.data.get('phone_number') or ''
-            # MAC-derived fallback must stay within max_length=15: "MAC-" (4) + 11 chars = 15
-            phone_to_use = provided_phone if provided_phone else f"MAC-{mac_address.replace(':', '')[:11]}"
-            
-            # Resolve the persistent client record
-            hotspot_client = HotspotClient.get_or_create_by_mac(
-                schema_name=tenant.schema_name,
-                mac_address=mac_address,
-                phone_number=phone_to_use,
-            )
-            
-            if hotspot_client and mac_address:
-                HotspotClientDevice.record_device(
-                    client=hotspot_client, 
-                    mac_address=mac_address
+            # ════════════════════════════════════════════════════════════════
+            # 🆕 SHORT LOCK: Prevent race conditions on double-tap
+            # ════════════════════════════════════════════════════════════════
+            lock_key = f"voucher_redeem_lock:{tenant.schema_name}:{voucher_code}:{mac_address}"
+            if not cache.add(lock_key, "1", timeout=15):
+                return Response(
+                    {'error': 'Redemption already in progress. Please wait a moment.'},
+                    status=status.HTTP_409_CONFLICT,
                 )
             
-            # Use the client's permanent canonical_username as the access code
-            if hotspot_client and hotspot_client.canonical_username:
-                friendly_username = hotspot_client.canonical_username
-                logger.info(f"🔄 VOUCHER: Using permanent username {friendly_username} for {mac_address}")
-            else:
-                # Fallback: generate new code (should rarely happen)
-                friendly_username = self._generate_code()
-                logger.warning(f"⚠️ VOUCHER: No canonical_username, using generated code {friendly_username}")
-
-            # Mark voucher as used
-            voucher.use_count = (voucher.use_count or 0) + 1
-            if voucher.remaining_value is not None:
-                voucher.remaining_value = max(Decimal('0'), voucher.remaining_value - plan.price)
-            if not voucher.is_reusable or voucher.use_count >= (voucher.max_uses or 1):
-                voucher.status = 'USED'
-            voucher.save()
-
-            # Create hotspot session
-            session_id = HotspotSession.generate_session_id()
-            session = HotspotSession.objects.create(
-                session_id=session_id,
-                router=router,
-                plan=plan,
-                phone_number='VOUCHER',
-                mac_address=mac_address,
-                amount=plan.price,
-                status='paid',
-                access_code=friendly_username,
-                payhero_checkout_id=f'VOUCHER_{voucher.code}',
-                hotspot_client=hotspot_client,  # Link to persistent client
-            )
-
             try:
-                session.activate(friendly_username)
+                # ============================================================
+                # FIX: Auto-detect plan from voucher - no plan_id required!
+                # ============================================================
+                try:
+                    voucher = Voucher.objects.select_related('batch', 'batch__hotspot_plan').get(code__iexact=voucher_code)
+                except Voucher.DoesNotExist:
+                    return Response({'error': 'Invalid voucher code'}, status=status.HTTP_404_NOT_FOUND)
+
+                # Check if voucher is expired or used
+                if not voucher.is_valid():
+                    if voucher.status == 'EXPIRED' or (voucher.valid_to and voucher.valid_to < timezone.now()):
+                        reason = 'Voucher has expired'
+                    elif voucher.status in ('USED', 'REDEEMED') or voucher.use_count >= (voucher.max_uses or 1):
+                        reason = 'Voucher has already been used'
+                    else:
+                        reason = 'Voucher is not available'
+                    return Response({'error': reason}, status=status.HTTP_400_BAD_REQUEST)
+
+                # ============================================================
+                # Auto-detect the plan from the voucher
+                # ============================================================
+                plan = None
+                # First check if voucher has hotspot_plan directly
+                if hasattr(voucher, 'hotspot_plan') and voucher.hotspot_plan:
+                    plan = voucher.hotspot_plan
+                # Then check the batch's hotspot_plan
+                elif voucher.batch and voucher.batch.hotspot_plan:
+                    plan = voucher.batch.hotspot_plan
                 
-                # ────────────────────────────────────────────────────────────
-                # FIX 2: Close only prior radacct rows for renewal
-                # ────────────────────────────────────────────────────────────
-                closed_count = _close_prior_radacct_rows_for_renewal(session, friendly_username)
-                if closed_count > 0:
-                    logger.info(
-                        f"Closed {closed_count} old RADIUS sessions for {friendly_username} before renewal activation"
+                if not plan:
+                    return Response(
+                        {'error': 'This voucher is not linked to a valid plan'},
+                        status=status.HTTP_400_BAD_REQUEST
+                    )
+
+                # Verify the plan is active
+                if not plan.is_active:
+                    return Response(
+                        {'error': 'The plan linked to this voucher is no longer available'},
+                        status=status.HTTP_400_BAD_REQUEST
+                    )
+
+                # Get the router
+                try:
+                    router = Router.objects.get(id=router_id, is_active=True)
+                except (Router.DoesNotExist, ValueError):
+                    try:
+                        router = Router.objects.get(name=router_id, is_active=True)
+                    except Router.DoesNotExist:
+                        return Response({'error': 'Router not found'}, status=status.HTTP_404_NOT_FOUND)
+
+                # ============================================================
+                # FIX: Enforce voucher plan restriction (if voucher is plan-restricted)
+                # ============================================================
+                voucher_plan_id = getattr(voucher.batch, 'hotspot_plan_id', None)
+                if voucher_plan_id and str(voucher_plan_id) != str(plan.id):
+                    logger.warning(
+                        f"Voucher {voucher.code} is restricted to plan {voucher_plan_id} "
+                        f"but the linked plan is {plan.id}"
+                    )
+                    return Response(
+                        {'error': 'This voucher is not valid for the selected plan'},
+                        status=status.HTTP_400_BAD_REQUEST
+                    )
+
+                # Check if voucher has sufficient balance
+                if voucher.remaining_value is not None and voucher.remaining_value < plan.price:
+                    return Response({
+                        'error': f'Voucher balance (KES {voucher.remaining_value}) is insufficient for this plan (KES {plan.price})'
+                    }, status=status.HTTP_400_BAD_REQUEST)
+
+                # ══════════════════════════════════════════════════════════════
+                # RESOLVE HOTSPOT IDENTITY FOR VOUCHER (using new canonical_username)
+                # ══════════════════════════════════════════════════════════════
+                from apps.billing.models.hotspot_models import HotspotClient, HotspotClientDevice
+                
+                # Use MAC as a fallback identifier if real phone isn't provided
+                provided_phone = request.data.get('phone_number') or ''
+                # MAC-derived fallback must stay within max_length=15: "MAC-" (4) + 11 chars = 15
+                phone_to_use = provided_phone if provided_phone else f"MAC-{mac_address.replace(':', '')[:11]}"
+                
+                # Resolve the persistent client record
+                hotspot_client = HotspotClient.get_or_create_by_mac(
+                    schema_name=tenant.schema_name,
+                    mac_address=mac_address,
+                    phone_number=phone_to_use,
+                )
+                
+                if hotspot_client and mac_address:
+                    HotspotClientDevice.record_device(
+                        client=hotspot_client, 
+                        mac_address=mac_address
                     )
                 
-                from apps.billing.services.hotspot_radius_service import HotspotRadiusService
-                radius_service = HotspotRadiusService()
-                radius_service.create_hotspot_credentials(
-                    username=friendly_username,
-                    password=friendly_username,
-                    router=session.router,
-                    plan=session.plan,
-                    expires_at=session.expires_at,
-                    mac_address=mac_address,
-                )
-                logger.info(f"VOUCHER REDEEM: {voucher.code} -> user {friendly_username} at {router.name} (plan: {plan.name})")
-                
-                # ── SMS: welcome for voucher redemption ──
-                # FIX: Fire-and-forget async task — SMS sending is off the critical path
-                from apps.messaging.tasks import send_hotspot_welcome_sms
-                send_hotspot_welcome_sms.delay(session.session_id, tenant.schema_name)
-                    
-            except Exception as e:
-                logger.error(f"RADIUS activation failed for voucher: {e}")
-                return Response({'error': 'Activation failed'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+                # Use the client's permanent canonical_username as the access code
+                if hotspot_client and hotspot_client.canonical_username:
+                    friendly_username = hotspot_client.canonical_username
+                    logger.info(f"🔄 VOUCHER: Using permanent username {friendly_username} for {mac_address}")
+                else:
+                    # Fallback: generate new code (should rarely happen)
+                    friendly_username = self._generate_code()
+                    logger.warning(f"⚠️ VOUCHER: No canonical_username, using generated code {friendly_username}")
 
-            return Response({
-                'status': 'success',
-                'message': f'Voucher redeemed! You are connected with {plan.name} plan.',
-                'access_code': friendly_username,
-                'username': friendly_username,
-                'password': friendly_username,
-                'expires_at': session.expires_at,
-                'plan_name': plan.name,
-                'remaining_voucher_value': str(voucher.remaining_value) if voucher.remaining_value is not None else None,
-            })
+                # Mark voucher as used
+                voucher.use_count = (voucher.use_count or 0) + 1
+                if voucher.remaining_value is not None:
+                    voucher.remaining_value = max(Decimal('0'), voucher.remaining_value - plan.price)
+                if not voucher.is_reusable or voucher.use_count >= (voucher.max_uses or 1):
+                    voucher.status = 'USED'
+                voucher.save()
+
+                # Create hotspot session
+                session_id = HotspotSession.generate_session_id()
+                session = HotspotSession.objects.create(
+                    session_id=session_id,
+                    router=router,
+                    plan=plan,
+                    phone_number='VOUCHER',
+                    mac_address=mac_address,
+                    amount=plan.price,
+                    status='paid',
+                    access_code=friendly_username,
+                    payhero_checkout_id=f'VOUCHER_{voucher.code}',
+                    hotspot_client=hotspot_client,  # Link to persistent client
+                )
+
+                try:
+                    session.activate(friendly_username)
+                    
+                    # ────────────────────────────────────────────────────────────
+                    # FIX 2: Close only prior radacct rows for renewal
+                    # ────────────────────────────────────────────────────────────
+                    closed_count = _close_prior_radacct_rows_for_renewal(session, friendly_username)
+                    if closed_count > 0:
+                        logger.info(
+                            f"Closed {closed_count} old RADIUS sessions for {friendly_username} before renewal activation"
+                        )
+                    
+                    from apps.billing.services.hotspot_radius_service import HotspotRadiusService
+                    radius_service = HotspotRadiusService()
+                    radius_service.create_hotspot_credentials(
+                        username=friendly_username,
+                        password=friendly_username,
+                        router=session.router,
+                        plan=session.plan,
+                        expires_at=session.expires_at,
+                        mac_address=mac_address,
+                    )
+                    logger.info(f"VOUCHER REDEEM: {voucher.code} -> user {friendly_username} at {router.name} (plan: {plan.name})")
+                    
+                    # ── SMS: welcome for voucher redemption ──
+                    # FIX: Fire-and-forget async task — SMS sending is off the critical path
+                    from apps.messaging.tasks import send_hotspot_welcome_sms
+                    send_hotspot_welcome_sms.delay(session.session_id, tenant.schema_name)
+                        
+                except Exception as e:
+                    logger.error(f"RADIUS activation failed for voucher: {e}")
+                    return Response({'error': 'Activation failed'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+                return Response({
+                    'status': 'success',
+                    'message': f'Voucher redeemed! You are connected with {plan.name} plan.',
+                    'access_code': friendly_username,
+                    'username': friendly_username,
+                    'password': friendly_username,
+                    'expires_at': session.expires_at,
+                    'plan_name': plan.name,
+                    'remaining_voucher_value': str(voucher.remaining_value) if voucher.remaining_value is not None else None,
+                })
+            
+            finally:
+                # Always release the lock
+                cache.delete(lock_key)
 
 
 # ============================================================
