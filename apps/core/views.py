@@ -1366,7 +1366,9 @@ class AuditLogViewSet(viewsets.ReadOnlyModelViewSet):
         include_superadmin = str(self.request.query_params.get("include_superadmin") or "").lower() in {"1", "true", "yes"}
         actor_type = self.request.query_params.get('actor_type')
 
-        if actor_type != "superadmin" and not (include_superadmin and self.request.user.is_superuser):
+        is_superadmin_viewer = getattr(self.request.user, "is_superuser", False)
+
+        if not is_superadmin_viewer and actor_type != "superadmin":
             queryset = queryset.exclude(superadmin_actor)
         
         user_id = self.request.query_params.get('user_id')
@@ -1382,9 +1384,10 @@ class AuditLogViewSet(viewsets.ReadOnlyModelViewSet):
             queryset = queryset.filter(model_name=model_name)
 
         if actor_type == "admin":
-            queryset = queryset.filter(
-                user__role="admin"
-            ).exclude(superadmin_actor)
+            admin_actor = Q(user__role="admin")
+            if is_superadmin_viewer or include_superadmin:
+                admin_actor |= superadmin_actor
+            queryset = queryset.filter(admin_actor)
         elif actor_type == "staff":
             queryset = queryset.filter(
                 Q(user__role__in=["staff", "technician", "accountant", "support"])
