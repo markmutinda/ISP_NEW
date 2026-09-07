@@ -687,6 +687,11 @@ class SMSNotifier:
         plan_name = plan.name if plan else ''
         access_code = session.access_code or ''
 
+        # NEW: amount context — session.amount is the actual paid value
+        amount_val = float(session.amount or 0)
+        amount_fmt = f"{amount_val:,.0f}"
+        amount_due_fmt = f"KES {amount_fmt}"
+
         default_msg = (
             f"WiFi Active! Code: {access_code}. "
             f"Plan: {plan_name} ({duration}). "
@@ -700,6 +705,9 @@ class SMSNotifier:
             duration=duration,
             expiry_time=expiry_time,
             speed=speed,
+            amount=amount_fmt,          # NEW
+            amount_due=amount_due_fmt,  # NEW
+            amount_paid=amount_fmt,     # NEW alias, in case template uses this
         )
         return _send_once(
             f"hs_welcome:{session.session_id}",
