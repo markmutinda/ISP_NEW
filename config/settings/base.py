@@ -372,6 +372,16 @@ EMAIL_TIMEOUT = int(os.getenv('EMAIL_TIMEOUT', 10))
 RESEND_API_KEY = os.getenv('RESEND_API_KEY', '')  # Set in .env for production
 RESEND_FROM_EMAIL = os.getenv('RESEND_FROM_EMAIL', 'Netily <billing@netily.co.ke>')
 OTP_EXEMPT_EMAILS = [e.strip().lower() for e in os.getenv('OTP_EXEMPT_EMAILS', 'admin@netily.co.ke').split(',') if e.strip()]
+PLATFORM_SUPERADMIN_EMAILS = [
+    e.strip().lower()
+    for e in os.getenv('PLATFORM_SUPERADMIN_EMAILS', os.getenv('OTP_EXEMPT_EMAILS', 'admin@netily.co.ke')).split(',')
+    if e.strip()
+]
+PLATFORM_SUPERADMIN_NAMES = [
+    n.strip().lower()
+    for n in os.getenv('PLATFORM_SUPERADMIN_NAMES', 'peter ouma,mark mbolonzi').split(',')
+    if n.strip()
+]
 AFFILIATE_ATTRIBUTION_WINDOW_DAYS = int(os.getenv('AFFILIATE_ATTRIBUTION_WINDOW_DAYS', '30'))
 AFFILIATE_CLICK_DEDUP_MINUTES = int(os.getenv('AFFILIATE_CLICK_DEDUP_MINUTES', '30'))
 

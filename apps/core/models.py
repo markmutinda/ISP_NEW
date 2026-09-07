@@ -576,25 +576,33 @@ class AuditLog(BaseModel):
     @staticmethod
     def _is_platform_superadmin_actor(user):
         email = str(getattr(user, "email", "") or "").strip().lower()
-        if not email:
-            return bool(getattr(user, "is_superuser", False))
+        full_name = " ".join(
+            part for part in [
+                str(getattr(user, "first_name", "") or "").strip(),
+                str(getattr(user, "last_name", "") or "").strip(),
+            ]
+            if part
+        ).lower()
+        role = str(getattr(user, "role", "") or "").strip().lower()
 
-        configured = getattr(settings, "OTP_EXEMPT_EMAILS", []) or []
-        configured_emails = {str(item).strip().lower() for item in configured if str(item).strip()}
-        if email in configured_emails:
+        configured_emails = {
+            str(item).strip().lower()
+            for item in getattr(settings, "PLATFORM_SUPERADMIN_EMAILS", []) or []
+            if str(item).strip()
+        }
+        configured_names = {
+            str(item).strip().lower()
+            for item in getattr(settings, "PLATFORM_SUPERADMIN_NAMES", []) or []
+            if str(item).strip()
+        }
+
+        if role in {"superadmin", "super_admin"}:
             return True
 
-        if getattr(user, "is_superuser", False):
+        if email and email in configured_emails:
             return True
 
-        try:
-            from django_tenants.utils import get_public_schema_name, schema_context
-
-            with schema_context(get_public_schema_name()):
-                return User.objects.filter(email__iexact=email, is_superuser=True).exists()
-        except Exception as exc:
-            logger.warning("Could not verify platform superadmin audit actor %s: %s", email, exc)
-            return False
+        return bool(full_name and full_name in configured_names)
     
     @classmethod
     def log_action(cls, user, action, model_name, object_id=None, object_repr=None, 

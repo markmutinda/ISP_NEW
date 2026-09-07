@@ -60,20 +60,14 @@ logger = logging.getLogger(__name__)
 
 
 def _platform_admin_emails() -> set[str]:
-    configured = getattr(settings, "OTP_EXEMPT_EMAILS", []) or []
+    configured = getattr(settings, "PLATFORM_SUPERADMIN_EMAILS", []) or []
     emails = {str(e).strip().lower() for e in configured if str(e).strip()}
-    try:
-        with schema_context(get_public_schema_name()):
-            emails.update(
-                str(email).strip().lower()
-                for email in User.objects.filter(is_active=True, is_superuser=True)
-                .exclude(email__isnull=True)
-                .values_list("email", flat=True)
-                if str(email).strip()
-            )
-    except Exception:
-        logger.exception("Failed to load active platform superadmin emails")
     return emails
+
+
+def _platform_admin_names() -> set[str]:
+    configured = getattr(settings, "PLATFORM_SUPERADMIN_NAMES", []) or []
+    return {str(name).strip().lower() for name in configured if str(name).strip()}
 
 
 def _tenant_local_platform_admin_exists(email: str) -> bool:
@@ -1362,15 +1356,20 @@ class AuditLogViewSet(viewsets.ReadOnlyModelViewSet):
     
     def get_queryset(self):
         queryset = super().get_queryset()
-        superadmin_actor = Q(user__is_superuser=True) | Q(user__role__in=["superadmin", "super_admin"])
+        superadmin_actor = Q(user__role__in=["superadmin", "super_admin"])
         for email in _platform_admin_emails():
             superadmin_actor |= Q(user__email__iexact=email)
+        for name in _platform_admin_names():
+            parts = [part for part in name.split() if part]
+            if len(parts) >= 2:
+                superadmin_actor |= Q(user__first_name__iexact=parts[0], user__last_name__iexact=" ".join(parts[1:]))
         include_superadmin = str(self.request.query_params.get("include_superadmin") or "").lower() in {"1", "true", "yes"}
+        hide_platform_superadmin = str(self.request.query_params.get("hide_platform_superadmin") or "").lower() in {"1", "true", "yes"}
         actor_type = self.request.query_params.get('actor_type')
 
         is_superadmin_viewer = getattr(self.request.user, "is_superuser", False)
 
-        if actor_type != "superadmin":
+        if (hide_platform_superadmin or not is_superadmin_viewer) and actor_type != "superadmin":
             queryset = queryset.exclude(superadmin_actor)
         
         user_id = self.request.query_params.get('user_id')
@@ -1387,7 +1386,7 @@ class AuditLogViewSet(viewsets.ReadOnlyModelViewSet):
 
         if actor_type == "admin":
             admin_actor = Q(user__role="admin")
-            if include_superadmin and is_superadmin_viewer:
+            if include_superadmin and is_superadmin_viewer and not hide_platform_superadmin:
                 admin_actor |= superadmin_actor
             queryset = queryset.filter(admin_actor)
         elif actor_type == "staff":
@@ -1404,6 +1403,8 @@ class AuditLogViewSet(viewsets.ReadOnlyModelViewSet):
                 queryset = queryset.none()
         elif actor_type == "system":
             queryset = queryset.filter(user__isnull=True)
+        elif actor_type == "user":
+            queryset = queryset.filter(user__role="customer")
 
         search = (self.request.query_params.get("search") or "").strip()
         if search:
