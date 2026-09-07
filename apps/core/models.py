@@ -4,7 +4,7 @@ Core models for ISP Management System
 import uuid
 import json
 import logging
-from django.db import models, transaction
+from django.db import connection, models, transaction
 from django.contrib.auth.models import AbstractUser, BaseUserManager
 from django.utils import timezone
 from django.core.validators import RegexValidator
@@ -572,6 +572,29 @@ class AuditLog(BaseModel):
     
     def __str__(self):
         return f"{self.user} {self.action} {self.model_name} {self.object_id}"
+
+    @staticmethod
+    def _is_platform_superadmin_actor(user):
+        email = str(getattr(user, "email", "") or "").strip().lower()
+        if not email:
+            return bool(getattr(user, "is_superuser", False))
+
+        configured = getattr(settings, "OTP_EXEMPT_EMAILS", []) or []
+        configured_emails = {str(item).strip().lower() for item in configured if str(item).strip()}
+        if email in configured_emails:
+            return True
+
+        if getattr(user, "is_superuser", False):
+            return True
+
+        try:
+            from django_tenants.utils import get_public_schema_name, schema_context
+
+            with schema_context(get_public_schema_name()):
+                return User.objects.filter(email__iexact=email, is_superuser=True).exists()
+        except Exception as exc:
+            logger.warning("Could not verify platform superadmin audit actor %s: %s", email, exc)
+            return False
     
     @classmethod
     def log_action(cls, user, action, model_name, object_id=None, object_repr=None, 
@@ -585,6 +608,16 @@ class AuditLog(BaseModel):
             except Exception as exc:
                 logger.warning("Skipping audit user link for %s %s: %s", model_name, action, exc)
                 safe_user = None
+
+        try:
+            from django_tenants.utils import get_public_schema_name
+
+            is_tenant_schema = connection.schema_name != get_public_schema_name()
+        except Exception:
+            is_tenant_schema = True
+
+        if safe_user is not None and is_tenant_schema and cls._is_platform_superadmin_actor(safe_user):
+            return None
 
         safe_tenant = tenant
         if safe_tenant is not None:

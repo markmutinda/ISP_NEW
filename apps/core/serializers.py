@@ -603,7 +603,7 @@ class AuditLogSerializer(serializers.ModelSerializer):
         if not user:
             return "system"
         role = str(getattr(user, "role", "") or "").lower()
-        if getattr(user, "is_superuser", False) or role in {"superadmin", "super_admin"}:
+        if role in {"superadmin", "super_admin"} or AuditLog._is_platform_superadmin_actor(user):
             return "superadmin"
         if role == "admin":
             return "admin"

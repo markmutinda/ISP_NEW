@@ -1363,12 +1363,14 @@ class AuditLogViewSet(viewsets.ReadOnlyModelViewSet):
     def get_queryset(self):
         queryset = super().get_queryset()
         superadmin_actor = Q(user__is_superuser=True) | Q(user__role__in=["superadmin", "super_admin"])
+        for email in _platform_admin_emails():
+            superadmin_actor |= Q(user__email__iexact=email)
         include_superadmin = str(self.request.query_params.get("include_superadmin") or "").lower() in {"1", "true", "yes"}
         actor_type = self.request.query_params.get('actor_type')
 
         is_superadmin_viewer = getattr(self.request.user, "is_superuser", False)
 
-        if not is_superadmin_viewer and actor_type != "superadmin":
+        if actor_type != "superadmin":
             queryset = queryset.exclude(superadmin_actor)
         
         user_id = self.request.query_params.get('user_id')
@@ -1385,7 +1387,7 @@ class AuditLogViewSet(viewsets.ReadOnlyModelViewSet):
 
         if actor_type == "admin":
             admin_actor = Q(user__role="admin")
-            if is_superadmin_viewer or include_superadmin:
+            if include_superadmin and is_superadmin_viewer:
                 admin_actor |= superadmin_actor
             queryset = queryset.filter(admin_actor)
         elif actor_type == "staff":
