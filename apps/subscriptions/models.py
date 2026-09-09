@@ -1438,3 +1438,45 @@ class TenantUserLedger(models.Model):
                 pass
         
         return entry
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# SUBSCRIPTION REMINDER MODELS
+# ──────────────────────────────────────────────────────────────────────────────
+
+class SubscriptionReminderTemplate(models.Model):
+    """Singleton — SMS copy for platform subscription payment reminders."""
+    content = models.TextField(default=(
+        "Hi {admin_name}, your Netily subscription for {company_name} ({plan_name}) "
+        "is due in {days_left} day(s) on {expiry_date}. Amount due: KES {amount_due}. "
+        "Please pay to avoid service interruption."
+    ))
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = 'Subscription Reminder Template'
+
+    @classmethod
+    def get_active(cls):
+        obj, _ = cls.objects.get_or_create(pk=1)
+        return obj
+
+
+class SubscriptionReminderLog(models.Model):
+    """Audit log for subscription expiry reminder SMS sends."""
+    MILESTONE_CHOICES = [('3_day', '3 Days Before'), ('1_day', '1 Day Before')]
+
+    subscription = models.ForeignKey(
+        CompanySubscription, on_delete=models.CASCADE, related_name='reminder_logs'
+    )
+    milestone = models.CharField(max_length=10, choices=MILESTONE_CHOICES)
+    period_end = models.DateTimeField()  # dedupe key — the cycle this reminder targets
+    phone_number = models.CharField(max_length=20, blank=True)
+    status = models.CharField(max_length=20, default='sent')
+    error = models.TextField(blank=True, default='')
+    sent_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        unique_together = [('subscription', 'milestone', 'period_end')]
+        indexes = [models.Index(fields=['subscription', 'milestone'])]
+        ordering = ['-sent_at']

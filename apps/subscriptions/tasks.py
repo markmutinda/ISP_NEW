@@ -1000,3 +1000,14 @@ def refresh_metered_billing_estimates():
             logger.error(f"refresh_metered_billing_estimates failed for company {company.pk}: {exc}")
 
     return f"Refreshed metered estimate cache for {refreshed} tenant(s)"
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# TASK: Subscription Expiry SMS Reminders (NEW)
+# ═══════════════════════════════════════════════════════════════════════════
+
+@shared_task(name='apps.subscriptions.tasks.send_subscription_expiry_sms_reminders')
+def send_subscription_expiry_sms_reminders():
+    """Send SMS reminders for platform subscriptions expiring in 3 or 1 days."""
+    from .reminder_service import send_subscription_expiry_reminders
+    return send_subscription_expiry_reminders()

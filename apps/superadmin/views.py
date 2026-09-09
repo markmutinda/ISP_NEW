@@ -5365,3 +5365,101 @@ class SuperadminSMSOverviewView(APIView):
 
         rows.sort(key=lambda x: x["created_at"], reverse=True)
         return rows
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  SUBSCRIPTION REMINDERS (Superadmin)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+
+class SubscriptionReminderTemplateView(APIView):
+    """GET/PATCH the SMS copy used for subscription payment reminders."""
+    permission_classes = SUPERADMIN_PERMS
+
+    def get(self, request):
+        _ensure_public()
+        from apps.subscriptions.models import SubscriptionReminderTemplate
+        from apps.subscriptions.reminder_service import TEMPLATE_VARIABLES
+
+        template = SubscriptionReminderTemplate.get_active()
+        return Response({
+            'content': template.content,
+            'updated_at': template.updated_at,
+            'variables': TEMPLATE_VARIABLES,
+        })
+
+    def patch(self, request):
+        _ensure_public()
+        from apps.subscriptions.models import SubscriptionReminderTemplate
+
+        content = (request.data.get('content') or '').strip()
+        if not content:
+            return Response({'detail': 'Template content cannot be empty.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        template = SubscriptionReminderTemplate.get_active()
+        template.content = content
+        template.save(update_fields=['content', 'updated_at'])
+
+        _log_action(request.user, "update", "SubscriptionReminderTemplate",
+                     object_repr="SMS reminder template", changes={'content': content}, request=request)
+        return Response({'content': template.content, 'updated_at': template.updated_at})
+
+
+class SubscriptionReminderBalanceView(APIView):
+    """Bytewave master balance — reuses the same lookup as the SMS overview page."""
+    permission_classes = SUPERADMIN_PERMS
+
+    def get(self, request):
+        _ensure_public()
+        return Response(SuperadminSMSOverviewView()._get_bytewave_balance())
+
+
+class SubscriptionReminderLogListView(APIView):
+    permission_classes = SUPERADMIN_PERMS
+
+    def get(self, request):
+        _ensure_public()
+        from apps.subscriptions.models import SubscriptionReminderLog
+
+        page = int(request.query_params.get('page', 1))
+        page_size = min(int(request.query_params.get('page_size', PAGE_SIZE)), 100)
+        status_filter = request.query_params.get('status')
+
+        qs = SubscriptionReminderLog.objects.select_related('subscription__company').order_by('-sent_at')
+        if status_filter:
+            qs = qs.filter(status=status_filter)
+
+        total = qs.count()
+        start = (page - 1) * page_size
+        rows = qs[start:start + page_size]
+
+        return Response({
+            'count': total,
+            'page': page,
+            'page_size': page_size,
+            'results': [
+                {
+                    'id': r.id,
+                    'company_name': r.subscription.company.name if r.subscription and r.subscription.company else '',
+                    'milestone': r.milestone,
+                    'phone_number': r.phone_number,
+                    'status': r.status,
+                    'error': r.error,
+                    'period_end': r.period_end,
+                    'sent_at': r.sent_at,
+                }
+                for r in rows
+            ],
+        })
+
+
+class SubscriptionReminderTestSendView(APIView):
+    """Manually trigger the reminder sweep now."""
+    permission_classes = SUPERADMIN_PERMS
+
+    def post(self, request):
+        from apps.subscriptions.tasks import send_subscription_expiry_sms_reminders
+        result = send_subscription_expiry_sms_reminders.delay()
+        _log_action(request.user, "trigger", "SubscriptionReminderSweep",
+                     object_repr="Manual reminder sweep", request=request)
+        return Response({'detail': 'Reminder sweep queued.', 'task_id': result.id})

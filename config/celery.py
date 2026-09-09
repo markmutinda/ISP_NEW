@@ -355,6 +355,17 @@ app.conf.beat_schedule = {
         'schedule': crontab(day_of_week='monday', hour=2, minute=0),
         'options': {'queue': 'default'}
     },
+
+    # ────────────────────────────────────────────────────────────────
+    # SUBSCRIPTION EXPIRY SMS REMINDERS — Daily at 8:15 AM
+    # Sends SMS reminders to tenant admins 3 days and 1 day before
+    # their platform subscription expires.
+    # ────────────────────────────────────────────────────────────────
+    'subscription-expiry-sms-reminders-daily': {
+        'task': 'apps.subscriptions.tasks.send_subscription_expiry_sms_reminders',
+        'schedule': crontab(hour=8, minute=15),  # Daily at 8:15 AM
+        'options': {'queue': 'billing'}
+    },
 }
 
 # ════════════════════════════════════════════════════════════════════════════

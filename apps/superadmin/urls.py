@@ -128,4 +128,12 @@ urlpatterns = [
 
     # SMS Overview (Superadmin)
     path("sms/overview/", views.SuperadminSMSOverviewView.as_view(), name="sms-overview"),
+
+    # ────────────────────────────────────────────────────────────────
+    # SUBSCRIPTION REMINDERS (Superadmin)
+    # ────────────────────────────────────────────────────────────────
+    path("subscription-reminders/template/", views.SubscriptionReminderTemplateView.as_view(), name="subscription-reminder-template"),
+    path("subscription-reminders/balance/", views.SubscriptionReminderBalanceView.as_view(), name="subscription-reminder-balance"),
+    path("subscription-reminders/logs/", views.SubscriptionReminderLogListView.as_view(), name="subscription-reminder-logs"),
+    path("subscription-reminders/send-now/", views.SubscriptionReminderTestSendView.as_view(), name="subscription-reminder-send-now"),
 ]
