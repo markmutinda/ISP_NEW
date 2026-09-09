@@ -3,7 +3,16 @@ services:
     image: postgres:15-alpine
     container_name: netily_db
     restart: unless-stopped
-    command: postgres -c max_connections=200 -c shared_buffers=256MB
+    command: >
+      postgres
+      -c max_connections=300
+      -c shared_buffers=1536MB
+      -c effective_cache_size=4096MB
+      -c work_mem=16MB
+      -c maintenance_work_mem=256MB
+      -c checkpoint_completion_target=0.9
+      -c wal_buffers=16MB
+      -c random_page_cost=1.1
     volumes:
       - postgres_data:/var/lib/postgresql/data
     env_file: ../.env
@@ -19,7 +28,8 @@ services:
     deploy:
       resources:
         limits:
-          memory: 512M
+          cpus: "1.5"
+          memory: 2048M
     logging:
       driver: "json-file"
       options:
@@ -32,7 +42,7 @@ services:
     image: redis:7-alpine
     container_name: netily_redis
     restart: unless-stopped
-    command: redis-server --maxmemory 50mb --maxmemory-policy allkeys-lru
+    command: redis-server --maxmemory 200mb --maxmemory-policy allkeys-lru
     volumes:
       - redis_data:/data
     healthcheck:
@@ -43,7 +53,8 @@ services:
     deploy:
       resources:
         limits:
-          memory: 60M
+          cpus: "0.5"
+          memory: 256M
     logging:
       driver: "json-file"
       options:
@@ -65,7 +76,8 @@ services:
     deploy:
       resources:
         limits:
-          memory: 64M
+          cpus: "0.25"
+          memory: 128M
     logging:
       driver: "json-file"
       options:
@@ -81,22 +93,14 @@ services:
     command: >
       sh -c "echo 'Preparing migration history...' &&
              python manage.py prepare_migrations &&
-             echo 'Running migrations...' &&
              python manage.py migrate_schemas_resilient --shared &&
              python manage.py migrate_schemas_resilient --tenant &&
-             echo 'Migrations complete.' &&
-             echo 'Repairing token-blacklist FK constraints...' &&
              python manage.py fix_tenant_token_blacklist &&
-             echo 'Syncing subscription plan pricing...' &&
              python manage.py seed_plans &&
-             echo 'Setting up routes...' &&
              while ! getent hosts netily-openvpn-isp; do sleep 1; done &&
              VPN_IP=$$(getent hosts netily-openvpn-isp | awk '{ print $$1 }') &&
-             echo 'VPN Gateway found at: '$$VPN_IP &&
-             echo 'Adding route for '$${VPN_NETWORK_CIDR:-10.8.0.0/16}' via '$$VPN_IP &&
              if [ -n \"$$VPN_IP\" ]; then ip route add $${VPN_NETWORK_CIDR:-10.8.0.0/16} via $$VPN_IP || true; fi &&
-             echo 'Route added successfully!' &&
-             gunicorn config.wsgi:application --bind 0.0.0.0:8000 --workers 2 --timeout 300"
+             gunicorn config.wsgi:application --bind 0.0.0.0:8000 --workers 4 --threads 2 --worker-class gthread --timeout 300 --max-requests 1000 --max-requests-jitter 100"
     working_dir: /app
     volumes:
       - ../:/app
@@ -135,7 +139,8 @@ services:
     deploy:
       resources:
         limits:
-          memory: 1024M
+          cpus: "1.5"
+          memory: 1536M
     logging:
       driver: "json-file"
       options:
@@ -155,11 +160,8 @@ services:
     command: >
       sh -c "while ! getent hosts netily-openvpn-isp; do sleep 1; done &&
              VPN_IP=$$(getent hosts netily-openvpn-isp | awk '{ print $$1 }') &&
-             echo 'VPN Gateway found at: '$$VPN_IP &&
-             echo 'Adding route for '$${VPN_NETWORK_CIDR:-10.8.0.0/16}' via '$$VPN_IP &&
              if [ -n \"$$VPN_IP\" ]; then ip route add $${VPN_NETWORK_CIDR:-10.8.0.0/16} via $$VPN_IP || true; fi &&
-             echo 'Route added successfully!' &&
-             celery -A config worker -l info --concurrency=4 -Q default,celery,radius,billing,notifications"
+             celery -A config worker -l info --concurrency=8 -Q default,celery,radius,billing,notifications"
     volumes:
       - ../:/app
       - /var/run/docker.sock:/var/run/docker.sock
@@ -187,7 +189,8 @@ services:
     deploy:
       resources:
         limits:
-          memory: 1024M
+          cpus: "1.5"
+          memory: 1536M
     logging:
       driver: "json-file"
       options:
@@ -223,6 +226,7 @@ services:
     deploy:
       resources:
         limits:
+          cpus: "0.25"
           memory: 256M
     logging:
       driver: "json-file"
@@ -258,7 +262,8 @@ services:
     deploy:
       resources:
         limits:
-          memory: 60M
+          cpus: "0.5"
+          memory: 128M
     logging:
       driver: "json-file"
       options:
@@ -288,7 +293,8 @@ services:
     deploy:
       resources:
         limits:
-          memory: 300M
+          cpus: "0.75"
+          memory: 512M
     logging:
       driver: "json-file"
       options:
@@ -316,7 +322,8 @@ services:
     deploy:
       resources:
         limits:
-          memory: 30M
+          cpus: "0.5"
+          memory: 64M
     logging:
       driver: "json-file"
       options:
@@ -372,6 +379,7 @@ services:
     deploy:
       resources:
         limits:
+          cpus: "0.5"
           memory: 256M
     logging:
       driver: "json-file"
