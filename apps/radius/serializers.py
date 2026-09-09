@@ -480,6 +480,15 @@ class CustomerRadiusCredentialsSerializer(serializers.ModelSerializer):
             'password': {'write_only': True}  # Don't expose password in GET by default
         }
 
+    # ============================================================
+    # FIX 2b: Server-side guard so a blank password can never
+    # silently wipe the real one.
+    # ============================================================
+    def validate_password(self, value):
+        if not value or not value.strip():
+            raise serializers.ValidationError("Password cannot be blank.")
+        return value
+
 
 class CustomerRadiusCredentialsDetailSerializer(CustomerRadiusCredentialsSerializer):
     """Detailed serializer that shows password (for admin)."""

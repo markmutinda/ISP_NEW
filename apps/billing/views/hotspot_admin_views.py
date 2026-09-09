@@ -759,26 +759,41 @@ class HotspotClientDetailView(APIView):
             'total_pages': (total + page_size - 1) // page_size,
         })
 
+    # ============================================================
+    # BUG 3 FIX: DELETE method - full revoke + CoA-disconnect
+    # ============================================================
     def delete(self, request, id):
         """
-        Delete a hotspot client and revoke their RADIUS credentials.
-        
-        DELETE /api/v1/hotspot/admin/clients/{id}/
+        Delete a hotspot client: cancel every session they hold (so
+        auto-login/phone-reconnect can never treat them as subscribed again),
+        then fully revoke + CoA-disconnect every access code they've ever
+        used — including multi-device slot codes like MXA-BKCS-2.
         """
         try:
             client = HotspotClient.objects.get(id=id)
         except HotspotClient.DoesNotExist:
             return Response({'error': 'Client not found'}, status=404)
-        
-        # Clean up RADIUS credentials first
-        username = client.canonical_username
-        if username:
-            try:
-                from apps.billing.services.hotspot_radius_service import HotspotRadiusService
-                HotspotRadiusService().revoke_credentials(username)
-            except Exception as e:
-                logger.warning(f"Could not revoke RADIUS for {username}: {e}")
-        
+
+        from apps.billing.models.hotspot_models import HotspotSession
+
+        sessions = HotspotSession.objects.filter(hotspot_client=client).select_related('router')
+
+        access_codes = set()
+        for session in sessions:
+            if session.access_code:
+                access_codes.add((session.access_code, session.router))
+            if session.status in ('active', 'paid'):
+                session.refund_or_cancel(reason="Client deleted by admin")
+
+        if client.canonical_username:
+            access_codes.add((client.canonical_username, None))
+
+        from apps.billing.services.hotspot_radius_service import HotspotRadiusService
+        radius_service = HotspotRadiusService()
+        for access_code, router in access_codes:
+            if access_code:
+                radius_service.revoke_and_disconnect(access_code, router=router)
+
         client.delete()
         return Response(status=204)
 

@@ -574,9 +574,13 @@ def prune_stale_hotspot_clients():
             # This happens outside the transaction because it affects external
             # systems (RADIUS). If RADIUS cleanup fails, we still want to
             # delete the client from the DB.
+            # ============================================================
+            # BONUS FIX: Use revoke_and_disconnect for each access code
+            # ============================================================
             for code in access_codes:
                 try:
-                    radius_service.revoke_credentials(code)
+                    # Use revoke_and_disconnect which also sends CoA
+                    radius_service.revoke_and_disconnect(code, router=None)
                     sync_service.delete_radius_user(code)
                 except Exception as e:
                     logger.warning(f"[{tenant.schema_name}] RADIUS cleanup failed for {code}: {e}")

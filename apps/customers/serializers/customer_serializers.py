@@ -254,9 +254,10 @@ class CustomerListSerializer(serializers.ModelSerializer):
         services = getattr(obj, 'active_services_list', None)
         
         if services is None:
-            # Fallback: Only fetch active/pending services, limit to 1
+            # FIX 1a: Include SUSPENDED so a suspended service is still resolvable
+            # Fallback: Only fetch active/pending/suspended services, limit to 1
             services = obj.services.select_related('plan').filter(
-                status__in=['ACTIVE', 'PENDING']
+                status__in=['ACTIVE', 'PENDING', 'SUSPENDED']   # was missing SUSPENDED
             ).order_by('-activation_date', '-created_at')[:1]
         else:
             # active_services_list is already a list from Prefetch

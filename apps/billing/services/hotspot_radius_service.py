@@ -288,6 +288,35 @@ class HotspotRadiusService:
             logger.error(f"Failed to revoke RADIUS credentials: {e}", exc_info=True)
             return False
     
+    # ============================================================
+    # BUG 3 FIX: Full revoke + CoA disconnect helper
+    # ============================================================
+    def revoke_and_disconnect(self, username: str, router=None) -> bool:
+        """
+        Full teardown for a hotspot identity: wipes RADIUS entries entirely
+        (not just Auth-Type Reject, which a later re-provisioning pass can
+        overwrite), closes any open radacct row, and sends a live CoA
+        Disconnect so an already-authenticated MikroTik session is actually
+        kicked — not just blocked on the next auth attempt.
+        """
+        try:
+            self.sync_service.delete_radius_user(username)
+            self.sync_service.disconnect_user(username)
+        except Exception as e:
+            logger.warning(f"RADIUS teardown failed for {username}: {e}")
+
+        if router:
+            try:
+                from apps.radius.services.coa_service import CoAService
+                router_ip = router.vpn_ip_address or router.ip_address
+                if router_ip:
+                    CoAService(nas_ip=router_ip).disconnect_user(username, nas_ip_address=router_ip)
+            except Exception as e:
+                logger.warning(f"CoA disconnect failed for {username}: {e}")
+
+        logger.info(f"Fully revoked and disconnected hotspot identity: {username}")
+        return True
+    
     def extend_session(
         self,
         username: str,

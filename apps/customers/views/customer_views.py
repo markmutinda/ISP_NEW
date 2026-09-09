@@ -53,6 +53,7 @@ class CustomerViewSet(viewsets.ModelViewSet):
     # OPTIMIZED: Only fetch necessary related data with depth limits
     # - select_related: direct foreign keys (1:1 or belongs-to)
     # - prefetch_related with limit: only fetch the most recent active service, not all services
+    # FIX 1a: Include SUSPENDED in prefetch so service remains resolvable after unsuspend
     queryset = Customer.objects.select_related(
         'user',                    # needed for name/phone/email
         'radius_credentials',      # needed for PPPoE username/expiry
@@ -61,7 +62,7 @@ class CustomerViewSet(viewsets.ModelViewSet):
         Prefetch(
             'services',
             queryset=ServiceConnection.objects.select_related('plan').filter(
-                status__in=['ACTIVE', 'PENDING']
+                status__in=['ACTIVE', 'PENDING', 'SUSPENDED']   # was missing SUSPENDED
             ).order_by('-activation_date', '-created_at')[:1],
             to_attr='active_services_list'
         )
@@ -453,6 +454,17 @@ class CustomerViewSet(viewsets.ModelViewSet):
             credentials.is_enabled = True
             credentials.disabled_reason = ''
             credentials.save()
+
+            # FIX 1b: A RADIUS-level unsuspend must also lift a SUSPENDED ServiceConnection,
+            # otherwise service_id stays invisible to extend/change-plan/edit-IP.
+            restored = customer.services.filter(status='SUSPENDED').update(
+                status='ACTIVE', suspension_date=None
+            )
+            if restored:
+                logger.info(
+                    f"Restored {restored} suspended service(s) to ACTIVE for "
+                    f"{customer.customer_code} after RADIUS unsuspend"
+                )
             action_label = 'enabled'
         else:
             credentials.is_enabled = False
