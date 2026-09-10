@@ -9,11 +9,15 @@ import csv
 import io
 import json
 import logging
+import os
+import shutil
+import subprocess
 from datetime import datetime, time, timedelta
 from decimal import Decimal
 
 import requests as _requests  # For external API calls
 from django.conf import settings
+from django.core.cache import cache
 from django.core.exceptions import ValidationError as DjangoValidationError
 from django.core.management import call_command
 from django.core.validators import validate_email
@@ -114,6 +118,142 @@ def _serialize_deletion_job(job: TenantDeletionJob) -> dict:
         "started_at": job.started_at.isoformat() if job.started_at else None,
         "finished_at": job.finished_at.isoformat() if job.finished_at else None,
     }
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  SERVER STATS (Container + Host Resource Monitoring)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+def _parse_docker_size(value: str) -> float:
+    """Convert a docker stats size like '516.1MiB' or '1.5GiB' to megabytes."""
+    value = value.strip()
+    units = {
+        "TiB": 1024 * 1024, "TB": 1024 * 1024,
+        "GiB": 1024, "GB": 1024,
+        "MiB": 1, "MB": 1,
+        "KiB": 1 / 1024, "KB": 1 / 1024,
+        "B": 1 / (1024 * 1024),
+    }
+    for unit, factor in units.items():
+        if value.endswith(unit):
+            try:
+                return round(float(value[: -len(unit)]) * factor, 2)
+            except ValueError:
+                return 0.0
+    return 0.0
+
+
+def _health_status(percent: float) -> str:
+    if percent >= 85:
+        return "critical"
+    if percent >= 65:
+        return "warning"
+    return "healthy"
+
+
+class ServerStatsView(APIView):
+    """
+    Container + host resource stats for the superadmin dashboard.
+    Results are cached for a few seconds so multiple open tabs/polls
+    don't each trigger a fresh `docker stats` sample (~1s blocking call).
+    """
+    permission_classes = SUPERADMIN_PERMS
+    CACHE_KEY = "superadmin:server_stats"
+    CACHE_TTL = 3  # seconds
+
+    def get(self, request):
+        _ensure_public()
+        cached = cache.get(self.CACHE_KEY)
+        if cached:
+            return Response(cached)
+
+        payload = {
+            "containers": self._get_container_stats(),
+            "host": self._get_host_stats(),
+            "timestamp": timezone.now().isoformat(),
+        }
+        cache.set(self.CACHE_KEY, payload, timeout=self.CACHE_TTL)
+        return Response(payload)
+
+    def _get_container_stats(self):
+        try:
+            result = subprocess.run(
+                [
+                    "docker", "stats", "--no-stream",
+                    "--format",
+                    "{{.Name}}|{{.CPUPerc}}|{{.MemUsage}}|{{.MemPerc}}|{{.NetIO}}|{{.BlockIO}}|{{.PIDs}}",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=8,
+            )
+        except (subprocess.TimeoutExpired, FileNotFoundError) as exc:
+            logger.warning("docker stats unavailable: %s", exc)
+            return []
+
+        if result.returncode != 0:
+            logger.warning("docker stats failed: %s", result.stderr)
+            return []
+
+        containers = []
+        for line in result.stdout.strip().splitlines():
+            parts = line.split("|")
+            if len(parts) != 7:
+                continue
+            name, cpu_perc, mem_usage, mem_perc, net_io, block_io, pids = parts
+
+            try:
+                cpu_percent = float(cpu_perc.strip().rstrip("%"))
+            except ValueError:
+                cpu_percent = 0.0
+            try:
+                mem_percent = float(mem_perc.strip().rstrip("%"))
+            except ValueError:
+                mem_percent = 0.0
+
+            mem_used_raw, _, mem_limit_raw = mem_usage.partition(" / ")
+            net_in_raw, _, net_out_raw = net_io.partition(" / ")
+            block_in_raw, _, block_out_raw = block_io.partition(" / ")
+
+            containers.append({
+                "name": name.strip(),
+                "cpu_percent": cpu_percent,
+                "mem_used_mb": _parse_docker_size(mem_used_raw),
+                "mem_limit_mb": _parse_docker_size(mem_limit_raw),
+                "mem_percent": mem_percent,
+                "net_in_mb": _parse_docker_size(net_in_raw),
+                "net_out_mb": _parse_docker_size(net_out_raw),
+                "block_in_mb": _parse_docker_size(block_in_raw),
+                "block_out_mb": _parse_docker_size(block_out_raw),
+                "pids": int(pids.strip() or 0),
+                "status": _health_status(max(cpu_percent, mem_percent)),
+            })
+
+        containers.sort(key=lambda c: c["mem_percent"], reverse=True)
+        return containers
+
+    def _get_host_stats(self):
+        disk = shutil.disk_usage("/")
+        disk_total_gb = round(disk.total / (1024 ** 3), 2)
+        disk_used_gb = round(disk.used / (1024 ** 3), 2)
+        disk_percent = round((disk.used / disk.total) * 100, 1) if disk.total else 0
+
+        try:
+            load1, load5, load15 = os.getloadavg()
+        except (OSError, AttributeError):
+            load1 = load5 = load15 = 0.0
+
+        return {
+            "disk_total_gb": disk_total_gb,
+            "disk_used_gb": disk_used_gb,
+            "disk_free_gb": round(disk_total_gb - disk_used_gb, 2),
+            "disk_percent": disk_percent,
+            "disk_status": _health_status(disk_percent),
+            "cpu_count": os.cpu_count() or 1,
+            "load_avg_1m": round(load1, 2),
+            "load_avg_5m": round(load5, 2),
+            "load_avg_15m": round(load15, 2),
+        }
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

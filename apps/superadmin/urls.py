@@ -15,6 +15,9 @@ urlpatterns = [
     # Dashboard KPIs
     path("dashboard/", views.DashboardView.as_view(), name="dashboard"),
 
+    # Server Stats (Container + Host Resource Monitoring)
+    path("server-stats/", views.ServerStatsView.as_view(), name="server-stats"),
+
     # Tenant CRUD
     path("tenants/", views.TenantListView.as_view(), name="tenant-list"),
     path("tenants/create/", views.TenantCreateView.as_view(), name="tenant-create"),
