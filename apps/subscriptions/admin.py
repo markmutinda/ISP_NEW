@@ -6,6 +6,7 @@ from .models import (
     ISPPayoutConfig,
     ISPSettlement,
     CommissionLedger,
+    SubscriptionInvoiceReminderDelivery,
 )
 
 
@@ -61,3 +62,18 @@ class CommissionLedgerAdmin(admin.ModelAdmin):
     search_fields = ['company__name', 'payment_reference']
     raw_id_fields = ['company', 'settlement']
     date_hierarchy = 'created_at'
+
+
+@admin.register(SubscriptionInvoiceReminderDelivery)
+class SubscriptionInvoiceReminderDeliveryAdmin(admin.ModelAdmin):
+    list_display = [
+        'tenant', 'invoice_number', 'milestone', 'channel', 'status',
+        'recipient_email', 'recipient_phone', 'sent_at', 'created_at',
+    ]
+    list_filter = ['channel', 'status', 'milestone', 'created_at']
+    search_fields = [
+        'tenant__name', 'tenant__schema_name', 'invoice_number',
+        'recipient_name', 'recipient_email', 'recipient_phone',
+    ]
+    raw_id_fields = ['tenant', 'billing_cycle', 'subscription']
+    readonly_fields = ['created_at', 'updated_at', 'sent_at']

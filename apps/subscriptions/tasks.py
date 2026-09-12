@@ -6,12 +6,16 @@ from datetime import timedelta
 from decimal import Decimal
 from celery import shared_task
 from django.utils import timezone
-from django.db import transaction
+from django.db import IntegrityError, transaction
 from django.db.models import Q, Sum
 from django.contrib.auth import get_user_model
 from django_tenants.utils import schema_context, get_public_schema_name
 
-from apps.subscriptions.models import BillingCycle, BillableClientRecord
+from apps.subscriptions.models import (
+    BillingCycle,
+    BillableClientRecord,
+    SubscriptionInvoiceReminderDelivery,
+)
 from apps.billing.models import Invoice, InvoiceItem
 from apps.customers.models import Customer
 
@@ -48,8 +52,9 @@ def _subscription_invoice_reminder_settings():
 
     raw = SystemSettings.get_setting("subscription_invoice_reminders", default={
         "enabled": True,
-        "days_before": [3, 1],
-        "channels": ["email", "in_app"],
+        "days_before": [5, 3, 1],
+        "channels": ["email", "sms", "in_app"],
+        "send_expired_notice": True,
     })
     if isinstance(raw, str):
         try:
@@ -70,11 +75,12 @@ def _subscription_invoice_reminder_settings():
                 days.add(day)
         return sorted(days, reverse=True)
 
-    channels = [ch for ch in raw.get("channels", ["email", "in_app"]) if ch in {"email", "sms", "in_app"}]
+    channels = [ch for ch in raw.get("channels", ["email", "sms", "in_app"]) if ch in {"email", "sms", "in_app"}]
     return {
         "enabled": bool(raw.get("enabled", True)),
-        "days_before": clean_days(raw.get("days_before", [3, 1])) or [3, 1],
-        "channels": channels or ["email", "in_app"],
+        "days_before": clean_days(raw.get("days_before", [5, 3, 1])) or [5, 3, 1],
+        "channels": channels or ["email", "sms", "in_app"],
+        "send_expired_notice": bool(raw.get("send_expired_notice", True)),
     }
 
 
@@ -85,6 +91,142 @@ def _tenant_invoice_admins(tenant):
             is_active=True,
             role__in=admin_roles,
         ).values("id", "email", "phone_number", "first_name", "last_name"))
+
+
+def _recipient_name(recipient):
+    name = f"{recipient.get('first_name') or ''} {recipient.get('last_name') or ''}".strip()
+    return name or recipient.get("email") or recipient.get("phone_number") or "Tenant admin"
+
+
+def _invoice_reminder_milestone(invoice, cycle, today, target_days, send_expired_notice):
+    if not invoice or not invoice.due_date:
+        return None
+
+    days_before = (invoice.due_date - today).days
+    if days_before in target_days:
+        return str(days_before)
+
+    grace_date = cycle.grace_ends_at.date() if cycle.grace_ends_at else None
+    is_expired = grace_date < today if grace_date else invoice.due_date < today
+    if send_expired_notice and is_expired:
+        return "expired"
+    return None
+
+
+def _invoice_reminder_copy(*, tenant_name, invoice, cycle, amount_due, milestone):
+    invoice_number = invoice.invoice_number
+    due_date = invoice.due_date
+    period = f"{cycle.start_date.date()} to {cycle.end_date.date()}"
+
+    if milestone == "expired":
+        subject = f"Netily subscription invoice overdue - {invoice_number}"
+        sms = (
+            f"Hi {tenant_name}, your Netily subscription invoice {invoice_number} is overdue. "
+            f"Amount due: KES {amount_due}. Please pay from Admin > Subscription to restore full access."
+        )
+        body = (
+            f"Your Netily subscription invoice is overdue.\n\n"
+            f"Invoice: {invoice_number}\n"
+            f"Amount due: KES {amount_due}\n"
+            f"Tenant: {tenant_name}\n"
+            f"Period: {period}\n"
+            f"Due date: {due_date}\n\n"
+            "Please open Admin > Subscription and settle the invoice to restore full access."
+        )
+        return subject, body, sms
+
+    days = int(milestone)
+    day_label = "tomorrow" if days == 1 else f"in {days} days"
+    subject = f"Reminder: Netily invoice {invoice_number} due {day_label}"
+    if days == 5:
+        sms = (
+            f"Hi {tenant_name}, your Netily subscription invoice {invoice_number} is due in 5 days. "
+            f"Amount due: KES {amount_due}. Please renew early from Admin > Subscription to avoid interruption."
+        )
+    elif days == 3:
+        sms = (
+            f"Hi {tenant_name}, your Netily subscription ends in 3 days. "
+            f"Invoice {invoice_number}: KES {amount_due}. Please renew from Admin > Subscription."
+        )
+    else:
+        sms = (
+            f"Hi {tenant_name}, your Netily subscription ends tomorrow. "
+            f"Invoice {invoice_number}: KES {amount_due}. Renew today to keep your account active."
+        )
+
+    body = (
+        f"Your Netily subscription invoice is due {day_label}.\n\n"
+        f"Invoice: {invoice_number}\n"
+        f"Amount due: KES {amount_due}\n"
+        f"Tenant: {tenant_name}\n"
+        f"Period: {period}\n"
+        f"Due date: {due_date}\n\n"
+        "Please open Admin > Subscription and settle it before access is affected."
+    )
+    return subject, body, sms
+
+
+def _get_or_create_reminder_delivery(*, cycle, invoice, milestone, channel, recipient, destination):
+    defaults = {
+        "tenant": cycle.tenant,
+        "subscription": cycle.subscription,
+        "invoice_number": invoice.invoice_number or "",
+        "recipient_user_id": str(recipient.get("id") or ""),
+        "recipient_name": _recipient_name(recipient),
+        "recipient_email": recipient.get("email") or "",
+        "recipient_phone": recipient.get("phone_number") or "",
+        "status": "pending",
+        "metadata": {
+            "due_date": invoice.due_date.isoformat() if invoice.due_date else None,
+            "cycle_start": cycle.start_date.date().isoformat(),
+            "cycle_end": cycle.end_date.date().isoformat(),
+            "destination": destination,
+        },
+    }
+    with schema_context(get_public_schema_name()):
+        try:
+            delivery, _ = SubscriptionInvoiceReminderDelivery.objects.get_or_create(
+                billing_cycle=cycle,
+                invoice_reference=str(invoice.id),
+                milestone=str(milestone),
+                channel=channel,
+                recipient_user_id=defaults["recipient_user_id"],
+                recipient_email=defaults["recipient_email"],
+                recipient_phone=defaults["recipient_phone"],
+                defaults=defaults,
+            )
+            return delivery
+        except IntegrityError:
+            return SubscriptionInvoiceReminderDelivery.objects.get(
+                billing_cycle=cycle,
+                invoice_reference=str(invoice.id),
+                milestone=str(milestone),
+                channel=channel,
+                recipient_user_id=defaults["recipient_user_id"],
+                recipient_email=defaults["recipient_email"],
+                recipient_phone=defaults["recipient_phone"],
+            )
+
+
+def _mark_reminder_delivery(delivery_id, *, status, provider_message_id="", error_message="", metadata=None):
+    with schema_context(get_public_schema_name()):
+        delivery = SubscriptionInvoiceReminderDelivery.objects.filter(pk=delivery_id).first()
+        if not delivery:
+            return
+        delivery.status = status
+        delivery.provider_message_id = provider_message_id or ""
+        delivery.error_message = error_message or ""
+        delivery.metadata = {**(delivery.metadata or {}), **(metadata or {})}
+        if status == "sent":
+            delivery.sent_at = timezone.now()
+        delivery.save(update_fields=[
+            "status",
+            "provider_message_id",
+            "error_message",
+            "metadata",
+            "sent_at",
+            "updated_at",
+        ])
 
 
 def _sync_net_bill_invoice_usage_items(cycle, invoice, *, actual_hotspot_revenue=None):
@@ -370,9 +512,10 @@ def send_subscription_invoice_reminders():
     Send platform subscription invoice reminders before tenant invoice due dates.
 
     Defaults are controlled by SystemSettings key `subscription_invoice_reminders`.
-    Each invoice/day is marked in internal_notes to avoid duplicate sends.
+    Delivery rows guard each invoice/milestone/channel/recipient from duplicates.
     """
     from apps.core.email_delivery import send_transactional_email
+    from apps.messaging.services.platform_sms_sender import PlatformSMSSender
 
     settings_payload = _subscription_invoice_reminder_settings()
     if not settings_payload["enabled"]:
@@ -381,6 +524,7 @@ def send_subscription_invoice_reminders():
     today = timezone.localdate()
     target_days = set(settings_payload["days_before"])
     channels = set(settings_payload["channels"])
+    send_expired_notice = settings_payload.get("send_expired_notice", True)
     cycles = BillingCycle.objects.filter(status="invoiced").select_related(
         "tenant",
         "tenant__company",
@@ -388,7 +532,8 @@ def send_subscription_invoice_reminders():
         "subscription__plan",
     )
 
-    sent = {"email": 0, "sms": 0, "in_app": 0, "cycles": 0}
+    sms_sender = PlatformSMSSender() if "sms" in channels else None
+    sent = {"email": 0, "sms": 0, "in_app": 0, "failed": 0, "skipped": 0, "cycles": 0}
     for cycle in cycles:
         try:
             invoice = None
@@ -402,30 +547,35 @@ def send_subscription_invoice_reminders():
 
             if not invoice or not invoice.due_date:
                 continue
-            if str(invoice.status).upper() == "PAID":
+            invoice_status = str(invoice.status or "").upper()
+            if invoice_status in {"PAID", "VOIDED", "CANCELLED", "WRITTEN_OFF"}:
+                continue
+            amount_due = _decimal_money(invoice.balance or invoice.total_amount)
+            if amount_due <= 0:
                 continue
 
-            days_before = (invoice.due_date - today).days
-            if days_before not in target_days:
+            milestone = _invoice_reminder_milestone(
+                invoice,
+                cycle,
+                today,
+                target_days,
+                send_expired_notice,
+            )
+            if not milestone:
                 continue
 
-            marker = f"[auto_reminder:{days_before}:{today.isoformat()}]"
-            if marker in (invoice.internal_notes or ""):
-                continue
-
-            amount_due = invoice.balance or invoice.total_amount
             tenant_name = getattr(getattr(cycle.tenant, "company", None), "name", None) or cycle.tenant.subdomain
-            subject = f"Reminder: Netily invoice {invoice.invoice_number} due in {days_before} day{'s' if days_before != 1 else ''}"
-            message = (
-                f"Your Netily subscription invoice is due in {days_before} day{'s' if days_before != 1 else ''}.\n\n"
-                f"Invoice: {invoice.invoice_number}\n"
-                f"Amount due: KES {amount_due}\n"
-                f"Tenant: {tenant_name}\n"
-                f"Period: {cycle.start_date.date()} to {cycle.end_date.date()}\n"
-                f"Due date: {invoice.due_date}\n\n"
-                "Please open your Netily admin billing page to settle it before access is affected."
+            subject, message, sms_message = _invoice_reminder_copy(
+                tenant_name=tenant_name,
+                invoice=invoice,
+                cycle=cycle,
+                amount_due=amount_due,
+                milestone=milestone,
             )
             recipients = _tenant_invoice_admins(cycle.tenant)
+            if not recipients:
+                sent["skipped"] += 1
+                continue
 
             with schema_context(cycle.tenant.schema_name):
                 from apps.notifications.models import Notification
@@ -438,63 +588,122 @@ def send_subscription_invoice_reminders():
                     user_id = recipient.get("id")
 
                     if "email" in channels and email:
-                        result = send_transactional_email(
-                            subject=subject,
-                            recipient=email,
-                            plain_message=message,
-                            html_message=message.replace("\n", "<br>"),
+                        delivery = _get_or_create_reminder_delivery(
+                            cycle=cycle,
+                            invoice=invoice,
+                            milestone=milestone,
+                            channel="email",
+                            recipient=recipient,
+                            destination=email,
                         )
-                        if result.get("sent"):
-                            sent["email"] += 1
+                        if delivery.status == "sent":
+                            sent["skipped"] += 1
+                        else:
+                            result = send_transactional_email(
+                                subject=subject,
+                                recipient=email,
+                                plain_message=message,
+                                html_message=message.replace("\n", "<br>"),
+                            )
+                            if result.get("sent"):
+                                _mark_reminder_delivery(
+                                    delivery.id,
+                                    status="sent",
+                                    provider_message_id=str(result.get("message_id") or ""),
+                                    metadata={"email": email, "source": "subscription_invoice_auto_reminder"},
+                                )
+                                sent["email"] += 1
+                            else:
+                                _mark_reminder_delivery(
+                                    delivery.id,
+                                    status="failed",
+                                    error_message=str(result.get("error") or "Email send failed"),
+                                    metadata={"email": email, "source": "subscription_invoice_auto_reminder"},
+                                )
+                                sent["failed"] += 1
 
-                    if "in_app" in channels:
-                        notification = Notification.objects.create(
-                            user_id=user_id,
-                            notification_type="in_app",
-                            subject=subject,
-                            message=message,
-                            priority=4,
-                            metadata={
-                                "source": "subscription_invoice_auto_reminder",
-                                "billing_cycle_id": str(cycle.id),
-                                "invoice_id": invoice.id,
-                                "days_before": days_before,
-                            },
+                    if "in_app" in channels and user_id:
+                        delivery = _get_or_create_reminder_delivery(
+                            cycle=cycle,
+                            invoice=invoice,
+                            milestone=milestone,
+                            channel="in_app",
+                            recipient=recipient,
+                            destination=str(user_id),
                         )
-                        manager.send_notification(notification)
-                        sent["in_app"] += 1
+                        if delivery.status == "sent":
+                            sent["skipped"] += 1
+                        else:
+                            notification = Notification.objects.create(
+                                user_id=user_id,
+                                notification_type="in_app",
+                                subject=subject,
+                                message=message,
+                                priority=4,
+                                metadata={
+                                    "source": "subscription_invoice_auto_reminder",
+                                    "billing_cycle_id": str(cycle.id),
+                                    "invoice_id": invoice.id,
+                                    "milestone": milestone,
+                                },
+                            )
+                            ok = manager.send_notification(notification)
+                            _mark_reminder_delivery(
+                                delivery.id,
+                                status="sent" if ok else "failed",
+                                provider_message_id=str(notification.id),
+                                error_message="" if ok else "In-app notification failed",
+                                metadata={
+                                    "notification_id": str(notification.id),
+                                    "source": "subscription_invoice_auto_reminder",
+                                },
+                            )
+                            if ok:
+                                sent["in_app"] += 1
+                            else:
+                                sent["failed"] += 1
 
                     if "sms" in channels and phone:
-                        notification = Notification.objects.create(
-                            user_id=user_id,
-                            notification_type="sms",
-                            subject=subject,
-                            message=(
-                                f"Netily invoice {invoice.invoice_number}: KES {amount_due} "
-                                f"due in {days_before} day{'s' if days_before != 1 else ''}. "
-                                "Open admin billing to pay."
-                            ),
-                            recipient_phone=phone,
-                            priority=4,
-                            metadata={
-                                "source": "subscription_invoice_auto_reminder",
-                                "billing_cycle_id": str(cycle.id),
-                                "invoice_id": invoice.id,
-                                "days_before": days_before,
-                            },
+                        delivery = _get_or_create_reminder_delivery(
+                            cycle=cycle,
+                            invoice=invoice,
+                            milestone=milestone,
+                            channel="sms",
+                            recipient=recipient,
+                            destination=phone,
                         )
-                        manager.send_notification(notification)
-                        sent["sms"] += 1
+                        if delivery.status == "sent":
+                            sent["skipped"] += 1
+                        else:
+                            result = sms_sender.send_sms(to=phone, message=sms_message) if sms_sender else {
+                                "success": False,
+                                "error": "SMS channel requested but platform SMS sender is unavailable.",
+                            }
+                            ok = bool(result.get("success"))
+                            _mark_reminder_delivery(
+                                delivery.id,
+                                status="sent" if ok else "failed",
+                                provider_message_id=str(result.get("provider_message_id") or result.get("provider_id") or ""),
+                                error_message="" if ok else str(result.get("error") or "SMS send failed"),
+                                metadata={
+                                    "phone": phone,
+                                    "provider": result.get("provider", "bytewave_master"),
+                                    "source": "subscription_invoice_auto_reminder",
+                                },
+                            )
+                            if ok:
+                                sent["sms"] += 1
+                            else:
+                                sent["failed"] += 1
 
-                invoice.internal_notes = f"{invoice.internal_notes or ''}\n{marker}".strip()
-                invoice.save(update_fields=["internal_notes", "updated_at"])
-                sent["cycles"] += 1
+            sent["cycles"] += 1
         except Exception as exc:
             logger.exception("Failed sending subscription invoice reminder for cycle %s: %s", cycle.id, exc)
 
     return (
         f"Subscription invoice reminders sent for {sent['cycles']} cycle(s): "
-        f"email={sent['email']}, sms={sent['sms']}, in_app={sent['in_app']}."
+        f"email={sent['email']}, sms={sent['sms']}, in_app={sent['in_app']}, "
+        f"failed={sent['failed']}, skipped={sent['skipped']}."
     )
 
 

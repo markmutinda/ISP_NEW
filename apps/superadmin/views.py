@@ -3171,8 +3171,9 @@ def _subscription_invoice_admins(tenant):
 SUBSCRIPTION_INVOICE_REMINDER_KEY = "subscription_invoice_reminders"
 DEFAULT_SUBSCRIPTION_INVOICE_REMINDERS = {
     "enabled": True,
-    "days_before": [3, 1],
-    "channels": ["email", "in_app"],
+    "days_before": [5, 3, 1],
+    "channels": ["email", "sms", "in_app"],
+    "send_expired_notice": True,
 }
 
 
@@ -3206,6 +3207,10 @@ def _subscription_invoice_reminder_settings():
         "enabled": bool(raw.get("enabled", DEFAULT_SUBSCRIPTION_INVOICE_REMINDERS["enabled"])),
         "days_before": clean_days(days) or DEFAULT_SUBSCRIPTION_INVOICE_REMINDERS["days_before"],
         "channels": [ch for ch in channels if ch in {"email", "sms", "in_app"}],
+        "send_expired_notice": bool(raw.get(
+            "send_expired_notice",
+            DEFAULT_SUBSCRIPTION_INVOICE_REMINDERS["send_expired_notice"],
+        )),
     }
 
 
@@ -3223,13 +3228,14 @@ def _save_subscription_invoice_reminder_settings(data):
 
     settings_payload = {
         "enabled": bool(data.get("enabled", True)),
-        "days_before": clean_days(data.get("days_before", [3, 1])),
-        "channels": [ch for ch in data.get("channels", ["email", "in_app"]) if ch in {"email", "sms", "in_app"}],
+        "days_before": clean_days(data.get("days_before", [5, 3, 1])),
+        "channels": [ch for ch in data.get("channels", ["email", "sms", "in_app"]) if ch in {"email", "sms", "in_app"}],
+        "send_expired_notice": bool(data.get("send_expired_notice", True)),
     }
     if not settings_payload["days_before"]:
-        settings_payload["days_before"] = [3, 1]
+        settings_payload["days_before"] = [5, 3, 1]
     if not settings_payload["channels"]:
-        settings_payload["channels"] = ["email", "in_app"]
+        settings_payload["channels"] = ["email", "sms", "in_app"]
     SystemSettings.objects.update_or_create(
         key=SUBSCRIPTION_INVOICE_REMINDER_KEY,
         defaults={

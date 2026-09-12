@@ -12,6 +12,7 @@ These models live in the PUBLIC schema and handle:
 8. BillableClientRecord - Ghost records of PPPoE users counted per cycle
 9. BillingSnapshot - Additional ghost record model for PPPoE users
 10. TenantUserLedger - Immutable audit trail of PPPoE/Hotspot user lifecycle events
+11. SubscriptionInvoiceReminderDelivery - Invoice reminder delivery audit trail
 """
 
 import calendar
@@ -1480,3 +1481,82 @@ class SubscriptionReminderLog(models.Model):
         unique_together = [('subscription', 'milestone', 'period_end')]
         indexes = [models.Index(fields=['subscription', 'milestone'])]
         ordering = ['-sent_at']
+
+
+class SubscriptionInvoiceReminderDelivery(models.Model):
+    """Public-schema delivery log for tenant subscription invoice reminders."""
+
+    CHANNEL_CHOICES = (
+        ('email', 'Email'),
+        ('sms', 'SMS'),
+        ('in_app', 'In-app'),
+    )
+    STATUS_CHOICES = (
+        ('pending', 'Pending'),
+        ('sent', 'Sent'),
+        ('failed', 'Failed'),
+        ('skipped', 'Skipped'),
+    )
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    tenant = models.ForeignKey(
+        'core.Tenant',
+        on_delete=models.CASCADE,
+        related_name='subscription_invoice_reminder_deliveries',
+    )
+    billing_cycle = models.ForeignKey(
+        BillingCycle,
+        on_delete=models.CASCADE,
+        related_name='invoice_reminder_deliveries',
+    )
+    subscription = models.ForeignKey(
+        CompanySubscription,
+        on_delete=models.CASCADE,
+        related_name='invoice_reminder_deliveries',
+    )
+    invoice_reference = models.CharField(max_length=100)
+    invoice_number = models.CharField(max_length=100, blank=True)
+    milestone = models.CharField(
+        max_length=20,
+        help_text="Reminder milestone, for example 5, 3, 1, or expired.",
+    )
+    channel = models.CharField(max_length=20, choices=CHANNEL_CHOICES)
+    recipient_user_id = models.CharField(max_length=64, blank=True)
+    recipient_name = models.CharField(max_length=255, blank=True)
+    recipient_email = models.EmailField(blank=True)
+    recipient_phone = models.CharField(max_length=32, blank=True)
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='pending')
+    provider_message_id = models.CharField(max_length=255, blank=True)
+    error_message = models.TextField(blank=True)
+    metadata = models.JSONField(default=dict, blank=True)
+    sent_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['-created_at']
+        verbose_name = 'Subscription Invoice Reminder Delivery'
+        verbose_name_plural = 'Subscription Invoice Reminder Deliveries'
+        constraints = [
+            models.UniqueConstraint(
+                fields=[
+                    'billing_cycle',
+                    'invoice_reference',
+                    'milestone',
+                    'channel',
+                    'recipient_user_id',
+                    'recipient_email',
+                    'recipient_phone',
+                ],
+                name='uniq_subscription_invoice_reminder_delivery',
+            ),
+        ]
+        indexes = [
+            models.Index(fields=['tenant', 'status'], name='subscriptio_tenant__d85e23_idx'),
+            models.Index(fields=['billing_cycle', 'milestone'], name='subscriptio_billing_4a9d64_idx'),
+            models.Index(fields=['channel', 'status'], name='subscriptio_channel_443cd2_idx'),
+            models.Index(fields=['created_at'], name='subscriptio_created_4dfdcb_idx'),
+        ]
+
+    def __str__(self):
+        return f"{self.invoice_number or self.invoice_reference} {self.milestone} {self.channel} {self.status}"
