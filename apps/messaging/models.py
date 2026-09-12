@@ -32,6 +32,13 @@ class SMSTemplate(models.Model):
         ordering = ['-created_at']
         verbose_name = "SMS Template"
         verbose_name_plural = "SMS Templates"
+        constraints = [
+            models.UniqueConstraint(
+                fields=['event_type'],
+                condition=models.Q(is_active=True) & ~models.Q(event_type=''),
+                name='unique_active_event_type_per_tenant',
+            ),
+        ]
     
     def __str__(self):
         return self.name
