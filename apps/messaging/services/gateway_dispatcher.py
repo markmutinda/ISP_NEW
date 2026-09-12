@@ -646,17 +646,45 @@ class BytewaveBackend:
             raise RuntimeError(err)
 
         bal_data = data.get("data", {})
-        # tolerate multiple possible shapes
-        if isinstance(bal_data, dict):
-            units = bal_data.get("sms_unit") or bal_data.get("units") or bal_data.get("balance") or 0
-        else:
-            units = bal_data
+        units = self._extract_balance_units(bal_data) or Decimal("0")
 
         return {
             "balance": float(units),    # here balance means SMS units
             "currency": "SMS_UNITS",
             "unit_cost": Decimal("1.00"),  # not money; 1 unit == 1 sms unit
         }
+
+    def _extract_balance_units(self, payload):
+        keys = (
+            "sms_unit", "sms_units", "smsunit", "units", "unit",
+            "balance", "wallet_balance", "remaining", "available",
+            "available_units", "remaining_units", "credit", "credits",
+        )
+        if isinstance(payload, dict):
+            for key in keys:
+                value = payload.get(key)
+                if value not in (None, ""):
+                    try:
+                        return Decimal(str(value))
+                    except Exception:
+                        pass
+            for value in payload.values():
+                found = self._extract_balance_units(value)
+                if found is not None:
+                    return found
+            return None
+        if isinstance(payload, (list, tuple)):
+            for value in payload:
+                found = self._extract_balance_units(value)
+                if found is not None:
+                    return found
+            return None
+        try:
+            if payload in (None, ""):
+                return None
+            return Decimal(str(payload))
+        except Exception:
+            return None
 
 
 # ─── PROVIDER REGISTRY ─────────────────────────────────────────

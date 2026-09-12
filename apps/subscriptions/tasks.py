@@ -166,6 +166,29 @@ def _invoice_reminder_copy(*, tenant_name, invoice, cycle, amount_due, milestone
     return subject, body, sms
 
 
+def _invoice_reminder_template_sms(*, tenant_name, invoice, cycle, amount_due, milestone, recipient):
+    from apps.subscriptions.models import SubscriptionReminderTemplate
+
+    admin_name = (recipient.get("first_name") or "").strip() or "there"
+    plan_name = cycle.subscription.plan.name if cycle.subscription and cycle.subscription.plan else ""
+    days_left = "0" if milestone == "expired" else str(milestone)
+    with schema_context(get_public_schema_name()):
+        template = SubscriptionReminderTemplate.get_active().content
+    context = {
+        "company_name": tenant_name,
+        "plan_name": plan_name,
+        "days_left": days_left,
+        "expiry_date": invoice.due_date.strftime("%d %b %Y") if invoice.due_date else "",
+        "amount_due": f"{float(amount_due):,.0f}",
+        "admin_name": admin_name,
+        "invoice_number": invoice.invoice_number or "",
+    }
+    message = template
+    for key, value in context.items():
+        message = message.replace("{" + key + "}", str(value))
+    return message
+
+
 def _get_or_create_reminder_delivery(*, cycle, invoice, milestone, channel, recipient, destination):
     defaults = {
         "tenant": cycle.tenant,
@@ -675,7 +698,15 @@ def send_subscription_invoice_reminders():
                         if delivery.status == "sent":
                             sent["skipped"] += 1
                         else:
-                            result = sms_sender.send_sms(to=phone, message=sms_message) if sms_sender else {
+                            templated_sms = _invoice_reminder_template_sms(
+                                tenant_name=tenant_name,
+                                invoice=invoice,
+                                cycle=cycle,
+                                amount_due=amount_due,
+                                milestone=milestone,
+                                recipient=recipient,
+                            )
+                            result = sms_sender.send_sms(to=phone, message=templated_sms) if sms_sender else {
                                 "success": False,
                                 "error": "SMS channel requested but platform SMS sender is unavailable.",
                             }
@@ -1217,6 +1248,5 @@ def refresh_metered_billing_estimates():
 
 @shared_task(name='apps.subscriptions.tasks.send_subscription_expiry_sms_reminders')
 def send_subscription_expiry_sms_reminders():
-    """Send SMS reminders for platform subscriptions expiring in 3 or 1 days."""
-    from .reminder_service import send_subscription_expiry_reminders
-    return send_subscription_expiry_reminders()
+    """Backward-compatible alias for the invoice-based reminder sweep."""
+    return send_subscription_invoice_reminders()

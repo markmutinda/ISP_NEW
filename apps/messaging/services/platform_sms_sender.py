@@ -58,3 +58,36 @@ class PlatformSMSSender:
                 "error": str(exc),
                 "provider": "bytewave_master",
             }
+
+    def get_balance(self) -> Dict[str, Any]:
+        if not self.api_token:
+            return {
+                "success": False,
+                "error": "BYTEWAVE_API_TOKEN is not configured.",
+                "balance": 0,
+                "currency": "SMS_UNITS",
+            }
+
+        try:
+            backend = BytewaveBackend(
+                api_key=self.api_token,
+                sender_id=self.sender_id,
+                extra_config={"base_url": self.base_url},
+            )
+            result = backend.get_balance()
+            return {
+                "success": True,
+                "balance": float(result.get("balance") or 0),
+                "currency": result.get("currency") or "SMS_UNITS",
+                "raw": result,
+                "provider": "bytewave_master",
+            }
+        except Exception as exc:
+            logger.exception("Platform SMS balance fetch failed: %s", exc)
+            return {
+                "success": False,
+                "error": str(exc),
+                "balance": 0,
+                "currency": "SMS_UNITS",
+                "provider": "bytewave_master",
+            }

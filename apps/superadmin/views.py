@@ -3700,6 +3700,12 @@ class SubscriptionInvoiceDetailView(APIView):
         with schema_context(cycle.tenant.schema_name):
             from apps.billing.models import Invoice, InvoiceItem
             invoice = Invoice.objects.get(pk=invoice.pk)
+            original_invoice_state = {
+                "status": invoice.status,
+                "is_overdue": invoice.is_overdue,
+                "overdue_days": invoice.overdue_days,
+                "paid_at": invoice.paid_at,
+            }
             manual_items = invoice.items.filter(service_type="netily_manual_adjustment")
             existing_adjustment = manual_items.aggregate(total=Sum("total"))["total"] or Decimal("0.00")
             base_subtotal = _decimal_money((invoice.subtotal or invoice.total_amount) - existing_adjustment)
@@ -3731,10 +3737,13 @@ class SubscriptionInvoiceDetailView(APIView):
                 manual_items.delete()
 
             invoice.calculate_totals()
+            Invoice.objects.filter(pk=invoice.pk).update(**original_invoice_state)
             invoice.refresh_from_db()
             subtotal = _decimal_money(invoice.subtotal or invoice.total_amount)
             invoice.discount_amount = discount_amount
             invoice.calculate_totals()
+            Invoice.objects.filter(pk=invoice.pk).update(**original_invoice_state)
+            invoice.refresh_from_db()
 
             notes = []
             if adjustment_amount > 0:
@@ -3748,6 +3757,8 @@ class SubscriptionInvoiceDetailView(APIView):
                 invoice.internal_notes = f"{invoice.internal_notes or ''}\n" + "\n".join(notes)
                 invoice.internal_notes = invoice.internal_notes.strip()
                 invoice.save(update_fields=["internal_notes", "updated_at"])
+                Invoice.objects.filter(pk=invoice.pk).update(**original_invoice_state)
+                invoice.refresh_from_db()
 
         _log_action(
             request.user,
@@ -5426,61 +5437,9 @@ class SuperadminSMSOverviewView(APIView):
         })
 
     def _get_bytewave_balance(self) -> dict:
-        import requests as _requests
-        from django.conf import settings as _settings
+        from apps.messaging.services.platform_sms_sender import PlatformSMSSender
 
-        api_token = getattr(_settings, "BYTEWAVE_API_TOKEN", "")
-        base_url = "https://portal.bytewavenetworks.com/api/http"
-
-        if not api_token:
-            return {"success": False, "error": "BYTEWAVE_API_TOKEN not configured", "balance": 0}
-
-        try:
-            resp = _requests.get(
-                f"{base_url}/balance",
-                headers={
-                    "Content-Type": "application/json",
-                    "Accept": "application/json",
-                },
-                json={"api_token": api_token},
-                timeout=10,
-            )
-            resp.raise_for_status()
-            data = resp.json()
-
-            if data.get("status") == "success":
-                raw = data.get("data", {})
-                # data can be dict or scalar depending on Bytewave version
-                if isinstance(raw, dict):
-                    units = (
-                        raw.get("sms_unit")
-                        or raw.get("sms_units")
-                        or raw.get("units")
-                        or raw.get("balance")
-                        or raw.get("remaining")
-                        or 0
-                    )
-                elif isinstance(raw, (int, float, str)):
-                    units = raw
-                else:
-                    units = 0
-
-                return {
-                    "success": True,
-                    "balance": float(units),
-                    "currency": "SMS_UNITS",
-                    "raw": raw,  # include raw so you can debug what fields come back
-                }
-
-            return {
-                "success": False,
-                "error": data.get("message", "Unknown error from Bytewave"),
-                "balance": 0,
-            }
-
-        except Exception as exc:
-            logger.error("Bytewave balance fetch failed: %s", exc)
-            return {"success": False, "error": str(exc), "balance": 0}
+        return PlatformSMSSender().get_balance()
 
     def _get_all_topup_history(self, tenants, limit_per_tenant: int = 50) -> list:
         rows = []
@@ -5557,7 +5516,9 @@ class SubscriptionReminderBalanceView(APIView):
 
     def get(self, request):
         _ensure_public()
-        return Response(SuperadminSMSOverviewView()._get_bytewave_balance())
+        from apps.messaging.services.platform_sms_sender import PlatformSMSSender
+
+        return Response(PlatformSMSSender().get_balance())
 
 
 class SubscriptionReminderLogListView(APIView):
@@ -5565,15 +5526,22 @@ class SubscriptionReminderLogListView(APIView):
 
     def get(self, request):
         _ensure_public()
-        from apps.subscriptions.models import SubscriptionReminderLog
+        from apps.subscriptions.models import SubscriptionInvoiceReminderDelivery
 
         page = int(request.query_params.get('page', 1))
         page_size = min(int(request.query_params.get('page_size', PAGE_SIZE)), 100)
         status_filter = request.query_params.get('status')
 
-        qs = SubscriptionReminderLog.objects.select_related('subscription__company').order_by('-sent_at')
+        qs = SubscriptionInvoiceReminderDelivery.objects.select_related(
+            'subscription__company',
+            'tenant',
+            'billing_cycle',
+        ).order_by('-created_at')
         if status_filter:
             qs = qs.filter(status=status_filter)
+        channel_filter = request.query_params.get('channel')
+        if channel_filter:
+            qs = qs.filter(channel=channel_filter)
 
         total = qs.count()
         start = (page - 1) * page_size
@@ -5585,14 +5553,22 @@ class SubscriptionReminderLogListView(APIView):
             'page_size': page_size,
             'results': [
                 {
-                    'id': r.id,
+                    'id': str(r.id),
                     'company_name': r.subscription.company.name if r.subscription and r.subscription.company else '',
+                    'tenant_name': r.tenant.name if r.tenant else '',
+                    'tenant_subdomain': r.tenant.subdomain if r.tenant else '',
+                    'invoice_number': r.invoice_number,
                     'milestone': r.milestone,
-                    'phone_number': r.phone_number,
+                    'channel': r.channel,
+                    'recipient_name': r.recipient_name,
+                    'phone_number': r.recipient_phone,
+                    'recipient_phone': r.recipient_phone,
+                    'recipient_email': r.recipient_email,
                     'status': r.status,
-                    'error': r.error,
-                    'period_end': r.period_end,
+                    'error': r.error_message,
+                    'period_end': r.billing_cycle.end_date if r.billing_cycle else None,
                     'sent_at': r.sent_at,
+                    'created_at': r.created_at,
                 }
                 for r in rows
             ],
@@ -5604,8 +5580,8 @@ class SubscriptionReminderTestSendView(APIView):
     permission_classes = SUPERADMIN_PERMS
 
     def post(self, request):
-        from apps.subscriptions.tasks import send_subscription_expiry_sms_reminders
-        result = send_subscription_expiry_sms_reminders.delay()
+        from apps.subscriptions.tasks import send_subscription_invoice_reminders
+        result = send_subscription_invoice_reminders.delay()
         _log_action(request.user, "trigger", "SubscriptionReminderSweep",
                      object_repr="Manual reminder sweep", request=request)
         return Response({'detail': 'Reminder sweep queued.', 'task_id': result.id})

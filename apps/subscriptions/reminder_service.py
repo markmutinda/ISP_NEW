@@ -20,6 +20,7 @@ TEMPLATE_VARIABLES = [
     {'key': '{expiry_date}', 'label': 'Expiry Date', 'example': '12 Sep 2026'},
     {'key': '{amount_due}', 'label': 'Amount Due (KES)', 'example': '2,500'},
     {'key': '{admin_name}', 'label': 'Admin First Name', 'example': 'Jane'},
+    {'key': '{invoice_number}', 'label': 'Invoice Number', 'example': 'NET-BILL-260912090000'},
 ]
 
 
