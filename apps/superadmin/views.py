@@ -5585,3 +5585,37 @@ class SubscriptionReminderTestSendView(APIView):
         _log_action(request.user, "trigger", "SubscriptionReminderSweep",
                      object_repr="Manual reminder sweep", request=request)
         return Response({'detail': 'Reminder sweep queued.', 'task_id': result.id})
+
+
+class SubscriptionReminderManualSendView(APIView):
+    """Send a reminder immediately for a selected subscription invoice."""
+    permission_classes = SUPERADMIN_PERMS
+
+    def post(self, request):
+        _ensure_public()
+        from apps.subscriptions.tasks import send_subscription_invoice_reminder_for_cycle
+
+        cycle_id = request.data.get("cycle_id") or request.data.get("invoice_id")
+        if not cycle_id:
+            return Response({"detail": "cycle_id is required."}, status=status.HTTP_400_BAD_REQUEST)
+
+        channels = request.data.get("channels") or ["sms"]
+        if isinstance(channels, str):
+            channels = [channels]
+
+        try:
+            result = send_subscription_invoice_reminder_for_cycle(cycle_id, channels=channels)
+        except Exception as exc:
+            logger.exception("Manual subscription reminder failed for cycle %s: %s", cycle_id, exc)
+            return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+
+        _log_action(
+            request.user,
+            "trigger",
+            "SubscriptionReminderManualSend",
+            object_repr=f"Manual reminder for {result.get('tenant_name')} {result.get('invoice_number')}",
+            object_id=cycle_id,
+            changes={"channels": channels, "result": result},
+            request=request,
+        )
+        return Response(result)

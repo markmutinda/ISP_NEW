@@ -1,7 +1,9 @@
 import logging
+from decimal import Decimal
 from typing import Any, Dict
 
 from django.conf import settings
+import requests
 
 from apps.messaging.services.gateway_dispatcher import BytewaveBackend
 
@@ -75,19 +77,93 @@ class PlatformSMSSender:
                 extra_config={"base_url": self.base_url},
             )
             result = backend.get_balance()
-            return {
+            response = {
                 "success": True,
                 "balance": float(result.get("balance") or 0),
                 "currency": result.get("currency") or "SMS_UNITS",
                 "raw": result,
                 "provider": "bytewave_master",
             }
+            if response["balance"] > 0:
+                return response
+
+            legacy = self._get_legacy_http_balance()
+            if legacy.get("success") and float(legacy.get("balance") or 0) > 0:
+                return legacy
+            return response
         except Exception as exc:
-            logger.exception("Platform SMS balance fetch failed: %s", exc)
+            logger.warning("Platform SMS v3 balance fetch failed: %s", exc)
+            legacy = self._get_legacy_http_balance()
+            if legacy.get("success"):
+                return legacy
+            legacy["error"] = legacy.get("error") or str(exc)
+            return legacy
+
+    def _get_legacy_http_balance(self) -> Dict[str, Any]:
+        try:
+            resp = requests.get(
+                "https://portal.bytewavenetworks.com/api/http/balance",
+                headers={"Content-Type": "application/json", "Accept": "application/json"},
+                json={"api_token": self.api_token},
+                timeout=15,
+            )
+            data = resp.json()
+            if resp.status_code >= 400:
+                return {
+                    "success": False,
+                    "error": data.get("message", f"HTTP {resp.status_code}"),
+                    "balance": 0,
+                    "currency": "SMS_UNITS",
+                    "provider": "bytewave_master_legacy",
+                    "raw": data,
+                }
+            raw = data.get("data", data)
+            units = self._extract_units(raw) or Decimal("0")
+            return {
+                "success": True,
+                "balance": float(units),
+                "currency": "SMS_UNITS",
+                "provider": "bytewave_master_legacy",
+                "raw": raw,
+            }
+        except Exception as exc:
+            logger.exception("Platform SMS legacy balance fetch failed: %s", exc)
             return {
                 "success": False,
                 "error": str(exc),
                 "balance": 0,
                 "currency": "SMS_UNITS",
-                "provider": "bytewave_master",
+                "provider": "bytewave_master_legacy",
             }
+
+    def _extract_units(self, payload):
+        keys = (
+            "sms_unit", "sms_units", "smsunit", "units", "unit",
+            "balance", "wallet_balance", "remaining", "available",
+            "available_units", "remaining_units", "credit", "credits",
+        )
+        if isinstance(payload, dict):
+            for key in keys:
+                value = payload.get(key)
+                if value not in (None, ""):
+                    try:
+                        return Decimal(str(value))
+                    except Exception:
+                        pass
+            for value in payload.values():
+                found = self._extract_units(value)
+                if found is not None:
+                    return found
+            return None
+        if isinstance(payload, (list, tuple)):
+            for value in payload:
+                found = self._extract_units(value)
+                if found is not None:
+                    return found
+            return None
+        try:
+            if payload in (None, ""):
+                return None
+            return Decimal(str(payload))
+        except Exception:
+            return None

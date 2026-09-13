@@ -139,4 +139,5 @@ urlpatterns = [
     path("subscription-reminders/balance/", views.SubscriptionReminderBalanceView.as_view(), name="subscription-reminder-balance"),
     path("subscription-reminders/logs/", views.SubscriptionReminderLogListView.as_view(), name="subscription-reminder-logs"),
     path("subscription-reminders/send-now/", views.SubscriptionReminderTestSendView.as_view(), name="subscription-reminder-send-now"),
+    path("subscription-reminders/send-manual/", views.SubscriptionReminderManualSendView.as_view(), name="subscription-reminder-send-manual"),
 ]
