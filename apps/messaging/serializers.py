@@ -33,6 +33,24 @@ class SMSTemplateCreateUpdateSerializer(serializers.ModelSerializer):
             'event_type': {'required': False, 'allow_blank': True},
         }
 
+    def validate_event_type(self, value):
+        """
+        Prevent creating a second ACTIVE template for the same event_type.
+        Matches the DB-level unique constraint on (event_type) WHERE is_active=True.
+        Returns a clean 400 instead of letting IntegrityError bubble up as 500.
+        """
+        if not value:
+            return value
+        qs = SMSTemplate.objects.filter(event_type=value, is_active=True)
+        if self.instance:
+            qs = qs.exclude(pk=self.instance.pk)
+        if qs.exists():
+            raise serializers.ValidationError(
+                f"An active template already uses event '{value}'. "
+                "Deactivate the existing one first."
+            )
+        return value
+
 
 class SMSCampaignSerializer(serializers.ModelSerializer):
     """Full serializer for campaigns (list, retrieve, stats)"""

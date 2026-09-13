@@ -77,14 +77,19 @@ def _get_rendered_message(event_type: str, default_msg: str, **context) -> str:
     Prefers tenant-customised rows (is_system=False) over system defaults.
     Substitutes all {variable} placeholders with context values.
     Falls back to default_msg if no template found or template is blank.
+
+    FIX: Deterministic ordering — if duplicate active templates exist for the
+    same event_type, pick the one most recently updated, then highest id.
+    Prevents non-deterministic template selection when duplicates exist.
     """
     from apps.messaging.models import SMSTemplate
 
-    # Prefer tenant-customised template, fall back to system default
+    # Prefer tenant-customised template, fall back to system default.
+    # Deterministic tie-break: newest updated_at, then highest id.
     template = (
         SMSTemplate.objects
         .filter(event_type=event_type, is_active=True)
-        .order_by('is_system')  # False (0) before True (1) — tenant custom first
+        .order_by('is_system', '-updated_at', '-id')
         .first()
     )
 

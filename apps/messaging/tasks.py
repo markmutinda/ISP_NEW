@@ -74,11 +74,21 @@ def _get_rendered_message(event_type: str, default_msg: str, **context) -> str:
     Fetches the active custom template for a given event from the database.
     Replaces {variable} placeholders with actual values.
     Falls back to the hardcoded default_msg if no template exists.
+
+    FIX: Deterministic ordering — if duplicate active templates exist for the
+    same event_type, pick the one most recently updated, then highest id.
+    Prevents non-deterministic template selection when duplicates exist.
     """
     from apps.messaging.models import SMSTemplate
     
-    # Query the database for the user's saved template for this specific event
-    template = SMSTemplate.objects.filter(event_type=event_type, is_active=True).first()
+    # Query the database for the user's saved template for this specific event.
+    # Deterministic tie-break: tenant-custom first, then newest updated_at, then highest id.
+    template = (
+        SMSTemplate.objects
+        .filter(event_type=event_type, is_active=True)
+        .order_by('is_system', '-updated_at', '-id')
+        .first()
+    )
     
     if not template or not template.content.strip():
         return default_msg
