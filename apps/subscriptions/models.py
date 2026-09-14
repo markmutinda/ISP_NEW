@@ -23,6 +23,7 @@ from decimal import Decimal
 
 from django.conf import settings
 from django.db import models
+from django.core.validators import MinValueValidator
 from django.utils import timezone
 
 
@@ -1481,6 +1482,99 @@ class SubscriptionReminderLog(models.Model):
         unique_together = [('subscription', 'milestone', 'period_end')]
         indexes = [models.Index(fields=['subscription', 'milestone'])]
         ordering = ['-sent_at']
+
+
+class PlatformSMSWallet(models.Model):
+    """
+    Public-schema SMS wallet for Netily-owned operational messages.
+
+    Tenant customer SMS credits live in each tenant schema. This wallet is only
+    for platform messages such as subscription payment reminders.
+    """
+    sms_units = models.DecimalField(
+        max_digits=14,
+        decimal_places=4,
+        default=Decimal('0.0000'),
+    )
+    sell_price_per_unit = models.DecimalField(
+        max_digits=10,
+        decimal_places=4,
+        default=Decimal('0.4000'),
+        validators=[MinValueValidator(Decimal('0.0000'))],
+    )
+    enforce_balance = models.BooleanField(
+        default=False,
+        help_text='When enabled, platform SMS sends fail if this wallet has insufficient units.',
+    )
+    is_active = models.BooleanField(default=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = 'Platform SMS Wallet'
+        verbose_name_plural = 'Platform SMS Wallets'
+
+    def __str__(self):
+        return f"Platform SMS Wallet ({self.sms_units} units)"
+
+    @classmethod
+    def get_active(cls):
+        obj, _ = cls.objects.get_or_create(
+            pk=1,
+            defaults={
+                'sms_units': Decimal('0.0000'),
+                'sell_price_per_unit': Decimal('0.4000'),
+                'enforce_balance': False,
+                'is_active': True,
+            },
+        )
+        return obj
+
+
+class PlatformSMSLedger(models.Model):
+    ENTRY_TYPES = (
+        ('credit', 'Credit'),
+        ('debit', 'Debit'),
+        ('refund', 'Refund'),
+        ('adjustment', 'Adjustment'),
+    )
+
+    wallet = models.ForeignKey(
+        PlatformSMSWallet,
+        on_delete=models.CASCADE,
+        related_name='entries',
+    )
+    entry_type = models.CharField(max_length=20, choices=ENTRY_TYPES)
+    units = models.DecimalField(
+        max_digits=14,
+        decimal_places=4,
+        help_text='Positive for credits/refunds, negative for debits.',
+    )
+    unit_price = models.DecimalField(max_digits=10, decimal_places=4, default=Decimal('0.0000'))
+    amount = models.DecimalField(max_digits=12, decimal_places=2, default=Decimal('0.00'))
+    reference = models.CharField(max_length=120, blank=True, default='')
+    provider_message_id = models.CharField(max_length=255, blank=True, default='')
+    notes = models.TextField(blank=True, default='')
+    metadata = models.JSONField(default=dict, blank=True)
+    reminder_delivery = models.ForeignKey(
+        'subscriptions.SubscriptionInvoiceReminderDelivery',
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name='platform_sms_ledger_entries',
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        verbose_name = 'Platform SMS Ledger Entry'
+        verbose_name_plural = 'Platform SMS Ledger Entries'
+        ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['entry_type', 'created_at']),
+            models.Index(fields=['reference']),
+        ]
+
+    def __str__(self):
+        return f"{self.entry_type}: {self.units} platform SMS units"
 
 
 class SubscriptionInvoiceReminderDelivery(models.Model):

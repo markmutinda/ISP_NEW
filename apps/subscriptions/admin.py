@@ -6,6 +6,8 @@ from .models import (
     ISPPayoutConfig,
     ISPSettlement,
     CommissionLedger,
+    PlatformSMSLedger,
+    PlatformSMSWallet,
     SubscriptionInvoiceReminderDelivery,
 )
 
@@ -77,3 +79,19 @@ class SubscriptionInvoiceReminderDeliveryAdmin(admin.ModelAdmin):
     ]
     raw_id_fields = ['tenant', 'billing_cycle', 'subscription']
     readonly_fields = ['created_at', 'updated_at', 'sent_at']
+
+
+@admin.register(PlatformSMSWallet)
+class PlatformSMSWalletAdmin(admin.ModelAdmin):
+    list_display = ['id', 'sms_units', 'sell_price_per_unit', 'enforce_balance', 'is_active', 'updated_at']
+    list_filter = ['enforce_balance', 'is_active']
+    readonly_fields = ['updated_at']
+
+
+@admin.register(PlatformSMSLedger)
+class PlatformSMSLedgerAdmin(admin.ModelAdmin):
+    list_display = ['entry_type', 'units', 'amount', 'reference', 'provider_message_id', 'created_at']
+    list_filter = ['entry_type', 'created_at']
+    search_fields = ['reference', 'provider_message_id', 'notes']
+    raw_id_fields = ['wallet', 'reminder_delivery']
+    readonly_fields = ['created_at']

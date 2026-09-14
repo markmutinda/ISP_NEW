@@ -336,6 +336,8 @@ CORS_ALLOW_CREDENTIALS = True
 # Standard CORS headers plus the tenant and OTP browser-session headers.
 CORS_ALLOW_HEADERS = (
     *default_headers,
+    "cache-control",
+    "pragma",
     "x-session-id",
     "x-tenant",
 )

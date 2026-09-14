@@ -4,6 +4,8 @@ from decimal import Decimal
 from typing import Any, Dict
 
 from django.conf import settings
+from django.db import transaction
+from django_tenants.utils import get_public_schema_name, schema_context
 import requests
 
 from apps.messaging.services.gateway_dispatcher import BytewaveBackend
@@ -25,7 +27,15 @@ class PlatformSMSSender:
         self.sender_id = getattr(settings, "BYTEWAVE_SENDER_ID", "BytewaveSMS") or "BytewaveSMS"
         self.base_url = getattr(settings, "BYTEWAVE_BASE_URL", "https://portal.bytewavenetworks.com/api/v3")
 
-    def send_sms(self, *, to: str, message: str) -> Dict[str, Any]:
+    def send_sms(
+        self,
+        *,
+        to: str,
+        message: str,
+        reference: str = "",
+        reminder_delivery_id: str = "",
+        metadata: Dict[str, Any] | None = None,
+    ) -> Dict[str, Any]:
         if not self.api_token:
             return {
                 "success": False,
@@ -39,6 +49,21 @@ class PlatformSMSSender:
                 "error": "Recipient phone number is required.",
             }
 
+        reservation = self._reserve_platform_units(
+            message=message,
+            reference=reference,
+            reminder_delivery_id=reminder_delivery_id,
+            metadata=metadata or {},
+        )
+        if not reservation.get("success"):
+            return {
+                "success": False,
+                "status": "failed",
+                "error": reservation.get("error") or "Insufficient platform SMS balance.",
+                "provider": "bytewave_master",
+                **reservation,
+            }
+
         try:
             backend = BytewaveBackend(
                 api_key=self.api_token,
@@ -46,7 +71,21 @@ class PlatformSMSSender:
                 extra_config={"base_url": self.base_url},
             )
             ok, provider_id, cost = backend.send(to, message)
+            if not ok:
+                self._refund_platform_units(
+                    units=Decimal(str(reservation.get("platform_sms_units") or "0")),
+                    reference=reference,
+                    debit_ledger_id=reservation.get("platform_sms_ledger_id"),
+                    reason="Provider send failure",
+                    metadata=metadata or {},
+                )
+            else:
+                self._mark_provider_message(
+                    ledger_id=reservation.get("platform_sms_ledger_id"),
+                    provider_message_id=provider_id or "",
+                )
             return {
+                **reservation,
                 "success": bool(ok),
                 "status": "sent" if ok else "failed",
                 "provider_message_id": provider_id or "",
@@ -54,13 +93,139 @@ class PlatformSMSSender:
                 "provider": "bytewave_master",
             }
         except Exception as exc:
+            self._refund_platform_units(
+                units=Decimal(str(reservation.get("platform_sms_units") or "0")),
+                reference=reference,
+                debit_ledger_id=reservation.get("platform_sms_ledger_id"),
+                reason=f"Provider exception: {exc}",
+                metadata=metadata or {},
+            )
             logger.exception("Platform SMS send failed: %s", exc)
             return {
+                **reservation,
                 "success": False,
                 "status": "failed",
                 "error": str(exc),
                 "provider": "bytewave_master",
             }
+
+    def _sms_units_for_message(self, text: str) -> Decimal:
+        length = len(text or "")
+        if length <= 160:
+            return Decimal("1.0000")
+        segments = 1 + ((length - 160 + 152) // 153)
+        return Decimal(str(segments)).quantize(Decimal("0.0001"))
+
+    def _reserve_platform_units(
+        self,
+        *,
+        message: str,
+        reference: str = "",
+        reminder_delivery_id: str = "",
+        metadata: Dict[str, Any] | None = None,
+    ) -> Dict[str, Any]:
+        units = self._sms_units_for_message(message)
+        try:
+            with schema_context(get_public_schema_name()):
+                from apps.subscriptions.models import (
+                    PlatformSMSLedger,
+                    PlatformSMSWallet,
+                    SubscriptionInvoiceReminderDelivery,
+                )
+
+                with transaction.atomic():
+                    wallet = PlatformSMSWallet.get_active()
+                    wallet = PlatformSMSWallet.objects.select_for_update().get(pk=wallet.pk)
+                    if wallet.enforce_balance and wallet.sms_units < units:
+                        return {
+                            "success": False,
+                            "error": "Insufficient Netily platform SMS balance.",
+                            "platform_sms_units": str(units),
+                            "platform_sms_wallet_balance": str(wallet.sms_units),
+                        }
+
+                    wallet.sms_units = wallet.sms_units - units
+                    wallet.save(update_fields=["sms_units", "updated_at"])
+
+                    reminder_delivery = None
+                    if reminder_delivery_id:
+                        reminder_delivery = SubscriptionInvoiceReminderDelivery.objects.filter(
+                            pk=reminder_delivery_id,
+                        ).first()
+
+                    ledger = PlatformSMSLedger.objects.create(
+                        wallet=wallet,
+                        entry_type="debit",
+                        units=-units,
+                        unit_price=wallet.sell_price_per_unit,
+                        amount=(units * wallet.sell_price_per_unit).quantize(Decimal("0.01")),
+                        reference=reference or str(reminder_delivery_id or ""),
+                        notes="Subscription reminder SMS debit",
+                        metadata=metadata or {},
+                        reminder_delivery=reminder_delivery,
+                    )
+                    return {
+                        "success": True,
+                        "platform_sms_units": str(units),
+                        "platform_sms_ledger_id": str(ledger.id),
+                        "platform_sms_wallet_balance": str(wallet.sms_units),
+                    }
+        except Exception as exc:
+            logger.exception("Platform SMS wallet debit failed: %s", exc)
+            return {
+                "success": False,
+                "error": str(exc),
+                "platform_sms_units": str(units),
+            }
+
+    def _refund_platform_units(
+        self,
+        *,
+        units: Decimal,
+        reference: str = "",
+        debit_ledger_id: str | None = None,
+        reason: str = "Provider failure refund",
+        metadata: Dict[str, Any] | None = None,
+    ):
+        if units <= 0:
+            return
+        try:
+            with schema_context(get_public_schema_name()):
+                from apps.subscriptions.models import PlatformSMSLedger, PlatformSMSWallet
+
+                with transaction.atomic():
+                    wallet = PlatformSMSWallet.get_active()
+                    wallet = PlatformSMSWallet.objects.select_for_update().get(pk=wallet.pk)
+                    wallet.sms_units = wallet.sms_units + units
+                    wallet.save(update_fields=["sms_units", "updated_at"])
+                    PlatformSMSLedger.objects.create(
+                        wallet=wallet,
+                        entry_type="refund",
+                        units=units,
+                        unit_price=wallet.sell_price_per_unit,
+                        amount=(units * wallet.sell_price_per_unit).quantize(Decimal("0.01")),
+                        reference=reference,
+                        notes=reason,
+                        metadata={
+                            **(metadata or {}),
+                            "debit_ledger_id": str(debit_ledger_id or ""),
+                        },
+                    )
+        except Exception as exc:
+            logger.exception("Platform SMS wallet refund failed: %s", exc)
+
+    def _mark_provider_message(self, *, ledger_id: str | None, provider_message_id: str):
+        if not ledger_id or not provider_message_id:
+            return
+        try:
+            with schema_context(get_public_schema_name()):
+                from apps.subscriptions.models import PlatformSMSLedger
+
+                PlatformSMSLedger.objects.filter(pk=ledger_id).update(
+                    provider_message_id=str(provider_message_id),
+                )
+        except Exception as exc:
+            logger.warning("Platform SMS ledger provider update failed: %s", exc)
 
     def get_balance(self) -> Dict[str, Any]:
         if not self.api_token:

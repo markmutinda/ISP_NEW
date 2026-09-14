@@ -448,7 +448,19 @@ def send_subscription_invoice_reminder_for_cycle(cycle_id=None, *, tenant_id=Non
                     milestone=manual_milestone,
                     recipient=recipient,
                 )
-                result = sms_sender.send_sms(to=phone, message=templated_sms) if sms_sender else {
+                result = sms_sender.send_sms(
+                    to=phone,
+                    message=templated_sms,
+                    reference=f"subscription-reminder:{delivery.id}",
+                    reminder_delivery_id=str(delivery.id),
+                    metadata={
+                        "tenant_id": str(cycle.tenant_id),
+                        "tenant_schema": cycle.tenant.schema_name,
+                        "billing_cycle_id": str(cycle.id),
+                        "milestone": manual_milestone,
+                        "source": "subscription_invoice_manual_reminder",
+                    },
+                ) if sms_sender else {
                     "success": False,
                     "error": "SMS channel requested but platform SMS sender is unavailable.",
                 }
@@ -461,6 +473,9 @@ def send_subscription_invoice_reminder_for_cycle(cycle_id=None, *, tenant_id=Non
                     metadata={
                         "phone": phone,
                         "provider": result.get("provider", "bytewave_master"),
+                        "platform_sms_units": result.get("platform_sms_units", ""),
+                        "platform_sms_ledger_id": result.get("platform_sms_ledger_id", ""),
+                        "platform_sms_wallet_balance": result.get("platform_sms_wallet_balance", ""),
                         "source": "subscription_invoice_manual_reminder",
                     },
                 )
@@ -796,8 +811,6 @@ def send_subscription_invoice_reminders():
                 if invoice:
                     BillingCycle.objects.filter(pk=cycle.pk).update(invoice_reference=str(invoice.id))
 
-            if not invoice or not invoice.due_date:
-                continue
             invoice_status = str(invoice.status or "").upper() if invoice else ""
             if invoice and invoice_status in {"PAID", "VOIDED", "CANCELLED", "WRITTEN_OFF"}:
                 continue
@@ -934,7 +947,19 @@ def send_subscription_invoice_reminders():
                                 milestone=milestone,
                                 recipient=recipient,
                             )
-                            result = sms_sender.send_sms(to=phone, message=templated_sms) if sms_sender else {
+                            result = sms_sender.send_sms(
+                                to=phone,
+                                message=templated_sms,
+                                reference=f"subscription-reminder:{delivery.id}",
+                                reminder_delivery_id=str(delivery.id),
+                                metadata={
+                                    "tenant_id": str(cycle.tenant_id),
+                                    "tenant_schema": cycle.tenant.schema_name,
+                                    "billing_cycle_id": str(cycle.id),
+                                    "milestone": milestone,
+                                    "source": "subscription_invoice_auto_reminder",
+                                },
+                            ) if sms_sender else {
                                 "success": False,
                                 "error": "SMS channel requested but platform SMS sender is unavailable.",
                             }
@@ -947,6 +972,9 @@ def send_subscription_invoice_reminders():
                                 metadata={
                                     "phone": phone,
                                     "provider": result.get("provider", "bytewave_master"),
+                                    "platform_sms_units": result.get("platform_sms_units", ""),
+                                    "platform_sms_ledger_id": result.get("platform_sms_ledger_id", ""),
+                                    "platform_sms_wallet_balance": result.get("platform_sms_wallet_balance", ""),
                                     "source": "subscription_invoice_auto_reminder",
                                 },
                             )

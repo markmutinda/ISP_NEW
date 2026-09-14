@@ -5522,8 +5522,14 @@ class SubscriptionReminderBalanceView(APIView):
     def get(self, request):
         _ensure_public()
         from apps.messaging.services.platform_sms_sender import PlatformSMSSender
+        from apps.subscriptions.models import PlatformSMSLedger, PlatformSMSWallet
 
         provider_balance = PlatformSMSSender().get_balance()
+        platform_wallet = PlatformSMSWallet.get_active()
+        ledger_totals = PlatformSMSLedger.objects.aggregate(
+            debited_units=Sum('units', filter=Q(entry_type='debit')),
+            refunded_units=Sum('units', filter=Q(entry_type='refund')),
+        )
         pooled_units = Decimal("0.00")
         inbuilt_tenant_count = 0
         failed_tenants = []
@@ -5562,7 +5568,22 @@ class SubscriptionReminderBalanceView(APIView):
             "provider": provider_balance.get("provider", "bytewave_master"),
             "raw": provider_balance.get("raw"),
             "platform_balance": provider_balance,
+            "platform_wallet": {
+                "sms_units": str(platform_wallet.sms_units),
+                "sell_price_per_unit": str(platform_wallet.sell_price_per_unit),
+                "enforce_balance": platform_wallet.enforce_balance,
+                "is_active": platform_wallet.is_active,
+                "updated_at": platform_wallet.updated_at,
+                "debited_units": str(abs(ledger_totals.get('debited_units') or Decimal("0.00"))),
+                "refunded_units": str(ledger_totals.get('refunded_units') or Decimal("0.00")),
+            },
+            "spendable_balance_source": "platform_wallet",
             "total_inbuilt_units": str(pooled_units),
+            "tenant_inbuilt_units": {
+                "total_units": str(pooled_units),
+                "tenant_count": inbuilt_tenant_count,
+                "note": "Visibility only. Subscription reminders do not debit tenant SMS wallets.",
+            },
             "inbuilt_tenant_count": inbuilt_tenant_count,
             "failed_tenant_count": len(failed_tenants),
             "failed_tenants": failed_tenants[:5],
