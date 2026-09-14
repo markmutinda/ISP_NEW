@@ -1084,3 +1084,87 @@ class WebAuthnCredential(models.Model):
 
     def __str__(self):
         return f"{self.user.email or self.user.phone_number} - {self.device_label or 'Unnamed device'}"
+
+
+class SupportChatConversation(models.Model):
+    STATUS_CHOICES = (
+        ("new", "New"),
+        ("open", "Open"),
+        ("waiting_on_tenant", "Waiting on tenant"),
+        ("resolved", "Resolved"),
+    )
+    PRIORITY_CHOICES = (
+        ("normal", "Normal"),
+        ("high", "High"),
+        ("urgent", "Urgent"),
+    )
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    tenant_id = models.UUIDField(db_index=True)
+    tenant_schema = models.CharField(max_length=63, db_index=True)
+    tenant_name = models.CharField(max_length=255, blank=True, default="")
+    tenant_subdomain = models.CharField(max_length=120, blank=True, default="")
+    category = models.CharField(max_length=80, blank=True, default="General")
+    subject = models.CharField(max_length=180, blank=True, default="")
+    status = models.CharField(max_length=32, choices=STATUS_CHOICES, default="new", db_index=True)
+    priority = models.CharField(max_length=20, choices=PRIORITY_CHOICES, default="normal", db_index=True)
+    created_by_user_id = models.IntegerField(null=True, blank=True)
+    created_by_name = models.CharField(max_length=160, blank=True, default="")
+    created_by_email = models.EmailField(blank=True, default="")
+    created_by_phone = models.CharField(max_length=32, blank=True, default="")
+    assigned_to_user_id = models.IntegerField(null=True, blank=True)
+    assigned_to_name = models.CharField(max_length=160, blank=True, default="")
+    last_message_preview = models.CharField(max_length=260, blank=True, default="")
+    last_message_at = models.DateTimeField(null=True, blank=True, db_index=True)
+    tenant_last_read_at = models.DateTimeField(null=True, blank=True)
+    superadmin_last_read_at = models.DateTimeField(null=True, blank=True)
+    resolved_at = models.DateTimeField(null=True, blank=True)
+    metadata = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        app_label = "core"
+        ordering = ["-last_message_at", "-created_at"]
+        indexes = [
+            models.Index(fields=["tenant_id", "status"]),
+            models.Index(fields=["status", "last_message_at"]),
+            models.Index(fields=["assigned_to_user_id", "status"]),
+        ]
+
+    def __str__(self):
+        return f"{self.tenant_name or self.tenant_subdomain} - {self.subject or self.category}"
+
+
+class SupportChatMessage(models.Model):
+    SENDER_TYPES = (
+        ("tenant", "Tenant"),
+        ("superadmin", "Superadmin"),
+        ("system", "System"),
+    )
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    conversation = models.ForeignKey(
+        SupportChatConversation,
+        on_delete=models.CASCADE,
+        related_name="messages",
+    )
+    sender_type = models.CharField(max_length=20, choices=SENDER_TYPES, db_index=True)
+    sender_user_id = models.IntegerField(null=True, blank=True)
+    sender_name = models.CharField(max_length=160, blank=True, default="")
+    sender_email = models.EmailField(blank=True, default="")
+    body = models.TextField()
+    metadata = models.JSONField(default=dict, blank=True)
+    read_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+
+    class Meta:
+        app_label = "core"
+        ordering = ["created_at"]
+        indexes = [
+            models.Index(fields=["conversation", "created_at"]),
+            models.Index(fields=["sender_type", "created_at"]),
+        ]
+
+    def __str__(self):
+        return f"{self.sender_type}: {self.body[:48]}"

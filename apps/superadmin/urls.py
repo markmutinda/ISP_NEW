@@ -8,6 +8,7 @@ from django.urls import path
 
 from . import views
 from . import support_views
+from apps.core.views_support import SuperadminSupportChatConversationDetailView, SuperadminSupportChatConversationListView
 
 app_name = "superadmin"
 
@@ -123,6 +124,8 @@ urlpatterns = [
     path("support-executives/", support_views.SuperadminSupportExecutiveListCreateView.as_view(), name="support-executive-list"),
     path("support-executives/<int:user_id>/", support_views.SuperadminSupportExecutiveDetailView.as_view(), name="support-executive-detail"),
     path("support-activity/", support_views.SuperadminSupportActivityListView.as_view(), name="support-activity-list"),
+    path("support-chat/conversations/", SuperadminSupportChatConversationListView.as_view(), name="support-chat-conversation-list"),
+    path("support-chat/conversations/<uuid:conversation_id>/", SuperadminSupportChatConversationDetailView.as_view(), name="support-chat-conversation-detail"),
 
     # Hidden superadmin credential management
     path("superadmins/", support_views.SuperadminAccountListCreateView.as_view(), name="superadmin-account-list"),

@@ -5496,6 +5496,7 @@ class SubscriptionReminderTemplateView(APIView):
     def patch(self, request):
         _ensure_public()
         from apps.subscriptions.models import SubscriptionReminderTemplate
+        from apps.subscriptions.reminder_service import TEMPLATE_VARIABLES
 
         content = (request.data.get('content') or '').strip()
         if not content:
@@ -5507,7 +5508,11 @@ class SubscriptionReminderTemplateView(APIView):
 
         _log_action(request.user, "update", "SubscriptionReminderTemplate",
                      object_repr="SMS reminder template", changes={'content': content}, request=request)
-        return Response({'content': template.content, 'updated_at': template.updated_at})
+        return Response({
+            'content': template.content,
+            'updated_at': template.updated_at,
+            'variables': TEMPLATE_VARIABLES,
+        })
 
 
 class SubscriptionReminderBalanceView(APIView):

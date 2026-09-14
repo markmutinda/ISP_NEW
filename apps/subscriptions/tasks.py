@@ -414,7 +414,7 @@ def send_subscription_invoice_reminder_for_cycle(cycle_id=None, *, tenant_id=Non
                     metadata={
                         "source": "subscription_invoice_manual_reminder",
                         "billing_cycle_id": str(cycle.id),
-                        "invoice_id": invoice.id,
+                        "invoice_id": invoice.id if invoice else None,
                         "milestone": manual_milestone,
                     },
                 )
@@ -471,7 +471,7 @@ def send_subscription_invoice_reminder_for_cycle(cycle_id=None, *, tenant_id=Non
             f"Manual reminder processed for {tenant_name}: "
             f"email={counts['email']}, sms={counts['sms']}, in_app={counts['in_app']}, failed={counts['failed']}."
         ),
-        "invoice_number": invoice.invoice_number,
+        "invoice_number": invoice.invoice_number if invoice else "",
         "tenant_name": tenant_name,
         "milestone": manual_milestone,
         **counts,
@@ -894,7 +894,7 @@ def send_subscription_invoice_reminders():
                                 metadata={
                                     "source": "subscription_invoice_auto_reminder",
                                     "billing_cycle_id": str(cycle.id),
-                                    "invoice_id": invoice.id,
+                                    "invoice_id": invoice.id if invoice else None,
                                     "milestone": milestone,
                                 },
                             )
