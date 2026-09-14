@@ -5596,17 +5596,18 @@ class SubscriptionReminderManualSendView(APIView):
         from apps.subscriptions.tasks import send_subscription_invoice_reminder_for_cycle
 
         cycle_id = request.data.get("cycle_id") or request.data.get("invoice_id")
-        if not cycle_id:
-            return Response({"detail": "cycle_id is required."}, status=status.HTTP_400_BAD_REQUEST)
+        tenant_id = request.data.get("tenant_id")
+        if not cycle_id and not tenant_id:
+            return Response({"detail": "tenant_id is required."}, status=status.HTTP_400_BAD_REQUEST)
 
         channels = request.data.get("channels") or ["sms"]
         if isinstance(channels, str):
             channels = [channels]
 
         try:
-            result = send_subscription_invoice_reminder_for_cycle(cycle_id, channels=channels)
+            result = send_subscription_invoice_reminder_for_cycle(cycle_id, tenant_id=tenant_id, channels=channels)
         except Exception as exc:
-            logger.exception("Manual subscription reminder failed for cycle %s: %s", cycle_id, exc)
+            logger.exception("Manual subscription reminder failed for cycle=%s tenant=%s: %s", cycle_id, tenant_id, exc)
             return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
 
         _log_action(
@@ -5614,7 +5615,7 @@ class SubscriptionReminderManualSendView(APIView):
             "trigger",
             "SubscriptionReminderManualSend",
             object_repr=f"Manual reminder for {result.get('tenant_name')} {result.get('invoice_number')}",
-            object_id=cycle_id,
+            object_id=cycle_id or tenant_id,
             changes={"channels": channels, "result": result},
             request=request,
         )

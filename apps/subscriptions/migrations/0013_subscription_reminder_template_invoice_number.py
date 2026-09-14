@@ -9,15 +9,20 @@ OLD_TEMPLATE = (
 
 NEW_TEMPLATE = (
     "Hi {admin_name}, your Netily subscription for {company_name} ({plan_name}) "
-    "invoice {invoice_number} is due in {days_left} day(s) on {expiry_date}. Amount due: KES {amount_due}. "
-    "Please pay to avoid service interruption."
+    "is due in {days_left} day(s) on {expiry_date}. "
+    "Please open Admin > Subscription and renew to keep your account active."
 )
 
 
 def upgrade_default_template(apps, schema_editor):
     SubscriptionReminderTemplate = apps.get_model('subscriptions', 'SubscriptionReminderTemplate')
     template = SubscriptionReminderTemplate.objects.filter(pk=1).first()
-    if template and template.content == OLD_TEMPLATE:
+    previous_invoice_template = (
+        "Hi {admin_name}, your Netily subscription for {company_name} ({plan_name}) "
+        "invoice {invoice_number} is due in {days_left} day(s) on {expiry_date}. Amount due: KES {amount_due}. "
+        "Please pay to avoid service interruption."
+    )
+    if template and template.content in {OLD_TEMPLATE, previous_invoice_template}:
         template.content = NEW_TEMPLATE
         template.save(update_fields=['content', 'updated_at'])
 

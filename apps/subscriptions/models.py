@@ -1449,8 +1449,8 @@ class SubscriptionReminderTemplate(models.Model):
     """Singleton — SMS copy for platform subscription payment reminders."""
     content = models.TextField(default=(
         "Hi {admin_name}, your Netily subscription for {company_name} ({plan_name}) "
-        "invoice {invoice_number} is due in {days_left} day(s) on {expiry_date}. Amount due: KES {amount_due}. "
-        "Please pay to avoid service interruption."
+        "is due in {days_left} day(s) on {expiry_date}. "
+        "Please open Admin > Subscription and renew to keep your account active."
     ))
     updated_at = models.DateTimeField(auto_now=True)
 
