@@ -287,7 +287,7 @@ def _get_reminder_cycle_for_tenant(tenant_id):
             subscription=subscription,
             status__in=["active", "invoiced"],
         )
-        .order_by("-start_date", "-created_at")
+        .order_by("-start_date", "-end_date", "-id")
         .first()
     )
     if cycle:

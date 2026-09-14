@@ -5518,7 +5518,50 @@ class SubscriptionReminderBalanceView(APIView):
         _ensure_public()
         from apps.messaging.services.platform_sms_sender import PlatformSMSSender
 
-        return Response(PlatformSMSSender().get_balance())
+        provider_balance = PlatformSMSSender().get_balance()
+        pooled_units = Decimal("0.00")
+        inbuilt_tenant_count = 0
+        failed_tenants = []
+
+        tenants = (
+            Tenant.objects.select_related("company")
+            .exclude(schema_name__in=PROTECTED_SCHEMAS)
+            .filter(is_active=True)
+        )
+        for tenant in tenants:
+            try:
+                with schema_context(tenant.schema_name):
+                    gateway = SMSGatewayConfig.objects.filter(
+                        is_active=True,
+                        use_inbuilt_system=True,
+                    ).first()
+                    if not gateway:
+                        continue
+
+                    inbuilt_tenant_count += 1
+                    wallet = TenantSMSWallet.objects.filter(is_active=True).first()
+                    if wallet:
+                        pooled_units += Decimal(str(wallet.sms_units or "0"))
+            except Exception as exc:
+                failed_tenants.append({
+                    "tenant": tenant.schema_name,
+                    "error": str(exc),
+                })
+                logger.warning("Subscription reminder balance scan failed for %s: %s", tenant.schema_name, exc)
+
+        return Response({
+            "success": bool(provider_balance.get("success", False)),
+            "balance": float(provider_balance.get("balance") or 0),
+            "currency": provider_balance.get("currency") or "SMS_UNITS",
+            "error": provider_balance.get("error", ""),
+            "provider": provider_balance.get("provider", "bytewave_master"),
+            "raw": provider_balance.get("raw"),
+            "platform_balance": provider_balance,
+            "total_inbuilt_units": str(pooled_units),
+            "inbuilt_tenant_count": inbuilt_tenant_count,
+            "failed_tenant_count": len(failed_tenants),
+            "failed_tenants": failed_tenants[:5],
+        })
 
 
 class SubscriptionReminderLogListView(APIView):

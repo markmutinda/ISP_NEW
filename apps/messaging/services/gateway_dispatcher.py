@@ -19,6 +19,7 @@ Supported providers:
   12. Talksasa
 """
 import logging
+import re
 import requests
 import time
 from decimal import Decimal
@@ -657,17 +658,17 @@ class BytewaveBackend:
     def _extract_balance_units(self, payload):
         keys = (
             "sms_unit", "sms_units", "smsunit", "units", "unit",
-            "balance", "wallet_balance", "remaining", "available",
-            "available_units", "remaining_units", "credit", "credits",
+            "remaining_balance", "available_units", "remaining_units",
+            "wallet_balance", "balance", "remaining", "available",
+            "credit", "credits",
         )
         if isinstance(payload, dict):
             for key in keys:
                 value = payload.get(key)
                 if value not in (None, ""):
-                    try:
-                        return Decimal(str(value))
-                    except Exception:
-                        pass
+                    parsed = self._parse_decimal(value)
+                    if parsed is not None:
+                        return parsed
             for value in payload.values():
                 found = self._extract_balance_units(value)
                 if found is not None:
@@ -682,9 +683,23 @@ class BytewaveBackend:
         try:
             if payload in (None, ""):
                 return None
-            return Decimal(str(payload))
+            return self._parse_decimal(payload)
         except Exception:
             return None
+
+    def _parse_decimal(self, value):
+        if value in (None, ""):
+            return None
+        try:
+            return Decimal(str(value))
+        except Exception:
+            match = re.search(r"-?\d+(?:,\d{3})*(?:\.\d+)?|-?\d+(?:\.\d+)?", str(value))
+            if not match:
+                return None
+            try:
+                return Decimal(match.group(0).replace(",", ""))
+            except Exception:
+                return None
 
 
 # ─── PROVIDER REGISTRY ─────────────────────────────────────────

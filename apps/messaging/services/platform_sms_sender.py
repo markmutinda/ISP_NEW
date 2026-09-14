@@ -1,4 +1,5 @@
 import logging
+import re
 from decimal import Decimal
 from typing import Any, Dict
 
@@ -100,12 +101,33 @@ class PlatformSMSSender:
             return legacy
 
     def _get_legacy_http_balance(self) -> Dict[str, Any]:
+        attempts = (
+            ("get_params", requests.get, {"params": {"api_token": self.api_token}}),
+            ("post_json", requests.post, {"json": {"api_token": self.api_token}}),
+            ("get_json", requests.get, {"json": {"api_token": self.api_token}}),
+        )
+        last_error = ""
+        for label, method, payload_kwargs in attempts:
+            result = self._request_legacy_http_balance(label, method, payload_kwargs)
+            if result.get("success"):
+                return result
+            last_error = result.get("error") or last_error
+
+        return {
+            "success": False,
+            "error": last_error or "Unable to read Bytewave legacy balance.",
+            "balance": 0,
+            "currency": "SMS_UNITS",
+            "provider": "bytewave_master_legacy",
+        }
+
+    def _request_legacy_http_balance(self, label, method, payload_kwargs) -> Dict[str, Any]:
         try:
-            resp = requests.get(
+            resp = method(
                 "https://portal.bytewavenetworks.com/api/http/balance",
                 headers={"Content-Type": "application/json", "Accept": "application/json"},
-                json={"api_token": self.api_token},
                 timeout=15,
+                **payload_kwargs,
             )
             data = resp.json()
             if resp.status_code >= 400:
@@ -119,37 +141,38 @@ class PlatformSMSSender:
                 }
             raw = data.get("data", data)
             units = self._extract_units(raw) or Decimal("0")
+            currency = "KES" if self._payload_contains_kes(raw) else "SMS_UNITS"
             return {
                 "success": True,
                 "balance": float(units),
-                "currency": "SMS_UNITS",
-                "provider": "bytewave_master_legacy",
+                "currency": currency,
+                "provider": f"bytewave_master_legacy_{label}",
                 "raw": raw,
             }
         except Exception as exc:
-            logger.exception("Platform SMS legacy balance fetch failed: %s", exc)
+            logger.warning("Platform SMS legacy balance fetch failed via %s: %s", label, exc)
             return {
                 "success": False,
                 "error": str(exc),
                 "balance": 0,
                 "currency": "SMS_UNITS",
-                "provider": "bytewave_master_legacy",
+                "provider": f"bytewave_master_legacy_{label}",
             }
 
     def _extract_units(self, payload):
         keys = (
             "sms_unit", "sms_units", "smsunit", "units", "unit",
-            "balance", "wallet_balance", "remaining", "available",
-            "available_units", "remaining_units", "credit", "credits",
+            "remaining_balance", "available_units", "remaining_units",
+            "wallet_balance", "balance", "remaining", "available",
+            "credit", "credits",
         )
         if isinstance(payload, dict):
             for key in keys:
                 value = payload.get(key)
                 if value not in (None, ""):
-                    try:
-                        return Decimal(str(value))
-                    except Exception:
-                        pass
+                    parsed = self._parse_decimal(value)
+                    if parsed is not None:
+                        return parsed
             for value in payload.values():
                 found = self._extract_units(value)
                 if found is not None:
@@ -164,6 +187,27 @@ class PlatformSMSSender:
         try:
             if payload in (None, ""):
                 return None
-            return Decimal(str(payload))
+            return self._parse_decimal(payload)
         except Exception:
             return None
+
+    def _parse_decimal(self, value):
+        if value in (None, ""):
+            return None
+        try:
+            return Decimal(str(value))
+        except Exception:
+            match = re.search(r"-?\d+(?:,\d{3})*(?:\.\d+)?|-?\d+(?:\.\d+)?", str(value))
+            if not match:
+                return None
+            try:
+                return Decimal(match.group(0).replace(",", ""))
+            except Exception:
+                return None
+
+    def _payload_contains_kes(self, payload):
+        if isinstance(payload, dict):
+            return any(self._payload_contains_kes(value) for value in payload.values())
+        if isinstance(payload, (list, tuple)):
+            return any(self._payload_contains_kes(value) for value in payload)
+        return "ksh" in str(payload).lower() or "kes" in str(payload).lower()
