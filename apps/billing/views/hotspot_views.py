@@ -1525,15 +1525,11 @@ class HotspotVoucherRedeemView(APIView):
                     friendly_username = self._generate_code()
                     logger.warning(f"⚠️ VOUCHER: No canonical_username, using generated code {friendly_username}")
 
-                # Mark voucher as used
-                voucher.use_count = (voucher.use_count or 0) + 1
-                if voucher.remaining_value is not None:
-                    voucher.remaining_value = max(Decimal('0'), voucher.remaining_value - plan.price)
-                if not voucher.is_reusable or voucher.use_count >= (voucher.max_uses or 1):
-                    voucher.status = 'USED'
-                voucher.save()
-
-                # Create hotspot session
+                # ────────────────────────────────────────────────────────────
+                # BUG 1 FIX: Create session FIRST, provision RADIUS, THEN mark
+                # voucher used. Any failure raises and rolls back the whole
+                # @transaction.atomic block, leaving the voucher untouched.
+                # ────────────────────────────────────────────────────────────
                 session_id = HotspotSession.generate_session_id()
                 session = HotspotSession.objects.create(
                     session_id=session_id,
@@ -1545,24 +1541,15 @@ class HotspotVoucherRedeemView(APIView):
                     status='paid',
                     access_code=friendly_username,
                     payhero_checkout_id=f'VOUCHER_{voucher.code}',
-                    hotspot_client=hotspot_client,  # Link to persistent client
+                    hotspot_client=hotspot_client,
                 )
 
                 try:
                     session.activate(friendly_username)
-                    
-                    # ────────────────────────────────────────────────────────────
-                    # FIX 2: Close only prior radacct rows for renewal
-                    # ────────────────────────────────────────────────────────────
-                    closed_count = _close_prior_radacct_rows_for_renewal(session, friendly_username)
-                    if closed_count > 0:
-                        logger.info(
-                            f"Closed {closed_count} old RADIUS sessions for {friendly_username} before renewal activation"
-                        )
-                    
+                    _close_prior_radacct_rows_for_renewal(session, friendly_username)
+
                     from apps.billing.services.hotspot_radius_service import HotspotRadiusService
-                    radius_service = HotspotRadiusService()
-                    radius_service.create_hotspot_credentials(
+                    ok = HotspotRadiusService().create_hotspot_credentials(
                         username=friendly_username,
                         password=friendly_username,
                         router=session.router,
@@ -1570,16 +1557,28 @@ class HotspotVoucherRedeemView(APIView):
                         expires_at=session.expires_at,
                         mac_address=mac_address,
                     )
-                    logger.info(f"VOUCHER REDEEM: {voucher.code} -> user {friendly_username} at {router.name} (plan: {plan.name})")
-                    
-                    # ── SMS: welcome for voucher redemption ──
-                    # FIX: Fire-and-forget async task — SMS sending is off the critical path
-                    from apps.messaging.tasks import send_hotspot_welcome_sms
-                    send_hotspot_welcome_sms.delay(session.session_id, tenant.schema_name)
-                        
+                    if not ok:
+                        raise RuntimeError("RADIUS provisioning returned False")
+
+                    # Only NOW mark the voucher consumed — atomic with everything above
+                    voucher.use_count = (voucher.use_count or 0) + 1
+                    if voucher.remaining_value is not None:
+                        voucher.remaining_value = max(Decimal('0'), voucher.remaining_value - plan.price)
+                    if not voucher.is_reusable or voucher.use_count >= (voucher.max_uses or 1):
+                        voucher.status = 'USED'
+                    voucher.save()
+
+                    logger.info(f"VOUCHER REDEEM: {voucher.code} -> user {friendly_username} at {router.name}")
+
                 except Exception as e:
-                    logger.error(f"RADIUS activation failed for voucher: {e}")
-                    return Response({'error': 'Activation failed'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+                    logger.error(f"Voucher redeem activation failed, rolling back: {e}", exc_info=True)
+                    # Re-raise so @transaction.atomic actually rolls back the session AND
+                    # leaves the voucher untouched — safe to retry immediately.
+                    raise
+
+                # fire-and-forget welcome SMS AFTER the atomic block commits successfully
+                from apps.messaging.tasks import send_hotspot_welcome_sms
+                send_hotspot_welcome_sms.delay(session.session_id, tenant.schema_name)
 
                 return Response({
                     'status': 'success',
@@ -1591,7 +1590,13 @@ class HotspotVoucherRedeemView(APIView):
                     'plan_name': plan.name,
                     'remaining_voucher_value': str(voucher.remaining_value) if voucher.remaining_value is not None else None,
                 })
-            
+
+            except Exception as e:
+                logger.error(f"Voucher redeem failed for {voucher_code}: {e}", exc_info=True)
+                return Response(
+                    {'error': 'Could not activate your plan. Please try redeeming again.', 'retriable': True},
+                    status=status.HTTP_503_SERVICE_UNAVAILABLE,
+                )
             finally:
                 # Always release the lock
                 cache.delete(lock_key)
@@ -1862,241 +1867,121 @@ class HotspotPhoneReconnectView(APIView):
                     status=status.HTTP_404_NOT_FOUND
                 )
 
-            # ── Find the most recent active session for this client ─
-            # FIXED: Also search by phone_number directly to catch sessions without client link
-            logger.info(
-                f"Phone reconnect lookup: raw={raw_phone} canonical={phone_canonical} "
-                f"client_id={client.id} client_phone={client.canonical_phone} "
-                f"client_username={client.canonical_username}"
-            )
+            # ═══════════════════════════════════════════════════════════════
+            # BUG 3 FIX: Slot allocation lock — prevent TOCTOU race when two
+            # devices reconnect simultaneously and both pass the slot check.
+            # ═══════════════════════════════════════════════════════════════
+            slot_lock_key = f"phone_reconnect_slot_lock:{tenant.schema_name}:{client.id}"
+            if not cache.add(slot_lock_key, "1", timeout=10):
+                return Response(
+                    {'error': 'Another device is connecting right now. Please try again in a few seconds.'},
+                    status=status.HTTP_409_CONFLICT,
+                )
 
-            active_sessions = HotspotSession.objects.filter(
-                Q(hotspot_client=client) |
-                Q(phone_number=phone_canonical) |
-                Q(phone_number=phone_local) |
-                Q(phone_number=phone_short),
-                status='active',
-                expires_at__gt=now,
-            ).select_related('plan', 'router').order_by('-activated_at').distinct()
+            try:
+                # ── Find the most recent active session for this client ─
+                # FIXED: Also search by phone_number directly to catch sessions without client link
+                logger.info(
+                    f"Phone reconnect lookup: raw={raw_phone} canonical={phone_canonical} "
+                    f"client_id={client.id} client_phone={client.canonical_phone} "
+                    f"client_username={client.canonical_username}"
+                )
 
-            logger.info(
-                f"Active sessions found: {active_sessions.count()} "
-                f"for client {client.canonical_username}"
-            )
-
-            if not active_sessions.exists():
-                # Check if there is a 'paid' session (activation pending)
-                paid_session = HotspotSession.objects.filter(
+                active_sessions = HotspotSession.objects.filter(
                     Q(hotspot_client=client) |
                     Q(phone_number=phone_canonical) |
                     Q(phone_number=phone_local) |
                     Q(phone_number=phone_short),
-                    status='paid',
-                ).order_by('-created_at').first()
+                    status='active',
+                    expires_at__gt=now,
+                ).select_related('plan', 'router').order_by('-activated_at').distinct()
 
-                if paid_session:
-                    # Activate it now AND create RADIUS credentials
-                    paid_session.activate(paid_session.access_code or HotspotSession.generate_access_code())
-                    
-                    # Create RADIUS credentials for the newly activated session
-                    try:
-                        from apps.billing.services.hotspot_radius_service import HotspotRadiusService
-                        HotspotRadiusService().create_hotspot_credentials(
-                            username=paid_session.access_code,
-                            password=paid_session.access_code,
-                            router=paid_session.router,
-                            plan=paid_session.plan,
-                            expires_at=paid_session.expires_at,
-                            mac_address=mac_address,
-                        )
-                    except Exception as e:
-                        logger.error(f"Phone reconnect paid->active RADIUS failed: {e}")
-                    
-                    active_sessions = HotspotSession.objects.filter(
+                logger.info(
+                    f"Active sessions found: {active_sessions.count()} "
+                    f"for client {client.canonical_username}"
+                )
+
+                if not active_sessions.exists():
+                    # Check if there is a 'paid' session (activation pending)
+                    paid_session = HotspotSession.objects.filter(
                         Q(hotspot_client=client) |
                         Q(phone_number=phone_canonical) |
                         Q(phone_number=phone_local) |
                         Q(phone_number=phone_short),
-                        status='active',
-                        expires_at__gt=now,
-                    ).select_related('plan', 'router').order_by('-activated_at').distinct()
+                        status='paid',
+                    ).order_by('-created_at').first()
 
-            if not active_sessions.exists():
-                return Response(
-                    {
-                        'error': 'No active subscription found for this number. '
-                                 'Your plan may have expired.',
-                        'expired': True,
-                    },
-                    status=status.HTTP_404_NOT_FOUND
-                )
+                    if paid_session:
+                        # Activate it now AND create RADIUS credentials
+                        paid_session.activate(paid_session.access_code or HotspotSession.generate_access_code())
+                        
+                        # Create RADIUS credentials for the newly activated session
+                        try:
+                            from apps.billing.services.hotspot_radius_service import HotspotRadiusService
+                            HotspotRadiusService().create_hotspot_credentials(
+                                username=paid_session.access_code,
+                                password=paid_session.access_code,
+                                router=paid_session.router,
+                                plan=paid_session.plan,
+                                expires_at=paid_session.expires_at,
+                                mac_address=mac_address,
+                            )
+                        except Exception as e:
+                            logger.error(f"Phone reconnect paid->active RADIUS failed: {e}")
+                        
+                        active_sessions = HotspotSession.objects.filter(
+                            Q(hotspot_client=client) |
+                            Q(phone_number=phone_canonical) |
+                            Q(phone_number=phone_local) |
+                            Q(phone_number=phone_short),
+                            status='active',
+                            expires_at__gt=now,
+                        ).select_related('plan', 'router').order_by('-activated_at').distinct()
 
-            # ── Use the canonical (first-device) session as the reference ─
-            # The "base" session holds the plan and expiry that all devices share
-            base_session = active_sessions.filter(
-                access_code=client.canonical_username
-            ).first() or active_sessions.first()
-
-            plan = base_session.plan
-            plan_device_limit = getattr(plan, 'simultaneous_devices', 1) or 1
-
-            # ── ANTI-ABUSE: single-device plans cannot add NEW devices ──
-            # But always allow reconnect if this MAC already has an active session.
-            existing_mac_session = active_sessions.filter(mac_address=mac_address).first()
-
-            # FIXED: For single-device plans, allow reconnect when MAC is new but user is the owner
-            # This handles MAC randomization on phones
-            if plan_device_limit <= 1 and not existing_mac_session:
-                # MAC likely randomized — this IS their device, just with a new MAC.
-                # Since they proved ownership via phone number, allow reconnect and
-                # update the session MAC so future auto-logins work correctly.
-                base_session_updated = base_session
-                if mac_address and mac_address != '00:00:00:00:00:00':
-                    # Update the stored MAC so auto-login works next time
-                    base_session_updated.mac_address = mac_address
-                    base_session_updated.save(update_fields=['mac_address'])
-                    # Also register this device under the client
-                    if base_session_updated.hotspot_client:
-                        HotspotClientDevice.record_device(
-                            client=base_session_updated.hotspot_client,
-                            mac_address=mac_address
-                        )
-                
-                access_code = base_session.access_code
-                try:
-                    # ── CoA pre‑clear (single‑device) ──
-                    try:
-                        router_ip = router.vpn_ip_address or router.ip_address
-                        if router_ip:
-                            CoAService(nas_ip=router_ip).disconnect_user(access_code, nas_ip_address=router_ip)
-                    except Exception as coa_err:
-                        logger.warning(f"Phone reconnect CoA pre-clear failed for {access_code}: {coa_err}")
-
-                    from apps.billing.services.hotspot_radius_service import HotspotRadiusService
-                    HotspotRadiusService().create_hotspot_credentials(
-                        username=access_code,
-                        password=access_code,
-                        router=router,
-                        plan=plan,
-                        expires_at=base_session.expires_at,
-                        mac_address=mac_address,
-                    )
-                except Exception as e:
-                    logger.error(f"Phone reconnect single-device RADIUS reseed failed: {e}")
+                if not active_sessions.exists():
                     return Response(
-                        {'error': 'Failed to restore connection. Please try again.'},
-                        status=status.HTTP_500_INTERNAL_SERVER_ERROR
+                        {
+                            'error': 'No active subscription found for this number. '
+                                     'Your plan may have expired.',
+                            'expired': True,
+                        },
+                        status=status.HTTP_404_NOT_FOUND
                     )
 
-                remaining_minutes = max(
-                    0, int((base_session.expires_at - now).total_seconds() / 60)
-                )
-                logger.info(
-                    f"Phone reconnect (MAC rotation, same owner): phone={phone_canonical} "
-                    f"old_mac={base_session.mac_address} new_mac={mac_address} "
-                    f"access_code={access_code}"
-                )
-                return Response({
-                    'status': 'reconnected',
-                    'message': 'Welcome back! Your connection has been restored.',
-                    'access_code': access_code,
-                    'expires_at': base_session.expires_at.isoformat(),
-                    'remaining_minutes': remaining_minutes,
-                    'plan_name': plan.name,
-                    'device_slot': 'existing',
-                    'credentials': {'username': access_code, 'password': access_code},
-                })
+                # ── Use the canonical (first-device) session as the reference ─
+                # The "base" session holds the plan and expiry that all devices share
+                base_session = active_sessions.filter(
+                    access_code=client.canonical_username
+                ).first() or active_sessions.first()
 
-            # ── Check if this MAC already has an active session (reconnect) ──
-            existing_session_for_mac = active_sessions.filter(
-                mac_address=mac_address
-            ).first()
+                plan = base_session.plan
+                plan_device_limit = getattr(plan, 'simultaneous_devices', 1) or 1
 
-            if existing_session_for_mac:
-                # This MAC already has a slot — just reseed RADIUS credentials
-                access_code = existing_session_for_mac.access_code
-                try:
-                    # ── CoA pre‑clear (existing‑mac) ──
+                # ── ANTI-ABUSE: single-device plans cannot add NEW devices ──
+                # But always allow reconnect if this MAC already has an active session.
+                existing_mac_session = active_sessions.filter(mac_address=mac_address).first()
+
+                # FIXED: For single-device plans, allow reconnect when MAC is new but user is the owner
+                # This handles MAC randomization on phones
+                if plan_device_limit <= 1 and not existing_mac_session:
+                    # MAC likely randomized — this IS their device, just with a new MAC.
+                    # Since they proved ownership via phone number, allow reconnect and
+                    # update the session MAC so future auto-logins work correctly.
+                    base_session_updated = base_session
+                    if mac_address and mac_address != '00:00:00:00:00:00':
+                        # Update the stored MAC so auto-login works next time
+                        base_session_updated.mac_address = mac_address
+                        base_session_updated.save(update_fields=['mac_address'])
+                        # Also register this device under the client
+                        if base_session_updated.hotspot_client:
+                            HotspotClientDevice.record_device(
+                                client=base_session_updated.hotspot_client,
+                                mac_address=mac_address
+                            )
+                    
+                    access_code = base_session.access_code
                     try:
-                        router_ip = router.vpn_ip_address or router.ip_address
-                        if router_ip:
-                            CoAService(nas_ip=router_ip).disconnect_user(access_code, nas_ip_address=router_ip)
-                    except Exception as coa_err:
-                        logger.warning(f"Phone reconnect CoA pre-clear failed for {access_code}: {coa_err}")
-
-                    from apps.billing.services.hotspot_radius_service import HotspotRadiusService
-                    HotspotRadiusService().create_hotspot_credentials(
-                        username=access_code,
-                        password=access_code,
-                        router=router,
-                        plan=plan,
-                        expires_at=existing_session_for_mac.expires_at,
-                        mac_address=mac_address,
-                    )
-                except Exception as e:
-                    logger.error(f"Phone reconnect RADIUS reseed failed: {e}")
-                    return Response(
-                        {'error': 'Failed to restore connection. Please try again.'},
-                        status=status.HTTP_500_INTERNAL_SERVER_ERROR
-                    )
-
-                remaining_minutes = max(
-                    0, int((existing_session_for_mac.expires_at - now).total_seconds() / 60)
-                )
-                logger.info(
-                    f"Phone reconnect (existing MAC): phone={phone_canonical} "
-                    f"mac={mac_address} access_code={access_code}"
-                )
-                return Response({
-                    'status': 'reconnected',
-                    'message': 'Welcome back! Your connection has been restored.',
-                    'access_code': access_code,
-                    'expires_at': existing_session_for_mac.expires_at.isoformat(),
-                    'remaining_minutes': remaining_minutes,
-                    'plan_name': plan.name,
-                    'device_slot': 'existing',
-                    'credentials': {'username': access_code, 'password': access_code},
-                })
-
-            # ── New MAC — check if device slots are available ─────
-            # Count distinct active sessions for this client
-            # Each session with a unique access_code counts as one device slot
-            occupied_slots = active_sessions.values('access_code').distinct().count()
-
-            # ═══════════════════════════════════════════════════════════════
-            # FIX: MAC ROTATION TAKEOVER - When slots are full but the 
-            # requesting phone owns ALL of them, replace the stale session
-            # ═══════════════════════════════════════════════════════════════
-            if occupied_slots >= plan_device_limit:
-                # Before rejecting, check if ALL occupied slots belong to this client.
-                # If so, one of them may have a stale/rotated MAC — allow takeover.
-                
-                # Find sessions NOT matching current MAC (potential stale slots)
-                stale_sessions = active_sessions.exclude(mac_address=mac_address).order_by('activated_at')
-                
-                if stale_sessions.exists():
-                    # All slots are occupied by other MACs — could be legitimate other devices
-                    # OR stale rotated MACs. Since all sessions belong to this client (same phone),
-                    # replace the OLDEST stale session with this new MAC.
-                    oldest_stale = stale_sessions.first()
-                    
-                    logger.info(
-                        f"MAC rotation takeover: phone={phone_canonical} "
-                        f"replacing stale session {oldest_stale.access_code} "
-                        f"old_mac={oldest_stale.mac_address} new_mac={mac_address}"
-                    )
-                    
-                    # Update the old session's MAC to the new one
-                    oldest_stale.mac_address = mac_address
-                    oldest_stale.save(update_fields=['mac_address'])
-                    
-                    # Register new device
-                    HotspotClientDevice.record_device(client=client, mac_address=mac_address)
-                    
-                    # Reseed RADIUS with new MAC
-                    access_code = oldest_stale.access_code
-                    try:
-                        # ── CoA pre‑clear (mac‑rotation‑takeover) ──
+                        # ── CoA pre‑clear (single‑device) ──
                         try:
                             router_ip = router.vpn_ip_address or router.ip_address
                             if router_ip:
@@ -2110,130 +1995,266 @@ class HotspotPhoneReconnectView(APIView):
                             password=access_code,
                             router=router,
                             plan=plan,
-                            expires_at=oldest_stale.expires_at,
+                            expires_at=base_session.expires_at,
                             mac_address=mac_address,
                         )
                     except Exception as e:
-                        logger.error(f"Phone reconnect MAC-rotation takeover RADIUS failed: {e}")
+                        logger.error(f"Phone reconnect single-device RADIUS reseed failed: {e}")
                         return Response(
                             {'error': 'Failed to restore connection. Please try again.'},
                             status=status.HTTP_500_INTERNAL_SERVER_ERROR
                         )
-                    
+
                     remaining_minutes = max(
-                        0, int((oldest_stale.expires_at - now).total_seconds() / 60)
+                        0, int((base_session.expires_at - now).total_seconds() / 60)
                     )
                     logger.info(
-                        f"Phone reconnect (MAC rotation slot takeover): phone={phone_canonical} "
-                        f"old_mac={oldest_stale.mac_address} new_mac={mac_address} "
+                        f"Phone reconnect (MAC rotation, same owner): phone={phone_canonical} "
+                        f"old_mac={base_session.mac_address} new_mac={mac_address} "
                         f"access_code={access_code}"
                     )
                     return Response({
                         'status': 'reconnected',
                         'message': 'Welcome back! Your connection has been restored.',
                         'access_code': access_code,
-                        'expires_at': oldest_stale.expires_at.isoformat(),
+                        'expires_at': base_session.expires_at.isoformat(),
                         'remaining_minutes': remaining_minutes,
                         'plan_name': plan.name,
                         'device_slot': 'existing',
                         'credentials': {'username': access_code, 'password': access_code},
                     })
-                
-                # No stale sessions found — genuinely full with different active MACs
-                return Response(
-                    {
-                        'error': (
-                            f'Your plan supports {plan_device_limit} device'
-                            f'{"s" if plan_device_limit > 1 else ""}. '
-                            f'All slots are in use. '
-                            f'Disconnect one of your other devices to connect this one.'
-                        ),
-                        'slots_full': True,
-                        'device_limit': plan_device_limit,
-                        'occupied_slots': occupied_slots,
-                    },
-                    status=status.HTTP_403_FORBIDDEN
-                )
 
-            # ── Create a new device slot ──────────────────────────
-            # Device slot number: canonical = 1, next = 2, 3, ...
-            device_slot = occupied_slots + 1
+                # ── Check if this MAC already has an active session (reconnect) ──
+                existing_session_for_mac = active_sessions.filter(
+                    mac_address=mac_address
+                ).first()
 
-            if device_slot == 1 and client.canonical_username:
-                new_access_code = client.canonical_username
-            else:
-                base_username = client.canonical_username or base_session.access_code
-                new_access_code = f"{base_username}-{device_slot}"
-                # Collision guard
-                attempt = device_slot
-                while HotspotSession.objects.filter(
-                    access_code=new_access_code,
-                    status='active',
-                    expires_at__gt=now,
-                ).exists():
-                    attempt += 1
-                    new_access_code = f"{base_username}-{attempt}"
+                if existing_session_for_mac:
+                    # This MAC already has a slot — just reseed RADIUS credentials
+                    access_code = existing_session_for_mac.access_code
+                    try:
+                        # ── CoA pre‑clear (existing‑mac) ──
+                        try:
+                            router_ip = router.vpn_ip_address or router.ip_address
+                            if router_ip:
+                                CoAService(nas_ip=router_ip).disconnect_user(access_code, nas_ip_address=router_ip)
+                        except Exception as coa_err:
+                            logger.warning(f"Phone reconnect CoA pre-clear failed for {access_code}: {coa_err}")
 
-            # ── Register the new device ───────────────────────────
-            HotspotClientDevice.record_device(client=client, mac_address=mac_address)
+                        from apps.billing.services.hotspot_radius_service import HotspotRadiusService
+                        HotspotRadiusService().create_hotspot_credentials(
+                            username=access_code,
+                            password=access_code,
+                            router=router,
+                            plan=plan,
+                            expires_at=existing_session_for_mac.expires_at,
+                            mac_address=mac_address,
+                        )
+                    except Exception as e:
+                        logger.error(f"Phone reconnect RADIUS reseed failed: {e}")
+                        return Response(
+                            {'error': 'Failed to restore connection. Please try again.'},
+                            status=status.HTTP_500_INTERNAL_SERVER_ERROR
+                        )
 
-            # Create a new session record for this device
-            new_session = HotspotSession.objects.create(
-                session_id=HotspotSession.generate_session_id(),
-                router=router,
-                plan=plan,
-                phone_number=phone_canonical,
-                mac_address=mac_address,
-                amount=Decimal('0'),   # Already paid — no additional charge
-                status='active',
-                access_code=new_access_code,
-                radius_username=new_access_code,
-                activated_at=now,
-                expires_at=base_session.expires_at,   # Same expiry as original purchase
-                hotspot_client=client,
-            )
+                    remaining_minutes = max(
+                        0, int((existing_session_for_mac.expires_at - now).total_seconds() / 60)
+                    )
+                    logger.info(
+                        f"Phone reconnect (existing MAC): phone={phone_canonical} "
+                        f"mac={mac_address} access_code={access_code}"
+                    )
+                    return Response({
+                        'status': 'reconnected',
+                        'message': 'Welcome back! Your connection has been restored.',
+                        'access_code': access_code,
+                        'expires_at': existing_session_for_mac.expires_at.isoformat(),
+                        'remaining_minutes': remaining_minutes,
+                        'plan_name': plan.name,
+                        'device_slot': 'existing',
+                        'credentials': {'username': access_code, 'password': access_code},
+                    })
 
-            # ── Seed RADIUS for the new device ────────────────────
-            try:
-                from apps.billing.services.hotspot_radius_service import HotspotRadiusService
-                HotspotRadiusService().create_hotspot_credentials(
-                    username=new_access_code,
-                    password=new_access_code,
+                # ── New MAC — check if device slots are available ─────
+                # Count distinct active sessions for this client
+                # Each session with a unique access_code counts as one device slot
+                occupied_slots = active_sessions.values('access_code').distinct().count()
+
+                # ═══════════════════════════════════════════════════════════════
+                # FIX: MAC ROTATION TAKEOVER - When slots are full but the 
+                # requesting phone owns ALL of them, replace the stale session
+                # ═══════════════════════════════════════════════════════════════
+                if occupied_slots >= plan_device_limit:
+                    # Before rejecting, check if ALL occupied slots belong to this client.
+                    # If so, one of them may have a stale/rotated MAC — allow takeover.
+                    
+                    # Find sessions NOT matching current MAC (potential stale slots)
+                    stale_sessions = active_sessions.exclude(mac_address=mac_address).order_by('activated_at')
+                    
+                    if stale_sessions.exists():
+                        # All slots are occupied by other MACs — could be legitimate other devices
+                        # OR stale rotated MACs. Since all sessions belong to this client (same phone),
+                        # replace the OLDEST stale session with this new MAC.
+                        oldest_stale = stale_sessions.first()
+                        
+                        logger.info(
+                            f"MAC rotation takeover: phone={phone_canonical} "
+                            f"replacing stale session {oldest_stale.access_code} "
+                            f"old_mac={oldest_stale.mac_address} new_mac={mac_address}"
+                        )
+                        
+                        # Update the old session's MAC to the new one
+                        oldest_stale.mac_address = mac_address
+                        oldest_stale.save(update_fields=['mac_address'])
+                        
+                        # Register new device
+                        HotspotClientDevice.record_device(client=client, mac_address=mac_address)
+                        
+                        # Reseed RADIUS with new MAC
+                        access_code = oldest_stale.access_code
+                        try:
+                            # ── CoA pre‑clear (mac‑rotation‑takeover) ──
+                            try:
+                                router_ip = router.vpn_ip_address or router.ip_address
+                                if router_ip:
+                                    CoAService(nas_ip=router_ip).disconnect_user(access_code, nas_ip_address=router_ip)
+                            except Exception as coa_err:
+                                logger.warning(f"Phone reconnect CoA pre-clear failed for {access_code}: {coa_err}")
+
+                            from apps.billing.services.hotspot_radius_service import HotspotRadiusService
+                            HotspotRadiusService().create_hotspot_credentials(
+                                username=access_code,
+                                password=access_code,
+                                router=router,
+                                plan=plan,
+                                expires_at=oldest_stale.expires_at,
+                                mac_address=mac_address,
+                            )
+                        except Exception as e:
+                            logger.error(f"Phone reconnect MAC-rotation takeover RADIUS failed: {e}")
+                            return Response(
+                                {'error': 'Failed to restore connection. Please try again.'},
+                                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+                            )
+                        
+                        remaining_minutes = max(
+                            0, int((oldest_stale.expires_at - now).total_seconds() / 60)
+                        )
+                        logger.info(
+                            f"Phone reconnect (MAC rotation slot takeover): phone={phone_canonical} "
+                            f"old_mac={oldest_stale.mac_address} new_mac={mac_address} "
+                            f"access_code={access_code}"
+                        )
+                        return Response({
+                            'status': 'reconnected',
+                            'message': 'Welcome back! Your connection has been restored.',
+                            'access_code': access_code,
+                            'expires_at': oldest_stale.expires_at.isoformat(),
+                            'remaining_minutes': remaining_minutes,
+                            'plan_name': plan.name,
+                            'device_slot': 'existing',
+                            'credentials': {'username': access_code, 'password': access_code},
+                        })
+                    
+                    # No stale sessions found — genuinely full with different active MACs
+                    return Response(
+                        {
+                            'error': (
+                                f'Your plan supports {plan_device_limit} device'
+                                f'{"s" if plan_device_limit > 1 else ""}. '
+                                f'All slots are in use. '
+                                f'Disconnect one of your other devices to connect this one.'
+                            ),
+                            'slots_full': True,
+                            'device_limit': plan_device_limit,
+                            'occupied_slots': occupied_slots,
+                        },
+                        status=status.HTTP_403_FORBIDDEN
+                    )
+
+                # ── Create a new device slot ──────────────────────────
+                # Device slot number: canonical = 1, next = 2, 3, ...
+                device_slot = occupied_slots + 1
+
+                if device_slot == 1 and client.canonical_username:
+                    new_access_code = client.canonical_username
+                else:
+                    base_username = client.canonical_username or base_session.access_code
+                    new_access_code = f"{base_username}-{device_slot}"
+                    # Collision guard
+                    attempt = device_slot
+                    while HotspotSession.objects.filter(
+                        access_code=new_access_code,
+                        status='active',
+                        expires_at__gt=now,
+                    ).exists():
+                        attempt += 1
+                        new_access_code = f"{base_username}-{attempt}"
+
+                # ── Register the new device ───────────────────────────
+                HotspotClientDevice.record_device(client=client, mac_address=mac_address)
+
+                # Create a new session record for this device
+                new_session = HotspotSession.objects.create(
+                    session_id=HotspotSession.generate_session_id(),
                     router=router,
                     plan=plan,
-                    expires_at=base_session.expires_at,
+                    phone_number=phone_canonical,
                     mac_address=mac_address,
+                    amount=Decimal('0'),   # Already paid — no additional charge
+                    status='active',
+                    access_code=new_access_code,
+                    radius_username=new_access_code,
+                    activated_at=now,
+                    expires_at=base_session.expires_at,   # Same expiry as original purchase
+                    hotspot_client=client,
                 )
-            except Exception as e:
-                # Roll back the session we just created
-                new_session.delete()
-                logger.error(f"Phone reconnect new-device RADIUS failed: {e}")
-                return Response(
-                    {'error': 'Failed to connect new device. Please try again.'},
-                    status=status.HTTP_500_INTERNAL_SERVER_ERROR
+
+                # ── Seed RADIUS for the new device ────────────────────
+                try:
+                    from apps.billing.services.hotspot_radius_service import HotspotRadiusService
+                    HotspotRadiusService().create_hotspot_credentials(
+                        username=new_access_code,
+                        password=new_access_code,
+                        router=router,
+                        plan=plan,
+                        expires_at=base_session.expires_at,
+                        mac_address=mac_address,
+                    )
+                except Exception as e:
+                    # Roll back the session we just created
+                    new_session.delete()
+                    logger.error(f"Phone reconnect new-device RADIUS failed: {e}")
+                    return Response(
+                        {'error': 'Failed to connect new device. Please try again.'},
+                        status=status.HTTP_500_INTERNAL_SERVER_ERROR
+                    )
+
+                remaining_minutes = max(
+                    0, int((base_session.expires_at - now).total_seconds() / 60)
                 )
 
-            remaining_minutes = max(
-                0, int((base_session.expires_at - now).total_seconds() / 60)
-            )
+                logger.info(
+                    f"Phone reconnect (new device slot {device_slot}): "
+                    f"phone={phone_canonical} mac={mac_address} "
+                    f"access_code={new_access_code} plan_limit={plan_device_limit}"
+                )
 
-            logger.info(
-                f"Phone reconnect (new device slot {device_slot}): "
-                f"phone={phone_canonical} mac={mac_address} "
-                f"access_code={new_access_code} plan_limit={plan_device_limit}"
-            )
+                return Response({
+                    'status': 'new_device_connected',
+                    'message': f'Device {device_slot} of {plan_device_limit} connected successfully!',
+                    'access_code': new_access_code,
+                    'expires_at': base_session.expires_at.isoformat(),
+                    'remaining_minutes': remaining_minutes,
+                    'plan_name': plan.name,
+                    'device_slot': device_slot,
+                    'device_limit': plan_device_limit,
+                    'credentials': {'username': new_access_code, 'password': new_access_code},
+                })
 
-            return Response({
-                'status': 'new_device_connected',
-                'message': f'Device {device_slot} of {plan_device_limit} connected successfully!',
-                'access_code': new_access_code,
-                'expires_at': base_session.expires_at.isoformat(),
-                'remaining_minutes': remaining_minutes,
-                'plan_name': plan.name,
-                'device_slot': device_slot,
-                'device_limit': plan_device_limit,
-                'credentials': {'username': new_access_code, 'password': new_access_code},
-            })
+            finally:
+                # BUG 3 FIX: release the slot lock
+                cache.delete(slot_lock_key)
 
 
 # ============================================================

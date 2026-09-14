@@ -655,3 +655,40 @@ def prune_stale_hotspot_clients():
     except Exception as e:
         logger.error(f"Hotspot client pruning task failed: {e}", exc_info=True)
         return {'error': str(e)}
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# BONUS: ASYNC RADIUS PROVISIONING WITH RETRY
+# ═══════════════════════════════════════════════════════════════════════════
+
+@shared_task(bind=True, max_retries=3, default_retry_delay=2, name='apps.billing.tasks.provision_hotspot_radius')
+def provision_hotspot_radius(self, tenant_schema, username, password, router_id, plan_id, expires_at_iso, mac_address):
+    """
+    Async RADIUS provisioning with retry.
+
+    Queued by purchase / voucher / reconnect paths so a transient RADIUS or
+    DB hiccup doesn't kill the whole user-facing request. The session row is
+    committed first; the status-poll / auto-login path picks up credentials
+    once this task lands.
+
+    Retries up to 3 times with a 2s delay on failure.
+    """
+    from django_tenants.utils import schema_context
+    from apps.network.models.router_models import Router
+    from apps.billing.models.hotspot_models import HotspotPlan
+    from apps.billing.services.hotspot_radius_service import HotspotRadiusService
+    from django.utils.dateparse import parse_datetime
+
+    with schema_context(tenant_schema):
+        try:
+            router = Router.objects.get(id=router_id)
+            plan = HotspotPlan.objects.get(id=plan_id)
+            expires_at = parse_datetime(expires_at_iso)
+            ok = HotspotRadiusService().create_hotspot_credentials(
+                username=username, password=password, router=router,
+                plan=plan, expires_at=expires_at, mac_address=mac_address,
+            )
+            if not ok:
+                raise RuntimeError("RADIUS provisioning returned False")
+        except Exception as exc:
+            raise self.retry(exc=exc)
