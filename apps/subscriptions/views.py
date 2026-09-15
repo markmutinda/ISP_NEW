@@ -54,6 +54,14 @@ from .serializers import (
 logger = logging.getLogger(__name__)
 
 
+class FreshBillingResponseMixin:
+    def finalize_response(self, request, response, *args, **kwargs):
+        response = super().finalize_response(request, response, *args, **kwargs)
+        response['Cache-Control'] = 'no-store, no-cache, max-age=0, must-revalidate'
+        response['Pragma'] = 'no-cache'
+        return response
+
+
 # ─────────────────────────────────────────────────────────────
 #  NETILY SUBSCRIPTION PLANS
 # ─────────────────────────────────────────────────────────────
@@ -81,7 +89,7 @@ class NetilyPlanViewSet(viewsets.ReadOnlyModelViewSet):
             return super().list(request, *args, **kwargs)
 
 
-class CurrentSubscriptionView(APIView):
+class CurrentSubscriptionView(FreshBillingResponseMixin, APIView):
     """
     Get the current company's subscription details.
     Auto-creates a 14-day trial subscription for new companies.
@@ -197,7 +205,7 @@ class CurrentSubscriptionView(APIView):
             )
 
 
-class SubscriptionUsageView(APIView):
+class SubscriptionUsageView(FreshBillingResponseMixin, APIView):
     """
     Get current usage statistics against subscription limits.
     
@@ -1010,7 +1018,7 @@ class InitiateSubscriptionPaymentView(APIView):
         })
 
 
-class SubscriptionPaymentViewSet(viewsets.ReadOnlyModelViewSet):
+class SubscriptionPaymentViewSet(FreshBillingResponseMixin, viewsets.ReadOnlyModelViewSet):
     """
     ViewSet for subscription payment history.
     
@@ -1045,24 +1053,29 @@ class SubscriptionPaymentViewSet(viewsets.ReadOnlyModelViewSet):
             tenant=tenant,
             subscription=subscription,
         ).order_by('-start_date', '-end_date').first()
-        if not cycle:
-            return {}
-
         payload = {
             'billing_cycle_id': str(cycle.id),
             'billing_cycle_start': cycle.start_date,
             'billing_cycle_end': cycle.end_date,
             'billing_cycle_status': cycle.status,
             'invoice_reference': cycle.invoice_reference,
-        }
+        } if cycle else {}
 
-        if cycle.invoice_reference:
+        if tenant:
             try:
                 with schema_context(tenant.schema_name):
                     from apps.billing.models import Invoice
-                    invoice = Invoice.objects.filter(pk=cycle.invoice_reference).first()
+                    invoices = Invoice.objects.filter(invoice_number__startswith='NET-BILL').exclude(
+                        status__in=['VOIDED', 'WRITTEN_OFF', 'CANCELLED'])
+                    payload['invoice_balance_remaining'] = str(
+                        invoices.filter(balance__gt=0).aggregate(total=Sum('balance'))['total'] or Decimal('0.00'))
+                    invoice = invoices.filter(internal_notes__contains=f'[subscription-payment:{payment.id}]').order_by('-created_at').first()
+                    if not invoice and cycle and cycle.invoice_reference:
+                        invoice = invoices.filter(pk=cycle.invoice_reference).first()
                     if invoice:
                         payload['invoice_number'] = invoice.invoice_number
+                        payload['invoice_reference'] = str(invoice.pk)
+                        payload['invoice_status'] = invoice.status
             except Exception as exc:
                 logger.warning(
                     "Failed loading invoice metadata for subscription payment %s: %s",
@@ -1089,9 +1102,11 @@ class SubscriptionPaymentViewSet(viewsets.ReadOnlyModelViewSet):
             return payment
 
         cache_key = f"subscription-stk-query:{payment.id}:{payment.payhero_checkout_id}"
-        if cache.get(cache_key):
-            return payment
-        cache.set(cache_key, True, 8)
+        try:
+            if not cache.add(cache_key, True, 8):
+                return payment
+        except Exception:
+            logger.warning('STK query throttle unavailable: payment=%s', payment.id)
 
         try:
             gateway_status = query_stk_status(checkout_request_id=payment.payhero_checkout_id)
@@ -1120,7 +1135,9 @@ class SubscriptionPaymentViewSet(viewsets.ReadOnlyModelViewSet):
 
         terminal_failure_codes = {'1', '1032', '1037', '2001'}
         if result_code in terminal_failure_codes:
-            payment.mark_failed(result_desc or 'M-Pesa did not complete the payment.')
+            # A delayed query failure must not overwrite a successful callback.
+            SubscriptionPayment.objects.filter(pk=payment.pk, status__in=['pending', 'processing']).update(
+                status='failed', failure_reason=result_desc or 'M-Pesa did not complete the payment.')
             payment.refresh_from_db()
 
         return payment
@@ -1135,41 +1152,48 @@ class SubscriptionPaymentViewSet(viewsets.ReadOnlyModelViewSet):
             payment = self.get_object()
             payment = self._reconcile_gateway_status(payment)
 
-            if payment.status in ['completed', 'failed', 'cancelled']:
-                subscription_activated = self._subscription_is_current(payment.subscription)
-                if payment.status == 'completed' and not subscription_activated:
-                    try:
-                        from .billing_lifecycle import complete_subscription_stk_payment
+            if payment.status == 'completed' and not payment.activation_applied_at:
+                try:
+                    from .billing_lifecycle import complete_subscription_stk_payment
 
-                        payment, _invoice = complete_subscription_stk_payment(
-                            payment,
-                            mpesa_receipt=payment.mpesa_receipt or "",
-                        )
-                        payment.refresh_from_db()
-                        subscription_activated = self._subscription_is_current(payment.subscription)
-                    except Exception:
-                        logger.exception("Failed repairing completed subscription payment %s during status polling", payment.id)
+                    payment, _invoice = complete_subscription_stk_payment(
+                        payment,
+                        mpesa_receipt=payment.mpesa_receipt or "",
+                    )
+                    payment.refresh_from_db()
+                except Exception:
+                    logger.exception("Failed repairing completed subscription payment %s during status polling", payment.id)
 
-                return Response({
-                    'payment_id': str(payment.id),
-                    'status': payment.status,
-                    'message': (
-                        self._get_status_message(payment)
-                        if payment.status != 'completed' or subscription_activated
-                        else 'Payment received, but the subscription invoice still has an outstanding balance.'
-                    ),
-                    'mpesa_receipt': payment.mpesa_receipt,
-                    'completed_at': payment.completed_at,
-                    'subscription_activated': subscription_activated,
-                    **self._billing_cycle_payload(payment),
-                })
-
+            payment.refresh_from_db()
+            subscription = payment.subscription
+            cycle_payload = self._billing_cycle_payload(payment)
+            subscription_activated = bool(
+                payment.status == 'completed' and payment.activation_applied_at
+                and self._subscription_is_current(subscription)
+            )
+            message = self._get_status_message(payment)
+            if payment.status == 'completed' and not subscription_activated:
+                balance = cycle_payload.get('invoice_balance_remaining')
+                message = (
+                    f'Payment received. KES {balance} remains to restore access.'
+                    if balance and Decimal(balance) > 0
+                    else 'Payment received. We are finishing your renewal. Check status again shortly.'
+                )
             return Response({
                 'payment_id': str(payment.id),
-                'status': 'pending',
-                'message': 'Waiting for M-Pesa confirmation. If you completed the PIN, we are checking Safaricom directly too.',
-                'mpesa_receipt': None,
-                'completed_at': None,
+                'status': payment.status,
+                'message': message,
+                'mpesa_receipt': payment.mpesa_receipt,
+                'completed_at': payment.completed_at,
+                'subscription_activated': subscription_activated,
+                'payment_received': payment.status == 'completed',
+                'unlock_ready': subscription_activated,
+                'subscription_status': subscription.status,
+                'current_period_start': subscription.current_period_start,
+                'current_period_end': subscription.current_period_end,
+                'invoice_status': None,
+                'invoice_balance_remaining': None,
+                **cycle_payload,
             })
     
     def _get_status_message(self, payment):

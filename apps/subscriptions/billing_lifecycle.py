@@ -1,6 +1,7 @@
 import logging
 from decimal import Decimal
 
+from django.db import transaction
 from django.utils import timezone
 from django_tenants.utils import get_public_schema_name, schema_context
 
@@ -27,6 +28,7 @@ def subscription_receipt_number(payment):
     return f"NET-RCPT-{str(payment.id).split('-')[0].upper()}"
 
 
+@transaction.atomic
 def sync_subscription_invoice_payment(payment, *, notify=True):
     """
     Mirror a successful public SubscriptionPayment onto the tenant NET-BILL invoice.
@@ -68,11 +70,16 @@ def sync_subscription_invoice_payment(payment, *, notify=True):
         )
 
         unpaid = (
-            Invoice.objects.filter(invoice_number__startswith="NET-BILL")
+            Invoice.objects.select_for_update().filter(invoice_number__startswith="NET-BILL")
             .exclude(status__in=["VOIDED", "WRITTEN_OFF", "CANCELLED"])
             .order_by("created_at", "id")
         )
 
+        # Use the immutable payment ID: Daraja query recovery may precede the receipt.
+        payment_marker = f"[subscription-payment:{payment.id}]"
+        existing_invoice = unpaid.filter(internal_notes__contains=payment_marker).last()
+        if existing_invoice:
+            return existing_invoice
         amount_remaining = money(payment.amount)
         for candidate in unpaid:
             existing_notes = candidate.internal_notes or ""
@@ -96,6 +103,8 @@ def sync_subscription_invoice_payment(payment, *, notify=True):
             candidate.save(update_fields=["amount_paid", "balance", "status", "paid_at", "updated_at"])
             invoice = candidate
             amount_remaining = money(amount_remaining - applied)
+            candidate.internal_notes = f"{existing_notes}\n{payment_marker} Receipt: {receipt_number}. Applied: KES {applied}.".strip()
+            candidate.save(update_fields=["internal_notes", "updated_at"])
             if amount_remaining <= 0:
                 break
 
@@ -127,11 +136,11 @@ def sync_subscription_invoice_payment(payment, *, notify=True):
             )
 
         note = (
-            f"Subscription payment received. Receipt: {receipt_number}. "
+            f"{payment_marker} Subscription payment received. Receipt: {receipt_number}. "
             f"Amount: KES {money(payment.amount)}. Balance: KES {money(invoice.balance)}"
         )
         existing_notes = invoice.internal_notes or ""
-        if receipt_number not in existing_notes:
+        if payment_marker not in existing_notes:
             invoice.internal_notes = f"{existing_notes}\n{note}".strip()
             invoice.save(update_fields=["internal_notes", "updated_at"])
 
@@ -156,40 +165,48 @@ def complete_subscription_stk_payment(payment, mpesa_receipt=""):
     locks the row so a duplicate Safaricom callback is a no-op.
     """
     from django.db import transaction
-    from .models import SubscriptionPayment
+    from .models import CompanySubscription, SubscriptionPayment
 
     with schema_context(get_public_schema_name()):
         with transaction.atomic():
             locked = SubscriptionPayment.objects.select_for_update().get(id=payment.id)
-            if locked.status == 'completed':
-                subscription = locked.subscription
-                if (
-                    subscription.status == 'active'
-                    and subscription.current_period_end
-                    and subscription.current_period_end > timezone.now()
-                ):
-                    return locked, None
-                logger.warning(
-                    "Repairing completed subscription payment without active cycle: payment=%s subscription=%s status=%s period_end=%s",
-                    locked.id,
-                    subscription.id,
-                    subscription.status,
-                    subscription.current_period_end,
-                )
-                payment = locked
-            else:
+            subscription = CompanySubscription.objects.select_for_update().get(pk=locked.subscription_id)
+            locked.subscription = subscription
+            if locked.activation_applied_at:
+                if mpesa_receipt and not locked.mpesa_receipt:
+                    locked.mpesa_receipt = mpesa_receipt
+                    locked.save(update_fields=['mpesa_receipt'])
+                return locked, None
+            # Legacy completions have no activation marker. Do not replay payments
+            # already covered by a later billing period, even after it expires.
+            period_already_advanced = (
+                locked.completed_at and subscription.current_period_start
+                and subscription.current_period_start >= locked.completed_at
+            ) or (
+                locked.period_end and subscription.current_period_end
+                and subscription.current_period_end >= locked.period_end
+            )
+            if locked.status == 'completed' and period_already_advanced:
+                locked.activation_applied_at = locked.completed_at or timezone.now()
+                locked.save(update_fields=['activation_applied_at'])
+                return locked, None
+            newly_received = locked.status != 'completed'
+            if newly_received:
                 locked.mark_completed(mpesa_receipt=mpesa_receipt)
-                payment = locked
-
-    invoice = sync_subscription_invoice_payment(payment, notify=True)
-    invoice_fully_paid = subscription_invoice_is_fully_paid(invoice)
-
-    if invoice_fully_paid:
-        with schema_context(get_public_schema_name()):
-            with transaction.atomic():
-                locked = SubscriptionPayment.objects.select_for_update().get(id=payment.id)
+            invoice = sync_subscription_invoice_payment(locked, notify=False)
+            if mpesa_receipt and not locked.mpesa_receipt:
+                locked.mpesa_receipt = mpesa_receipt
+                locked.save(update_fields=['mpesa_receipt'])
+            invoice_fully_paid = subscription_invoice_is_fully_paid(invoice)
+            tenant = get_tenant_for_subscription(subscription)
+            if invoice_fully_paid and tenant:
+                with schema_context(tenant.schema_name):
+                    from apps.billing.models import Invoice
+                    invoice_fully_paid = not Invoice.objects.filter(
+                        invoice_number__startswith='NET-BILL', balance__gt=0,
+                    ).exclude(status__in=['VOIDED', 'WRITTEN_OFF', 'CANCELLED']).exists()
+            if invoice_fully_paid:
                 locked.apply_intended_plan()
-                subscription = locked.subscription
                 if subscription.is_trial or subscription.status in ('trialing', 'expired', 'pending'):
                     subscription.convert_from_trial(
                         billing_period=subscription.billing_period,
@@ -198,14 +215,41 @@ def complete_subscription_stk_payment(payment, mpesa_receipt=""):
                     )
                 else:
                     subscription.extend_subscription()
+                locked.activation_applied_at = timezone.now()
+                locked.save(update_fields=['activation_applied_at'])
+                logger.info('Subscription payment activated: payment=%s subscription=%s period_end=%s',
+                            locked.id, subscription.id, subscription.current_period_end)
+                transaction.on_commit(lambda: _queue_completed_subscription_notice(locked.id, invoice.pk))
+            else:
+                logger.info('Subscription payment received; settlement pending: payment=%s invoice=%s',
+                            locked.id, getattr(invoice, 'pk', None))
+                if newly_received and invoice:
+                    transaction.on_commit(lambda: _queue_completed_subscription_notice(locked.id, invoice.pk, activated=False))
+            return locked, invoice
 
-                from .tasks import send_cycle_activated_email
-                send_cycle_activated_email.delay(subscription.company_id)
-                payment = locked
 
-        notify_telegram_subscription_payment(payment, invoice)
+def _notify_completed_subscription(payment, invoice):
+    """Notification outages must never roll back payment settlement or renewal."""
+    try:
+        from .tasks import send_cycle_activated_email
+        send_cycle_activated_email.delay(payment.subscription.company_id)
+    except Exception:
+        logger.exception('Activation email enqueue failed: payment=%s', payment.id)
+    try:
+        tenant = get_tenant_for_subscription(payment.subscription)
+        if tenant and invoice:
+            notify_subscription_payment_received(tenant, payment, invoice)
+    except Exception:
+        logger.exception('Subscription receipt notification failed: payment=%s', payment.id)
+    notify_telegram_subscription_payment(payment, invoice)
 
-    return payment, invoice
+
+def _queue_completed_subscription_notice(payment_id, invoice_id, activated=True):
+    try:
+        from .tasks import send_subscription_payment_receipt
+        send_subscription_payment_receipt.apply_async(args=[str(payment_id), str(invoice_id), activated], retry=False)
+    except Exception:
+        logger.exception('Subscription receipt enqueue failed: payment=%s', payment_id)
 
 
 def notify_telegram_subscription_payment(payment, invoice=None):

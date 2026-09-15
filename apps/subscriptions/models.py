@@ -557,6 +557,7 @@ class SubscriptionPayment(models.Model):
     # Timestamps
     created_at = models.DateTimeField(auto_now_add=True)
     completed_at = models.DateTimeField(null=True, blank=True)
+    activation_applied_at = models.DateTimeField(null=True, blank=True)
     
     # Billing period this payment covers
     period_start = models.DateTimeField(null=True, blank=True)

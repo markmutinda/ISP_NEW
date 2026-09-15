@@ -79,6 +79,8 @@ def _find_subscription_payment(callback):
         query |= Q(payhero_checkout_id=checkout_request_id)
     if account_reference:
         query |= Q(payhero_reference=account_reference)
+    if callback.get('merchant_request_id'):
+        query |= Q(payhero_reference=callback['merchant_request_id'])
 
     if query:
         payment = SubscriptionPayment.objects.filter(query).first()
@@ -129,6 +131,11 @@ class SubscriptionPaybillCallbackView(APIView):
     permission_classes = [AllowAny]
 
     def post(self, request):
+        from django_tenants.utils import get_public_schema_name, schema_context
+        with schema_context(get_public_schema_name()):
+            return self._process_callback(request)
+
+    def _process_callback(self, request):
         callback = _normalize_stk_callback(request.data)
         result_code = callback["result_code"]
         checkout_request_id = callback["checkout_request_id"]
@@ -146,13 +153,14 @@ class SubscriptionPaybillCallbackView(APIView):
             return Response({"ResultCode": 0, "ResultDesc": "Accepted"})
 
         if str(result_code) != "0":
-            if payment.status != "completed":
-                payment.mark_failed(callback["result_desc"] or "Payment failed")
+            SubscriptionPayment.objects.filter(pk=payment.pk, status__in=['pending', 'processing']).update(
+                status='failed', failure_reason=callback['result_desc'] or 'Payment failed')
             return Response({"ResultCode": 0, "ResultDesc": "Accepted"})
 
         try:
             complete_subscription_stk_payment(payment, mpesa_receipt=callback["mpesa_receipt"])
         except Exception:
             logger.exception("Failed completing subscription payment %s", payment.id)
+            return Response({'detail': 'Payment confirmation could not be saved.'}, status=503)
 
         return Response({"ResultCode": 0, "ResultDesc": "Accepted"})

@@ -23,6 +23,25 @@ from apps.customers.models import Customer
 logger = logging.getLogger(__name__)
 User = get_user_model()
 
+
+@shared_task
+def send_subscription_payment_receipt(payment_id, invoice_id, activated=True):
+    from .models import SubscriptionPayment
+    from .billing_lifecycle import get_tenant_for_subscription, _notify_completed_subscription
+
+    with schema_context(get_public_schema_name()):
+        payment = SubscriptionPayment.objects.select_related('subscription__company', 'subscription__plan').get(pk=payment_id)
+        tenant = get_tenant_for_subscription(payment.subscription)
+        if not tenant:
+            return
+        with schema_context(tenant.schema_name):
+            invoice = Invoice.objects.filter(pk=invoice_id).first()
+        if activated:
+            _notify_completed_subscription(payment, invoice)
+        elif invoice:
+            from .billing_lifecycle import notify_subscription_partial_payment_received
+            notify_subscription_partial_payment_received(tenant, payment, invoice)
+
 def batched(iterable, n):
     it = iter(iterable)
     while batch := tuple(islice(it, n)):
