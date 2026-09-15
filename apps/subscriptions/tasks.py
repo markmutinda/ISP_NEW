@@ -105,12 +105,8 @@ def _subscription_invoice_reminder_settings():
 
 
 def _tenant_invoice_admins(tenant):
-    with schema_context(tenant.schema_name):
-        admin_roles = ["admin", "super_admin", "superadmin", "accountant", "support"]
-        return list(User.objects.filter(
-            is_active=True,
-            role__in=admin_roles,
-        ).values("id", "email", "phone_number", "first_name", "last_name"))
+    from .reminder_recipients import tenant_billing_recipients
+    return tenant_billing_recipients(tenant)
 
 
 def _recipient_name(recipient):
@@ -368,7 +364,10 @@ def send_subscription_invoice_reminder_for_cycle(cycle_id=None, *, tenant_id=Non
     )
     recipients = _tenant_invoice_admins(cycle.tenant)
     if not recipients:
-        raise ValueError("No active tenant billing recipients were found.")
+        raise ValueError("No active tenant account admin was found. Update the tenant's account contact before sending.")
+    recipient = recipients[0]
+    if not any(recipient.get({'sms': 'phone_number', 'email': 'email', 'in_app': 'id'}[channel]) for channel in channels):
+        raise ValueError("The tenant account admin has no valid contact for the selected channels. Update their contact details before sending.")
 
     sms_sender = PlatformSMSSender() if "sms" in channels else None
     counts = {"email": 0, "sms": 0, "in_app": 0, "failed": 0, "skipped": 0}

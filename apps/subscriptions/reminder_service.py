@@ -46,15 +46,9 @@ def _fmt_phone(phone: str) -> str:
 
 def get_tenant_admin_phone(tenant):
     """The tenant's original admin (created at signup) is the SMS target."""
-    with schema_context(tenant.schema_name):
-        from apps.core.models import User
-        admin = (
-            User.objects.filter(role='admin', is_active=True)
-            .exclude(phone_number='')
-            .order_by('date_joined')
-            .first()
-        )
-        return (admin.phone_number, admin.first_name) if admin else (None, '')
+    from .reminder_recipients import tenant_billing_recipients
+    recipients = tenant_billing_recipients(tenant)
+    return (recipients[0]['phone_number'], recipients[0]['first_name']) if recipients else (None, '')
 
 
 def render_reminder_message(subscription, days_left, expiry_dt):

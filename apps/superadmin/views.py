@@ -3159,13 +3159,8 @@ def _parse_admin_datetime(value, field_name, *, end_of_day=False):
 
 
 def _subscription_invoice_admins(tenant):
-    with schema_context(tenant.schema_name):
-        admin_roles = ["admin", "super_admin", "superadmin", "accountant", "support"]
-        admins = User.objects.filter(
-            is_active=True,
-            role__in=admin_roles,
-        ).values("id", "email", "phone_number", "first_name", "last_name")
-        return list(admins)
+    from apps.subscriptions.reminder_recipients import tenant_billing_recipients
+    return tenant_billing_recipients(tenant)
 
 
 SUBSCRIPTION_INVOICE_REMINDER_KEY = "subscription_invoice_reminders"
