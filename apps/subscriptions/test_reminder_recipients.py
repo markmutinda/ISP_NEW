@@ -56,8 +56,45 @@ class ReminderRecipientTests(SimpleTestCase):
         self.assertEqual(_select_recipient(self.tenant, [self.user()], users), [])
 
     def test_other_tenant_and_platform_only_accounts_are_excluded(self):
-        users = [self.user(company_id=20), self.user(tenant_id=20), self.user(is_superuser=True)]
+        users = [self.user(company_id=20), self.user(tenant_id=20), self.user(role='superadmin', is_superuser=True)]
         self.assertEqual(_select_recipient(self.tenant, [], users), [])
+
+    def test_registered_tenant_owner_with_superuser_flag_is_selected(self):
+        # CompanyRegisterView creates the local owner with null foreign keys
+        # and full permissions; the tenant schema supplies the account scope.
+        owner = self.user(9, company_id=None, tenant_id=None, is_superuser=True)
+        users = [
+            self.user(1, email='admin@netily.co.ke', is_superuser=True),
+            self.user(2, first_name='Peter', last_name='Ouma', is_superuser=True),
+            owner,
+            self.user(10, email='technician@example.com', role='staff'),
+        ]
+        recipients = _select_recipient(self.tenant, [], users)
+        self.assertEqual(len(recipients), 1)
+        self.assertEqual(recipients[0]['id'], 9)
+        self.assertEqual(recipients[0]['phone_number'], '+254706580196')
+
+    def test_signup_mirror_with_tenant_superuser_flag_is_selected(self):
+        signup = self.user(90)
+        mirror = self.user(8, company_id=None, tenant_id=None, is_superuser=True)
+        recipients = _select_recipient(self.tenant, [signup], [mirror])
+        self.assertEqual(len(recipients), 1)
+        self.assertEqual(recipients[0]['id'], 8)
+
+    def test_inactive_tenant_superuser_is_not_selected(self):
+        owner = self.user(is_superuser=True, is_active=False)
+        self.assertEqual(_select_recipient(self.tenant, [], [owner]), [])
+
+    def test_configured_platform_superuser_mirrors_are_excluded(self):
+        for identity in [
+            {'email': 'admin@netily.co.ke'},
+            {'first_name': 'Peter', 'last_name': 'Ouma'},
+            {'first_name': 'Mark', 'last_name': 'Mbolonzi'},
+            {'role': 'super_admin'},
+        ]:
+            with self.subTest(identity=identity):
+                user = self.user(is_superuser=True, company_id=None, tenant_id=None, **identity)
+                self.assertEqual(_select_recipient(self.tenant, [], [user]), [])
 
     def test_invalid_synthetic_phones_are_not_sent_to_provider(self):
         for phone in ['+2547004781488', '+2547003781488', '+254700000001', '', 'call 0706580196']:

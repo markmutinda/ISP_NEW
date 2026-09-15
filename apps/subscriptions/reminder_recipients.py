@@ -28,10 +28,11 @@ def normalize_billing_phone(value):
 
 
 def _eligible(user, tenant):
+    # Signup grants tenant owners is_superuser=True inside their own schema.
+    # Platform identity is determined by role and configured identities below.
     return bool(
         user.is_active
         and user.role in {'admin', 'owner'}
-        and not user.is_superuser
         and user.company_id in {None, tenant.company_id}
         and user.tenant_id in {None, tenant.pk}
         and str(user.email or '').strip().lower() not in SYSTEM_EMAILS

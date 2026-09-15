@@ -922,6 +922,10 @@ def send_subscription_invoice_reminders():
             )
             recipients = _tenant_invoice_admins(cycle.tenant)
             if not recipients:
+                logger.warning(
+                    'Subscription reminder skipped: no eligible account owner for tenant=%s cycle=%s',
+                    cycle.tenant_id, cycle.pk,
+                )
                 sent["skipped"] += 1
                 continue
 
