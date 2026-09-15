@@ -144,8 +144,9 @@ class PlatformSMSSender:
                             "platform_sms_wallet_balance": str(wallet.sms_units),
                         }
 
-                    wallet.sms_units = wallet.sms_units - units
-                    wallet.save(update_fields=["sms_units", "updated_at"])
+                    if wallet.enforce_balance:
+                        wallet.sms_units = wallet.sms_units - units
+                        wallet.save(update_fields=["sms_units", "updated_at"])
 
                     reminder_delivery = None
                     if reminder_delivery_id:
@@ -169,6 +170,7 @@ class PlatformSMSSender:
                         "platform_sms_units": str(units),
                         "platform_sms_ledger_id": str(ledger.id),
                         "platform_sms_wallet_balance": str(wallet.sms_units),
+                        "platform_sms_balance_enforced": wallet.enforce_balance,
                     }
         except Exception as exc:
             logger.exception("Platform SMS wallet debit failed: %s", exc)
@@ -196,8 +198,9 @@ class PlatformSMSSender:
                 with transaction.atomic():
                     wallet = PlatformSMSWallet.get_active()
                     wallet = PlatformSMSWallet.objects.select_for_update().get(pk=wallet.pk)
-                    wallet.sms_units = wallet.sms_units + units
-                    wallet.save(update_fields=["sms_units", "updated_at"])
+                    if wallet.enforce_balance:
+                        wallet.sms_units = wallet.sms_units + units
+                        wallet.save(update_fields=["sms_units", "updated_at"])
                     PlatformSMSLedger.objects.create(
                         wallet=wallet,
                         entry_type="refund",

@@ -987,6 +987,10 @@ class BillingCycle(models.Model):
     
     # Track the actual generated invoice (if using apps.billing.models.Invoice)
     invoice_reference = models.CharField(max_length=100, blank=True, null=True)
+    pending_discount_amount = models.DecimalField(max_digits=12, decimal_places=2, default=Decimal('0.00'))
+    pending_discount_reason = models.TextField(blank=True, default='')
+    pending_manual_adjustment_amount = models.DecimalField(max_digits=12, decimal_places=2, default=Decimal('0.00'))
+    pending_manual_adjustment_description = models.TextField(blank=True, default='')
     
     # ── FIX 3.1: PRICING SNAPSHOTS ──
     # Locks in the pricing at the moment the cycle is created

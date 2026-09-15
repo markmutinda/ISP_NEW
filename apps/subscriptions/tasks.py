@@ -493,6 +493,70 @@ def send_subscription_invoice_reminder_for_cycle(cycle_id=None, *, tenant_id=Non
     }
 
 
+def _apply_cycle_pending_invoice_adjustments(cycle, invoice):
+    if not invoice:
+        return invoice
+
+    adjustment_amount = _decimal_money(getattr(cycle, 'pending_manual_adjustment_amount', 0))
+    adjustment_description = (
+        getattr(cycle, 'pending_manual_adjustment_description', '')
+        or 'Manual custom charge'
+    ).strip()
+    discount_amount = _decimal_money(getattr(cycle, 'pending_discount_amount', 0))
+
+    with schema_context(cycle.tenant.schema_name):
+        invoice = Invoice.objects.get(pk=invoice.pk)
+        original_state = {
+            'status': invoice.status,
+            'is_overdue': invoice.is_overdue,
+            'overdue_days': invoice.overdue_days,
+            'paid_at': invoice.paid_at,
+        }
+        manual_items = invoice.items.filter(service_type='netily_manual_adjustment')
+        existing_adjustment = manual_items.aggregate(total=Sum('total'))['total'] or Decimal('0.00')
+        base_subtotal = _decimal_money((invoice.subtotal or invoice.total_amount) - existing_adjustment)
+        intended_subtotal = _decimal_money(base_subtotal + adjustment_amount)
+        if discount_amount > intended_subtotal:
+            logger.warning(
+                "Skipping pending discount for cycle %s because discount %s exceeds subtotal %s",
+                cycle.id,
+                discount_amount,
+                intended_subtotal,
+            )
+            discount_amount = Decimal('0.00')
+
+        if adjustment_amount > 0:
+            item = manual_items.order_by('id').first()
+            if item:
+                item.description = adjustment_description
+                item.quantity = Decimal('1.00')
+                item.unit_price = adjustment_amount
+                item.tax_rate = Decimal('0.00')
+                item.tax_amount = Decimal('0.00')
+                item.total = adjustment_amount
+                item.save()
+                manual_items.exclude(pk=item.pk).delete()
+            else:
+                InvoiceItem.objects.create(
+                    invoice=invoice,
+                    description=adjustment_description,
+                    quantity=1,
+                    unit_price=adjustment_amount,
+                    tax_rate=0,
+                    tax_amount=0,
+                    total=adjustment_amount,
+                    service_type='netily_manual_adjustment',
+                )
+        else:
+            manual_items.delete()
+
+        invoice.discount_amount = discount_amount
+        invoice.calculate_totals()
+        Invoice.objects.filter(pk=invoice.pk).update(**original_state)
+        invoice.refresh_from_db()
+        return invoice
+
+
 def _sync_net_bill_invoice_usage_items(cycle, invoice, *, actual_hotspot_revenue=None):
     if not invoice or str(invoice.status).upper() == 'PAID':
         return invoice
@@ -546,7 +610,7 @@ def _sync_net_bill_invoice_usage_items(cycle, invoice, *, actual_hotspot_revenue
                 total=minimum_adjustment,
             )
 
-        invoice.calculate_totals()
+        invoice = _apply_cycle_pending_invoice_adjustments(cycle, invoice)
         invoice.refresh_from_db()
         return invoice
 
@@ -715,6 +779,8 @@ def generate_metered_invoices():
                             tax_amount=0,
                             total=minimum_adjustment
                         )
+                    if not invoice_was_reused:
+                        new_invoice = _apply_cycle_pending_invoice_adjustments(cycle, new_invoice)
 
                 with schema_context(get_public_schema_name()):
                     # Reconcile the accumulator with actual DB figures

@@ -3320,8 +3320,87 @@ def _sync_subscription_invoice_usage_items(cycle, invoice):
                 total=minimum_adjustment,
             )
 
-        invoice.calculate_totals()
+        invoice = _apply_subscription_invoice_pending_adjustments(cycle, invoice, append_notes=False)
         invoice.refresh_from_db()
+        return invoice
+
+
+def _apply_subscription_invoice_pending_adjustments(cycle, invoice, *, append_notes=False):
+    if not invoice:
+        return invoice
+
+    adjustment_amount = _decimal_money(getattr(cycle, "pending_manual_adjustment_amount", 0))
+    adjustment_description = (
+        getattr(cycle, "pending_manual_adjustment_description", "")
+        or "Manual custom charge"
+    ).strip()
+    discount_amount = _decimal_money(getattr(cycle, "pending_discount_amount", 0))
+    discount_reason = (getattr(cycle, "pending_discount_reason", "") or "").strip()
+
+    with schema_context(cycle.tenant.schema_name):
+        from apps.billing.models import Invoice, InvoiceItem
+
+        invoice = Invoice.objects.get(pk=invoice.pk)
+        original_invoice_state = {
+            "status": invoice.status,
+            "is_overdue": invoice.is_overdue,
+            "overdue_days": invoice.overdue_days,
+            "paid_at": invoice.paid_at,
+        }
+
+        manual_items = invoice.items.filter(service_type="netily_manual_adjustment")
+        existing_adjustment = manual_items.aggregate(total=Sum("total"))["total"] or Decimal("0.00")
+        base_subtotal = _decimal_money((invoice.subtotal or invoice.total_amount) - existing_adjustment)
+        intended_subtotal = _decimal_money(base_subtotal + adjustment_amount)
+        if discount_amount > intended_subtotal:
+            raise ValueError("discount_amount cannot exceed invoice subtotal.")
+
+        if adjustment_amount > 0:
+            item = manual_items.order_by("id").first()
+            if item:
+                item.description = adjustment_description
+                item.quantity = Decimal("1.00")
+                item.unit_price = adjustment_amount
+                item.tax_rate = Decimal("0.00")
+                item.tax_amount = Decimal("0.00")
+                item.total = adjustment_amount
+                item.save()
+                manual_items.exclude(pk=item.pk).delete()
+            else:
+                InvoiceItem.objects.create(
+                    invoice=invoice,
+                    description=adjustment_description,
+                    quantity=1,
+                    unit_price=adjustment_amount,
+                    tax_rate=0,
+                    tax_amount=0,
+                    total=adjustment_amount,
+                    service_type="netily_manual_adjustment",
+                )
+        else:
+            manual_items.delete()
+
+        invoice.discount_amount = discount_amount
+        invoice.calculate_totals()
+        Invoice.objects.filter(pk=invoice.pk).update(**original_invoice_state)
+        invoice.refresh_from_db()
+
+        if append_notes:
+            notes = []
+            if adjustment_amount > 0:
+                notes.append(f"Manual charge applied by superadmin: KES {adjustment_amount} - {adjustment_description}")
+            if discount_amount > 0:
+                note = f"Manual discount applied by superadmin: KES {discount_amount}"
+                if discount_reason:
+                    note = f"{note} - {discount_reason}"
+                notes.append(note)
+            if notes:
+                invoice.internal_notes = f"{invoice.internal_notes or ''}\n" + "\n".join(notes)
+                invoice.internal_notes = invoice.internal_notes.strip()
+                invoice.save(update_fields=["internal_notes", "updated_at"])
+                Invoice.objects.filter(pk=invoice.pk).update(**original_invoice_state)
+                invoice.refresh_from_db()
+
         return invoice
 
 
@@ -3419,6 +3498,7 @@ def _get_or_create_subscription_invoice(cycle, *, create=False):
                 tax_amount=0,
                 total=minimum_adjustment,
             )
+        invoice = _apply_subscription_invoice_pending_adjustments(cycle, invoice, append_notes=False)
 
     update_fields = {"invoice_reference": str(invoice.id)}
     if cycle.status == "active":
@@ -3500,6 +3580,13 @@ def _subscription_invoice_payload(cycle, *, include_recipients=False):
                     "receipt": receipt_snapshot,
                 }
                 effective_total = _decimal_money(tenant_invoice.total_amount)
+    else:
+        pending_adjustment = _decimal_money(getattr(cycle, "pending_manual_adjustment_amount", 0))
+        pending_discount = _decimal_money(getattr(cycle, "pending_discount_amount", 0))
+        effective_total = max(
+            _decimal_money(calculated_total + pending_adjustment - pending_discount),
+            Decimal("0.00"),
+        )
 
     recipients = _subscription_invoice_admins(tenant) if include_recipients else []
 
@@ -3530,6 +3617,10 @@ def _subscription_invoice_payload(cycle, *, include_recipients=False):
         "minimum_adjustment": str(minimum_adjustment),
         "calculated_total": str(calculated_total),
         "effective_total": str(effective_total),
+        "pending_discount_amount": str(_decimal_money(getattr(cycle, "pending_discount_amount", 0))),
+        "pending_discount_reason": getattr(cycle, "pending_discount_reason", "") or "",
+        "pending_manual_adjustment_amount": str(_decimal_money(getattr(cycle, "pending_manual_adjustment_amount", 0))),
+        "pending_manual_adjustment_description": getattr(cycle, "pending_manual_adjustment_description", "") or "",
         "invoice": invoice_snapshot,
         "receipt": receipt_snapshot,
         "recipients": recipients,
@@ -3696,69 +3787,28 @@ class SubscriptionInvoiceDetailView(APIView):
         if adjustment_amount < 0:
             return Response({"detail": "manual_adjustment_amount cannot be negative."}, status=status.HTTP_400_BAD_REQUEST)
 
-        invoice = _get_or_create_subscription_invoice(cycle, create=True)
-        with schema_context(cycle.tenant.schema_name):
-            from apps.billing.models import Invoice, InvoiceItem
-            invoice = Invoice.objects.get(pk=invoice.pk)
-            original_invoice_state = {
-                "status": invoice.status,
-                "is_overdue": invoice.is_overdue,
-                "overdue_days": invoice.overdue_days,
-                "paid_at": invoice.paid_at,
-            }
-            manual_items = invoice.items.filter(service_type="netily_manual_adjustment")
-            existing_adjustment = manual_items.aggregate(total=Sum("total"))["total"] or Decimal("0.00")
-            base_subtotal = _decimal_money((invoice.subtotal or invoice.total_amount) - existing_adjustment)
-            intended_subtotal = _decimal_money(base_subtotal + adjustment_amount)
-            if discount_amount > intended_subtotal:
-                return Response({"detail": "discount_amount cannot exceed invoice subtotal."}, status=status.HTTP_400_BAD_REQUEST)
+        pending_total = _decimal_money(cycle.calculate_billable_usage_charge(cycle.refresh_actual_hotspot_revenue()))
+        pending_total = _decimal_money(pending_total + adjustment_amount)
+        if discount_amount > pending_total:
+            return Response({"detail": "discount_amount cannot exceed invoice subtotal."}, status=status.HTTP_400_BAD_REQUEST)
 
-            if adjustment_amount > 0:
-                item = manual_items.order_by("id").first()
-                if item:
-                    item.description = adjustment_description
-                    item.quantity = Decimal("1.00")
-                    item.unit_price = adjustment_amount
-                    item.tax_rate = Decimal("0.00")
-                    item.tax_amount = Decimal("0.00")
-                    item.save()
-                    manual_items.exclude(pk=item.pk).delete()
-                else:
-                    InvoiceItem.objects.create(
-                        invoice=invoice,
-                        description=adjustment_description,
-                        quantity=1,
-                        unit_price=adjustment_amount,
-                        tax_rate=0,
-                        tax_amount=0,
-                        service_type="netily_manual_adjustment",
-                    )
-            else:
-                manual_items.delete()
+        BillingCycle.objects.filter(pk=cycle.pk).update(
+            pending_discount_amount=discount_amount,
+            pending_discount_reason=discount_reason,
+            pending_manual_adjustment_amount=adjustment_amount,
+            pending_manual_adjustment_description=adjustment_description,
+        )
+        cycle.pending_discount_amount = discount_amount
+        cycle.pending_discount_reason = discount_reason
+        cycle.pending_manual_adjustment_amount = adjustment_amount
+        cycle.pending_manual_adjustment_description = adjustment_description
 
-            invoice.calculate_totals()
-            Invoice.objects.filter(pk=invoice.pk).update(**original_invoice_state)
-            invoice.refresh_from_db()
-            subtotal = _decimal_money(invoice.subtotal or invoice.total_amount)
-            invoice.discount_amount = discount_amount
-            invoice.calculate_totals()
-            Invoice.objects.filter(pk=invoice.pk).update(**original_invoice_state)
-            invoice.refresh_from_db()
-
-            notes = []
-            if adjustment_amount > 0:
-                notes.append(f"Manual charge applied by superadmin: KES {adjustment_amount} - {adjustment_description}")
-            if discount_amount > 0:
-                note = f"Manual discount applied by superadmin: KES {discount_amount}"
-                if discount_reason:
-                    note = f"{note} - {discount_reason}"
-                notes.append(note)
-            if notes:
-                invoice.internal_notes = f"{invoice.internal_notes or ''}\n" + "\n".join(notes)
-                invoice.internal_notes = invoice.internal_notes.strip()
-                invoice.save(update_fields=["internal_notes", "updated_at"])
-                Invoice.objects.filter(pk=invoice.pk).update(**original_invoice_state)
-                invoice.refresh_from_db()
+        invoice = _get_or_create_subscription_invoice(cycle, create=False)
+        if invoice:
+            try:
+                _apply_subscription_invoice_pending_adjustments(cycle, invoice, append_notes=True)
+            except ValueError as exc:
+                return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
 
         _log_action(
             request.user,
@@ -5526,6 +5576,17 @@ class SubscriptionReminderBalanceView(APIView):
 
         provider_balance = PlatformSMSSender().get_balance()
         platform_wallet = PlatformSMSWallet.get_active()
+        provider_units = None
+        if provider_balance.get("success"):
+            provider_currency = str(provider_balance.get("currency") or "SMS_UNITS").upper()
+            if provider_currency != "KES":
+                try:
+                    provider_units = Decimal(str(provider_balance.get("balance") or "0"))
+                except Exception:
+                    provider_units = None
+        if provider_units is not None and not platform_wallet.enforce_balance:
+            platform_wallet.sms_units = provider_units
+            platform_wallet.save(update_fields=["sms_units", "updated_at"])
         ledger_totals = PlatformSMSLedger.objects.aggregate(
             debited_units=Sum('units', filter=Q(entry_type='debit')),
             refunded_units=Sum('units', filter=Q(entry_type='refund')),
@@ -5615,32 +5676,36 @@ class SubscriptionReminderLogListView(APIView):
         total = qs.count()
         start = (page - 1) * page_size
         rows = qs[start:start + page_size]
+        results = []
+        for row in rows:
+            subscription = getattr(row, 'subscription', None)
+            company = getattr(subscription, 'company', None) if subscription else None
+            tenant = getattr(row, 'tenant', None)
+            billing_cycle = getattr(row, 'billing_cycle', None)
+            results.append({
+                'id': str(row.id),
+                'company_name': getattr(company, 'name', '') or '',
+                'tenant_name': getattr(tenant, 'name', '') or getattr(tenant, 'subdomain', '') or '',
+                'tenant_subdomain': getattr(tenant, 'subdomain', '') or '',
+                'invoice_number': row.invoice_number or '',
+                'milestone': row.milestone or '',
+                'channel': row.channel or '',
+                'recipient_name': row.recipient_name or '',
+                'phone_number': row.recipient_phone or '',
+                'recipient_phone': row.recipient_phone or '',
+                'recipient_email': row.recipient_email or '',
+                'status': row.status or '',
+                'error': row.error_message or '',
+                'period_end': billing_cycle.end_date.isoformat() if billing_cycle and billing_cycle.end_date else None,
+                'sent_at': row.sent_at.isoformat() if row.sent_at else None,
+                'created_at': row.created_at.isoformat() if row.created_at else None,
+            })
 
         return Response({
             'count': total,
             'page': page,
             'page_size': page_size,
-            'results': [
-                {
-                    'id': str(r.id),
-                    'company_name': r.subscription.company.name if r.subscription and r.subscription.company else '',
-                    'tenant_name': r.tenant.name if r.tenant else '',
-                    'tenant_subdomain': r.tenant.subdomain if r.tenant else '',
-                    'invoice_number': r.invoice_number,
-                    'milestone': r.milestone,
-                    'channel': r.channel,
-                    'recipient_name': r.recipient_name,
-                    'phone_number': r.recipient_phone,
-                    'recipient_phone': r.recipient_phone,
-                    'recipient_email': r.recipient_email,
-                    'status': r.status,
-                    'error': r.error_message,
-                    'period_end': r.billing_cycle.end_date if r.billing_cycle else None,
-                    'sent_at': r.sent_at,
-                    'created_at': r.created_at,
-                }
-                for r in rows
-            ],
+            'results': results,
         })
 
 
