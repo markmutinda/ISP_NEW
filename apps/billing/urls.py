@@ -92,6 +92,15 @@ from .views.invoice_settings_views import (
     HotspotPruneSettingsView,   # <-- add
 )
 
+# ==========================
+# Hotspot Chat URLs (NEW)
+# ==========================
+from .views.hotspot_chat_views import HotspotChatInitView, HotspotChatSendView
+from .views.hotspot_chat_admin_views import (
+    HotspotChatThreadListView, HotspotChatThreadDetailView,
+    HotspotChatReplyView, HotspotChatStatusView,
+)
+
 router = DefaultRouter()
 
 # Invoice URLs
@@ -138,6 +147,9 @@ hotspot_urlpatterns = [
     path('ads/media/<int:pk>/', HotspotAdMediaView.as_view(), name='hotspot-ad-media'),
     path('loyalty-info/', HotspotLoyaltyInfoView.as_view(), name='hotspot-loyalty-info'),
     path('loyalty-redeem/', HotspotLoyaltyRedeemView.as_view(), name='hotspot-loyalty-redeem'),
+    # CHAT (PUBLIC - anonymous hotspot users)
+    path('chat/init/', HotspotChatInitView.as_view(), name='hotspot-chat-init'),
+    path('chat/send/', HotspotChatSendView.as_view(), name='hotspot-chat-send'),
 ]
 
 # ==========================
@@ -248,6 +260,15 @@ hotspot_admin_urlpatterns = [
     path('admin/ads/<int:pk>/toggle-active/',
          HotspotAdAdminViewSet.as_view({'post': 'toggle_active'}),
          name='hotspot-admin-ad-toggle'),
+
+    # ============================================================
+    # HOTSPOT CHAT ADMIN ROUTES (NEW)
+    # Reuses /admin/tickets RBAC bucket
+    # ============================================================
+    path('admin/chats/', HotspotChatThreadListView.as_view(), name='hotspot-admin-chats'),
+    path('admin/chats/<int:pk>/', HotspotChatThreadDetailView.as_view(), name='hotspot-admin-chat-detail'),
+    path('admin/chats/<int:pk>/reply/', HotspotChatReplyView.as_view(), name='hotspot-admin-chat-reply'),
+    path('admin/chats/<int:pk>/status/', HotspotChatStatusView.as_view(), name='hotspot-admin-chat-status'),
 ]
 
 # ==========================

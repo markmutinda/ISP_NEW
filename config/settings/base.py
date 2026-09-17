@@ -292,6 +292,7 @@ REST_FRAMEWORK = {
         'hotspot_auto_login': '20/min',           # Auto-login attempts
         'hotspot_tv_code_generate': '30/min',     # TV code generation (prevents abuse)
         'hotspot_tv_code_verify': '60/min',       # TV code verification (user-friendly)
+        'hotspot_chat': '30/min',                 # Hotspot chat init/send (public, no auth)
         'affiliate_click': '120/min',
         'affiliate_register': '10/hour',
         'affiliate_login': '20/min',

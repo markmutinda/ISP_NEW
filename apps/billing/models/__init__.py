@@ -32,6 +32,8 @@ from .ad_models import (
 
 from .subscription_models import Subscription   # <-- new import
 
+from .hotspot_chat_models import HotspotChatThread, HotspotChatMessage
+
 __all__ = [
     # Billing
     'Plan',
@@ -55,4 +57,7 @@ __all__ = [
     'HotspotAdGrant',
     # Subscription
     'Subscription',                              # <-- added to __all__
+    # Hotspot Chat
+    'HotspotChatThread',
+    'HotspotChatMessage',
 ]
