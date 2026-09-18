@@ -2437,7 +2437,7 @@ class UnifiedDashboardView(APIView):
                 except Exception:
                     return {'total': 0, 'online': 0, 'offline': 0, 'warning': 0, 'maintenance': 0, 'total_connected_users': 0}
 
-        # COMBINED: tickets, expired, and online in ONE worker
+        # COMBINED: tickets, expired, online, and hotspot chats in ONE worker
         def get_misc_stats():
             with schema_context(tenant_schema):
                 try:
@@ -2456,13 +2456,25 @@ class UnifiedDashboardView(APIView):
                     ).count()
                     online = RadAcct.objects.filter(acctstoptime__isnull=True).count()
 
+                    # Hotspot chats (isolated so a failure here never breaks the rest)
+                    hotspot_chats = {'total': 0, 'unread': 0}
+                    try:
+                        from apps.billing.models.hotspot_chat_models import HotspotChatThread
+                        hotspot_chats = HotspotChatThread.objects.aggregate(
+                            total=Count('id'),
+                            unread=Count('id', filter=Q(unread_by_admin=True)),
+                        )
+                    except Exception:
+                        pass
+
                     return {
                         'tickets': tickets,
                         'expired': expired,
                         'online': online,
+                        'hotspot_chats': hotspot_chats,
                     }
                 except Exception:
-                    return {'tickets': {}, 'expired': 0, 'online': 0}
+                    return {'tickets': {}, 'expired': 0, 'online': 0, 'hotspot_chats': {'total': 0, 'unread': 0}}
 
         def get_active_subscriptions():
             with schema_context(tenant_schema):
@@ -2574,6 +2586,7 @@ class UnifiedDashboardView(APIView):
         tickets = misc.get('tickets', {})
         expired_count = misc.get('expired', 0)
         online_count = misc.get('online', 0)
+        hotspot_chats = misc.get('hotspot_chats', {}) or {}
 
         rev = results['revenue']
         today_rev = float(rev.get('today') or 0)
@@ -2620,6 +2633,8 @@ class UnifiedDashboardView(APIView):
                 'in_progress': tickets.get('in_progress', 0),
                 'resolved': tickets.get('resolved', 0),
                 'avg_response_time': '—',
+                'hotspot_chats': hotspot_chats.get('total', 0) or 0,
+                'hotspot_chats_unread': hotspot_chats.get('unread', 0) or 0,
             },
             'recent_activity': results['activity'],
             'overview': {
