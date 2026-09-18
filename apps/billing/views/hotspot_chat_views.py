@@ -58,6 +58,7 @@ def _serialize_thread(t, *, with_messages=False):
         'last_message_preview': t.last_message_preview,
         'last_message_at': t.last_message_at.isoformat() if t.last_message_at else None,
         'unread_by_customer': t.unread_by_customer,
+        'unread_by_admin': t.unread_by_admin,
     }
     if with_messages:
         data['messages'] = [_serialize_message(m) for m in t.messages.all()]
@@ -163,7 +164,7 @@ class HotspotChatSendView(APIView):
             )
             thread.touch(
                 message,
-                status_value='open' if thread.status == 'resolved' else None,
+                status_value='open',       # was: 'open' if thread.status == 'resolved' else None
                 unread_by_admin=True,
             )
 

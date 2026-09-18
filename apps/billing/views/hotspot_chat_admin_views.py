@@ -52,6 +52,12 @@ class HotspotChatThreadDetailView(APIView):
             thread.save(update_fields=['unread_by_admin'])
         return Response(_serialize_thread(thread, with_messages=True))
 
+    def delete(self, request, pk):
+        deleted, _ = HotspotChatThread.objects.filter(pk=pk).delete()
+        if not deleted:
+            return Response({'error': 'Not found'}, status=404)
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
 
 class HotspotChatReplyView(APIView):
     permission_classes = [IsAuthenticated, IsAdminOrStaff, HasRoleAccessPolicy]
