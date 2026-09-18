@@ -277,6 +277,11 @@ app.conf.beat_schedule = {
         'schedule': crontab(hour=9, minute=30),  # Daily at 9:30 AM
         'options': {'queue': 'billing'}
     },
+    'reconcile-pending-subscription-stk-payments-every-2-min': {
+        'task': 'apps.subscriptions.tasks.reconcile_pending_subscription_stk_payments',
+        'schedule': crontab(minute='*/2'),
+        'options': {'queue': 'billing'}
+    },
     'reconcile-hotspot-accumulators': {
         'task': 'apps.subscriptions.tasks.reconcile_hotspot_accumulators',
         'schedule': crontab(hour='8,14,20', minute=0),  # Same cadence as metered billing estimates

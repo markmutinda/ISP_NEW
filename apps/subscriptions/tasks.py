@@ -15,6 +15,7 @@ from apps.subscriptions.models import (
     BillingCycle,
     BillableClientRecord,
     CompanySubscription,
+    SubscriptionPayment,
     SubscriptionInvoiceReminderDelivery,
 )
 from apps.billing.models import Invoice, InvoiceItem
@@ -1456,6 +1457,54 @@ def reconcile_hotspot_accumulators():
             logger.error(f"[{cycle.tenant.schema_name}] Reconciliation failed: {e}")
 
     return f"Reconciled {reconciled}/{active_cycles.count()} active cycles"
+
+
+@shared_task(name='apps.subscriptions.tasks.reconcile_pending_subscription_stk_payments')
+def reconcile_pending_subscription_stk_payments(max_age_hours=24, min_age_seconds=45, limit=80):
+    """
+    Safety net for tenant subscription STK payments whose Daraja callback was
+    delayed, dropped, or acknowledged before activation completed.
+    """
+    from .payment_recovery import reconcile_subscription_payment_from_gateway
+
+    now = timezone.now()
+    oldest = now - timedelta(hours=max_age_hours)
+    newest = now - timedelta(seconds=min_age_seconds)
+    candidates = (
+        SubscriptionPayment.objects
+        .select_related('subscription__company', 'subscription__plan')
+        .filter(
+            status__in=['pending', 'processing'],
+            payhero_checkout_id__isnull=False,
+            created_at__gte=oldest,
+            created_at__lte=newest,
+        )
+        .exclude(payhero_checkout_id='')
+        .order_by('created_at')[:limit]
+    )
+
+    checked = activated = failed = skipped = errors = 0
+    for payment in candidates:
+        try:
+            before_status = payment.status
+            before_activation = payment.activation_applied_at
+            payment, meta = reconcile_subscription_payment_from_gateway(payment, throttle_seconds=0)
+            if not meta.get('checked'):
+                skipped += 1
+                continue
+            checked += 1
+            if payment.status == 'completed' and payment.activation_applied_at and not before_activation:
+                activated += 1
+            elif before_status != 'failed' and payment.status == 'failed':
+                failed += 1
+        except Exception:
+            errors += 1
+            logger.exception("Pending subscription STK reconciliation failed: payment=%s", payment.id)
+
+    return (
+        f"Subscription STK reconciliation checked={checked}, activated={activated}, "
+        f"failed={failed}, skipped={skipped}, errors={errors}"
+    )
 
 
 @shared_task(name='apps.subscriptions.tasks.refresh_metered_billing_estimates')

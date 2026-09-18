@@ -23,7 +23,7 @@ from rest_framework.permissions import IsAuthenticated, AllowAny
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from apps.billing.services.netily_paybill_service import query_stk_status, stk_push_own_paybill, NetilyPaybillError
+from apps.billing.services.netily_paybill_service import stk_push_own_paybill, NetilyPaybillError
 from requests.exceptions import RequestException
 from apps.core.models import Company
 
@@ -36,6 +36,7 @@ from .models import (
     ISPSettlement,
     CommissionLedger,
 )
+from .payment_recovery import reconcile_subscription_payment_from_gateway
 from .serializers import (
     NetilyPlanSerializer,
     CompanySubscriptionSerializer,
@@ -1092,54 +1093,40 @@ class SubscriptionPaymentViewSet(FreshBillingResponseMixin, viewsets.ReadOnlyMod
             and subscription.current_period_end > timezone.now()
         )
 
+    @action(detail=False, methods=['get'], url_path='latest-pending')
+    def latest_pending(self, request):
+        """
+        Return the tenant's newest active STK payment so the guard can resume
+        polling after a browser refresh.
+        """
+        cutoff = timezone.now() - timedelta(hours=24)
+        payment = (
+            self.get_queryset()
+            .filter(
+                status__in=['pending', 'processing'],
+                payhero_checkout_id__isnull=False,
+                created_at__gte=cutoff,
+            )
+            .exclude(payhero_checkout_id='')
+            .order_by('-created_at')
+            .first()
+        )
+        if not payment:
+            return Response({'payment': None})
+
+        payment = self._reconcile_gateway_status(payment)
+        return Response({'payment': SubscriptionPaymentSerializer(payment).data})
+
     def _reconcile_gateway_status(self, payment):
         """
         Recover paid STK pushes when Daraja's callback is delayed or never reaches us.
         The cache throttle keeps active payment modals from querying Safaricom on
         every frontend poll.
         """
-        if payment.status not in ['pending', 'processing'] or not payment.payhero_checkout_id:
-            return payment
-
-        cache_key = f"subscription-stk-query:{payment.id}:{payment.payhero_checkout_id}"
         try:
-            if not cache.add(cache_key, True, 8):
-                return payment
+            payment, _meta = reconcile_subscription_payment_from_gateway(payment, throttle_seconds=8)
         except Exception:
-            logger.warning('STK query throttle unavailable: payment=%s', payment.id)
-
-        try:
-            gateway_status = query_stk_status(checkout_request_id=payment.payhero_checkout_id)
-        except NetilyPaybillError as exc:
-            logger.info("Subscription STK status query still pending for payment %s: %s", payment.id, exc)
-            return payment
-        except Exception as exc:
-            logger.warning("Unexpected subscription STK status query error for payment %s: %s", payment.id, exc)
-            return payment
-
-        result_code = str(gateway_status.get('ResultCode', '')).strip()
-        result_desc = gateway_status.get('ResultDesc') or gateway_status.get('errorMessage') or ''
-
-        if result_code == '0':
-            try:
-                from .billing_lifecycle import complete_subscription_stk_payment
-
-                payment, _invoice = complete_subscription_stk_payment(
-                    payment,
-                    mpesa_receipt=payment.mpesa_receipt or "",
-                )
-                payment.refresh_from_db()
-            except Exception:
-                logger.exception("Failed completing subscription payment %s from STK query", payment.id)
-            return payment
-
-        terminal_failure_codes = {'1', '1032', '1037', '2001'}
-        if result_code in terminal_failure_codes:
-            # A delayed query failure must not overwrite a successful callback.
-            SubscriptionPayment.objects.filter(pk=payment.pk, status__in=['pending', 'processing']).update(
-                status='failed', failure_reason=result_desc or 'M-Pesa did not complete the payment.')
-            payment.refresh_from_db()
-
+            logger.exception("Failed completing subscription payment %s from STK query", payment.id)
         return payment
     
     @action(detail=True, methods=['get'])

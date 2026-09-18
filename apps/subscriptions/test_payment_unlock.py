@@ -100,13 +100,24 @@ class PaymentUnlockTests(SimpleTestCase):
         self.payment.payhero_checkout_id = 'checkout'
         view = SubscriptionPaymentViewSet()
         with (
-            patch('apps.subscriptions.views.cache.add', return_value=True),
-            patch('apps.subscriptions.views.query_stk_status', return_value={'ResultCode': 1032}),
+            patch('apps.subscriptions.payment_recovery.cache.add', return_value=True),
+            patch('apps.subscriptions.payment_recovery.query_stk_status', return_value={'ResultCode': 1032}),
             patch('apps.subscriptions.models.SubscriptionPayment.objects') as payments,
         ):
             view._reconcile_gateway_status(self.payment)
             payments.filter.assert_called_once_with(pk=self.payment.pk, status__in=['pending', 'processing'])
         self.payment.mark_failed.assert_not_called()
+
+    def test_gateway_success_recovery_uses_shared_lifecycle(self):
+        self.payment.payhero_checkout_id = 'checkout'
+        view = SubscriptionPaymentViewSet()
+        with (
+            patch('apps.subscriptions.payment_recovery.cache.add', return_value=True),
+            patch('apps.subscriptions.payment_recovery.query_stk_status', return_value={'ResultCode': 0}),
+            patch('apps.subscriptions.payment_recovery.complete_subscription_stk_payment', return_value=(self.payment, None)) as complete,
+        ):
+            view._reconcile_gateway_status(self.payment)
+            complete.assert_called_once_with(self.payment, mpesa_receipt='')
 
     def test_notification_broker_failure_is_isolated(self):
         from .billing_lifecycle import _queue_completed_subscription_notice
