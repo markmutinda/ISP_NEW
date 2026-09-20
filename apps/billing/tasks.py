@@ -692,3 +692,41 @@ def provision_hotspot_radius(self, tenant_schema, username, password, router_id,
                 raise RuntimeError("RADIUS provisioning returned False")
         except Exception as exc:
             raise self.retry(exc=exc)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# MANUAL RENEWAL POST-ACTIONS — CoA + SMS (runs after transaction commits)
+# ═══════════════════════════════════════════════════════════════════════════
+
+@shared_task(name='apps.billing.tasks.post_renewal_actions')
+def post_renewal_actions(tenant_schema, customer_id, plan_name='', expires_at_iso=None,
+                         reference='', send_sms=True, kick_username=None, nas_ip=None):
+    """CoA disconnect (only when the user was expired/disabled) + renewal SMS. Runs after commit."""
+    from django_tenants.utils import schema_context
+    from django.utils.dateparse import parse_datetime
+
+    with schema_context(tenant_schema):
+        from apps.customers.models import Customer
+        customer = Customer.objects.select_related('user').filter(id=customer_id).first()
+        if not customer:
+            return
+
+        if kick_username and nas_ip:
+            try:
+                from apps.radius.services.coa_service import CoAService
+                CoAService().disconnect_user(username=kick_username, nas_ip_address=nas_ip)
+            except Exception as e:
+                logger.warning(f"[RENEW] CoA failed for {kick_username}: {e}")
+
+        if send_sms:
+            try:
+                from apps.messaging.services.notification_sender import SMSNotifier
+                SMSNotifier.pppoe_renewal(
+                    customer=customer,
+                    plan_name=plan_name,
+                    expires_at=parse_datetime(expires_at_iso) if expires_at_iso else None,
+                    reference=reference,
+                    schema_name=tenant_schema,
+                )
+            except Exception as e:
+                logger.warning(f"[RENEW] SMS failed for customer {customer_id}: {e}")
