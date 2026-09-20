@@ -46,6 +46,7 @@ from .serializers import (
     CustomerRadiusCredentialsDetailSerializer,
 )
 from .services import RadiusSyncService
+from .services.usage_service import build_online_context, get_period_usage, format_bytes
 
 # Import pagination classes
 from utils.pagination import LargeResultsSetPagination
@@ -193,7 +194,10 @@ class RadiusActiveSessionsView(APIView):
         if limit_param is not None and 'page' not in request.query_params:
             # Legacy mode: use limit without pagination
             limit = min(int(limit_param), 500)
-            radacct_data = OnlineUserSerializer(radacct_qs[:limit], many=True).data
+            rows = list(radacct_qs[:limit])
+            radacct_data = OnlineUserSerializer(
+                rows, many=True, context=build_online_context(rows)
+            ).data
             
             return Response({
                 "count": len(radacct_data),
@@ -208,8 +212,10 @@ class RadiusActiveSessionsView(APIView):
         start = (page - 1) * page_size
         end = start + page_size
         
-        paginated_sessions = radacct_qs[start:end]
-        radacct_data = OnlineUserSerializer(paginated_sessions, many=True).data
+        rows = list(radacct_qs[start:end])
+        radacct_data = OnlineUserSerializer(
+            rows, many=True, context=build_online_context(rows)
+        ).data
         
         # Build pagination URLs
         base_url = request.build_absolute_uri('/api/v1/radius/sessions/active/')
@@ -299,6 +305,31 @@ class RadiusOnlineUsernamesView(APIView):
             }
 
         return Response({'online': result, 'count': len(result)})
+
+
+# ────────────────────────────────────────────────────────────────
+# NEW: Subscription-Period Usage Bulk Endpoint
+# ────────────────────────────────────────────────────────────────
+
+class RadiusUsageBulkView(APIView):
+    """
+    GET /api/v1/radius/usage/?usernames=a&usernames=b   (max 200)
+
+    Subscription-period usage for any set of usernames (PPPoE or hotspot),
+    online or offline. Single SQL query regardless of list size.
+    """
+    permission_classes = [IsAuthenticated, HasCompanyAccess, HasRoleAccessPolicy]
+    required_rbac_paths = ("/admin/users", "/admin/radius")
+
+    def get(self, request):
+        names = [n.strip() for n in request.query_params.getlist('usernames') if n and n.strip()][:200]
+        totals = get_period_usage(names)
+        return Response({
+            'usage': {
+                n: {'bytes': b, 'usage': format_bytes(b)}
+                for n, b in totals.items()
+            }
+        })
 
 
 # ────────────────────────────────────────────────────────────────
