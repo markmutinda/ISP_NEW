@@ -173,7 +173,27 @@ class HotspotRadiusService:
             
             # Data limit (if applicable)
             # FIX: Force conversion here too
-            if plan.data_limit_mb and plan.data_limit_mb > 0:
+            #
+            # 🆕 FUP rework: if the plan is linked to an active FUP policy,
+            # the policy's limit_bytes is the authoritative cap (same value
+            # PPPoE uses via Mikrotik-Total-Limit) — so hotspot FUP is
+            # enforced identically by the router. Falls back to the plan's
+            # own data cap for non-FUP plans.
+            fup_policy = self._get_active_fup_policy_for_plan(plan)
+            if fup_policy and fup_policy.reset_period != 'PEAK_HOURS':
+                # FUP policy linked → policy.limit_bytes is the cap
+                try:
+                    reply_attributes['Mikrotik-Total-Limit'] = str(fup_policy.limit_bytes)
+                    logger.debug(
+                        f"FUP hard cap applied for {username}: "
+                        f"policy={fup_policy.name} limit={fup_policy.limit_bytes}B"
+                    )
+                except (ValueError, TypeError, AttributeError):
+                    logger.warning(
+                        f"Invalid FUP policy limit for plan {plan.name}: {fup_policy}"
+                    )
+            elif plan.data_limit_mb and plan.data_limit_mb > 0:
+                # No FUP policy → fall back to plan's own data cap
                 try:
                     limit_mb = float(plan.data_limit_mb)
                     data_bytes = int(limit_mb * 1024 * 1024)
@@ -238,6 +258,36 @@ class HotspotRadiusService:
         except Exception as e:
             logger.error(f"Failed to create hotspot RADIUS credentials: {e}", exc_info=True)
             return False
+    
+    def _get_active_fup_policy_for_plan(self, plan):
+        """
+        Resolve the active FUP policy linked to a hotspot plan, if any.
+
+        Uses FUPPolicyHotspotPlan (the link table for hotspot plans), which is
+        the same table FUPUsageService.get_active_policy_for_hotspot_session
+        reads from. Returns None if no active FUP policy is linked.
+
+        Kept as a small private helper so create_hotspot_credentials doesn't
+        need a HotspotSession instance (which may not exist yet at credential
+        creation time — we only have the plan).
+        """
+        try:
+            from apps.fup.models import FUPPolicyHotspotPlan
+            link = (
+                FUPPolicyHotspotPlan.objects
+                .select_related('policy')
+                .filter(
+                    hotspot_plan=plan,
+                    is_active=True,
+                    policy__is_active=True,
+                    policy__status='ACTIVE',
+                )
+                .first()
+            )
+            return link.policy if link else None
+        except Exception as e:
+            logger.warning(f"FUP policy lookup failed for hotspot plan {plan}: {e}")
+            return None
     
     def create_mac_auth_entry(
         self,

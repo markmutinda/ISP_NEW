@@ -60,6 +60,19 @@ class FUPUsageService:
             # Overnight e.g. 22:00–02:00
             return current >= start or current <= end
 
+    def _hour_in_peak_window(self, local_hour, peak_start, peak_end) -> bool:
+        """
+        Check whether a given local time-of-day falls inside a peak window.
+        Mirrors _is_peak_hour's logic but takes a time object (not a policy/datetime).
+        Handles both normal and overnight ranges.
+        """
+        if not peak_start or not peak_end:
+            return True  # No config → always in window
+        if peak_start <= peak_end:
+            return peak_start <= local_hour <= peak_end
+        else:
+            return local_hour >= peak_start or local_hour <= peak_end
+
     # ─── Window Resolution ────────────────────────────────────────────────────
 
     def resolve_window(self, policy, service_connection=None, activation_date=None, now=None):
@@ -301,3 +314,26 @@ class FUPUsageService:
             if self.sync_usage_for_hotspot_session(session, now=now):
                 synced += 1
         return synced
+
+    # ═══════════════════════════════════════════════════════════════════════════
+    # NEW — Peak-hour accurate usage lookup (FUP rework)
+    # ═══════════════════════════════════════════════════════════════════════════
+
+    def get_peak_hour_usage_bytes(self, policy, username, day_start) -> int:
+        """
+        Sum usage buckets that fall inside the policy's peak-hour window.
+
+        Because FUPUsageBucket stamps the real hour each delta was accrued in,
+        this is the *only* accurate way to measure peak-hour-only usage —
+        cumulative radacct counters can't tell you when bytes were spent.
+        """
+        from apps.fup.models import FUPUsageBucket
+        buckets = FUPUsageBucket.objects.filter(
+            policy=policy, username=username, hour_start__gte=day_start,
+        )
+        total = 0
+        for b in buckets:
+            local_hour = timezone.localtime(b.hour_start, NAIROBI_TZ).time()
+            if self._hour_in_peak_window(local_hour, policy.peak_hour_start, policy.peak_hour_end):
+                total += b.bytes_total
+        return total

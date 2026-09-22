@@ -1,199 +1,85 @@
 import logging
-from celery import shared_task
+from celery import shared_task, group
 from django_tenants.utils import schema_context, get_tenant_model
-from django.db import models
+from django.core.cache import cache
 from django.utils import timezone
-from .services import FUPUsageService, FUPEnforcementService
 
 logger = logging.getLogger(__name__)
 
-@shared_task
-def sync_fup_usage():
-    """Aggregates traffic for ALL tenants — both PPPoE and hotspot."""
+
+@shared_task(name='apps.fup.tasks.fup_delta_sync_fanout')
+def fup_delta_sync_fanout():
+    """Fan out one delta-sync task per tenant."""
     TenantModel = get_tenant_model()
-    tenants = TenantModel.objects.exclude(schema_name='public')
-    total_synced = 0
-    
-    for tenant in tenants:
-        with schema_context(tenant.schema_name):
-            try:
-                service = FUPUsageService()
-                synced = service.sync_usage_for_all_active_services()
-                # NEW: also sync hotspot sessions
-                synced += service.sync_usage_for_all_active_hotspot_sessions()
-                total_synced += synced
-                if synced > 0:
-                    logger.info(f"[FUP SYNC] {synced} services/sessions updated for tenant {tenant.schema_name}")
-            except Exception as e:
-                logger.error(f"[FUP SYNC] Error in tenant {tenant.schema_name}: {e}")
-                
-    return {'total_synced': total_synced}
+    schemas = list(
+        TenantModel.objects.exclude(schema_name='public').values_list('schema_name', flat=True)
+    )
+    group(fup_delta_sync_for_tenant.s(schema) for schema in schemas).apply_async()
+    return {'tenants_dispatched': len(schemas)}
 
-@shared_task
-def enforce_fup_policies():
-    """Evaluates thresholds and applies throttles for ALL tenants."""
-    TenantModel = get_tenant_model()
-    tenants = TenantModel.objects.exclude(schema_name='public')
-    total_processed = 0
-    
-    for tenant in tenants:
-        with schema_context(tenant.schema_name):
-            try:
-                result = FUPEnforcementService().enforce_all()
-                processed = result.get('processed', 0)
-                total_processed += processed
-                if processed > 0:
-                    logger.info(f"[FUP ENFORCE] {processed} users evaluated for tenant {tenant.schema_name}")
-            except Exception as e:
-                logger.error(f"[FUP ENFORCE] Error in tenant {tenant.schema_name}: {e}")
 
-    return {'total_processed': total_processed}
+@shared_task(
+    name='apps.fup.tasks.fup_delta_sync_for_tenant',
+    bind=True,
+    max_retries=2,
+    default_retry_delay=10,
+)
+def fup_delta_sync_for_tenant(self, schema_name: str):
+    from apps.fup.services.delta_sync_service import FUPDeltaSyncService
 
-@shared_task
+    lock_key = f"fup_delta_sync_lock:{schema_name}"
+    if not cache.add(lock_key, "1", timeout=55):
+        logger.info(f"[FUP DELTA] {schema_name}: previous run still active, skipping")
+        return {'skipped': True}
+    try:
+        with schema_context(schema_name):
+            result = FUPDeltaSyncService().run()
+            if result.get('windows_updated'):
+                logger.info(f"[FUP DELTA] {schema_name}: {result}")
+            return result
+    except Exception as exc:
+        logger.error(f"[FUP DELTA] {schema_name} failed: {exc}")
+        raise self.retry(exc=exc)
+    finally:
+        cache.delete(lock_key)
+
+
+@shared_task(name='apps.fup.tasks.reconcile_fup_states')
 def reconcile_fup_states():
-    """
-    Hourly: release throttles where the current usage window is within limits.
-    
-    This is CRITICAL for period resets (daily/weekly/monthly) where a user
-    was throttled in the previous period but their usage is now within limits
-    in the new period. Without this, they would stay throttled forever.
-    """
-    from apps.fup.models import FUPThrottleState, FUPUsageWindow
-    from apps.fup.services import FUPEnforcementService
-    from django.utils import timezone
-    
+    """Fan out one reconcile task per tenant."""
     TenantModel = get_tenant_model()
-    tenants = TenantModel.objects.exclude(schema_name='public')
-    total_released = 0
-    
-    for tenant in tenants:
-        try:
-            with schema_context(tenant.schema_name):
-                released_count = 0
-                now = timezone.now()
-                
-                # Get all active throttles (both PPPoE and Hotspot)
-                active_throttles = FUPThrottleState.objects.filter(
-                    active=True
-                ).select_related('service_connection', 'hotspot_session', 'policy')
-                
-                service = FUPEnforcementService()
-                
-                for ts in active_throttles:
-                    # Find the current usage window for this throttle
-                    current_window = None
-                    
-                    if ts.service_connection:
-                        # PPPoE / Static connection
-                        current_window = FUPUsageWindow.objects.filter(
-                            policy=ts.policy,
-                            service_connection=ts.service_connection,
-                            period_start__lte=now,
-                            period_end__gt=now,
-                        ).first()
-                    elif ts.hotspot_session:
-                        # Hotspot session
-                        current_window = FUPUsageWindow.objects.filter(
-                            policy=ts.policy,
-                            hotspot_session=ts.hotspot_session,
-                            period_start__lte=now,
-                            period_end__gt=now,
-                        ).first()
-                    else:
-                        # No connection or session - orphaned throttle, deactivate it
-                        logger.warning(f"FUP throttle {ts.id} has no associated service_connection or hotspot_session")
-                        ts.active = False
-                        ts.released_at = now
-                        ts.reason = 'Orphaned throttle - no associated connection'
-                        ts.save(update_fields=['active', 'released_at', 'reason'])
-                        continue
-                    
-                    # Check if we should release the throttle
-                    should_release = False
-                    release_reason = ''
-                    
-                    if not current_window:
-                        # No current window exists - this could be a period gap
-                        # Better to release to be safe
-                        should_release = True
-                        release_reason = 'No current usage window found'
-                        logger.warning(f"Throttle {ts.id} has no current window, releasing")
-                    elif current_window.total_bytes <= current_window.limit_bytes:
-                        # Usage is within limit in the current period
-                        should_release = True
-                        release_reason = f'Period reset - usage within limit ({current_window.total_gb} GB / {current_window.limit_gb} GB)'
-                    
-                    if should_release:
-                        try:
-                            if ts.service_connection:
-                                # Release PPPoE service throttle
-                                service.release_service(
-                                    ts.service_connection, 
-                                    reason=release_reason
-                                )
-                                released_count += 1
-                                logger.info(
-                                    f"[FUP RECONCILE] Released throttle for service {ts.service_connection.id} "
-                                    f"in tenant {tenant.schema_name}: {release_reason}"
-                                )
-                            elif ts.hotspot_session:
-                                # Release Hotspot session throttle
-                                service._release_hotspot_throttle(
-                                    ts.hotspot_session, 
-                                    ts, 
-                                    release_reason
-                                )
-                                released_count += 1
-                                logger.info(
-                                    f"[FUP RECONCILE] Released throttle for hotspot session {ts.hotspot_session.id} "
-                                    f"in tenant {tenant.schema_name}: {release_reason}"
-                                )
-                        except Exception as e:
-                            logger.error(
-                                f"[FUP RECONCILE] Failed to release throttle {ts.id} "
-                                f"in tenant {tenant.schema_name}: {e}"
-                            )
-                
-                total_released += released_count
-                if released_count > 0:
-                    logger.info(
-                        f"[FUP RECONCILE] Released {released_count} throttles for tenant {tenant.schema_name}"
-                    )
-                    
-        except Exception as e:
-            logger.error(f"[FUP RECONCILE] Error in tenant {tenant.schema_name}: {e}", exc_info=True)
-    
-    logger.info(f"[FUP RECONCILE] Complete: {total_released} throttles released across all tenants")
-    return {'status': 'ok', 'released': total_released}
+    schemas = list(
+        TenantModel.objects.exclude(schema_name='public').values_list('schema_name', flat=True)
+    )
+    group(reconcile_fup_states_for_tenant.s(s) for s in schemas).apply_async()
+    return {'tenants_dispatched': len(schemas)}
 
 
-@shared_task
-def reconcile_fup_states_for_tenant(schema_name: str):
-    """
-    Tenant-specific reconciliation task - useful for manual triggers.
-    
-    Args:
-        schema_name: The tenant schema to reconcile
-    """
+@shared_task(
+    name='apps.fup.tasks.reconcile_fup_states_for_tenant',
+    bind=True,
+    max_retries=2,
+    default_retry_delay=30,
+)
+def reconcile_fup_states_for_tenant(self, schema_name: str):
     from apps.fup.models import FUPThrottleState, FUPUsageWindow
     from apps.fup.services import FUPEnforcementService
-    from django.utils import timezone
-    
+
     released_count = 0
-    
+
     try:
         with schema_context(schema_name):
             now = timezone.now()
-            
+
             active_throttles = FUPThrottleState.objects.filter(
                 active=True
             ).select_related('service_connection', 'hotspot_session', 'policy')
-            
+
             service = FUPEnforcementService()
-            
+
             for ts in active_throttles:
                 current_window = None
-                
+
                 if ts.service_connection:
                     current_window = FUPUsageWindow.objects.filter(
                         policy=ts.policy,
@@ -214,29 +100,29 @@ def reconcile_fup_states_for_tenant(schema_name: str):
                     ts.reason = 'Orphaned throttle - no associated connection'
                     ts.save(update_fields=['active', 'released_at', 'reason'])
                     continue
-                
+
                 if not current_window or current_window.total_bytes <= current_window.limit_bytes:
                     if ts.service_connection:
                         service.release_service(
-                            ts.service_connection, 
+                            ts.service_connection,
                             reason='Period reset - within limits'
                         )
                         released_count += 1
                     elif ts.hotspot_session:
                         service._release_hotspot_throttle(
-                            ts.hotspot_session, 
-                            ts, 
+                            ts.hotspot_session,
+                            ts,
                             'Period reset - within limits'
                         )
                         released_count += 1
-            
+
             if released_count > 0:
                 logger.info(
                     f"[FUP RECONCILE] Released {released_count} throttles for tenant {schema_name}"
                 )
-                
+
     except Exception as e:
         logger.error(f"[FUP RECONCILE] Error in tenant {schema_name}: {e}", exc_info=True)
-        raise
-    
+        raise self.retry(exc=e)
+
     return {'schema': schema_name, 'released': released_count}

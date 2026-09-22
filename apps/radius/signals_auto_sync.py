@@ -523,6 +523,12 @@ def _get_or_create_bandwidth_profile(service_connection):
         defaults['burst_threshold'] = (plan.burst_threshold or 0) * multiplier
         defaults['burst_time'] = plan.burst_time or 10
     
+    # 🆕 FUP rework: populate fup_total_limit_bytes so MikroTik enforces the cap natively
+    from apps.fup.services.usage_service import FUPUsageService
+    _fup_policy = FUPUsageService().get_active_policy_for_service(service_connection)
+    _fup_limit = _fup_policy.limit_bytes if (_fup_policy and _fup_policy.reset_period != 'PEAK_HOURS') else None
+    defaults['fup_total_limit_bytes'] = _fup_limit
+    
     profile, created = RadiusBandwidthProfile.objects.get_or_create(
         name=profile_name,
         defaults=defaults,
@@ -560,6 +566,11 @@ def _get_or_create_bandwidth_profile(service_connection):
                 profile.burst_threshold = (plan.burst_threshold or 0) * multiplier
                 profile.burst_time = plan.burst_time or 10
                 needs_update = True
+        
+        # 🆕 FUP rework: keep fup_total_limit_bytes in sync on profile refresh
+        if profile.fup_total_limit_bytes != _fup_limit:
+            profile.fup_total_limit_bytes = _fup_limit
+            needs_update = True
         
         if needs_update:
             profile.save()

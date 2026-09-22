@@ -24,6 +24,7 @@ from .models import (
     FUPThrottleState,
     FUPUsageWindow,
     FUPAuditLog,
+    FUPUsageBucket,
 )
 from .serializers import (
     FUPPolicySerializer,
@@ -58,11 +59,21 @@ class FUPDashboardSummaryView(APIView):
         active_violations = FUPViolation.objects.filter(status='OPEN').count()
         currently_throttled = FUPThrottleState.objects.filter(active=True).count()
 
+        # 🆕 FUP rework: surface freshness of the new bucket-based usage data
+        # so admins can trust the numbers on the dashboard.
+        last_bucket = (
+            FUPUsageBucket.objects
+            .order_by('-hour_start')
+            .values_list('hour_start', flat=True)
+            .first()
+        )
+
         return Response({
             'active_policies': active_policies,
             'users_under_fup': users_under_fup,
             'active_violations': active_violations,
             'currently_throttled': currently_throttled,
+            'last_synced_at': last_bucket,
         })
 
 
@@ -399,6 +410,34 @@ class FUPPolicyViewSet(viewsets.ModelViewSet):
         )
                 
         return Response({'message': 'Manual enforcement complete.', 'services_processed': count})
+
+    # 🆕 FUP rework: cheap dry-run preview of a policy's impact
+    @action(detail=False, methods=['post'])
+    def preview_impact(self, request):
+        """
+        Cheap dry-run: how many active users a not-yet-saved policy config
+        would cover, and how many are already over the proposed limit.
+        Uses existing FUPUsageWindow rows — no new aggregation.
+        """
+        data_limit_gb = request.data.get('data_limit_gb')
+        if not data_limit_gb:
+            return Response({'affected': 0, 'would_throttle_now': 0})
+        limit_bytes = int(float(data_limit_gb) * 1024 ** 3)
+
+        # If editing an existing policy, scope to its linked plans; for a brand
+        # new policy there's nothing linked yet, so affected=0 is correct/expected.
+        policy_id = request.data.get('id')
+        if not policy_id:
+            return Response({'affected': 0, 'would_throttle_now': 0})
+
+        windows = FUPUsageWindow.objects.filter(
+            policy_id=policy_id,
+            period_start__lte=timezone.now(),
+            period_end__gt=timezone.now(),
+        )
+        affected = windows.count()
+        would_throttle = windows.filter(total_bytes__gt=limit_bytes).count()
+        return Response({'affected': affected, 'would_throttle_now': would_throttle})
 
 
 class FUPViolationViewSet(viewsets.ReadOnlyModelViewSet):

@@ -380,3 +380,49 @@ class FUPAuditLog(models.Model):
         ordering = ['-created_at']
         verbose_name = 'FUP Audit Log'
         verbose_name_plural = 'FUP Audit Logs'
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# NEW MODELS — Incremental counters + hour buckets (FUP rework)
+# ═══════════════════════════════════════════════════════════════════════════
+
+class FUPSessionCounter(models.Model):
+    """
+    High-water-mark per RADIUS session. Lets the delta-sync job compute
+    'bytes since last poll' with an indexed query instead of re-summing
+    the whole subscription window every cycle.
+    """
+    acctuniqueid = models.CharField(max_length=32, primary_key=True)
+    username = models.CharField(max_length=64, db_index=True)
+    last_input_octets = models.BigIntegerField(default=0)
+    last_output_octets = models.BigIntegerField(default=0)
+    last_synced_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        indexes = [models.Index(fields=['username'])]
+
+
+class FUPUsageBucket(models.Model):
+    """
+    One row per (policy, subject, hour). Deltas are attributed to the hour
+    they were accrued in, at write time — this is what makes PEAK_HOURS
+    policies accurate (cumulative radacct counters can't do this).
+    """
+    policy = models.ForeignKey('fup.FUPPolicy', on_delete=models.CASCADE, related_name='usage_buckets')
+    service_connection = models.ForeignKey(
+        'customers.ServiceConnection', on_delete=models.CASCADE, null=True, blank=True, related_name='fup_buckets'
+    )
+    hotspot_session = models.ForeignKey(
+        'billing.HotspotSession', on_delete=models.CASCADE, null=True, blank=True, related_name='fup_buckets'
+    )
+    username = models.CharField(max_length=64, db_index=True)
+    hour_start = models.DateTimeField(db_index=True)
+    bytes_total = models.BigIntegerField(default=0)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=['policy', 'username', 'hour_start'], name='uniq_fup_bucket_policy_user_hour'
+            ),
+        ]
+        indexes = [models.Index(fields=['username', 'hour_start'])]

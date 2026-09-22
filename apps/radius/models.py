@@ -438,6 +438,12 @@ class RadiusBandwidthProfile(models.Model):
     # Data limits (optional)
     daily_limit_mb = models.BigIntegerField(null=True, blank=True, help_text="Daily data limit in MB")
     monthly_limit_mb = models.BigIntegerField(null=True, blank=True, help_text="Monthly data limit in MB")
+    # 🆕 FUP rework: hard cap pushed to MikroTik so the router enforces the FUP byte limit natively
+    fup_total_limit_bytes = models.BigIntegerField(
+        null=True, blank=True,
+        help_text="Pushed to MikroTik as Mikrotik-Total-Limit so the router enforces "
+                   "the FUP data cap natively, independent of Celery polling."
+    )
     
     # Session limits
     session_timeout = models.IntegerField(null=True, blank=True, help_text="Session timeout in seconds")
@@ -493,6 +499,10 @@ class RadiusBandwidthProfile(models.Model):
         
         if self.simultaneous_use:
             attrs['Simultaneous-Use'] = str(self.simultaneous_use)
+        
+        # 🆕 FUP rework: emit Mikrotik-Total-Limit so router enforces FUP byte cap natively
+        if self.fup_total_limit_bytes:
+            attrs['Mikrotik-Total-Limit'] = str(self.fup_total_limit_bytes)
         
         return attrs
 
