@@ -28,6 +28,74 @@ def subscription_receipt_number(payment):
     return f"NET-RCPT-{str(payment.id).split('-')[0].upper()}"
 
 
+def _payment_window(payment, subscription):
+    start = getattr(payment, "period_start", None) or getattr(subscription, "current_period_start", None)
+    end = getattr(payment, "period_end", None) or getattr(subscription, "current_period_end", None)
+    if start and not end:
+        end = subscription.next_period_end(start)
+    return start, end
+
+
+def _candidate_invoice_references(subscription, tenant, payment=None):
+    """
+    Prefer the NET-BILL invoice that belongs to the payment window so a current
+    renewal is not swallowed by an unrelated older open invoice.
+    """
+    if not tenant or not subscription:
+        return []
+
+    from .models import BillingCycle
+
+    start, end = _payment_window(payment, subscription)
+    with schema_context(get_public_schema_name()):
+        qs = (
+            BillingCycle.objects.filter(
+                tenant=tenant,
+                subscription=subscription,
+                invoice_reference__isnull=False,
+            )
+            .exclude(invoice_reference="")
+            .order_by("-end_date", "-start_date")
+        )
+        if start and end:
+            overlap = list(qs.filter(start_date__lt=end, end_date__gt=start).values_list("invoice_reference", flat=True))
+            if overlap:
+                return [str(ref) for ref in overlap if ref]
+
+        return [
+            str(ref)
+            for ref in qs.filter(status__in=["invoiced", "active"]).values_list("invoice_reference", flat=True)[:5]
+            if ref
+        ]
+
+
+def get_target_net_bill_invoice_balance(subscription, tenant):
+    """
+    Return the most relevant outstanding tenant NET-BILL invoice and balance,
+    falling back to the oldest open invoice for legacy records.
+    """
+    candidate_refs = _candidate_invoice_references(subscription, tenant)
+    with schema_context(tenant.schema_name):
+        from apps.billing.models import Invoice
+
+        invoices = (
+            Invoice.objects.filter(invoice_number__startswith="NET-BILL")
+            .exclude(status__in=["VOIDED", "WRITTEN_OFF", "CANCELLED"])
+            .filter(balance__gt=0)
+        )
+        if candidate_refs:
+            by_cycle = {str(invoice.pk): invoice for invoice in invoices.filter(pk__in=candidate_refs)}
+            for ref in candidate_refs:
+                invoice = by_cycle.get(str(ref))
+                if invoice:
+                    return invoice, money(invoice.balance or invoice.total_amount)
+
+        invoice = invoices.order_by("created_at", "id").first()
+        if invoice:
+            return invoice, money(invoice.balance or invoice.total_amount)
+    return None, Decimal("0.00")
+
+
 @transaction.atomic
 def sync_subscription_invoice_payment(payment, *, notify=True):
     """
@@ -46,6 +114,7 @@ def sync_subscription_invoice_payment(payment, *, notify=True):
     paid_at = payment.completed_at or timezone.now()
     receipt_number = subscription_receipt_number(payment)
     invoice = None
+    candidate_refs = _candidate_invoice_references(subscription, tenant, payment)
 
     with schema_context(tenant.schema_name):
         from django.contrib.auth import get_user_model
@@ -81,7 +150,44 @@ def sync_subscription_invoice_payment(payment, *, notify=True):
         if existing_invoice:
             return existing_invoice
         amount_remaining = money(payment.amount)
+
+        if candidate_refs:
+            targeted = {str(candidate.pk): candidate for candidate in unpaid.filter(pk__in=candidate_refs)}
+            for ref in candidate_refs:
+                candidate = targeted.get(str(ref))
+                if not candidate:
+                    continue
+                existing_notes = candidate.internal_notes or ""
+                if receipt_number and receipt_number in existing_notes:
+                    invoice = candidate
+                    amount_remaining = Decimal("0.00")
+                    break
+
+                candidate_balance = money(candidate.balance if candidate.balance is not None else candidate.total_amount)
+                if candidate_balance <= 0:
+                    continue
+
+                applied = min(amount_remaining, candidate_balance)
+                candidate.amount_paid = money((candidate.amount_paid or Decimal("0.00")) + applied)
+                candidate.balance = money(max(candidate_balance - applied, Decimal("0.00")))
+                if candidate.balance <= 0:
+                    candidate.status = "PAID"
+                    candidate.paid_at = paid_at
+                else:
+                    candidate.status = "PARTIAL"
+                candidate.save(update_fields=["amount_paid", "balance", "status", "paid_at", "updated_at"])
+                invoice = candidate
+                amount_remaining = money(amount_remaining - applied)
+                candidate.internal_notes = f"{existing_notes}\n{payment_marker} Receipt: {receipt_number}. Applied: KES {applied}.".strip()
+                candidate.save(update_fields=["internal_notes", "updated_at"])
+                if amount_remaining <= 0:
+                    break
+
         for candidate in unpaid:
+            if amount_remaining <= 0:
+                break
+            if str(candidate.pk) in set(candidate_refs):
+                continue
             existing_notes = candidate.internal_notes or ""
             if receipt_number and receipt_number in existing_notes:
                 invoice = candidate
@@ -198,13 +304,6 @@ def complete_subscription_stk_payment(payment, mpesa_receipt=""):
                 locked.mpesa_receipt = mpesa_receipt
                 locked.save(update_fields=['mpesa_receipt'])
             invoice_fully_paid = subscription_invoice_is_fully_paid(invoice)
-            tenant = get_tenant_for_subscription(subscription)
-            if invoice_fully_paid and tenant:
-                with schema_context(tenant.schema_name):
-                    from apps.billing.models import Invoice
-                    invoice_fully_paid = not Invoice.objects.filter(
-                        invoice_number__startswith='NET-BILL', balance__gt=0,
-                    ).exclude(status__in=['VOIDED', 'WRITTEN_OFF', 'CANCELLED']).exists()
             if invoice_fully_paid:
                 locked.apply_intended_plan()
                 if subscription.is_trial or subscription.status in ('trialing', 'expired', 'pending'):

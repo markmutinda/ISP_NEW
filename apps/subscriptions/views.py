@@ -37,6 +37,7 @@ from .models import (
     CommissionLedger,
 )
 from .payment_recovery import reconcile_subscription_payment_from_gateway
+from .billing_lifecycle import get_target_net_bill_invoice_balance
 from .serializers import (
     NetilyPlanSerializer,
     CompanySubscriptionSerializer,
@@ -655,6 +656,18 @@ class BillingCycleBreakdownHistoryView(APIView):
                 invoice = Invoice.objects.filter(pk=cycle.invoice_reference).first()
                 if not invoice:
                     return payload
+                if str(invoice.status or '').upper() != 'PAID':
+                    try:
+                        from .tasks import _sync_net_bill_invoice_usage_items
+
+                        invoice = _sync_net_bill_invoice_usage_items(cycle, invoice)
+                    except Exception as sync_exc:
+                        logger.warning(
+                            "Failed syncing invoice usage for billing cycle %s tenant=%s: %s",
+                            cycle.id,
+                            getattr(tenant, 'schema_name', None),
+                            sync_exc,
+                        )
 
                 payload.update({
                     'invoice_id': str(invoice.id),
@@ -686,13 +699,22 @@ class BillingCycleBreakdownHistoryView(APIView):
         return payload
 
     def _cycle_payload(self, tenant, cycle):
-        hotspot_revenue = cycle.hotspot_revenue_accumulated or Decimal('0.00')
+        try:
+            hotspot_revenue = cycle.refresh_actual_hotspot_revenue()
+        except Exception as exc:
+            logger.warning(
+                "Failed refreshing hotspot revenue for billing cycle %s tenant=%s: %s",
+                cycle.id,
+                getattr(tenant, 'schema_name', None),
+                exc,
+            )
+            hotspot_revenue = cycle.hotspot_revenue_accumulated or Decimal('0.00')
         pppoe_count = cycle.calculate_total_pppoe()
         pppoe_charge = cycle.calculate_pppoe_charge()
         hotspot_share_amount = cycle.calculate_hotspot_revenue_share(hotspot_revenue)
         usage_subtotal = cycle.calculate_usage_subtotal(hotspot_revenue)
         minimum_adjustment = cycle.calculate_minimum_adjustment(hotspot_revenue)
-        total_charge = cycle.calculate_total_charge()
+        total_charge = cycle.calculate_billable_usage_charge(hotspot_revenue)
 
         payload = {
             'id': str(cycle.id),
@@ -819,21 +841,15 @@ class InitiateSubscriptionPaymentView(APIView):
         outstanding_invoice_balance = Decimal('0.00')
         outstanding_invoice_number = ''
 
-        try:
-            with schema_context(tenant.schema_name):
-                from apps.billing.models import Invoice
-                invoice = (
-                    Invoice.objects.filter(invoice_number__startswith='NET-BILL')
-                    .exclude(status__in=['VOIDED', 'WRITTEN_OFF', 'CANCELLED'])
-                    .filter(balance__gt=0)
-                    .order_by('created_at', 'id')
-                    .first()
-                )
+        with schema_context('public'):
+            existing_subscription = CompanySubscription.objects.filter(company=company).first()
+        if existing_subscription:
+            try:
+                invoice, outstanding_invoice_balance = get_target_net_bill_invoice_balance(existing_subscription, tenant)
                 if invoice:
-                    outstanding_invoice_balance = Decimal(str(invoice.balance or invoice.total_amount or '0')).quantize(Decimal('0.01'))
                     outstanding_invoice_number = invoice.invoice_number
-        except Exception as invoice_err:
-            logger.warning("Could not resolve outstanding NET-BILL balance for %s: %s", tenant.schema_name, invoice_err)
+            except Exception as invoice_err:
+                logger.warning("Could not resolve outstanding NET-BILL balance for %s: %s", tenant.schema_name, invoice_err)
         
         # ─────────────────────────────────────────────────────────────
         # Amount priority:

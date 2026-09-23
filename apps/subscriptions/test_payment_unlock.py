@@ -66,6 +66,25 @@ class PaymentUnlockTests(SimpleTestCase):
         self.payment.mark_completed.assert_not_called()
         self.subscription.extend_subscription.assert_called_once()
 
+    def test_paid_target_invoice_activates_even_with_unrelated_old_invoice(self):
+        tenant = SimpleNamespace(schema_name='tenant')
+        with (
+            patch('apps.subscriptions.billing_lifecycle.schema_context', return_value=nullcontext()),
+            patch('django.db.transaction.atomic', return_value=nullcontext()),
+            patch('django.db.transaction.on_commit'),
+            patch('apps.subscriptions.models.SubscriptionPayment.objects') as payments,
+            patch('apps.subscriptions.models.CompanySubscription.objects') as subscriptions,
+            patch('apps.subscriptions.billing_lifecycle.get_tenant_for_subscription', return_value=tenant),
+            patch(
+                'apps.subscriptions.billing_lifecycle.sync_subscription_invoice_payment',
+                return_value=SimpleNamespace(pk=1, balance=Decimal('0'), status='PAID'),
+            ),
+        ):
+            payments.select_for_update.return_value.get.return_value = self.payment
+            subscriptions.select_for_update.return_value.get.return_value = self.subscription
+            complete_subscription_stk_payment(self.payment, 'RECEIPT')
+        self.subscription.extend_subscription.assert_called_once()
+
     def test_old_payment_does_not_renew_a_later_expired_cycle(self):
         self.payment.status = 'completed'
         self.payment.completed_at = timezone.now() - timedelta(days=60)
@@ -137,3 +156,19 @@ class PaymentUnlockTests(SimpleTestCase):
         ):
             response = SubscriptionPaybillCallbackView()._process_callback(request)
         self.assertEqual(response.status_code, 503)
+
+    def test_hotspot_revenue_recorder_uses_atomic_f_expression(self):
+        from apps.billing.tasks import record_hotspot_revenue
+
+        tenant = SimpleNamespace(schema_name='tenant')
+        cycle = SimpleNamespace(id='cycle')
+        with (
+            patch('django_tenants.utils.schema_context', return_value=nullcontext()),
+            patch('apps.core.models.Tenant.objects.get', return_value=tenant),
+            patch('apps.subscriptions.models.BillingCycle.objects') as cycles,
+        ):
+            cycles.filter.return_value.first.return_value = cycle
+            record_hotspot_revenue('tenant', '125.50')
+        update_kwargs = cycles.filter.return_value.update.call_args.kwargs
+        self.assertIn('hotspot_revenue_accumulated', update_kwargs)
+        self.assertNotIsInstance(update_kwargs['hotspot_revenue_accumulated'], Decimal)

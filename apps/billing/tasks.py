@@ -20,6 +20,7 @@ import logging
 from celery import shared_task
 from datetime import timedelta
 
+from django.db.models import F
 from django.utils import timezone
 from decimal import Decimal
 
@@ -57,7 +58,7 @@ def record_hotspot_revenue(tenant_schema: str, amount_str: str):
             active_cycle = BillingCycle.objects.filter(tenant=tenant, status='active').first()
             if active_cycle:
                 BillingCycle.objects.filter(id=active_cycle.id).update(
-                    hotspot_revenue_accumulated=Decimal('F("hotspot_revenue_accumulated") + %s') % amount
+                    hotspot_revenue_accumulated=F("hotspot_revenue_accumulated") + amount
                 )
                 logger.info(
                     "Recorded hotspot revenue %s for %s (cycle %s)",
