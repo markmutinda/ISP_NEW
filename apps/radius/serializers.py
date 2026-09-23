@@ -17,6 +17,7 @@ from .models import (
     RadiusTenantConfig,
     CustomerRadiusCredentials,
 )
+from .services.usage_service import format_bytes, get_period_usage
 
 
 class RadCheckSerializer(serializers.ModelSerializer):
@@ -103,6 +104,9 @@ class OnlineUserSerializer(serializers.ModelSerializer):
         self._radius_cache = {}
 
     def _resolve_hotspot_session(self, obj):
+        prefetched = self.context.get('hotspot')
+        if prefetched is not None:
+            return prefetched.get(obj.username)
         username = obj.username
         if username not in self._hotspot_cache:
             from apps.billing.models.hotspot_models import HotspotSession
@@ -115,6 +119,9 @@ class OnlineUserSerializer(serializers.ModelSerializer):
         return self._hotspot_cache[username]
 
     def _resolve_radius_credentials(self, obj):
+        prefetched = self.context.get('creds')
+        if prefetched is not None:
+            return prefetched.get(obj.username)
         username = obj.username
         if username not in self._radius_cache:
             from apps.radius.models import CustomerRadiusCredentials
@@ -196,11 +203,13 @@ class OnlineUserSerializer(serializers.ModelSerializer):
         return None
 
     def get_router(self, obj) -> str:
-        # 1. Direct FK
         if obj.router:
             return obj.router.name
 
-        # 2. Resolve from NAS IP
+        routers = self.context.get('routers')
+        if routers is not None:
+            return routers.get(str(obj.nasipaddress)) or obj.nasipaddress or "Unknown Router"
+
         from apps.network.models import Router
         r = Router.objects.filter(
             models.Q(vpn_ip_address=obj.nasipaddress) |
@@ -221,79 +230,14 @@ class OnlineUserSerializer(serializers.ModelSerializer):
 
     def get_usage(self, obj) -> str:
         """
-        FIX: PPPoE usage no longer resets when user reconnects.
-        We now use subscription_activated_at as the anchor, falling back
-        to the start of the current calendar month (NOT obj.acctstarttime).
+        Usage accumulated across the CURRENT subscription period
+        (survives disconnects/reconnects, resets only on renewal).
         """
-        from django.db.models import Sum
-        import datetime
-
-        period_start = None
-
-        # ── PPPoE path: use explicit subscription activation timestamp ──
-        try:
-            from apps.radius.models import CustomerRadiusCredentials
-            creds = CustomerRadiusCredentials.objects.filter(username=obj.username).first()
-            if creds and creds.subscription_activated_at:
-                period_start = creds.subscription_activated_at
-            elif creds and creds.customer:
-                # Fallback: look for service activation date
-                service = creds.customer.services.filter(
-                    status='ACTIVE'
-                ).order_by('-activation_date').first()
-                if service and getattr(service, 'activation_date', None):
-                    ad = service.activation_date
-                    if isinstance(ad, datetime.date) and not isinstance(ad, datetime.datetime):
-                        ad = datetime.datetime(ad.year, ad.month, ad.day, tzinfo=datetime.timezone.utc)
-                    period_start = ad
-        except Exception:
-            pass
-
-        # ── Hotspot path: anchor to session activation ──────────────────
-        if period_start is None:
-            try:
-                from apps.billing.models.hotspot_models import HotspotSession
-                hs = (
-                    HotspotSession.objects
-                    .filter(access_code=obj.username, status__in=('active', 'paid'), activated_at__isnull=False)
-                    .order_by('-activated_at')
-                    .first()
-                )
-                if hs and hs.activated_at:
-                    period_start = hs.activated_at
-            except Exception:
-                pass
-
-        # ── FIX: Never use obj.acctstarttime as fallback for PPPoE!
-        #         That resets usage to 0 on every reconnect.
-        #         Use start of current calendar month instead. ──────────
-        if period_start is None:
-            from django.utils import timezone as _tz
-            _now = _tz.now()
-            period_start = _now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
-
-        # ── Sum all closed sessions since period_start ──────────────────
-        historical = RadAcct.objects.filter(
-            username=obj.username,
-            acctstoptime__isnull=False,
-            acctstarttime__gte=period_start,
-        ).aggregate(
-            total_in=Sum('acctinputoctets'),
-            total_out=Sum('acctoutputoctets'),
-        )
-
-        # ── Add the current open session ────────────────────────────────
-        current_in  = obj.acctinputoctets  or 0
-        current_out = obj.acctoutputoctets or 0
-        hist_in     = historical['total_in']  or 0
-        hist_out    = historical['total_out'] or 0
-
-        total_bytes = current_in + current_out + hist_in + hist_out
-
-        mb = total_bytes / (1024 * 1024)
-        if mb >= 1024:
-            return f"{mb / 1024:.2f} GB"
-        return f"{mb:.2f} MB"
+        usage_map = self.context.get('usage')
+        if usage_map is not None and obj.username in usage_map:
+            return usage_map[obj.username]
+        # Single-object fallback (no prefetched context)
+        return format_bytes(get_period_usage([obj.username]).get(obj.username, 0))
 
     def get_service_type(self, obj) -> str:
         """
@@ -305,8 +249,7 @@ class OnlineUserSerializer(serializers.ModelSerializer):
             return 'PPPOE'
 
         # Check if there's a hotspot session for this username
-        from apps.billing.models.hotspot_models import HotspotSession
-        if HotspotSession.objects.filter(access_code=obj.username).exists():
+        if self._resolve_hotspot_session(obj):
             return 'HOTSPOT'
 
         # nasporttype hints

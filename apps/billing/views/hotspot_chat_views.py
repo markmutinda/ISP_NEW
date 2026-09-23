@@ -58,6 +58,7 @@ def _serialize_thread(t, *, with_messages=False):
         'last_message_preview': t.last_message_preview,
         'last_message_at': t.last_message_at.isoformat() if t.last_message_at else None,
         'unread_by_customer': t.unread_by_customer,
+        'unread_by_admin': t.unread_by_admin,
     }
     if with_messages:
         data['messages'] = [_serialize_message(m) for m in t.messages.all()]
@@ -161,11 +162,61 @@ class HotspotChatSendView(APIView):
                 sender_name=phone,
                 body=body,
             )
-            # Re-opens a resolved thread the moment the customer writes again.
-            thread.unread_by_admin = True
-            thread.touch(message, status_value='open' if thread.status == 'resolved' else thread.status)
+            thread.touch(
+                message,
+                status_value='open',       # was: 'open' if thread.status == 'resolved' else None
+                unread_by_admin=True,
+            )
 
             return Response({
                 'thread': _serialize_thread(thread, with_messages=False),
                 'message': _serialize_message(message),
             }, status=status.HTTP_201_CREATED)
+
+
+class HotspotChatPollThrottle(AnonRateThrottle):
+    scope = 'hotspot_chat_poll'
+
+
+class HotspotChatPollView(APIView):
+    """
+    GET /api/v1/hotspot/chat/poll/?tenant=&thread_id=&after_id=0
+    Returns only messages newer than after_id — cheap enough to poll every few seconds.
+    """
+    permission_classes = [AllowAny]
+    authentication_classes = []
+    throttle_classes = [HotspotChatPollThrottle]
+
+    def get(self, request):
+        tenant_subdomain = request.query_params.get('tenant')
+        thread_id = request.query_params.get('thread_id')
+        if not tenant_subdomain or not thread_id:
+            return Response({'error': 'tenant and thread_id are required'}, status=400)
+
+        tenant = _resolve_tenant(tenant_subdomain)
+        if not tenant:
+            return Response({'error': 'Invalid tenant'}, status=400)
+
+        try:
+            after_id = int(request.query_params.get('after_id', 0))
+        except (TypeError, ValueError):
+            after_id = 0
+
+        with schema_context(tenant.schema_name):
+            rows = list(
+                HotspotChatMessage.objects.filter(thread_id=thread_id, id__gt=after_id)
+                .order_by('created_at')
+                .values('id', 'sender_type', 'sender_name', 'body', 'created_at')[:100]
+            )
+            thread_status = (
+                HotspotChatThread.objects.filter(id=thread_id)
+                .values_list('status', flat=True)
+                .first()
+            )
+
+        return Response({
+            'messages': [
+                {**r, 'created_at': r['created_at'].isoformat()} for r in rows
+            ],
+            'status': thread_status,
+        })

@@ -7,6 +7,7 @@ from .views import (
     RadiusDashboardView,
     RadiusActiveSessionsView,
     RadiusOnlineUsernamesView,  # NEW: Import the new view
+    RadiusUsageBulkView,  # NEW: Subscription-period usage endpoint
     RadiusUserView,
     RadiusUserActionView,
     RadAcctViewSet,
@@ -33,6 +34,9 @@ urlpatterns = [
     
     # NEW: Fast online usernames endpoint (no serializer overhead)
     path('sessions/online-usernames/', RadiusOnlineUsernamesView.as_view(), name='radius-online-usernames'),
+    
+    # NEW: Subscription-period usage for a set of usernames
+    path('usage/', RadiusUsageBulkView.as_view(), name='radius-usage-bulk'),
     
     # User management
     path('users/', RadiusUserView.as_view(), name='radius-user-list'),

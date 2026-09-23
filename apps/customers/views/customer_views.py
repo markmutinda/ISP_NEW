@@ -105,7 +105,7 @@ class CustomerViewSet(viewsets.ModelViewSet):
         # FIX: Added 'retrieve', 'list', 'dashboard' to admin-accessible actions
         if self.action in ['create', 'update', 'partial_update', 'destroy',
                            'toggle_radius', 'change_status', 'available_plans',
-                           'change_plan', 'retrieve', 'list', 'dashboard']:
+                           'change_plan', 'retrieve', 'list', 'dashboard', 'renew']:
             permission_classes = [IsAuthenticated, IsAdminOrStaff, HasRoleAccessPolicy]
         else:
             permission_classes = [IsAuthenticated, CustomerAccessPermission]
@@ -493,6 +493,64 @@ class CustomerViewSet(viewsets.ModelViewSet):
             'message': f'RADIUS access {action_label} for {customer.customer_code}',
             'is_enabled': credentials.is_enabled,
             'username': credentials.username,
+        })
+
+    @action(detail=True, methods=['post'])
+    def renew(self, request, pk=None):
+        """
+        Manually renew a PPPoE/Static subscription as if a payment just landed.
+        POST /customers/{id}/renew/
+        Body: { record_payment?: bool, amount?: number, payment_reference?: str,
+                notes?: str, payment_method_id?: int, send_sms?: bool }
+        """
+        from apps.billing.services.renewal_service import renew_subscription, RenewalError
+
+        def _flag(value, default):
+            if value is None:
+                return default
+            if isinstance(value, bool):
+                return value
+            return str(value).strip().lower() in ('1', 'true', 'yes', 'on')
+
+        customer = self.get_object()
+        data = request.data
+        record_payment = _flag(data.get('record_payment'), True)
+
+        try:
+            result = renew_subscription(
+                customer,
+                performed_by=request.user,
+                record_payment=record_payment,
+                amount=data.get('amount'),
+                payment_method_id=data.get('payment_method_id') or None,
+                reference=(data.get('payment_reference') or '').strip()[:100],
+                notes=(data.get('notes') or '').strip(),
+                send_sms=_flag(data.get('send_sms'), record_payment),
+            )
+        except RenewalError as e:
+            return Response({'status': 'error', 'message': str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+        AuditLog.log_action(
+            user=request.user,
+            action="update",
+            model_name="Subscription Renewal",
+            object_id=str(customer.id),
+            object_repr=f"{customer.customer_code} - {result['plan_name']}",
+            changes={
+                "event": "manual_renewal",
+                "previous_expiration": result['previous_expiration'],
+                "new_expiration": result['new_expiration'],
+                "payment": result['payment'],
+            },
+            ip_address=request.META.get("REMOTE_ADDR"),
+            user_agent=request.META.get("HTTP_USER_AGENT", ""),
+            tenant=getattr(request, "tenant", None),
+        )
+
+        return Response({
+            'status': 'success',
+            'message': f"Subscription renewed ({result['plan_name']})",
+            **result,
         })
 
 

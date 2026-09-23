@@ -299,19 +299,23 @@ app.conf.beat_schedule = {
         'options': {'queue': 'billing'}
     },
 
-    # ────────────────────────────────────────────────────────────────
-    # FUP Automation - Every 10 minutes
-    # ────────────────────────────────────────────────────────────────
-    'sync-fup-usage-every-10-min': {
-        'task': 'apps.fup.tasks.sync_fup_usage',
-        'schedule': crontab(minute='*/10'),
-        'options': {'queue': 'radius'}
+    # ════════════════════════════════════════════════════════════════
+    # FUP Automation — REWORKED
+    # ════════════════════════════════════════════════════════════════
+    # The two heavy N+1 jobs (sync-fup-usage-every-10-min and
+    # enforce-fup-policies-every-10-min) are REMOVED — they were replaced
+    # by event-driven delta sync + inline threshold enforcement.
+    # Delta accrual + crossed-threshold enforcement now happens inline
+    # inside fup_delta_sync_fanout, so a separate "enforce everyone" pass
+    # is no longer needed for the common case.
+    'fup-delta-sync-every-1-min': {
+        'task': 'apps.fup.tasks.fup_delta_sync_fanout',
+        'schedule': 60,  # Every 60 seconds
+        'options': {'queue': 'radius'},
     },
-    'enforce-fup-policies-every-10-min': {
-        'task': 'apps.fup.tasks.enforce_fup_policies',
-        'schedule': crontab(minute='*/10'),
-        'options': {'queue': 'radius'}
-    },
+    # Kept as a lightweight SAFETY NET only — catches drift/missed accounting
+    # packets and releases anyone whose window reset since the last check.
+    # No longer the primary enforcement mechanism.
     'reconcile-fup-states-hourly': {
         'task': 'apps.fup.tasks.reconcile_fup_states',
         'schedule': crontab(minute=15),  # Every hour at :15

@@ -50,12 +50,20 @@ class HotspotChatThread(models.Model):
     def __str__(self):
         return f"Chat<{self.phone_number}:{self.status}>"
 
-    def touch(self, message, *, status_value=None):
+    def touch(self, message, *, status_value=None, unread_by_admin=None, unread_by_customer=None):
+        update_fields = ['last_message_preview', 'last_message_at', 'updated_at']
         self.last_message_preview = message.body[:260]
         self.last_message_at = message.created_at
         if status_value:
             self.status = status_value
-        self.save(update_fields=['last_message_preview', 'last_message_at', 'status', 'updated_at'])
+            update_fields.append('status')
+        if unread_by_admin is not None:
+            self.unread_by_admin = unread_by_admin
+            update_fields.append('unread_by_admin')
+        if unread_by_customer is not None:
+            self.unread_by_customer = unread_by_customer
+            update_fields.append('unread_by_customer')
+        self.save(update_fields=update_fields)
 
 
 class HotspotChatMessage(models.Model):

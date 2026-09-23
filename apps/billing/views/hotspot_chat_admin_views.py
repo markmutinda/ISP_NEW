@@ -52,6 +52,12 @@ class HotspotChatThreadDetailView(APIView):
             thread.save(update_fields=['unread_by_admin'])
         return Response(_serialize_thread(thread, with_messages=True))
 
+    def delete(self, request, pk):
+        deleted, _ = HotspotChatThread.objects.filter(pk=pk).delete()
+        if not deleted:
+            return Response({'error': 'Not found'}, status=404)
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
 
 class HotspotChatReplyView(APIView):
     permission_classes = [IsAuthenticated, IsAdminOrStaff, HasRoleAccessPolicy]
@@ -73,11 +79,10 @@ class HotspotChatReplyView(APIView):
             sender_name=request.user.get_full_name() or request.user.email or 'Support',
             body=body,
         )
-        thread.unread_by_customer = True
         if not thread.assigned_to:
             thread.assigned_to = request.user
             thread.save(update_fields=['assigned_to'])
-        thread.touch(message, status_value='pending')
+        thread.touch(message, status_value='pending', unread_by_customer=True)
 
         return Response(_serialize_message(message), status=status.HTTP_201_CREATED)
 
@@ -96,3 +101,34 @@ class HotspotChatStatusView(APIView):
         thread.status = new_status
         thread.save(update_fields=['status', 'updated_at'])
         return Response({'id': thread.id, 'status': thread.status})
+
+
+class HotspotChatThreadPollView(APIView):
+    """GET /api/v1/hotspot/admin/chats/<id>/poll/?after_id=0 — used only while the drawer is open."""
+    permission_classes = [IsAuthenticated, IsAdminOrStaff, HasRoleAccessPolicy]
+    required_rbac_path = "/admin/tickets"
+
+    def get(self, request, pk):
+        try:
+            after_id = int(request.query_params.get('after_id', 0))
+        except (TypeError, ValueError):
+            after_id = 0
+
+        thread = HotspotChatThread.objects.filter(pk=pk).only('status', 'unread_by_admin').first()
+        if not thread:
+            return Response({'error': 'Not found'}, status=404)
+
+        rows = list(
+            HotspotChatMessage.objects.filter(thread_id=pk, id__gt=after_id)
+            .order_by('created_at')
+            .values('id', 'sender_type', 'sender_name', 'body', 'created_at')[:100]
+        )
+
+        if thread.unread_by_admin:
+            thread.unread_by_admin = False
+            thread.save(update_fields=['unread_by_admin'])
+
+        return Response({
+            'messages': [{**r, 'created_at': r['created_at'].isoformat()} for r in rows],
+            'status': thread.status,
+        })

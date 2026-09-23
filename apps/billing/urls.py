@@ -95,10 +95,10 @@ from .views.invoice_settings_views import (
 # ==========================
 # Hotspot Chat URLs (NEW)
 # ==========================
-from .views.hotspot_chat_views import HotspotChatInitView, HotspotChatSendView
+from .views.hotspot_chat_views import HotspotChatInitView, HotspotChatSendView, HotspotChatPollView
 from .views.hotspot_chat_admin_views import (
     HotspotChatThreadListView, HotspotChatThreadDetailView,
-    HotspotChatReplyView, HotspotChatStatusView,
+    HotspotChatReplyView, HotspotChatStatusView, HotspotChatThreadPollView,
 )
 
 router = DefaultRouter()
@@ -150,6 +150,7 @@ hotspot_urlpatterns = [
     # CHAT (PUBLIC - anonymous hotspot users)
     path('chat/init/', HotspotChatInitView.as_view(), name='hotspot-chat-init'),
     path('chat/send/', HotspotChatSendView.as_view(), name='hotspot-chat-send'),
+    path('chat/poll/', HotspotChatPollView.as_view(), name='hotspot-chat-poll'),
 ]
 
 # ==========================
@@ -269,6 +270,7 @@ hotspot_admin_urlpatterns = [
     path('admin/chats/<int:pk>/', HotspotChatThreadDetailView.as_view(), name='hotspot-admin-chat-detail'),
     path('admin/chats/<int:pk>/reply/', HotspotChatReplyView.as_view(), name='hotspot-admin-chat-reply'),
     path('admin/chats/<int:pk>/status/', HotspotChatStatusView.as_view(), name='hotspot-admin-chat-status'),
+    path('admin/chats/<int:pk>/poll/', HotspotChatThreadPollView.as_view(), name='hotspot-admin-chat-poll'),
 ]
 
 # ==========================
