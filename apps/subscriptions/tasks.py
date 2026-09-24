@@ -1624,10 +1624,10 @@ def refresh_metered_billing_estimates():
                 'usage_subtotal': str(usage_subtotal),
                 'minimum_adjustment': str(minimum_adjustment),
                 'total_estimate': str(total_estimate),
-                'note': 'Estimate uses current PPPoE footprint plus actual hotspot revenue reconciled from the active billing cycle.',
+                'note': 'Estimate uses current PPPoE footprint plus hotspot revenue reconciled from the 30-day reports window.',
             }
-            cache_key = f'metered_estimate:{company.pk}'
-            cache.set(cache_key, data, timeout=60 * 60 * 9)  # 9-hour TTL (> 8 h so never cold)
+            cache_key = f'metered_estimate:v2:{company.pk}'
+            cache.set(cache_key, data, timeout=60 * 5)
             refreshed += 1
         except Exception as exc:
             logger.error(f"refresh_metered_billing_estimates failed for company {company.pk}: {exc}")

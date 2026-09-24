@@ -349,16 +349,38 @@ class CompanySubscription(models.Model):
                     status='invoiced'
                 ).update(status='paid')
                 
-                # 2. Generate the NEW active container for the next period
-                BillingCycle.objects.get_or_create(
+                # 2. Generate or reuse the active container for the renewed period.
+                #
+                # Historical tenants may have duplicate active cycle rows from
+                # earlier retries. A broad get_or_create(status='active') raises
+                # MultipleObjectsReturned in that state, which blocks the M-Pesa
+                # callback and leaves the payment stuck in processing.
+                target_cycle = (
+                    BillingCycle.objects.select_for_update()
+                    .filter(
+                        tenant=tenant,
+                        subscription=self,
+                        status='active',
+                        start_date=self.current_period_start,
+                        end_date=self.current_period_end,
+                    )
+                    .order_by('-start_date', '-id')
+                    .first()
+                )
+                if not target_cycle:
+                    target_cycle = BillingCycle.objects.create(
+                        tenant=tenant,
+                        subscription=self,
+                        status='active',
+                        start_date=self.current_period_start,
+                        end_date=self.current_period_end,
+                    )
+
+                BillingCycle.objects.filter(
                     tenant=tenant,
                     subscription=self,
                     status='active',
-                    defaults={
-                        'start_date': self.current_period_start,
-                        'end_date': self.current_period_end
-                    }
-                )
+                ).exclude(pk=target_cycle.pk).update(status='paid')
     
     def cancel(self, immediate: bool = False):
         """Cancel subscription"""

@@ -268,3 +268,35 @@ class PaymentUnlockTests(SimpleTestCase):
         self.assertEqual(start, cycle.start_date)
         self.assertEqual(end, now)
         self.assertEqual(details["revenue"], Decimal("9000.00"))
+
+    def test_subscription_extension_does_not_get_or_create_active_cycle_broadly(self):
+        from .models import CompanySubscription
+
+        now = timezone.now()
+        target_cycle = SimpleNamespace(pk='target-cycle')
+        subscription = SimpleNamespace(
+            company=SimpleNamespace(tenant=SimpleNamespace(pk='tenant')),
+            current_period_start=now - timedelta(days=31),
+            current_period_end=now - timedelta(days=1),
+            status='past_due',
+            ensure_billing_anchor=MagicMock(),
+            next_period_end=MagicMock(return_value=now + timedelta(days=30)),
+            save=MagicMock(),
+        )
+
+        with (
+            patch('django.db.transaction.atomic', return_value=nullcontext()),
+            patch('apps.subscriptions.models.timezone.now', return_value=now),
+            patch('apps.subscriptions.models.BillingCycle.objects') as cycles,
+        ):
+            cycles.select_for_update.return_value.filter.return_value.order_by.return_value.first.return_value = None
+            cycles.create.return_value = target_cycle
+
+            CompanySubscription.extend_subscription(subscription)
+
+        cycles.get_or_create.assert_not_called()
+        cycles.create.assert_called_once()
+        cleanup_filter = cycles.filter.call_args_list[-1].kwargs
+        self.assertEqual(cleanup_filter["status"], "active")
+        cycles.filter.return_value.exclude.assert_called_once_with(pk=target_cycle.pk)
+        cycles.filter.return_value.exclude.return_value.update.assert_called_once_with(status='paid')
