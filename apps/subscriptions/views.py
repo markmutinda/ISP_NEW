@@ -436,7 +436,7 @@ class SubscriptionUsageView(FreshBillingResponseMixin, APIView):
                         'hotspot_revenue_count': hotspot_revenue_details["count"],
                         'hotspot_revenue_source': hotspot_revenue_details["source"],
                         'hotspot_revenue_note': (
-                            'Hotspot revenue is reconciled from completed hotspot payments in the active billing cycle.'
+                            'Hotspot revenue is reconciled from the same completed hotspot payments shown in the 30-day revenue report.'
                             if hotspot_revenue_details["source"] == "completed_hotspot_payments"
                             else 'Hotspot revenue is reconciled from legacy paid hotspot sessions because no completed hotspot payment records were found in this cycle.'
                         ),
@@ -597,7 +597,7 @@ class MeteredBillingEstimateView(APIView):
             'usage_subtotal': str(usage_subtotal),
             'minimum_adjustment': str(minimum_adjustment),
             'total_estimate': str(total_estimate),
-            'note': 'Estimate uses current PPPoE footprint plus actual hotspot revenue reconciled from the active billing cycle.',
+            'note': 'Estimate uses current PPPoE footprint plus hotspot revenue reconciled from the 30-day reports window.',
         }
         cache.set(cache_key, data, timeout=60 * 5)
         return Response(data)

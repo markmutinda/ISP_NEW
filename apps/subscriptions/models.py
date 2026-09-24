@@ -1233,9 +1233,9 @@ class BillingCycle(models.Model):
 
         with schema_context(self.tenant.schema_name):
             from apps.billing.models.hotspot_models import HotspotSession
-            from apps.billing.services.hotspot_revenue import completed_hotspot_payment_revenue
+            from apps.billing.services.hotspot_revenue import rolling_reports_hotspot_payment_revenue
 
-            payment_details = completed_hotspot_payment_revenue(self.start_date, self.end_date)
+            payment_details = rolling_reports_hotspot_payment_revenue(self)
             payment_count = payment_details["count"]
 
             if payment_count:

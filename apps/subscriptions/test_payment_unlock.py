@@ -206,11 +206,65 @@ class PaymentUnlockTests(SimpleTestCase):
         with (
             patch('django_tenants.utils.schema_context', return_value=nullcontext()),
             patch(
-                'apps.billing.services.hotspot_revenue.completed_hotspot_payment_revenue',
+                'apps.billing.services.hotspot_revenue.rolling_reports_hotspot_payment_revenue',
                 return_value=reports_style_total,
             ) as revenue_source,
         ):
             details = cycle.get_actual_hotspot_revenue_details()
 
         self.assertEqual(details, reports_style_total)
-        revenue_source.assert_called_once_with(cycle.start_date, cycle.end_date)
+        revenue_source.assert_called_once_with(cycle)
+
+    def test_reports_hotspot_revenue_window_caps_long_cycles_to_rolling_30d(self):
+        from apps.billing.services.hotspot_revenue import rolling_reports_hotspot_payment_revenue
+
+        now = timezone.now()
+        cycle = SimpleNamespace(
+            start_date=now - timedelta(days=45),
+            end_date=now + timedelta(days=15),
+        )
+
+        with (
+            patch('apps.billing.services.hotspot_revenue.timezone.now', return_value=now),
+            patch(
+                'apps.billing.services.hotspot_revenue.completed_hotspot_payment_revenue',
+                return_value={
+                    "revenue": Decimal("34760.00"),
+                    "count": 2700,
+                    "source": "completed_hotspot_payments",
+                },
+            ) as revenue_source,
+        ):
+            details = rolling_reports_hotspot_payment_revenue(cycle)
+
+        start, end = revenue_source.call_args.args
+        self.assertEqual(start, now - timedelta(days=30))
+        self.assertEqual(end, now)
+        self.assertEqual(details["revenue"], Decimal("34760.00"))
+
+    def test_reports_hotspot_revenue_window_does_not_include_before_new_cycle(self):
+        from apps.billing.services.hotspot_revenue import rolling_reports_hotspot_payment_revenue
+
+        now = timezone.now()
+        cycle = SimpleNamespace(
+            start_date=now - timedelta(days=10),
+            end_date=now + timedelta(days=20),
+        )
+
+        with (
+            patch('apps.billing.services.hotspot_revenue.timezone.now', return_value=now),
+            patch(
+                'apps.billing.services.hotspot_revenue.completed_hotspot_payment_revenue',
+                return_value={
+                    "revenue": Decimal("9000.00"),
+                    "count": 900,
+                    "source": "completed_hotspot_payments",
+                },
+            ) as revenue_source,
+        ):
+            details = rolling_reports_hotspot_payment_revenue(cycle)
+
+        start, end = revenue_source.call_args.args
+        self.assertEqual(start, cycle.start_date)
+        self.assertEqual(end, now)
+        self.assertEqual(details["revenue"], Decimal("9000.00"))
