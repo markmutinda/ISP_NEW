@@ -497,7 +497,7 @@ class MeteredBillingEstimateView(APIView):
             return Response({'error': 'No company associated with your account'},
                             status=status.HTTP_400_BAD_REQUEST)
 
-        cache_key = f'metered_estimate:{company.pk}'
+        cache_key = f'metered_estimate:v2:{company.pk}'
         from django.core.cache import cache
         cached = cache.get(cache_key)
         if cached:
@@ -599,7 +599,7 @@ class MeteredBillingEstimateView(APIView):
             'total_estimate': str(total_estimate),
             'note': 'Estimate uses current PPPoE footprint plus actual hotspot revenue reconciled from the active billing cycle.',
         }
-        cache.set(cache_key, data, timeout=60 * 60 * 8)  # 8-hour TTL
+        cache.set(cache_key, data, timeout=60 * 5)
         return Response(data)
 
 

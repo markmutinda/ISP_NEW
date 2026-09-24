@@ -172,3 +172,45 @@ class PaymentUnlockTests(SimpleTestCase):
         update_kwargs = cycles.filter.return_value.update.call_args.kwargs
         self.assertIn('hotspot_revenue_accumulated', update_kwargs)
         self.assertNotIsInstance(update_kwargs['hotspot_revenue_accumulated'], Decimal)
+
+    def test_billing_cycle_hotspot_revenue_uses_reports_source(self):
+        from apps.core.models import Company, Tenant
+        from .models import BillingCycle
+
+        now = timezone.now()
+        company = Company(
+            name='Tenant',
+            slug='tenant',
+            email='tenant@example.com',
+            phone_number='0700000000',
+            address='Nairobi',
+            city='Nairobi',
+        )
+        tenant = Tenant(
+            company=company,
+            subdomain='tenant',
+            database_name='tenant',
+            schema_name='tenant',
+        )
+        cycle = BillingCycle(
+            tenant=tenant,
+            start_date=now - timedelta(days=30),
+            end_date=now,
+        )
+        reports_style_total = {
+            "revenue": Decimal("34740.00"),
+            "count": 12,
+            "source": "completed_hotspot_payments",
+        }
+
+        with (
+            patch('django_tenants.utils.schema_context', return_value=nullcontext()),
+            patch(
+                'apps.billing.services.hotspot_revenue.completed_hotspot_payment_revenue',
+                return_value=reports_style_total,
+            ) as revenue_source,
+        ):
+            details = cycle.get_actual_hotspot_revenue_details()
+
+        self.assertEqual(details, reports_style_total)
+        revenue_source.assert_called_once_with(cycle.start_date, cycle.end_date)

@@ -1229,30 +1229,17 @@ class BillingCycle(models.Model):
         fallback only when no completed hotspot payment exists in the cycle.
         """
         from django_tenants.utils import schema_context
-        from django.db.models import Q, Sum
+        from django.db.models import Sum
 
         with schema_context(self.tenant.schema_name):
-            from apps.billing.models import Payment
             from apps.billing.models.hotspot_models import HotspotSession
+            from apps.billing.services.hotspot_revenue import completed_hotspot_payment_revenue
 
-            payment_qs = Payment.objects.filter(
-                status='COMPLETED',
-                payment_date__gte=self.start_date,
-                payment_date__lt=self.end_date,
-            ).filter(
-                Q(service_type='HOTSPOT') |
-                Q(hotspot_session__isnull=False) |
-                Q(payment_number__istartswith='HS_')
-            )
-            payment_total = payment_qs.aggregate(total=Sum('amount'))['total'] or Decimal('0.00')
-            payment_count = payment_qs.count()
+            payment_details = completed_hotspot_payment_revenue(self.start_date, self.end_date)
+            payment_count = payment_details["count"]
 
             if payment_count:
-                return {
-                    "revenue": payment_total,
-                    "count": payment_count,
-                    "source": "completed_hotspot_payments",
-                }
+                return payment_details
 
             session_qs = HotspotSession.objects.filter(
                 status__in=['active', 'expired'],
