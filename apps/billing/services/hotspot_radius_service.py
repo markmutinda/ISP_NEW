@@ -89,6 +89,25 @@ class HotspotRadiusService:
             True if credentials were created successfully
         """
         try:
+            # ─── FIX: CoA pre-clear before (re)issuing credentials ───────────
+            # Closing stale radacct rows in our DB is not enough: if the NAS
+            # itself still believes this username/MAC has a live session
+            # (stale binding after MAC rotation, crash, or a previous grant),
+            # Simultaneous-Use=1 silently rejects the new Access-Request and
+            # MikroTik bounces the client back to the captive portal even
+            # though our backend reports success. A live CoA Disconnect
+            # forces the NAS to drop any such session first.
+            if router:
+                try:
+                    from apps.radius.services.coa_service import CoAService
+                    router_ip = getattr(router, 'vpn_ip_address', None) or getattr(router, 'ip_address', None)
+                    if router_ip:
+                        CoAService(nas_ip=router_ip).disconnect_user(
+                            username, nas_ip_address=router_ip
+                        )
+                except Exception as coa_err:
+                    logger.warning(f"CoA pre-clear failed for {username} (non-fatal): {coa_err}")
+
             # ─── FIX: ALWAYS run this — closes stale radacct rows ───
             # This is what actually fixes "no more sessions are allowed":
             # a ghost radacct row from before the reboot blocks 
