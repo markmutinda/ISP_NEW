@@ -117,9 +117,19 @@ class HotspotRadiusService:
             # ─── NEW: Debounce ONLY the expensive RadCheck/RadReply rewrite ───
             # So N devices polling/reconnecting within the same few seconds after
             # a reboot don't each trigger a full delete+recreate cycle.
-            debounce_key = f"hotspot_radius_sync:{username}"
+            #
+            # FIX: Key by (username, mac_address) — NOT username alone. A phone
+            # reconnect after MAC rotation legitimately needs a fresh write to
+            # update Calling-Station-Id. Debouncing on username-only silently
+            # skipped that write whenever the access_code had been touched in
+            # the last 15s (e.g. the original purchase), leaving the RADIUS
+            # MAC-lock pointed at the old, dead MAC — so the router rejected
+            # the reconnect and bounced the client back to the captive portal.
+            debounce_key = f"hotspot_radius_sync:{username}:{mac_address or 'nomac'}"
             if cache.get(debounce_key):
-                logger.debug(f"Hotspot RADIUS reseed debounced for {username}")
+                logger.debug(
+                    f"Hotspot RADIUS reseed debounced for {username}@{mac_address or 'nomac'}"
+                )
                 return True
             
             # Build check attributes (authentication)
