@@ -1018,3 +1018,20 @@ def send_pppoe_expiry_reminders():
             )
 
     return {'status': 'done'}
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# ASYNC CoA DISCONNECT (fire-and-forget)
+# ════════════════════════════════════════════════════════════════════════════
+
+@shared_task(name='apps.radius.tasks.send_coa_disconnect_async', queue='radius', ignore_result=True)
+def send_coa_disconnect_async(nas_ip: str, username: str, session_id: str = None):
+    """
+    Fire-and-forget CoA Disconnect-Request. Must never block the calling
+    HTTP request — a NAS timeout is already treated as "disconnected".
+    """
+    from apps.radius.services.coa_service import CoAService
+    try:
+        CoAService(nas_ip=nas_ip).disconnect_user_via_coa(username, nas_ip, session_id)
+    except Exception as e:
+        logger.warning(f"[ASYNC COA] disconnect failed for {username}@{nas_ip}: {e}")

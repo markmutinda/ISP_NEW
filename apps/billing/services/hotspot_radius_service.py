@@ -89,36 +89,14 @@ class HotspotRadiusService:
             True if credentials were created successfully
         """
         try:
-            # ─── FIX: CoA pre-clear before (re)issuing credentials ───────────
-            # Closing stale radacct rows in our DB is not enough: if the NAS
-            # itself still believes this username/MAC has a live session
-            # (stale binding after MAC rotation, crash, or a previous grant),
-            # Simultaneous-Use=1 silently rejects the new Access-Request and
-            # MikroTik bounces the client back to the captive portal even
-            # though our backend reports success. A live CoA Disconnect
-            # forces the NAS to drop any such session first.
-            if router:
-                try:
-                    from apps.radius.services.coa_service import CoAService
-                    router_ip = getattr(router, 'vpn_ip_address', None) or getattr(router, 'ip_address', None)
-                    if router_ip:
-                        CoAService(nas_ip=router_ip).disconnect_user(
-                            username, nas_ip_address=router_ip
-                        )
-                except Exception as coa_err:
-                    logger.warning(f"CoA pre-clear failed for {username} (non-fatal): {coa_err}")
-
-            # ─── FIX: ALWAYS run this — closes stale radacct rows ───
-            # This is what actually fixes "no more sessions are allowed":
-            # a ghost radacct row from before the reboot blocks 
-            # Simultaneous-Use=1 until it's closed.
-            self._close_stale_sessions_for_user(username)
-            
-            # ─── NEW: Debounce ONLY the expensive RadCheck/RadReply rewrite ───
-            # So N devices polling/reconnecting within the same few seconds after
-            # a reboot don't each trigger a full delete+recreate cycle.
+            # Debounce FIRST — before any CoA call or DB write. A debounced
+            # call means valid credentials for this (username, mac) were
+            # already issued moments ago (e.g. webhook + status-poll racing
+            # each other). Previously the CoA disconnect ran BEFORE this
+            # check, so the second caller would force-kick a client that
+            # the first caller had just connected.
             #
-            # FIX: Key by (username, mac_address) — NOT username alone. A phone
+            # Keyed by (username, mac_address) — NOT username alone. A phone
             # reconnect after MAC rotation legitimately needs a fresh write to
             # update Calling-Station-Id. Debouncing on username-only silently
             # skipped that write whenever the access_code had been touched in
@@ -131,6 +109,25 @@ class HotspotRadiusService:
                     f"Hotspot RADIUS reseed debounced for {username}@{mac_address or 'nomac'}"
                 )
                 return True
+
+            # CoA pre-clear — dispatched async. Correctness never depended on
+            # the NAS ack (a timeout is already treated as success inside
+            # CoAService), so blocking the request thread for 3-5s here was
+            # pure latency and the direct cause of client-side request aborts
+            # on reconnect.
+            if router:
+                router_ip = getattr(router, 'vpn_ip_address', None) or getattr(router, 'ip_address', None)
+                if router_ip:
+                    try:
+                        from apps.radius.tasks import send_coa_disconnect_async
+                        send_coa_disconnect_async.delay(router_ip, username)
+                    except Exception as coa_err:
+                        logger.warning(f"CoA pre-clear dispatch failed for {username} (non-fatal): {coa_err}")
+
+            # ALWAYS run this — closes stale radacct rows. This is what
+            # actually fixes "no more sessions are allowed": a ghost radacct
+            # row from before a reboot blocks Simultaneous-Use=1 until closed.
+            self._close_stale_sessions_for_user(username)
             
             # Build check attributes (authentication)
             check_attributes = {
@@ -278,7 +275,7 @@ class HotspotRadiusService:
                 logger.warning(f"No expires_at for hotspot session {username}, relying on Session-Timeout only")
             # --- END FIX ---
             
-            # ─── NEW: Set debounce cache so we don't recreate on every poll ───
+            # Set debounce cache so we don't recreate on every poll
             cache.set(debounce_key, True, timeout=RADIUS_RESYNC_DEBOUNCE_SECONDS)
             
             logger.info(f"Hotspot RADIUS credentials synced: user={username} mac={mac_address}")
