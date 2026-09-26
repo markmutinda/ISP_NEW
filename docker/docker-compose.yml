@@ -5,11 +5,11 @@ services:
     restart: unless-stopped
     command: >
       postgres
-      -c max_connections=300
-      -c shared_buffers=1536MB
-      -c effective_cache_size=4096MB
-      -c work_mem=16MB
-      -c maintenance_work_mem=256MB
+      -c max_connections=150
+      -c shared_buffers=512MB
+      -c effective_cache_size=1536MB
+      -c work_mem=8MB
+      -c maintenance_work_mem=128MB
       -c checkpoint_completion_target=0.9
       -c wal_buffers=16MB
       -c random_page_cost=1.1
