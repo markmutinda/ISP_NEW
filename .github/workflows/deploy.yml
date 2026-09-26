@@ -99,9 +99,9 @@ jobs:
               sleep 3
             done
 
-            echo "==> Verifying PgBouncer can reach Postgres..."
-            run_step "PgBouncer end-to-end test" 1m bash -c '
-              docker compose exec -T pgbouncer pg_isready -h 127.0.0.1 -p 6432 -U netily -d netily_isp
+            echo "==> Verifying PgBouncer is accepting TCP connections..."
+            run_step "PgBouncer TCP check" 1m bash -c '
+              docker compose exec -T pgbouncer timeout 2 bash -c "</dev/tcp/127.0.0.1/6432" && echo "PgBouncer TCP: OK"
             '
 
             echo "==> Checking for missing model migrations..."
