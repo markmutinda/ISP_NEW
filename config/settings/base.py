@@ -184,6 +184,7 @@ DATABASES = {
         'HOST': os.environ.get('DB_HOST', 'localhost'),
         'PORT': os.environ.get('DB_PORT', '5432'),
         'CONN_MAX_AGE': 60,
+        'DISABLE_SERVER_SIDE_CURSORS': True,
     }
 }
 

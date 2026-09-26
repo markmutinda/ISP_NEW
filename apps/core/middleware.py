@@ -89,15 +89,39 @@ class TenantMainMiddleware(MiddlewareMixin):
 
     def _resolve_tenant(self, subdomain, full_host):
         """Try to find a tenant by subdomain, then by Domain record.
-        Returns (tenant, company) or (None, None).
+
+        Cache-first: routes through apps.core.tenant_cache.resolve_tenant_cached
+        which is Redis-backed (10-minute TTL for hits, 30s for negative lookups).
+        On a cache hit we only do one indexed PK lookup plus the company join;
+        on a miss the cache helper populates Redis for the next 10 minutes.
+
+        The Domain fallback is preserved for custom tenant domains
+        (e.g. bentrextechnologies.com) that don't match Tenant.subdomain.
         """
+        from .tenant_cache import resolve_tenant_cached
+
+        cached = resolve_tenant_cached(subdomain)
         connection.set_schema_to_public()
-        try:
-            tenant = Tenant.objects.get(subdomain=subdomain, is_active=True)
-        except Tenant.DoesNotExist:
-            # Fallback: look up by exact domain record
+
+        if cached:
             try:
-                domain = Domain.objects.get(domain=full_host)
+                tenant = Tenant.objects.select_related('company').get(pk=cached['id'])
+            except Tenant.DoesNotExist:
+                tenant = None
+            if tenant:
+                company = None
+                try:
+                    company = tenant.company
+                except Exception:
+                    pass
+                return tenant, company
+            # cached id stale (tenant deleted) — fall through to full lookup
+
+        try:
+            tenant = Tenant.objects.select_related('company').get(subdomain=subdomain, is_active=True)
+        except Tenant.DoesNotExist:
+            try:
+                domain = Domain.objects.select_related('tenant__company').get(domain=full_host)
                 tenant = domain.tenant
             except Domain.DoesNotExist:
                 return None, None

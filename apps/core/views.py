@@ -2,6 +2,7 @@
 Core views for ISP Management System
 """
 
+import functools
 import json
 
 from rest_framework import viewsets, status, generics, permissions
@@ -57,6 +58,29 @@ from .permissions import HasRoleAccessPolicy, IsAdmin, IsAdminOrStaff, IsCustome
 from .session_tokens import issue_refresh_token
 
 logger = logging.getLogger(__name__)
+
+
+def _threaded_db_task(fn):
+    """
+    Ensure DB connections opened inside a ThreadPoolExecutor worker thread
+    are returned to Django's connection pool when the task finishes.
+
+    Django only auto-closes connections at the end of the request/response
+    cycle on the request thread, not on arbitrary worker threads created
+    by concurrent.futures.ThreadPoolExecutor. Without this, every dashboard
+    load leaks up to N idle Postgres connections that never get released
+    until the thread is garbage-collected.
+
+    See: apps/core/views.py::UnifiedDashboardView
+    """
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        try:
+            return fn(*args, **kwargs)
+        finally:
+            from django.db import close_old_connections
+            close_old_connections()
+    return wrapper
 
 
 def _platform_admin_emails() -> set[str]:
@@ -2392,6 +2416,7 @@ class UnifiedDashboardView(APIView):
         month_start = today_start.replace(day=1)
         prev_month_start = (month_start - timedelta(days=1)).replace(day=1)
 
+        @_threaded_db_task
         def get_customer_stats():
             with schema_context(tenant_schema):
                 try:
@@ -2403,6 +2428,7 @@ class UnifiedDashboardView(APIView):
                 except Exception:
                     return {'total': 0, 'active': 0}
 
+        @_threaded_db_task
         def get_revenue_stats():
             with schema_context(tenant_schema):
                 try:
@@ -2419,6 +2445,7 @@ class UnifiedDashboardView(APIView):
                 except Exception:
                     return {}
 
+        @_threaded_db_task
         def get_router_stats():
             with schema_context(tenant_schema):
                 try:
@@ -2438,6 +2465,7 @@ class UnifiedDashboardView(APIView):
                     return {'total': 0, 'online': 0, 'offline': 0, 'warning': 0, 'maintenance': 0, 'total_connected_users': 0}
 
         # COMBINED: tickets, expired, online, and hotspot chats in ONE worker
+        @_threaded_db_task
         def get_misc_stats():
             with schema_context(tenant_schema):
                 try:
@@ -2476,6 +2504,7 @@ class UnifiedDashboardView(APIView):
                 except Exception:
                     return {'tickets': {}, 'expired': 0, 'online': 0, 'hotspot_chats': {'total': 0, 'unread': 0}}
 
+        @_threaded_db_task
         def get_active_subscriptions():
             with schema_context(tenant_schema):
                 try:
@@ -2497,6 +2526,7 @@ class UnifiedDashboardView(APIView):
                 except Exception:
                     return {'pppoe': 0, 'hotspot': 0, 'total': 0}
 
+        @_threaded_db_task
         def get_recent_activity():
             with schema_context(tenant_schema):
                 try:
@@ -2509,6 +2539,7 @@ class UnifiedDashboardView(APIView):
                 except Exception:
                     return []
 
+        @_threaded_db_task
         def get_weekly_income():
             with schema_context(tenant_schema):
                 try:
@@ -2537,6 +2568,7 @@ class UnifiedDashboardView(APIView):
                 except Exception:
                     return {'this_week': [], 'last_week': []}
 
+        @_threaded_db_task
         def get_monthly_earnings():
             with schema_context(tenant_schema):
                 try:
