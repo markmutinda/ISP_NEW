@@ -47,8 +47,6 @@ jobs:
               docker compose logs --tail=80 web || true
               echo "==> Recent worker logs"
               docker compose logs --tail=60 celery-worker || true
-              echo "==> Recent pgbouncer logs"
-              docker compose logs --tail=60 pgbouncer || true
               echo "==> Compose status"
               docker compose ps || true
             }
@@ -74,35 +72,9 @@ jobs:
 
             echo "==> Rebuilding ONLY backend application services..."
             cd docker
+            # 🟢 OPTIMIZATION 1: No 'compose down' (Zero database/VPN downtime).
+            # 🟢 OPTIMIZATION 2: Removed '--no-cache' to allow ultra-fast incremental builds.
             run_step "Building backend images" 18m docker compose build web celery-worker celery-beat
-
-            # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-            # 🆕 PgBouncer bootstrap — must run BEFORE any service that
-            #     connects to the database (migrations, web, worker, beat).
-            # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-            echo "==> Bringing up PgBouncer..."
-            run_step "Starting PgBouncer" 2m docker compose up -d pgbouncer
-
-            echo "==> Waiting for PgBouncer to become healthy..."
-            for i in $(seq 1 20); do
-              STATUS=$(docker inspect -f '{{.State.Health.Status}}' netily_pgbouncer 2>/dev/null || echo "missing")
-              echo "  Attempt $i: pgbouncer health = $STATUS"
-              if [ "$STATUS" = "healthy" ]; then
-                echo "  ✅ PgBouncer is healthy!"
-                break
-              fi
-              if [ "$i" = "20" ]; then
-                echo "  ❌ PgBouncer failed to become healthy. Dumping logs:"
-                docker compose logs --tail=80 pgbouncer
-                exit 1
-              fi
-              sleep 3
-            done
-
-            echo "==> Verifying PgBouncer is accepting TCP connections..."
-            run_step "PgBouncer TCP check" 1m bash -c '
-              docker compose exec -T pgbouncer timeout 2 bash -c "</dev/tcp/127.0.0.1/6432" && echo "PgBouncer TCP: OK"
-            '
 
             echo "==> Checking for missing model migrations..."
             run_step "Checking missing migrations" 3m docker compose run --rm web python manage.py makemigrations --check --dry-run
@@ -117,9 +89,11 @@ jobs:
             run_step "Seeding subscription plans" 3m docker compose run --rm web python manage.py seed_plans
 
             echo "==> Performing target rolling restart of backend services..."
+            # 🟢 OPTIMIZATION 3: '--no-deps' updates ONLY the backend without touching Nginx, DB, or WireGuard.
             run_step "Restarting backend services" 4m docker compose up -d --no-deps web celery-worker celery-beat
 
             echo "==> Injecting clean container-to-container network paths..."
+            # 🟢 OPTIMIZATION 4: The Network Guard. Explicitly overrides any multi-line IP lookup bugs automatically.
             TARGET_IP=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}} {{end}}' netily-openvpn | awk '{print $1}')
             docker exec -u 0 netily_backend ip route del 10.8.0.0/16 2>/dev/null || true
             docker exec -u 0 netily_backend ip route add 10.8.0.0/16 via $TARGET_IP || true
@@ -158,10 +132,6 @@ jobs:
               docker compose logs --tail=50 web
               exit 1
             }
-
-            echo "==> Verifying live Postgres connection count (post-PgBouncer)..."
-            docker exec netily_db psql -U netily -d netily_isp -c \
-              "SELECT count(*) AS connections_now FROM pg_stat_activity;" || true
 
             echo "==> Cleaning up old Docker images..."
             docker image prune -f
