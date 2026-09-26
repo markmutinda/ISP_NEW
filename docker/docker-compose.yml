@@ -64,7 +64,7 @@ services:
       - isp_network
 
   pgbouncer:
-    image: bitnami/pgbouncer:1.22.1
+    image: bitnamilegacy/pgbouncer:1.22.1
     container_name: netily_pgbouncer
     restart: unless-stopped
     environment:
