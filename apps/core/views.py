@@ -62,24 +62,24 @@ logger = logging.getLogger(__name__)
 
 def _threaded_db_task(fn):
     """
-    Ensure DB connections opened inside a ThreadPoolExecutor worker thread
-    are returned to Django's connection pool when the task finishes.
+    Force-close every DB connection this thread opened, rather than relying on
+    close_old_connections() (which only closes connections older than
+    CONN_MAX_AGE — and we run CONN_MAX_AGE=0, so this is now mostly a no-op
+    safety net for any remaining threaded call sites, e.g. Celery).
 
-    Django only auto-closes connections at the end of the request/response
-    cycle on the request thread, not on arbitrary worker threads created
-    by concurrent.futures.ThreadPoolExecutor. Without this, every dashboard
-    load leaks up to N idle Postgres connections that never get released
-    until the thread is garbage-collected.
-
-    See: apps/core/views.py::UnifiedDashboardView
+    connections.all() is thread-local: on a worker thread it only ever
+    contains that thread's own connection(s), never the request thread's.
+    Safe to call from inside a ThreadPoolExecutor worker without risk of
+    closing a connection another thread is still using.
     """
     @functools.wraps(fn)
     def wrapper(*args, **kwargs):
         try:
             return fn(*args, **kwargs)
         finally:
-            from django.db import close_old_connections
-            close_old_connections()
+            from django.db import connections
+            for conn in connections.all():
+                conn.close()
     return wrapper
 
 
@@ -2386,7 +2386,13 @@ class UnifiedDashboardView(APIView):
     """
     Single endpoint returning all dashboard data.
     Replaces 8+ separate API calls with one.
-    
+
+    v2 (sequential): All queries run on the single request thread, in
+    order, on one DB connection. This removes the ThreadPoolExecutor
+    that used to spawn up to 8 concurrent connections per dashboard
+    load — the single biggest multiplier on PgBouncer slot usage under
+    session-mode pooling.
+
     GET /api/v1/core/dashboard/unified/
     """
     permission_classes = [IsAuthenticated, IsAdminOrStaff, HasRoleAccessPolicy]
@@ -2396,222 +2402,178 @@ class UnifiedDashboardView(APIView):
         from django.db.models import Sum, Count, Q
         from django.utils import timezone
         from datetime import timedelta
-        import concurrent.futures
-
-        # Capture tenant schema BEFORE spawning threads
         from django.db import connection
+
         tenant_schema = connection.schema_name
         can_view_revenue = self._can_view_revenue(request)
 
-        # Convert to local time before computing day/week/month boundaries
         now = timezone.now()
         local_now = timezone.localtime(now)
         today_start = local_now.replace(hour=0, minute=0, second=0, microsecond=0)
         yesterday_start = today_start - timedelta(days=1)
-        
-        # Use Monday-anchored calendar week
         days_to_monday = today_start.weekday()
         week_start = today_start - timedelta(days=days_to_monday)
-        
         month_start = today_start.replace(day=1)
         prev_month_start = (month_start - timedelta(days=1)).replace(day=1)
 
-        @_threaded_db_task
+        # NOTE: these are plain functions now — no @_threaded_db_task, no
+        # schema_context wrapper needed since we're already on tenant_schema
+        # for the life of this request/connection.
+
         def get_customer_stats():
-            with schema_context(tenant_schema):
-                try:
-                    from apps.customers.models import Customer
-                    return Customer.objects.aggregate(
-                        total=Count('id'),
-                        active=Count('id', filter=Q(status='ACTIVE')),
-                    )
-                except Exception:
-                    return {'total': 0, 'active': 0}
+            try:
+                from apps.customers.models import Customer
+                return Customer.objects.aggregate(
+                    total=Count('id'),
+                    active=Count('id', filter=Q(status='ACTIVE')),
+                )
+            except Exception:
+                return {'total': 0, 'active': 0}
 
-        @_threaded_db_task
         def get_revenue_stats():
-            with schema_context(tenant_schema):
-                try:
-                    from apps.billing.models.payment_models import Payment
-                    pay = Payment.objects.filter(status__iexact='completed').aggregate(
-                        today=Sum('amount', filter=Q(payment_date__gte=today_start)),
-                        yesterday=Sum('amount', filter=Q(payment_date__gte=yesterday_start, payment_date__lt=today_start)),
-                        week=Sum('amount', filter=Q(payment_date__gte=week_start)),
-                        month=Sum('amount', filter=Q(payment_date__gte=month_start)),
-                        prev_month=Sum('amount', filter=Q(payment_date__gte=prev_month_start, payment_date__lt=month_start)),
-                        today_tx=Count('id', filter=Q(payment_date__gte=today_start)),
-                    )
-                    return pay
-                except Exception:
-                    return {}
+            try:
+                from apps.billing.models.payment_models import Payment
+                return Payment.objects.filter(status__iexact='completed').aggregate(
+                    today=Sum('amount', filter=Q(payment_date__gte=today_start)),
+                    yesterday=Sum('amount', filter=Q(payment_date__gte=yesterday_start, payment_date__lt=today_start)),
+                    week=Sum('amount', filter=Q(payment_date__gte=week_start)),
+                    month=Sum('amount', filter=Q(payment_date__gte=month_start)),
+                    prev_month=Sum('amount', filter=Q(payment_date__gte=prev_month_start, payment_date__lt=month_start)),
+                    today_tx=Count('id', filter=Q(payment_date__gte=today_start)),
+                )
+            except Exception:
+                return {}
 
-        @_threaded_db_task
         def get_router_stats():
-            with schema_context(tenant_schema):
-                try:
-                    from apps.network.models import Router
-                    stats = Router.objects.filter(is_active=True).aggregate(
-                        total=Count('id'),
-                        online=Count('id', filter=Q(status='online')),
-                        offline=Count('id', filter=Q(status='offline')),
-                        warning=Count('id', filter=Q(status='warning')),
-                        maintenance=Count('id', filter=Q(status='maintenance')),
-                    )
-                    from apps.radius.models import RadAcct
-                    connected = RadAcct.objects.filter(acctstoptime__isnull=True).count()
-                    stats['total_connected_users'] = connected
-                    return stats
-                except Exception:
-                    return {'total': 0, 'online': 0, 'offline': 0, 'warning': 0, 'maintenance': 0, 'total_connected_users': 0}
+            try:
+                from apps.network.models import Router
+                stats = Router.objects.filter(is_active=True).aggregate(
+                    total=Count('id'),
+                    online=Count('id', filter=Q(status='online')),
+                    offline=Count('id', filter=Q(status='offline')),
+                    warning=Count('id', filter=Q(status='warning')),
+                    maintenance=Count('id', filter=Q(status='maintenance')),
+                )
+                from apps.radius.models import RadAcct
+                stats['total_connected_users'] = RadAcct.objects.filter(acctstoptime__isnull=True).count()
+                return stats
+            except Exception:
+                return {'total': 0, 'online': 0, 'offline': 0, 'warning': 0, 'maintenance': 0, 'total_connected_users': 0}
 
-        # COMBINED: tickets, expired, online, and hotspot chats in ONE worker
-        @_threaded_db_task
         def get_misc_stats():
-            with schema_context(tenant_schema):
-                try:
-                    from apps.support.models import SupportTicket as Ticket
-                    from apps.radius.models import CustomerRadiusCredentials, RadAcct
+            try:
+                from apps.support.models import SupportTicket as Ticket
+                from apps.radius.models import CustomerRadiusCredentials, RadAcct
 
-                    tickets = Ticket.objects.aggregate(
-                        total=Count('id'),
-                        open=Count('id', filter=Q(status__iexact='open')),
-                        in_progress=Count('id', filter=Q(status__iexact='in_progress')),
-                        resolved=Count('id', filter=Q(status__iexact='resolved')),
+                tickets = Ticket.objects.aggregate(
+                    total=Count('id'),
+                    open=Count('id', filter=Q(status__iexact='open')),
+                    in_progress=Count('id', filter=Q(status__iexact='in_progress')),
+                    resolved=Count('id', filter=Q(status__iexact='resolved')),
+                )
+                expired = CustomerRadiusCredentials.objects.filter(
+                    expiration_date__isnull=False, expiration_date__lte=local_now,
+                ).count()
+                online = RadAcct.objects.filter(acctstoptime__isnull=True).count()
+
+                hotspot_chats = {'total': 0, 'unread': 0}
+                try:
+                    from apps.billing.models.hotspot_chat_models import HotspotChatThread
+                    hotspot_chats = HotspotChatThread.objects.aggregate(
+                        total=Count('id'), unread=Count('id', filter=Q(unread_by_admin=True)),
                     )
-                    expired = CustomerRadiusCredentials.objects.filter(
-                        expiration_date__isnull=False,
-                        expiration_date__lte=local_now,
-                    ).count()
-                    online = RadAcct.objects.filter(acctstoptime__isnull=True).count()
-
-                    # Hotspot chats (isolated so a failure here never breaks the rest)
-                    hotspot_chats = {'total': 0, 'unread': 0}
-                    try:
-                        from apps.billing.models.hotspot_chat_models import HotspotChatThread
-                        hotspot_chats = HotspotChatThread.objects.aggregate(
-                            total=Count('id'),
-                            unread=Count('id', filter=Q(unread_by_admin=True)),
-                        )
-                    except Exception:
-                        pass
-
-                    return {
-                        'tickets': tickets,
-                        'expired': expired,
-                        'online': online,
-                        'hotspot_chats': hotspot_chats,
-                    }
                 except Exception:
-                    return {'tickets': {}, 'expired': 0, 'online': 0, 'hotspot_chats': {'total': 0, 'unread': 0}}
+                    pass
 
-        @_threaded_db_task
+                return {'tickets': tickets, 'expired': expired, 'online': online, 'hotspot_chats': hotspot_chats}
+            except Exception:
+                return {'tickets': {}, 'expired': 0, 'online': 0, 'hotspot_chats': {'total': 0, 'unread': 0}}
+
         def get_active_subscriptions():
-            with schema_context(tenant_schema):
-                try:
-                    from apps.radius.models import CustomerRadiusCredentials
-                    from apps.billing.models.hotspot_models import HotspotSession
+            try:
+                from apps.radius.models import CustomerRadiusCredentials
+                from apps.billing.models.hotspot_models import HotspotSession
 
-                    pppoe_count = CustomerRadiusCredentials.objects.filter(
-                        is_enabled=True,
-                    ).filter(
-                        Q(expiration_date__isnull=True) | Q(expiration_date__gt=local_now)
-                    ).count()
+                pppoe_count = CustomerRadiusCredentials.objects.filter(is_enabled=True).filter(
+                    Q(expiration_date__isnull=True) | Q(expiration_date__gt=local_now)
+                ).count()
+                hotspot_active = HotspotSession.objects.filter(
+                    status='active', expires_at__gt=local_now,
+                ).values('hotspot_client_id').distinct().count()
 
-                    hotspot_active = HotspotSession.objects.filter(
-                        status='active',
-                        expires_at__gt=local_now,
-                    ).values('hotspot_client_id').distinct().count()
+                return {'pppoe': pppoe_count, 'hotspot': hotspot_active, 'total': pppoe_count + hotspot_active}
+            except Exception:
+                return {'pppoe': 0, 'hotspot': 0, 'total': 0}
 
-                    return {'pppoe': pppoe_count, 'hotspot': hotspot_active, 'total': pppoe_count + hotspot_active}
-                except Exception:
-                    return {'pppoe': 0, 'hotspot': 0, 'total': 0}
-
-        @_threaded_db_task
         def get_recent_activity():
-            with schema_context(tenant_schema):
-                try:
-                    from apps.core.models import AuditLog
-                    return list(AuditLog.objects.filter(
-                        tenant=getattr(request, 'tenant', None)
-                    ).order_by('-timestamp')[:10].values(
-                        'id', 'user__email', 'action', 'model_name', 'object_repr', 'timestamp'
-                    ))
-                except Exception:
-                    return []
+            try:
+                from apps.core.models import AuditLog
+                return list(AuditLog.objects.filter(
+                    tenant=getattr(request, 'tenant', None)
+                ).order_by('-timestamp')[:10].values(
+                    'id', 'user__email', 'action', 'model_name', 'object_repr', 'timestamp'
+                ))
+            except Exception:
+                return []
 
-        @_threaded_db_task
         def get_weekly_income():
-            with schema_context(tenant_schema):
-                try:
-                    from apps.billing.models.payment_models import Payment
-                    days_to_monday = local_now.weekday()
-                    this_week_start = today_start - timedelta(days=days_to_monday)
-                    last_week_start = this_week_start - timedelta(days=7)
+            try:
+                from apps.billing.models.payment_models import Payment
+                days_to_mon = local_now.weekday()
+                this_week_start = today_start - timedelta(days=days_to_mon)
+                last_week_start = this_week_start - timedelta(days=7)
 
-                    def week_buckets(start_dt, end_dt):
-                        payments = Payment.objects.filter(
-                            status__iexact='completed',
-                            payment_date__gte=start_dt,
-                            payment_date__lt=end_dt,
-                        )
-                        weekday_map = {i: 0 for i in range(7)}
-                        for p in payments:
-                            local_dt = timezone.localtime(p.payment_date)
-                            weekday_map[local_dt.weekday()] += float(p.amount or 0)
-                        labels = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']
-                        return [{'day': labels[i], 'amount': round(weekday_map[i], 2)} for i in range(7)]
+                def week_buckets(start_dt, end_dt):
+                    payments = Payment.objects.filter(
+                        status__iexact='completed', payment_date__gte=start_dt, payment_date__lt=end_dt,
+                    )
+                    weekday_map = {i: 0 for i in range(7)}
+                    for p in payments:
+                        local_dt = timezone.localtime(p.payment_date)
+                        weekday_map[local_dt.weekday()] += float(p.amount or 0)
+                    labels = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']
+                    return [{'day': labels[i], 'amount': round(weekday_map[i], 2)} for i in range(7)]
 
-                    return {
-                        'this_week': week_buckets(this_week_start, local_now),
-                        'last_week': week_buckets(last_week_start, this_week_start),
-                    }
-                except Exception:
-                    return {'this_week': [], 'last_week': []}
+                return {
+                    'this_week': week_buckets(this_week_start, local_now),
+                    'last_week': week_buckets(last_week_start, this_week_start),
+                }
+            except Exception:
+                return {'this_week': [], 'last_week': []}
 
-        @_threaded_db_task
         def get_monthly_earnings():
-            with schema_context(tenant_schema):
-                try:
-                    from apps.billing.models.payment_models import Payment
-                    from datetime import datetime
-                    current_year = local_now.year
-                    current_month = local_now.month
-                    labels = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec']
+            try:
+                from apps.billing.models.payment_models import Payment
+                from datetime import datetime
+                current_year, current_month = local_now.year, local_now.month
+                labels = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec']
 
-                    def year_buckets(year, max_month):
-                        result = []
-                        for month in range(1, max_month + 1):
-                            ms = datetime(year, month, 1, tzinfo=timezone.get_current_timezone())
-                            me = datetime(year, month + 1, 1, tzinfo=timezone.get_current_timezone()) if month < 12 else datetime(year + 1, 1, 1, tzinfo=timezone.get_current_timezone())
-                            total = float(Payment.objects.filter(
-                                status__iexact='completed', payment_date__gte=ms, payment_date__lt=me
-                            ).aggregate(v=Sum('amount'))['v'] or 0)
-                            result.append({'month': labels[month - 1], 'amount': round(total, 2)})
-                        return result
+                def year_buckets(year, max_month):
+                    result = []
+                    for month in range(1, max_month + 1):
+                        ms = datetime(year, month, 1, tzinfo=timezone.get_current_timezone())
+                        me = (datetime(year, month + 1, 1, tzinfo=timezone.get_current_timezone())
+                              if month < 12 else datetime(year + 1, 1, 1, tzinfo=timezone.get_current_timezone()))
+                        total = float(Payment.objects.filter(
+                            status__iexact='completed', payment_date__gte=ms, payment_date__lt=me
+                        ).aggregate(v=Sum('amount'))['v'] or 0)
+                        result.append({'month': labels[month - 1], 'amount': round(total, 2)})
+                    return result
 
-                    return {
-                        'this_year': year_buckets(current_year, current_month),
-                        'last_year': year_buckets(current_year - 1, 12),
-                    }
-                except Exception:
-                    return {'this_year': [], 'last_year': []}
+                return {'this_year': year_buckets(current_year, current_month), 'last_year': year_buckets(current_year - 1, 12)}
+            except Exception:
+                return {'this_year': [], 'last_year': []}
 
-        # Run all queries in parallel - REDUCED from 8 to 6 workers
-        with concurrent.futures.ThreadPoolExecutor(max_workers=6) as executor:
-            futures = {
-                'customers': executor.submit(get_customer_stats),
-                'revenue': executor.submit(get_revenue_stats) if can_view_revenue else None,
-                'routers': executor.submit(get_router_stats),
-                'misc': executor.submit(get_misc_stats),  # Combined worker
-                'subscriptions': executor.submit(get_active_subscriptions),
-                'activity': executor.submit(get_recent_activity),
-                'weekly_income': executor.submit(get_weekly_income) if can_view_revenue else None,
-                'monthly_earnings': executor.submit(get_monthly_earnings) if can_view_revenue else None,
-            }
-            results = {
-                k: f.result() if f is not None else {}
-                for k, f in futures.items()
-            }
+        results = {
+            'customers': get_customer_stats(),
+            'revenue': get_revenue_stats() if can_view_revenue else {},
+            'routers': get_router_stats(),
+            'misc': get_misc_stats(),
+            'subscriptions': get_active_subscriptions(),
+            'activity': get_recent_activity(),
+            'weekly_income': get_weekly_income() if can_view_revenue else {},
+            'monthly_earnings': get_monthly_earnings() if can_view_revenue else {},
+        }
 
         # Extract combined misc stats
         misc = results.get('misc', {})
