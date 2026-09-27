@@ -39,7 +39,7 @@ services:
       - isp_network
 
   pgbouncer:
-    image: edoburu/pgbouncer:1.21.0
+    image: edoburu/pgbouncer:v1.23.1-p3
     container_name: netily_pgbouncer
     restart: unless-stopped
     env_file: ../.env
