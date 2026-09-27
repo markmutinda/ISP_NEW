@@ -44,11 +44,11 @@ services:
     restart: unless-stopped
     env_file: ../.env
     environment:
-      - DATABASE_HOST=netily_db
-      - DATABASE_PORT=5432
-      - DATABASE_NAME=${DB_NAME:-isp_management}
-      - DATABASE_USER=${DB_USER:-isp_user}
-      - DATABASE_PASSWORD=${DB_PASSWORD}
+      - DB_HOST=netily_db
+      - DB_PORT=5432
+      - DB_NAME=${DB_NAME:-isp_management}
+      - DB_USER=${DB_USER:-isp_user}
+      - DB_PASSWORD=${DB_PASSWORD}
       - POOL_MODE=session
       - LISTEN_PORT=5432
       - MAX_CLIENT_CONN=1000
