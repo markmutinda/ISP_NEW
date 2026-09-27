@@ -5,10 +5,10 @@ services:
     restart: unless-stopped
     command: >
       postgres
-      -c max_connections=150
-      -c shared_buffers=512MB
+      -c max_connections=100
+      -c shared_buffers=640MB
       -c effective_cache_size=1536MB
-      -c work_mem=8MB
+      -c work_mem=6MB
       -c maintenance_work_mem=128MB
       -c checkpoint_completion_target=0.9
       -c wal_buffers=16MB
@@ -30,6 +30,51 @@ services:
         limits:
           cpus: "1.5"
           memory: 2048M
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    networks:
+      - isp_network
+
+  pgbouncer:
+    image: edoburu/pgbouncer:1.21.0
+    container_name: netily_pgbouncer
+    restart: unless-stopped
+    env_file: ../.env
+    environment:
+      - DATABASE_HOST=netily_db
+      - DATABASE_PORT=5432
+      - DATABASE_NAME=${DB_NAME:-isp_management}
+      - DATABASE_USER=${DB_USER:-isp_user}
+      - DATABASE_PASSWORD=${DB_PASSWORD}
+      - POOL_MODE=session
+      - LISTEN_PORT=5432
+      - MAX_CLIENT_CONN=1000
+      - DEFAULT_POOL_SIZE=50
+      - MIN_POOL_SIZE=10
+      - RESERVE_POOL_SIZE=10
+      - RESERVE_POOL_TIMEOUT=3
+      - SERVER_IDLE_TIMEOUT=60
+      - SERVER_LIFETIME=1800
+      - SERVER_RESET_QUERY=DISCARD ALL
+      - IGNORE_STARTUP_PARAMETERS=extra_float_digits
+      - ADMIN_USERS=${DB_USER:-isp_user}
+      - AUTH_TYPE=scram-sha-256
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "pg_isready", "-h", "localhost", "-p", "5432"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 128M
     logging:
       driver: "json-file"
       options:
@@ -116,7 +161,7 @@ services:
       # DJANGO_ALLOWED_HOSTS line REMOVED - now reads from env_file only
       - TENANT_BASE_DOMAIN=netily.co.ke
       - REDIS_URL=redis://netily_redis:6379/0
-      - DB_HOST=netily_db
+      - DB_HOST=netily_pgbouncer
       - DB_PORT=5432
       - OPENVPN_MANAGEMENT_HOST=netily-openvpn
       - VPN_GATEWAY_IP=${VPN_GATEWAY_IP:-10.8.0.1}
@@ -129,6 +174,8 @@ services:
       - NET_ADMIN
     depends_on:
       db:
+        condition: service_healthy
+      pgbouncer:
         condition: service_healthy
       redis:
         condition: service_healthy
@@ -172,7 +219,7 @@ services:
       - DJANGO_SETTINGS_MODULE=config.settings.production
       - DJANGO_SECRET_KEY=${SECRET_KEY:-changeme-generate-a-real-key}
       - REDIS_URL=redis://netily_redis:6379/0
-      - DB_HOST=netily_db
+      - DB_HOST=netily_pgbouncer
       - DB_PORT=5432
       - OPENVPN_MANAGEMENT_HOST=netily-openvpn
       - VPN_GATEWAY_IP=${VPN_GATEWAY_IP:-10.8.0.1}
@@ -183,6 +230,8 @@ services:
       - NET_ADMIN
     depends_on:
       db:
+        condition: service_healthy
+      pgbouncer:
         condition: service_healthy
       redis:
         condition: service_healthy
@@ -216,10 +265,12 @@ services:
       - DJANGO_SETTINGS_MODULE=config.settings.production
       - DJANGO_SECRET_KEY=${SECRET_KEY:-changeme-generate-a-real-key}
       - REDIS_URL=redis://netily_redis:6379/0
-      - DB_HOST=netily_db
+      - DB_HOST=netily_pgbouncer
       - DB_PORT=5432
     depends_on:
       db:
+        condition: service_healthy
+      pgbouncer:
         condition: service_healthy
       redis:
         condition: service_healthy

@@ -47,6 +47,8 @@ jobs:
               docker compose logs --tail=80 web || true
               echo "==> Recent worker logs"
               docker compose logs --tail=60 celery-worker || true
+              echo "==> Recent pgbouncer logs"
+              docker compose logs --tail=40 pgbouncer || true
               echo "==> Compose status"
               docker compose ps || true
             }
@@ -76,6 +78,13 @@ jobs:
             # 🟢 OPTIMIZATION 2: Removed '--no-cache' to allow ultra-fast incremental builds.
             run_step "Building backend images" 18m docker compose build web celery-worker celery-beat
 
+            echo "==> Applying updated Postgres config and starting PgBouncer..."
+            run_step "Recreating db with new config" 1m docker compose up -d --no-deps db
+            sleep 5
+            run_step "Starting PgBouncer" 1m docker compose up -d --no-deps pgbouncer
+            sleep 3
+            docker compose logs pgbouncer --tail=20
+
             echo "==> Checking for missing model migrations..."
             run_step "Checking missing migrations" 3m docker compose run --rm web python manage.py makemigrations --check --dry-run
 
@@ -90,7 +99,7 @@ jobs:
 
             echo "==> Performing target rolling restart of backend services..."
             # 🟢 OPTIMIZATION 3: '--no-deps' updates ONLY the backend without touching Nginx, DB, or WireGuard.
-            run_step "Restarting backend services" 4m docker compose up -d --no-deps web celery-worker celery-beat
+            run_step "Restarting backend services" 4m docker compose up -d --no-deps web celery-worker celery-beat pgbouncer
 
             echo "==> Injecting clean container-to-container network paths..."
             # 🟢 OPTIMIZATION 4: The Network Guard. Explicitly overrides any multi-line IP lookup bugs automatically.
