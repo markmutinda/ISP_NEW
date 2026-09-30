@@ -1,4 +1,4 @@
-cat > /root/netily_cloud/apps/core/views_tr069_webhook.py << 'PY_EOF'
+
 """
 Public TR-069 webhooks. These run BEFORE any tenant is known:
 1. credentials lookup  — called by the GenieACS extension on every CWMP auth check.
@@ -93,4 +93,3 @@ def tr069_inform_webhook(request):
         sync_cpe_device_task.apply_async(args=[device.pk, entry.tenant_schema], countdown=8)
 
     return JsonResponse({'status': 'ok'})
-PY_EOF
