@@ -28,38 +28,27 @@ def _get_notif_settings():
 
 
 def _log_sms(phone: str, message: str, status: str = 'sent',
-              msg_type: str = 'automated', recipient_name: str = '',
-              customer_id=None, provider_id: str = ''):
-    """
-    Persist every outbound SMS to SMSMessage so the History tab shows ALL messages.
-    Uses a nested savepoint to avoid poisoning parent billing transactions.
-    """
+             msg_type: str = 'automated', recipient_name: str = '',
+             customer_id=None, provider_id: str = '', error: str = ''):
+    """Persist every outbound SMS (with failure reason) so History shows why it failed."""
     try:
         from apps.messaging.models import SMSMessage
         from django.utils import timezone as tz
         from django.db import transaction
 
-        sent_at = tz.now() if status == 'sent' else None
-
-        safe_recipient = str(phone or '')[:20]
-        safe_status = str(status or 'sent')[:20]
-        safe_type = str(msg_type or 'automated')[:20]
-        safe_recipient_name = str(recipient_name or '')[:120]
-        safe_provider_id = str(provider_id or '')[:100]
-
         with transaction.atomic():
             SMSMessage.objects.create(
-                recipient=safe_recipient,
-                recipient_name=safe_recipient_name,
+                recipient=str(phone or '')[:20],
+                recipient_name=str(recipient_name or '')[:120],
                 message=message,
-                status=safe_status,
-                type=safe_type,
+                status=str(status or 'sent')[:20],
+                type=str(msg_type or 'automated')[:20],
                 provider='system',
-                provider_message_id=safe_provider_id,
-                sent_at=sent_at,
-                customer_id=customer_id if customer_id else None,
+                provider_message_id=str(provider_id or '')[:100],
+                error_message=(str(error)[:500] if error else None),
+                sent_at=tz.now() if status == 'sent' else None,
+                customer_id=customer_id or None,
             )
-        logger.debug(f"SMS logged cleanly: {safe_status} to {safe_recipient[:6]}***")
     except Exception as exc:
         logger.warning("[SMS Log] could not persist message: %s", exc)
 
@@ -110,72 +99,76 @@ def _get_settings():
     return SMSNotificationSettings.get_settings()
 
 
-def _dispatch(phone: str, message: str, schema_name: str = None) -> bool:
-    """Send via active gateway."""
+def _dispatch_result(phone: str, message: str, schema_name: str = None) -> dict:
+    """Send via active gateway; always returns a result dict (never raises)."""
     if not phone:
-        return False
+        return {'success': False, 'error': 'No phone number'}
     try:
         from apps.messaging.services.gateway_dispatcher import GatewayDispatcher
         from django.db import connection
 
         _schema = schema_name or getattr(connection, 'schema_name', None)
-        dispatcher = GatewayDispatcher(schema_name=_schema)
-        result = dispatcher.send_sms(to=phone, message=message)
-
-        if result.get("success"):
-            logger.info(f"SMS sent to {phone[:6]}***")
-            return True
-        logger.warning(f"SMS failed to {phone[:6]}***: {result.get('error')}")
-        return False
+        result = GatewayDispatcher(schema_name=_schema).send_sms(to=phone, message=message)
+        if result.get('success'):
+            logger.info("SMS sent to %s***", phone[:6])
+        else:
+            logger.warning("SMS failed to %s***: %s", phone[:6], result.get('error'))
+        return result
     except ValueError as e:
-        logger.warning(f"SMS not sent (no gateway): {e}")
-        return False
+        logger.warning("SMS not sent (no gateway): %s", e)
+        return {'success': False, 'error': str(e)}
     except Exception as e:
-        logger.error(f"SMS dispatch error: {e}", exc_info=True)
-        return False
+        logger.error("SMS dispatch error: %s", e, exc_info=True)
+        return {'success': False, 'error': str(e)}
+
+
+def _dispatch(phone: str, message: str, schema_name: str = None) -> bool:
+    return bool(_dispatch_result(phone, message, schema_name).get('success'))
 
 
 def _send_once(dedup_key: str, phone: str, message: str, ttl: int = 600,
                schema_name: str = None, customer_id=None, recipient_name: str = '') -> bool:
     """
-    Send SMS exactly once within the TTL window for the given dedup_key.
-    Uses DB dedup (INSERT ... ON CONFLICT) as primary guard,
-    cache as secondary fast-path.
+    Send exactly once per dedup_key. If the send FAILS, the dedup marker is
+    released so a later run can retry (previously a failed send blocked retries
+    until the dedup row was purged).
     """
     from django.db import IntegrityError, transaction as _tx
     from apps.messaging.models import SMSDeduplicationLog
 
     full_key = f"sms_once:{dedup_key}"
 
-    # Fast path: cache check
     if _cache.get(full_key):
-        logger.debug(f"SMS deduped via cache (key={full_key})")
         return False
 
-    # DB-level dedup: atomic insert — if row exists, skip
     try:
         with _tx.atomic():
             SMSDeduplicationLog.objects.create(dedup_key=full_key)
     except IntegrityError:
-        logger.info(f"SMS deduped via DB (key={full_key})")
         return False
     except Exception as e:
-        # If dedup model doesn't exist yet (pre-migration), fall through
-        logger.warning(f"SMS dedup DB check failed (non-fatal): {e}")
+        logger.warning("SMS dedup DB check failed (non-fatal): %s", e)
 
-    # Set cache so subsequent calls in same process skip DB hit
     _cache.set(full_key, 1, ttl)
 
-    result = _dispatch(phone, message, schema_name=schema_name)
+    result = _dispatch_result(phone, message, schema_name=schema_name)
+    ok = bool(result.get('success'))
 
-    if result:
-        _log_sms(phone, message, status='sent', msg_type='automated',
-                  customer_id=customer_id, recipient_name=recipient_name)
-    else:
-        _log_sms(phone, message, status='failed', msg_type='automated',
-                  customer_id=customer_id, recipient_name=recipient_name)
+    _log_sms(phone, message,
+             status='sent' if ok else 'failed',
+             msg_type='automated',
+             customer_id=customer_id, recipient_name=recipient_name,
+             provider_id=str(result.get('provider_id') or ''),
+             error='' if ok else str(result.get('error') or 'Unknown error'))
 
-    return result
+    if not ok:
+        try:
+            SMSDeduplicationLog.objects.filter(dedup_key=full_key).delete()
+        except Exception:
+            pass
+        _cache.delete(full_key)
+
+    return ok
 
 
 def _fmt_phone(phone: str) -> str:
@@ -561,15 +554,14 @@ class SMSNotifier:
         )
         msg = _get_rendered_message('pppoe_expiry_reminder', default_msg, **ctx)
 
-        # Plain dispatch (dedup handled at task level via DB)
-        result = _dispatch(phone, msg, schema_name=schema_name)
-        if result:
-            _log_sms(phone, msg, status='sent', msg_type='automated',
-                     recipient_name=ctx['name'], customer_id=customer.id)
-        else:
-            _log_sms(phone, msg, status='failed', msg_type='automated',
-                     recipient_name=ctx['name'], customer_id=customer.id)
-        return result
+        # ── FIXED: use _dispatch_result so we can persist the failure reason ──
+        result = _dispatch_result(phone, msg, schema_name=schema_name)
+        ok = bool(result.get('success'))
+        _log_sms(phone, msg, status='sent' if ok else 'failed', msg_type='automated',
+                 recipient_name=ctx['name'], customer_id=customer.id,
+                 provider_id=str(result.get('provider_id') or ''),
+                 error='' if ok else str(result.get('error') or 'Unknown error'))
+        return ok
 
     @staticmethod
     def pppoe_expired_notice(customer, plan_name: str = "", schema_name: str = None) -> bool:

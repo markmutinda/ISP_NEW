@@ -25,6 +25,9 @@ import time
 from decimal import Decimal
 from typing import Dict, Any, Optional, Tuple
 
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
+
 from django.conf import settings
 from django.utils import timezone
 
@@ -180,83 +183,170 @@ class AdvantaBackend:
         return {'balance': float(data.get('credit', 0)), 'currency': 'KES'}
 
 
+# ── Celcom module-level session ─────────────────────────────────
+# Reuses TLS connections (much faster for bursts of reminders).
+# Retries only on connect errors, so a message can never be sent twice.
+_CELCOM_SESSION = requests.Session()
+_CELCOM_SESSION.mount(
+    'https://',
+    HTTPAdapter(
+        pool_connections=10,
+        pool_maxsize=50,
+        max_retries=Retry(total=2, connect=2, read=0, status=0,
+                          backoff_factor=0.3, allowed_methods=None),
+    ),
+)
+
+
 class CelcomBackend:
     """
-    Celcom Africa SMS Backend
-    Docs: https://isms.celcomafrica.com/api/services/sendsms/
-    Auth: apikey + partnerID params
-    Success: respose-code == 200 (per-recipient, in "responses" array)
+    Celcom Africa SMS backend.
+    Auth: apikey + partnerID in JSON body. Success: responses[0]['respose-code'] == 200 (sic).
+    Celcom returns useful JSON even on 4xx/422, so we NEVER raise_for_status() blindly.
     """
     BASE_URL = 'https://isms.celcomafrica.com/api/services'
 
-    def __init__(self, api_key: str, extra_config: dict = None, sender_id: str = '', **kw):
-        self.api_key = api_key
-        self.sender_id = sender_id or 'INFOTEXT'
-        self.partner_id = (extra_config or {}).get('partner_id', '')
+    ERROR_CODES = {
+        '1001': 'Invalid sender id',
+        '1002': 'Network not allowed',
+        '1003': 'Invalid mobile number',
+        '1004': 'Low bulk credits',
+        '1005': 'Failed. System error',
+        '1006': 'Invalid credentials',
+        '1007': 'Failed. System error',
+        '1009': 'Unsupported data type',
+        '1010': 'Unsupported request type',
+        '4090': 'Internal error. Try again after 5 minutes',
+        '4091': 'No Partner ID is set',
+        '4092': 'No API key provided',
+        '4093': 'Details not found',
+    }
 
+    def __init__(self, api_key: str, extra_config: dict = None, sender_id: str = '', **kw):
+        cfg = extra_config or {}
+        self.api_key = (api_key or '').strip()
+        self.sender_id = (sender_id or 'INFOTEXT').strip()
+        self.partner_id = str(
+            cfg.get('partner_id') or cfg.get('partnerID') or cfg.get('partnerId') or ''
+        ).strip()
+
+    # ── internals ──────────────────────────────────────────────
+    def _creds(self) -> Dict[str, str]:
+        missing = []
+        if not self.api_key:
+            missing.append('API Key')
+        if not self.partner_id:
+            missing.append('Partner ID')
+        if missing:
+            raise RuntimeError(
+                f"Celcom config incomplete: missing {', '.join(missing)}. "
+                "Set it in SMS → Gateway."
+            )
+        return {'apikey': self.api_key, 'partnerID': self.partner_id}
+
+    @staticmethod
+    def _msisdn(to: str) -> str:
+        digits = ''.join(ch for ch in str(to or '') if ch.isdigit())
+        if digits.startswith('0') and len(digits) == 10:
+            digits = '254' + digits[1:]
+        elif len(digits) == 9 and digits[0] in '17':
+            digits = '254' + digits
+        return digits
+
+    @staticmethod
+    def _extract_error(data, http_status: int) -> str:
+        """Turn any Celcom/validation error shape into one readable string."""
+        if isinstance(data, dict):
+            resp = data.get('responses')
+            if isinstance(resp, list) and resp and isinstance(resp[0], dict):
+                r = resp[0]
+                code = str(r.get('respose-code', r.get('response-code', '')))
+                return (CelcomBackend.ERROR_CODES.get(code)
+                        or r.get('response-description')
+                        or f'Error code {code}')
+            detail = data.get('detail')
+            if isinstance(detail, list):  # 422 validation style
+                parts = []
+                for d in detail:
+                    if isinstance(d, dict):
+                        loc = '.'.join(str(x) for x in d.get('loc', []) if x != 'body')
+                        parts.append(f"{loc}: {d.get('msg', '')}".strip(': '))
+                    else:
+                        parts.append(str(d))
+                return '; '.join(p for p in parts if p) or f'HTTP {http_status}'
+            for key in ('message', 'error', 'detail', 'response-description'):
+                if data.get(key):
+                    return str(data[key])
+        return f'HTTP {http_status}'
+
+    def _post(self, path: str, payload: dict, read_timeout: int = 20):
+        try:
+            resp = _CELCOM_SESSION.post(
+                f'{self.BASE_URL}/{path}/',
+                json=payload,
+                headers={'Content-Type': 'application/json'},
+                timeout=(5, read_timeout),
+            )
+        except requests.Timeout:
+            raise RuntimeError('Celcom request timed out')
+        except requests.ConnectionError:
+            raise RuntimeError('Could not connect to Celcom')
+        try:
+            data = resp.json()
+        except ValueError:
+            raise RuntimeError(
+                f'Celcom returned non-JSON (HTTP {resp.status_code}): {(resp.text or "")[:200]!r}'
+            )
+        return resp, data
+
+    # ── public API ─────────────────────────────────────────────
     def send(self, to: str, message: str) -> Tuple[bool, str, Decimal]:
         payload = {
-            'apikey': self.api_key,
-            'partnerID': self.partner_id,
+            **self._creds(),
             'message': message,
             'shortcode': self.sender_id,
-            'mobile': to.lstrip('+'),
+            'mobile': self._msisdn(to),
+            'pass_type': 'plain',
         }
-        resp = requests.post(
-            f'{self.BASE_URL}/sendsms/',
-            json=payload,
-            headers={'Content-Type': 'application/json'},
-            timeout=20,
-        )
-        resp.raise_for_status()
-        data = resp.json()
+        resp, data = self._post('sendsms', payload)
 
-        responses = data.get('responses') or []
-        if not responses:
-            raise RuntimeError(f"Celcom returned no response data: {data}")
+        responses = data.get('responses') if isinstance(data, dict) else None
+        if isinstance(responses, list) and responses:
+            r = responses[0]
+            code = str(r.get('respose-code', r.get('response-code', '')))
+            if code == '200':
+                return True, str(r.get('messageid', '')), Decimal('0.00')
 
-        result = responses[0]
-        code = result.get('respose-code')  # sic — matches Celcom's actual field name
-
-        if str(code) == '200':
-            return True, str(result.get('messageid', '')), Decimal('0.00')
-
-        ERROR_CODES = {
-            '1001': 'Invalid sender id',
-            '1002': 'Network not allowed',
-            '1003': 'Invalid mobile number',
-            '1004': 'Low bulk credits',
-            '1005': 'Failed. System error',
-            '1006': 'Invalid credentials',
-            '1007': 'Failed. System error',
-            '1009': 'Unsupported data type',
-            '1010': 'Unsupported request type',
-            '4090': 'Internal error. Try again after 5 minutes',
-            '4091': 'No Partner ID is set',
-            '4092': 'No API key provided',
-            '4093': 'Details not found',
-        }
-        err = ERROR_CODES.get(str(code), result.get('response-description', f'Error code {code}'))
-        raise RuntimeError(err)
+        raise RuntimeError(f"Celcom: {self._extract_error(data, resp.status_code)}")
 
     def get_balance(self) -> Dict[str, Any]:
-        resp = requests.post(
-            f'{self.BASE_URL}/getbalance/',
-            json={'apikey': self.api_key, 'partnerID': self.partner_id},
-            headers={'Content-Type': 'application/json'},
-            timeout=15,
-        )
-        resp.raise_for_status()
-        data = resp.json()
+        resp, data = self._post('getbalance', self._creds(), read_timeout=15)
 
-        # Celcom's balance response shape isn't formally documented;
-        # tolerate a few likely key names.
-        balance = (
-            data.get('balance')
-            if data.get('balance') is not None
-            else data.get('credit', data.get('sms_balance', 0))
-        )
-        return {'balance': float(balance or 0), 'currency': 'KES'}
+        if resp.status_code >= 400:
+            raise RuntimeError(f"Celcom: {self._extract_error(data, resp.status_code)}")
+
+        def _num(v):
+            if v is None:
+                return None
+            if isinstance(v, (int, float)):
+                return float(v)
+            m = re.search(r'-?\d+(?:,\d{3})*(?:\.\d+)?', str(v))
+            return float(m.group(0).replace(',', '')) if m else None
+
+        src = data
+        if isinstance(data, dict) and isinstance(data.get('responses'), list) and data['responses']:
+            src = data['responses'][0]
+
+        balance = None
+        if isinstance(src, dict):
+            for key in ('credit', 'balance', 'sms_balance', 'credits', 'remaining_balance'):
+                balance = _num(src.get(key))
+                if balance is not None:
+                    break
+        if balance is None:
+            raise RuntimeError(f"Celcom balance: unrecognised response {data!r}")
+
+        return {'balance': balance, 'currency': 'KES'}
 
 
 class BlessedTextsBackend:
@@ -727,7 +817,10 @@ PROVIDER_FIELDS = {
     'infobip':        {'api_key': 'API Key', 'sender_id': 'Sender ID'},
     'beem':           {'api_key': 'API Key', 'api_secret': 'Secret Key', 'sender_id': 'Sender Name'},
     'advanta':        {'api_key': 'API Key', 'sender_id': 'Short Code'},
-    'celcom':         {'api_key': 'API Key', 'sender_id': 'Short Code'},
+    # NOTE: added 'partner_id' so the Gateway form exposes the Partner ID field.
+    # Without this, there is no way to enter 168 and Celcom always returns
+    # "No Partner ID is set" (4091) or 422.
+    'celcom':         {'api_key': 'API Key', 'partner_id': 'Partner ID', 'sender_id': 'Short Code'},
     'hubtel':         {'api_key': 'Client ID', 'api_secret': 'Client Secret', 'sender_id': 'Sender ID'},
     'bytewave':       {'api_key': 'API Token', 'sender_id': 'Sender ID'},
     'blessedtexts':   {'api_key': 'API Key', 'sender_id': 'Sender ID'},
