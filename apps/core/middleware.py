@@ -31,6 +31,13 @@ PUBLIC_ROUTER_PATHS = (
     '/api/v1/hotspot/login-page/',
     '/api/v1/hotspot/purchase/',
     '/api/v1/hotspot/routers/',
+    # ── TR-069 / GenieACS webhooks ────────────────────────────
+    # These are called by the GenieACS container on every CWMP
+    # auth check and every Inform. They run BEFORE any tenant is
+    # known, so they must bypass tenant resolution, audit logging,
+    # and subscription enforcement entirely.
+    '/api/v1/tr069/webhook/credentials/',
+    '/api/v1/tr069/webhook/inform/',
     # ── ADDED: these were falling through to full tenant DB resolution
     # + SubscriptionEnforcementMiddleware's cross-schema CompanySubscription
     # query on every single request — the actual cause of slowdowns under

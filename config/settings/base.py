@@ -109,6 +109,7 @@ TENANT_APPS = (
     'apps.bandwidth',
     'apps.vpn',                        # VPN/WireGuard Management
     'apps.radius',                     # RADIUS/FreeRADIUS Integration
+    'apps.tr069',                      # TR-069 / GenieACS CPE Management
     'apps.fup',
     'apps.loyalty',                    # Loyalty/Rewards Program
     'rest_framework_simplejwt.token_blacklist', # 🚨 MUST BE HERE TOO so tenants have their own token tables
@@ -587,6 +588,18 @@ WG_SERVER_PORT       = int(os.environ.get('WG_SERVER_PORT', '51820'))
 WG_SERVER_PUBLIC_KEY = os.environ.get('WG_SERVER_PUBLIC_KEY', '')
 WG_INTERFACE         = os.environ.get('WG_INTERFACE', 'wg0')
 WG_PEERS_DIR         = os.environ.get('WG_PEERS_DIR', '/etc/wireguard/peers')
+
+
+# ────────────────────────────────────────────────────────────────
+#  TR-069 / GenieACS
+# ────────────────────────────────────────────────────────────────
+GENIEACS_NBI_URL = os.environ.get('GENIEACS_NBI_URL', 'http://genieacs:7557')
+TR069_ACS_URL = os.environ.get('TR069_ACS_URL', 'http://acs.netily.co.ke/')
+TR069_WEBHOOK_SECRET = os.environ.get('TR069_WEBHOOK_SECRET', '')
+TR069_CONNECTION_REQUEST_TIMEOUT = int(os.environ.get('TR069_CONNECTION_REQUEST_TIMEOUT', '15'))
+TR069_RECOMMENDED_INFORM_INTERVAL = 300
+TR069_OFFLINE_AFTER_SECONDS = 900  # 3 missed 5-min check-ins → not_answering
+TR069_WEAK_SIGNAL_DBM = -27
 
 
 # ────────────────────────────────────────────────────────────────

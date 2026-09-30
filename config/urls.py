@@ -27,6 +27,9 @@ schema_view = get_schema_view(
 # Import Tuma URL patterns
 from apps.billing.urls_tuma import tuma_admin_urlpatterns, tuma_public_urlpatterns
 
+# 🚨 NEW: TR-069 / GenieACS public webhook views
+from apps.core.views_tr069_webhook import tr069_credentials_lookup, tr069_inform_webhook
+
 # API URL Patterns
 api_urlpatterns = [
     # Core app (Authentication, Users, System)
@@ -72,6 +75,11 @@ api_urlpatterns = [
     # RADIUS app (Phase 14 - RADIUS/FreeRADIUS Integration)
     path('radius/', include('apps.radius.urls')),
     
+    # ─────────────────────────────────────────────────────────────
+    # TR-069 / CPE remote management (Phase 15 - GenieACS Integration)
+    # ─────────────────────────────────────────────────────────────
+    path('tr069/', include('apps.tr069.urls')),
+
     # ─────────────────────────────────────────────────────────────
     # Subscriptions app (Netily Platform Subscriptions)
     # ─────────────────────────────────────────────────────────────
@@ -148,6 +156,15 @@ tuma_webhook_api_urlpatterns = [
     path('webhooks/netily-paybill/subscription-callback/', SubscriptionPaybillCallbackView.as_view(), name='subscription-paybill-callback'),
 ]
 
+# 🚨 NEW: TR-069 / GenieACS public webhook URLs
+# These MUST be reachable from inside the Docker network (called by
+# the GenieACS container itself), and they bypass tenant resolution
+# via PUBLIC_ROUTER_PATHS in apps.core.middleware.
+tr069_webhook_urlpatterns = [
+    path('tr069/webhook/credentials/', tr069_credentials_lookup, name='tr069-credentials-lookup'),
+    path('tr069/webhook/inform/', tr069_inform_webhook, name='tr069-inform-webhook'),
+]
+
 # Main URL Patterns
 urlpatterns = [
     # Admin URLs (using custom admin site)
@@ -186,6 +203,10 @@ urlpatterns = [
     
     # TUMA Webhook (PUBLIC - callback only)
     path('api/v1/', include(tuma_webhook_api_urlpatterns)),
+
+    # 🚨 NEW: TR-069 / GenieACS public webhooks
+    # Reachable as /api/v1/tr069/webhook/credentials/ and /api/v1/tr069/webhook/inform/
+    path('api/v1/', include(tr069_webhook_urlpatterns)),
     
     # API Documentation
     path('swagger/', schema_view.with_ui('swagger', cache_timeout=0), name='schema-swagger-ui'),

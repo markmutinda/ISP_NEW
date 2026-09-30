@@ -1168,3 +1168,38 @@ class SupportChatMessage(models.Model):
 
     def __str__(self):
         return f"{self.sender_type}: {self.body[:48]}"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# TR-069 / GenieACS — public-schema index
+# ─────────────────────────────────────────────────────────────────────────────
+
+class Tr069DeviceIndex(models.Model):
+    """
+    Public-schema index for TR-069 devices — mirrors GlobalRouterMap's role
+    for MikroTik/RADIUS. Keyed by serial_number because a device is enrolled
+    (and its ACS credentials generated) BEFORE it has ever contacted GenieACS,
+    so we can't key on a GenieACS device id yet at enrollment time.
+    """
+    serial_number = models.CharField(max_length=255, unique=True, db_index=True)
+    genieacs_device_id = models.CharField(max_length=255, blank=True, null=True, unique=True)
+    acs_username = models.CharField(max_length=64, unique=True)
+    acs_password = models.CharField(max_length=64)
+    tenant = models.ForeignKey(
+        'core.Tenant', on_delete=models.CASCADE, related_name='tr069_device_indexes'
+    )
+    tenant_schema = models.CharField(max_length=63, db_index=True)
+    is_active = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        app_label = 'core'
+        verbose_name = 'TR-069 Device Index'
+        verbose_name_plural = 'TR-069 Device Indexes'
+        indexes = [
+            models.Index(fields=['tenant_schema']),
+        ]
+
+    def __str__(self):
+        return f"{self.serial_number} -> {self.tenant_schema}"

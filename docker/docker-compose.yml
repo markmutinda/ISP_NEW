@@ -483,6 +483,57 @@ services:
         max-size: "10m"
         max-file: "3"
 
+  # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  # TR-069 / GenieACS — CPE remote management
+  # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  genieacs-mongo:
+    image: mongo:6
+    container_name: netily_genieacs_mongo
+    restart: unless-stopped
+    volumes:
+      - genieacs_mongo_data:/data/db
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+    networks:
+      - isp_network
+
+  genieacs:
+    image: drremorse/genieacs:latest
+    container_name: netily_genieacs
+    restart: unless-stopped
+    environment:
+      - GENIEACS_MONGODB_CONNECTION_URL=mongodb://genieacs-mongo/genieacs
+      - GENIEACS_CWMP_INTERFACE=0.0.0.0
+      - GENIEACS_CWMP_PORT=7547
+      - GENIEACS_NBI_INTERFACE=0.0.0.0
+      - GENIEACS_NBI_PORT=7557
+      - GENIEACS_FS_INTERFACE=0.0.0.0
+      - GENIEACS_FS_PORT=7567
+      - GENIEACS_FS_HOSTNAME=acs.netily.co.ke
+      - GENIEACS_UI_INTERFACE=0.0.0.0
+      - GENIEACS_UI_PORT=3300
+      - GENIEACS_EXT_DIR=/opt/genieacs/ext
+      - NETILY_AUTH_HOST=web
+      - NETILY_AUTH_PORT=8000
+      - NETILY_AUTH_TOKEN=${TR069_WEBHOOK_SECRET:-changeme}
+    volumes:
+      - ./genieacs/ext:/opt/genieacs/ext:ro
+      - genieacs_ext_state:/opt/genieacs/ext_state
+    ports:
+      - "7547:7547"   # CWMP — must be internet-reachable, CPEs dial this
+      - "7557:7557"   # NBI  — internal only, firewall this off from the internet
+      - "3300:3300"   # UI   — optional, for debugging; firewall this too
+    depends_on:
+      - genieacs-mongo
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+    networks:
+      - isp_network
+
 networks:
   isp_network:
     driver: bridge
@@ -511,3 +562,5 @@ volumes:
   freeradius_logs:
   certbot_www:
   certbot_certs:
+  genieacs_mongo_data:
+  genieacs_ext_state:
