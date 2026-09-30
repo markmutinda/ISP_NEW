@@ -314,15 +314,14 @@ def complete_subscription_stk_payment(payment, mpesa_receipt=""):
                 return locked, None
             # Legacy completions have no activation marker. Do not replay payments
             # already covered by a later billing period, even after it expires.
-            period_already_advanced = (
-                locked.completed_at
-                and subscription.current_period_start
-                and subscription.current_period_start >= locked.completed_at
-            ) or (
-                locked.period_end
-                and subscription.current_period_start
-                and subscription.current_period_start >= locked.period_end
-            )
+            if locked.period_end and subscription.current_period_start:
+                period_already_advanced = subscription.current_period_start >= locked.period_end
+            else:
+                period_already_advanced = (
+                    locked.completed_at
+                    and subscription.current_period_start
+                    and subscription.current_period_start >= locked.completed_at
+                )
             if locked.status == 'completed' and period_already_advanced:
                 locked.activation_applied_at = locked.completed_at or timezone.now()
                 locked.save(update_fields=['activation_applied_at'])

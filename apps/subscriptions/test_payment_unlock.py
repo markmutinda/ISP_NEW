@@ -67,11 +67,12 @@ class PaymentUnlockTests(SimpleTestCase):
         self.subscription.extend_subscription.assert_called_once()
 
     def test_completed_early_renewal_with_current_period_end_is_repaired(self):
+        paid_at = timezone.now()
         self.subscription.status = 'active'
-        self.subscription.current_period_start = timezone.now() - timedelta(days=27)
-        self.subscription.current_period_end = timezone.now() + timedelta(days=3)
+        self.subscription.current_period_start = paid_at + timedelta(hours=6)
+        self.subscription.current_period_end = paid_at + timedelta(days=3)
         self.payment.status = 'completed'
-        self.payment.completed_at = timezone.now()
+        self.payment.completed_at = paid_at
         self.payment.period_end = self.subscription.current_period_end
         self.complete(SimpleNamespace(pk=1, balance=Decimal('0'), status='PAID'))
         self.payment.mark_completed.assert_not_called()
