@@ -500,7 +500,7 @@ services:
       - isp_network
 
   genieacs:
-    image: drremorse/genieacs:latest
+    image: drumsergio/genieacs:latest
     container_name: netily_genieacs
     restart: unless-stopped
     environment:
