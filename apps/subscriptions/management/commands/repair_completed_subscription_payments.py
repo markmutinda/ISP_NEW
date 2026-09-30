@@ -52,6 +52,11 @@ class Command(BaseCommand):
                 "but whose subscription did not move beyond the payment period end."
             ),
         )
+        parser.add_argument(
+            "--latest-per-subscription",
+            action="store_true",
+            help="Only inspect the newest matching payment for each subscription.",
+        )
 
     def handle(self, *args, **options):
         dry_run = bool(options["dry_run"])
@@ -59,6 +64,7 @@ class Command(BaseCommand):
         references = [str(ref).strip() for ref in options.get("reference") or [] if str(ref).strip()]
         companies = [str(name).strip() for name in options.get("company") or [] if str(name).strip()]
         include_applied_stuck = bool(options["include_applied_stuck"])
+        latest_per_subscription = bool(options["latest_per_subscription"])
         order_by = ("-completed_at", "-created_at") if options["newest"] else ("completed_at", "created_at")
 
         with schema_context(get_public_schema_name()):
@@ -73,9 +79,12 @@ class Command(BaseCommand):
                 qs = qs.filter(models_q_for_references(references))
             if companies:
                 qs = qs.filter(models_q_for_companies(companies))
+            payments = list(qs[:limit])
+            if latest_per_subscription:
+                payments = _newest_payment_per_subscription(payments)
             payments = [
                 payment
-                for payment in qs[:limit]
+                for payment in payments
                 if payment.activation_applied_at is None or _is_applied_but_not_extended(payment)
             ]
 
@@ -153,10 +162,37 @@ def models_q_for_companies(companies):
 
 def _is_applied_but_not_extended(payment):
     subscription = getattr(payment, "subscription", None)
-    return bool(
+    if not (
         payment.activation_applied_at
         and payment.period_end
         and subscription
         and subscription.current_period_end
-        and subscription.current_period_end <= payment.period_end
+    ):
+        return False
+
+    paid_window_is_too_short = False
+    if payment.period_start:
+        paid_window_is_too_short = (payment.period_end - payment.period_start).days < 25
+
+    return bool(
+        subscription.current_period_end < payment.period_end
+        or (
+            subscription.current_period_end == payment.period_end
+            and paid_window_is_too_short
+        )
     )
+
+
+def _newest_payment_per_subscription(payments):
+    selected = {}
+    for payment in payments:
+        subscription_id = str(payment.subscription_id)
+        current = selected.get(subscription_id)
+        if not current:
+            selected[subscription_id] = payment
+            continue
+        current_completed = current.completed_at or current.created_at
+        payment_completed = payment.completed_at or payment.created_at
+        if payment_completed and current_completed and payment_completed > current_completed:
+            selected[subscription_id] = payment
+    return list(selected.values())
