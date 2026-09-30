@@ -3315,9 +3315,28 @@ def _sync_subscription_invoice_usage_items(cycle, invoice):
                 total=minimum_adjustment,
             )
 
+        invoice = _recalculate_subscription_invoice_totals_preserving_state(invoice)
         invoice = _apply_subscription_invoice_pending_adjustments(cycle, invoice, append_notes=False)
         invoice.refresh_from_db()
         return invoice
+
+
+def _recalculate_subscription_invoice_totals_preserving_state(invoice):
+    if not invoice:
+        return invoice
+
+    from apps.billing.models import Invoice
+
+    original_invoice_state = {
+        "status": invoice.status,
+        "is_overdue": invoice.is_overdue,
+        "overdue_days": invoice.overdue_days,
+        "paid_at": invoice.paid_at,
+    }
+    invoice.calculate_totals()
+    Invoice.objects.filter(pk=invoice.pk).update(**original_invoice_state)
+    invoice.refresh_from_db()
+    return invoice
 
 
 def _apply_subscription_invoice_pending_adjustments(cycle, invoice, *, append_notes=False):

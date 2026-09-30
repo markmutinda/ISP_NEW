@@ -231,14 +231,17 @@ def _invoice_reminder_template_sms(*, tenant_name, invoice, cycle, amount_due, m
 
 def _get_or_create_reminder_delivery(*, cycle, invoice, milestone, channel, recipient, destination):
     invoice_reference = str(invoice.id) if invoice else f"subscription:{cycle.subscription_id}:{cycle.end_date.date().isoformat()}"
+    recipient_user_id = str(recipient.get("id") or "")
+    recipient_email = (recipient.get("email") or "").strip().lower()
+    recipient_phone = (recipient.get("phone_number") or "").strip()
     defaults = {
         "tenant": cycle.tenant,
         "subscription": cycle.subscription,
         "invoice_number": invoice.invoice_number if invoice else "",
-        "recipient_user_id": str(recipient.get("id") or ""),
+        "recipient_user_id": recipient_user_id,
         "recipient_name": _recipient_name(recipient),
-        "recipient_email": recipient.get("email") or "",
-        "recipient_phone": recipient.get("phone_number") or "",
+        "recipient_email": recipient_email,
+        "recipient_phone": recipient_phone,
         "status": "pending",
         "metadata": {
             "due_date": invoice.due_date.isoformat() if invoice and invoice.due_date else cycle.end_date.date().isoformat(),
@@ -248,28 +251,78 @@ def _get_or_create_reminder_delivery(*, cycle, invoice, milestone, channel, reci
         },
     }
     with schema_context(get_public_schema_name()):
-        try:
-            delivery, _ = SubscriptionInvoiceReminderDelivery.objects.get_or_create(
+        existing = (
+            SubscriptionInvoiceReminderDelivery.objects.filter(
                 billing_cycle=cycle,
                 invoice_reference=invoice_reference,
                 milestone=str(milestone),
                 channel=channel,
-                recipient_user_id=defaults["recipient_user_id"],
-                recipient_email=defaults["recipient_email"],
-                recipient_phone=defaults["recipient_phone"],
+                recipient_user_id=recipient_user_id,
+                recipient_email=recipient_email,
+                recipient_phone=recipient_phone,
+            )
+            .order_by("created_at")
+            .first()
+        )
+        if existing:
+            existing._created_for_send = False
+            return existing
+        try:
+            delivery, created = SubscriptionInvoiceReminderDelivery.objects.get_or_create(
+                billing_cycle=cycle,
+                invoice_reference=invoice_reference,
+                milestone=str(milestone),
+                channel=channel,
+                recipient_user_id=recipient_user_id,
+                recipient_email=recipient_email,
+                recipient_phone=recipient_phone,
                 defaults=defaults,
             )
+            delivery._created_for_send = created
             return delivery
         except IntegrityError:
-            return SubscriptionInvoiceReminderDelivery.objects.get(
+            delivery = SubscriptionInvoiceReminderDelivery.objects.filter(
                 billing_cycle=cycle,
                 invoice_reference=invoice_reference,
                 milestone=str(milestone),
                 channel=channel,
-                recipient_user_id=defaults["recipient_user_id"],
-                recipient_email=defaults["recipient_email"],
-                recipient_phone=defaults["recipient_phone"],
-            )
+                recipient_user_id=recipient_user_id,
+                recipient_email=recipient_email,
+                recipient_phone=recipient_phone,
+            ).order_by("created_at").first()
+            if delivery:
+                delivery._created_for_send = False
+                return delivery
+            raise
+
+
+def _cycle_is_settled_or_renewed(cycle, invoice=None):
+    if str(getattr(cycle, "status", "")).lower() == "paid":
+        return True
+
+    if invoice:
+        invoice_status = str(getattr(invoice, "status", "") or "").upper()
+        if invoice_status in {"PAID", "VOIDED", "CANCELLED", "WRITTEN_OFF"}:
+            return True
+        amount_due = _decimal_money((invoice.balance or invoice.total_amount) if invoice else 0)
+        if amount_due <= 0:
+            return True
+
+    subscription = getattr(cycle, "subscription", None)
+    if (
+        subscription
+        and getattr(subscription, "current_period_end", None)
+        and getattr(cycle, "end_date", None)
+        and subscription.current_period_end > cycle.end_date
+        and str(getattr(subscription, "status", "")).lower() == "active"
+    ):
+        return True
+
+    return False
+
+
+def _reminder_delivery_was_already_attempted(delivery):
+    return not bool(getattr(delivery, "_created_for_send", False))
 
 
 def _mark_reminder_delivery(delivery_id, *, status, provider_message_id="", error_message="", metadata=None):
@@ -354,7 +407,10 @@ def send_subscription_invoice_reminder_for_cycle(cycle_id=None, *, tenant_id=Non
     if invoice and amount_due <= 0:
         raise ValueError(f"Invoice {invoice.invoice_number} has no outstanding balance.")
 
-    manual_milestone = milestone or f"manual-{timezone.now().strftime('%m%d%H%M%S')}"
+    if _cycle_is_settled_or_renewed(cycle, invoice):
+        raise ValueError("This tenant subscription is already paid for this billing cycle.")
+
+    manual_milestone = milestone or f"manual-{timezone.now().strftime('%m%d%H%M%S%f')}"
     tenant_name = getattr(getattr(cycle.tenant, "company", None), "name", None) or cycle.tenant.subdomain
     subject, message, _sms_message = _invoice_reminder_copy(
         tenant_name=tenant_name,
@@ -378,7 +434,7 @@ def send_subscription_invoice_reminder_for_cycle(cycle_id=None, *, tenant_id=Non
         from apps.notifications.services.notification_manager import NotificationManager
 
         manager = NotificationManager()
-        for recipient in recipients:
+        for recipient in recipients[:1]:
             email = recipient.get("email")
             phone = recipient.get("phone_number")
             user_id = recipient.get("id")
@@ -576,6 +632,22 @@ def _apply_cycle_pending_invoice_adjustments(cycle, invoice):
         return invoice
 
 
+def _recalculate_invoice_totals_preserving_state(invoice):
+    if not invoice:
+        return invoice
+
+    original_state = {
+        'status': invoice.status,
+        'is_overdue': invoice.is_overdue,
+        'overdue_days': invoice.overdue_days,
+        'paid_at': invoice.paid_at,
+    }
+    invoice.calculate_totals()
+    Invoice.objects.filter(pk=invoice.pk).update(**original_state)
+    invoice.refresh_from_db()
+    return invoice
+
+
 def _sync_net_bill_invoice_usage_items(cycle, invoice, *, actual_hotspot_revenue=None):
     if not invoice or str(invoice.status).upper() == 'PAID':
         return invoice
@@ -629,6 +701,7 @@ def _sync_net_bill_invoice_usage_items(cycle, invoice, *, actual_hotspot_revenue
                 total=minimum_adjustment,
             )
 
+        invoice = _recalculate_invoice_totals_preserving_state(invoice)
         invoice = _apply_cycle_pending_invoice_adjustments(cycle, invoice)
         invoice.refresh_from_db()
         return invoice
@@ -896,6 +969,9 @@ def send_subscription_invoice_reminders():
                 if invoice:
                     BillingCycle.objects.filter(pk=cycle.pk).update(invoice_reference=str(invoice.id))
 
+            if _cycle_is_settled_or_renewed(cycle, invoice):
+                continue
+
             invoice_status = str(invoice.status or "").upper() if invoice else ""
             if invoice and invoice_status in {"PAID", "VOIDED", "CANCELLED", "WRITTEN_OFF"}:
                 continue
@@ -935,7 +1011,7 @@ def send_subscription_invoice_reminders():
                 from apps.notifications.services.notification_manager import NotificationManager
 
                 manager = NotificationManager()
-                for recipient in recipients:
+                for recipient in recipients[:1]:
                     email = recipient.get("email")
                     phone = recipient.get("phone_number")
                     user_id = recipient.get("id")
@@ -949,7 +1025,7 @@ def send_subscription_invoice_reminders():
                             recipient=recipient,
                             destination=email,
                         )
-                        if delivery.status == "sent":
+                        if _reminder_delivery_was_already_attempted(delivery):
                             sent["skipped"] += 1
                         else:
                             result = send_transactional_email(
@@ -984,7 +1060,7 @@ def send_subscription_invoice_reminders():
                             recipient=recipient,
                             destination=str(user_id),
                         )
-                        if delivery.status == "sent":
+                        if _reminder_delivery_was_already_attempted(delivery):
                             sent["skipped"] += 1
                         else:
                             notification = Notification.objects.create(
@@ -1025,7 +1101,7 @@ def send_subscription_invoice_reminders():
                             recipient=recipient,
                             destination=phone,
                         )
-                        if delivery.status == "sent":
+                        if _reminder_delivery_was_already_attempted(delivery):
                             sent["skipped"] += 1
                         else:
                             templated_sms = _invoice_reminder_template_sms(

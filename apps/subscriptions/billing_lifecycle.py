@@ -14,6 +14,31 @@ def money(value):
     return Decimal(str(value or "0")).quantize(Decimal("0.01"))
 
 
+def _repair_net_bill_invoice_total_from_items(invoice):
+    """
+    Repair legacy NET-BILL invoices whose usage line items were refreshed but
+    total_amount/balance still reflect an older PPPoE-only subtotal.
+    """
+    if not invoice or not str(getattr(invoice, "invoice_number", "")).startswith("NET-BILL"):
+        return invoice
+
+    items_total = money(sum((item.total or Decimal("0.00")) for item in invoice.items.all()))
+    current_total = money(invoice.total_amount)
+    if items_total <= current_total:
+        return invoice
+
+    original_state = {
+        "status": invoice.status,
+        "is_overdue": invoice.is_overdue,
+        "overdue_days": invoice.overdue_days,
+        "paid_at": invoice.paid_at,
+    }
+    invoice.calculate_totals()
+    type(invoice).objects.filter(pk=invoice.pk).update(**original_state)
+    invoice.refresh_from_db()
+    return invoice
+
+
 def get_tenant_for_subscription(subscription):
     company = subscription.company
     tenant = getattr(company, "tenant", None)
@@ -88,10 +113,12 @@ def get_target_net_bill_invoice_balance(subscription, tenant):
             for ref in candidate_refs:
                 invoice = by_cycle.get(str(ref))
                 if invoice:
+                    invoice = _repair_net_bill_invoice_total_from_items(invoice)
                     return invoice, money(invoice.balance or invoice.total_amount)
 
         invoice = invoices.order_by("created_at", "id").first()
         if invoice:
+            invoice = _repair_net_bill_invoice_total_from_items(invoice)
             return invoice, money(invoice.balance or invoice.total_amount)
     return None, Decimal("0.00")
 
@@ -157,6 +184,7 @@ def sync_subscription_invoice_payment(payment, *, notify=True):
                 candidate = targeted.get(str(ref))
                 if not candidate:
                     continue
+                candidate = _repair_net_bill_invoice_total_from_items(candidate)
                 existing_notes = candidate.internal_notes or ""
                 if receipt_number and receipt_number in existing_notes:
                     invoice = candidate
@@ -188,6 +216,7 @@ def sync_subscription_invoice_payment(payment, *, notify=True):
                 break
             if str(candidate.pk) in set(candidate_refs):
                 continue
+            candidate = _repair_net_bill_invoice_total_from_items(candidate)
             existing_notes = candidate.internal_notes or ""
             if receipt_number and receipt_number in existing_notes:
                 invoice = candidate
@@ -286,11 +315,13 @@ def complete_subscription_stk_payment(payment, mpesa_receipt=""):
             # Legacy completions have no activation marker. Do not replay payments
             # already covered by a later billing period, even after it expires.
             period_already_advanced = (
-                locked.completed_at and subscription.current_period_start
+                locked.completed_at
+                and subscription.current_period_start
                 and subscription.current_period_start >= locked.completed_at
             ) or (
-                locked.period_end and subscription.current_period_end
-                and subscription.current_period_end >= locked.period_end
+                locked.period_end
+                and subscription.current_period_start
+                and subscription.current_period_start >= locked.period_end
             )
             if locked.status == 'completed' and period_already_advanced:
                 locked.activation_applied_at = locked.completed_at or timezone.now()
