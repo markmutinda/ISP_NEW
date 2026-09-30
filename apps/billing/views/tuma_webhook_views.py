@@ -310,27 +310,16 @@ class TumaWebhookView(APIView):
                                     f"and provisioned RADIUS profiles directly to disk."
                                 )
 
-                                # ── SEND WELCOME SMS ──────────────────────────────────
-                                # Re-fetch session so expires_at and access_code are up to date
-                                # after activate() updated them in DB
-                                try:
-                                    hotspot_session.refresh_from_db()
-                                    from apps.messaging.services.notification_sender import SMSNotifier
-                                    with schema_context(payment_schema):
-                                        SMSNotifier.hotspot_welcome(
-                                            hotspot_session,
-                                            schema_name=payment_schema,
-                                        )
-                                    logger.info(
-                                        f"Welcome SMS sent for session {hotspot_session.session_id}"
-                                    )
-                                except Exception as sms_err:
-                                    # SMS failure must never break payment confirmation
-                                    logger.warning(
-                                        f"Hotspot welcome SMS failed for session "
-                                        f"{hotspot_session.session_id}: {sms_err}"
-                                    )
-                                # ─────────────────────────────────────────────────────
+                                # ── SEND WELCOME SMS (async, off the critical path) ──
+                                # Fires only after this transaction commits, so the
+                                # payment/session row lock is released immediately and
+                                # RADIUS credential availability is never delayed by an
+                                # SMS provider API call.
+                                from apps.messaging.tasks import send_hotspot_welcome_sms
+                                transaction.on_commit(
+                                    lambda sid=hotspot_session.session_id, sch=payment_schema:
+                                        send_hotspot_welcome_sms.delay(sid, sch)
+                                )
 
                             except Exception as radius_err:
                                 logger.error(

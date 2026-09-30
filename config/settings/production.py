@@ -43,23 +43,28 @@ for host in [_domain, _droplet_ip, _public_ip, _server_ip]:
 #  • DigitalOcean Docker → uses DB_HOST / DB_NAME env vars
 #    which are already read by base.py, so we only override
 #    when DATABASE_URL is explicitly set.
+#
+#  IMPORTANT: conn_max_age is 0 because PgBouncer (session mode) is
+#  already the connection pooler. A persistent Django-side connection
+#  on top of it would double-pool — pinning a PgBouncer slot for the
+#  life of the worker instead of returning it after each request.
 # ────────────────────────────────────────────────────────────────
 DATABASE_URL = os.environ.get('DATABASE_URL')
 if DATABASE_URL:
     DATABASES = {
         'default': dj_database_url.config(
             default=DATABASE_URL,
-            conn_max_age=60,  # 🟢 FIX: Recycle connections every 60s instead of holding forever
+            conn_max_age=0,  # 🟢 FIX: PgBouncer is the pooler — release immediately after each request
             conn_health_checks=True,  # 🟢 FIX: Django 4.1+ pings connection before reuse, auto-reconnects if dead
             engine='django_tenants.postgresql_backend',
         )
     }
 else:
-    # 🟢 FIX: If DATABASE_URL is not used, still apply health check settings to the default DB config
+    # 🟢 FIX: If DATABASE_URL is not used, still apply settings to the default DB config
     # This ensures the fixes apply even when using individual DB_HOST/DB_NAME env vars
     if 'default' in DATABASES:
         DATABASES['default'].update({
-            'CONN_MAX_AGE': 60,
+            'CONN_MAX_AGE': 0,
             'CONN_HEALTH_CHECKS': True,
         })
 
