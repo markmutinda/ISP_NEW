@@ -1053,6 +1053,40 @@ class BillingCycle(models.Model):
         super().save(*args, **kwargs)
 
     @classmethod
+    def normalize_active_cycles(cls, tenant, subscription, *, preferred_cycle=None, now=None):
+        """
+        Keep one active cycle for a tenant subscription.
+
+        Older callback/admin paths could leave multiple active rows for the same
+        subscription. That makes guards, reminders, invoice tools, and dashboard
+        countdowns disagree. Prefer the cycle that covers the subscription's
+        current period, then close the other active rows as paid historical rows.
+        """
+        now = now or timezone.now()
+        active_qs = cls.objects.filter(
+            tenant=tenant,
+            subscription=subscription,
+            status='active',
+        ).order_by('-start_date', '-end_date', '-id')
+
+        keep = preferred_cycle
+        if keep is None and subscription.current_period_start and subscription.current_period_end:
+            keep = (
+                active_qs.filter(
+                    start_date=subscription.current_period_start,
+                    end_date=subscription.current_period_end,
+                )
+                .first()
+            )
+        if keep is None:
+            keep = active_qs.filter(start_date__lte=now, end_date__gt=now).first()
+        if keep is None:
+            keep = active_qs.first()
+        if keep:
+            active_qs.exclude(pk=keep.pk).update(status='paid')
+        return keep
+
+    @classmethod
     def get_current_active_cycle(cls, tenant, subscription, *, create=False, now=None):
         """
         Return the active billing cycle that overlaps the current clock time.
@@ -1060,28 +1094,55 @@ class BillingCycle(models.Model):
         current billing window.
         """
         now = now or timezone.now()
-        qs = cls.objects.filter(
+        overlapping = list(cls.objects.filter(
             tenant=tenant,
             subscription=subscription,
             status='active',
             start_date__lte=now,
             end_date__gt=now,
-        ).select_related('tenant', 'subscription__plan').order_by('-start_date')
-        cycle = qs.first()
-        if cycle or not create:
+        ).select_related('tenant', 'subscription__plan').order_by('-start_date'))
+        cycle = None
+        if overlapping:
+            cycle = sorted(
+                overlapping,
+                key=lambda item: (
+                    item.end_date - item.start_date,
+                    item.start_date,
+                    item.end_date,
+                ),
+                reverse=True,
+            )[0]
+        if cycle:
+            cls.normalize_active_cycles(tenant, subscription, preferred_cycle=cycle, now=now)
+            return cycle
+        if not create:
             return cycle
 
         start = subscription.current_period_start or now
         end = subscription.current_period_end or subscription.next_period_end(start)
         if end <= now:
             end = subscription.next_period_end(now)
-        return cls.objects.create(
-            tenant=tenant,
-            subscription=subscription,
-            start_date=start,
-            end_date=end,
-            status='active',
+        cycle = (
+            cls.objects.filter(
+                tenant=tenant,
+                subscription=subscription,
+                status='active',
+                start_date=start,
+                end_date=end,
+            )
+            .order_by('-start_date', '-id')
+            .first()
         )
+        if not cycle:
+            cycle = cls.objects.create(
+                tenant=tenant,
+                subscription=subscription,
+                start_date=start,
+                end_date=end,
+                status='active',
+            )
+        cls.normalize_active_cycles(tenant, subscription, preferred_cycle=cycle, now=now)
+        return cycle
 
     def get_raw_pppoe_count(self):
         """

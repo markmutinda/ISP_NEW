@@ -9,6 +9,7 @@ from django.utils import timezone
 from rest_framework.test import APIRequestFactory
 
 from .billing_lifecycle import complete_subscription_stk_payment
+from .management.commands.repair_subscription_billing_cycles import _select_target_cycle
 from .views import SubscriptionPaymentViewSet
 
 
@@ -312,3 +313,24 @@ class PaymentUnlockTests(SimpleTestCase):
         self.assertEqual(cleanup_filter["status"], "active")
         cycles.filter.return_value.exclude.assert_called_once_with(pk=target_cycle.pk)
         cycles.filter.return_value.exclude.return_value.update.assert_called_once_with(status='paid')
+
+    def test_cycle_repair_prefers_longer_active_cycle_over_one_day_duplicate(self):
+        now = timezone.now()
+        short_cycle = SimpleNamespace(
+            pk='short',
+            start_date=now,
+            end_date=now + timedelta(days=1),
+        )
+        monthly_cycle = SimpleNamespace(
+            pk='monthly',
+            start_date=now - timedelta(days=1),
+            end_date=now + timedelta(days=29),
+        )
+        subscription = SimpleNamespace(
+            current_period_start=short_cycle.start_date,
+            current_period_end=short_cycle.end_date,
+        )
+
+        selected = _select_target_cycle(subscription, [short_cycle, monthly_cycle])
+
+        self.assertEqual(selected.pk, 'monthly')
