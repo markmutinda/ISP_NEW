@@ -28,7 +28,7 @@ class Command(BaseCommand):
             "--tenant",
             action="append",
             default=[],
-            help="Filter by tenant schema/subdomain/name. Can be supplied multiple times.",
+            help="Filter by tenant schema, subdomain, domain, database name, or company name. Can be supplied multiple times.",
         )
         parser.add_argument(
             "--limit",
@@ -67,7 +67,9 @@ class Command(BaseCommand):
                     q = (
                         Q(company__tenant__schema_name__icontains=tenant)
                         | Q(company__tenant__subdomain__icontains=tenant)
-                        | Q(company__tenant__name__icontains=tenant)
+                        | Q(company__tenant__domain__icontains=tenant)
+                        | Q(company__tenant__database_name__icontains=tenant)
+                        | Q(company__name__icontains=tenant)
                     )
                     tenant_q = q if tenant_q is None else tenant_q | q
                 qs = qs.filter(tenant_q)
