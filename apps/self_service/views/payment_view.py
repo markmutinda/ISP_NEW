@@ -175,31 +175,6 @@ class PaymentView(APIView):
             description = f"Invoice #{invoice.invoice_number}"
         
         # ============================================================
-        # FIX 1: Try to link the customer's current service plan amount
-        # so the C2B webhook plan-matching works
-        # ============================================================
-        actual_amount = amount
-        try:
-            # Get the customer's active service with plan
-            service = customer.services.filter(
-                status__in=['ACTIVE', 'SUSPENDED'],
-                plan__isnull=False
-            ).first()
-            
-            if service and service.plan:
-                # If the service has a plan, use the plan amount
-                # This helps the C2B webhook match the payment to the right plan
-                plan_amount = service.plan.price or service.plan.amount
-                if plan_amount and plan_amount > 0:
-                    # If the customer is paying exactly the plan amount, use it
-                    # to ensure proper matching
-                    if amount == plan_amount or amount >= plan_amount:
-                        actual_amount = plan_amount
-                        logger.info(f"Using plan amount {plan_amount} for C2B matching for customer {customer.customer_code}")
-        except Exception as e:
-            logger.warning(f"Could not get service plan for amount matching: {e}")
-        
-        # ============================================================
         # FIX 2: Create Payment with enhanced notes to identify it as 
         # a customer portal payment
         # ============================================================
@@ -207,7 +182,7 @@ class PaymentView(APIView):
             schema_name=schema,
             customer=customer,
             invoice=invoice,
-            amount=actual_amount,  # Use the actual amount (plan amount if matched)
+            amount=amount,
             payment_method=payment_method,
             payer_phone=normalized_phone,
             mpesa_phone=normalized_phone,
@@ -228,8 +203,8 @@ class PaymentView(APIView):
                 
                 result = mpesa_service.initiate_stk_push(
                     phone_number=normalized_phone,
-                    amount=actual_amount,  # Use the actual amount
-                    account_reference=reference,
+                    amount=amount,
+                    account_reference=f"PP{payment.id}",   # <= 12 chars, unique, C2B-matchable
                     transaction_desc=description,
                     payment=payment
                 )
@@ -273,7 +248,7 @@ class PaymentView(APIView):
 
             try:
                 result = stk_push(
-                    amount=actual_amount,
+                    amount=amount,
                     phone_number=normalized_phone,
                     party_b=party_b,
                     account_reference=account_reference or reference[:12],
@@ -302,7 +277,7 @@ class PaymentView(APIView):
                     send_telegram_payment_alert_task.apply_async(args=[
                         build_payment_failure_message(
                             phone=normalized_phone,
-                            amount=actual_amount,
+                            amount=amount,
                             tenant_label=tenant_label,
                             reason=str(e),
                         )

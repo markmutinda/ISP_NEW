@@ -9,6 +9,7 @@ Webhook:
 
 import json
 import logging
+import re
 from decimal import Decimal
 
 from django.conf import settings
@@ -408,6 +409,30 @@ class MpesaC2BWebhookView(APIView):
                                 mpesa_txn.payment = payment
                                 mpesa_txn.save(update_fields=['payment'])
                                 hotspot_session.mark_paid(trans_id)
+                                return Response({"ResultCode": 0, "ResultDesc": "Success"}, status=status.HTTP_200_OK)
+
+                        # ── Customer-portal STK payment confirmed via C2B (ref = "PP<payment_id>") ──
+                        if not service and re.fullmatch(r"PP\d+", bill_ref):
+                            portal_payment = Payment.objects.select_for_update().filter(
+                                pk=int(bill_ref[2:]),
+                                customer__isnull=False,
+                                status__in=["PROCESSING", "PENDING"],
+                                amount=amount,
+                            ).first()
+                            if portal_payment:
+                                now_ts = timezone.now()
+                                portal_payment.status = "COMPLETED"
+                                portal_payment.mpesa_receipt = trans_id
+                                portal_payment.transaction_id = trans_id
+                                portal_payment.mpesa_phone = msisdn
+                                portal_payment.processed_at = now_ts
+                                portal_payment.payment_date = now_ts
+                                portal_payment.save()
+                                MpesaTransaction.objects.filter(payment=portal_payment).update(
+                                    status="COMPLETED", result_code=0, result_desc="Success (C2B)"
+                                )
+                                from apps.billing.services.pppoe_activation import activate_pppoe_from_payment
+                                activate_pppoe_from_payment(portal_payment)
                                 return Response({"ResultCode": 0, "ResultDesc": "Success"}, status=status.HTTP_200_OK)
 
                         # Unmatched account tracking

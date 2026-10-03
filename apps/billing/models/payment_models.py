@@ -998,23 +998,13 @@ class Payment(models.Model):
             super().save(*args, **kwargs)
     
     def mark_as_completed(self, transaction_id=None, receipt_number=None, processed_by=None):
-        """Mark payment as completed"""
         self.status = 'COMPLETED'
         self.processed_at = timezone.now()
-        
         if transaction_id:
             self.transaction_id = transaction_id
-        
         if processed_by:
             self.processed_by = processed_by
-        
         self.save()
-        
-        if self.invoice:
-            from .billing_models import Invoice
-            Invoice.objects.filter(pk=self.invoice.pk).update(
-                paid_amount=models.F('paid_amount') + self.net_amount
-            )
     
     def mark_as_failed(self, failure_reason, processed_by=None):
         """Mark payment as failed"""

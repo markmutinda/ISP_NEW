@@ -339,103 +339,12 @@ class TumaWebhookView(APIView):
                     # ================================================================
                     # PPPoE / STANDARD PLAN ACTIVATION LOGIC
                     # ================================================================
-                    if payment.customer and not hotspot_session:
+                    if payment.customer_id and not hotspot_session:
+                        from apps.billing.services.pppoe_activation import activate_pppoe_from_payment
                         try:
-                            # 1. Get the customer's primary service connection
-                            service = payment.customer.services.filter(
-                                status__in=['ACTIVE', 'SUSPENDED']
-                            ).first()
-                            
-                            if service and hasattr(payment.customer, 'radius_credentials'):
-                                creds = payment.customer.radius_credentials
-                                plan = service.plan
-                                
-                                # 2. Calculate new expiration date using the Plan's exact settings
-                                now = timezone.now()
-                                current_expiry = creds.expiration_date
-                                
-                                # ─── NEW: CALENDAR_MONTH HANDLING ──────────────────────────
-                                is_calendar = getattr(plan, 'validity_type', None) == 'CALENDAR_MONTH'
-                                
-                                if is_calendar:
-                                    from utils.billing_dates import resolve_calendar_renewal
-                                    new_anchor, new_expiry = resolve_calendar_renewal(
-                                        current_expiry,
-                                        anchor_day=creds.billing_anchor_day,
-                                        now=now
-                                    )
-                                    creds.billing_anchor_day = new_anchor
-                                    logger.info(
-                                        f"STK Webhook: CALENDAR_MONTH renewal for {creds.username} "
-                                        f"anchor={new_anchor}, expiry={new_expiry}"
-                                    )
-                                else:
-                                    # Fetch exact timedelta (minutes, hours, days, months)
-                                    validity_delta = None
-                                    if hasattr(plan, 'get_validity_timedelta'):
-                                        validity_delta = plan.get_validity_timedelta()
-                                    else:
-                                        from datetime import timedelta
-                                        validity_delta = timedelta(days=getattr(plan, 'validity_days', 30))
-                                    
-                                    if validity_delta is None:
-                                        # Unlimited Plan
-                                        new_expiry = None
-                                    else:
-                                        # If they still have active time, add to it. If expired, start from right now.
-                                        if current_expiry and current_expiry > now:
-                                            new_expiry = current_expiry + validity_delta
-                                        else:
-                                            new_expiry = now + validity_delta
-                                # ──────────────────────────────────────────────────────────
-                                
-                                # 3. Update Radius Credentials in the database
-                                creds.expiration_date = new_expiry
-                                creds.is_enabled = True
-                                creds.subscription_activated_at = now
-                                creds.save(update_fields=[
-                                    'expiration_date', 
-                                    'is_enabled', 
-                                    'subscription_activated_at',
-                                    'billing_anchor_day',  # Added for CALENDAR_MONTH
-                                ])
-                                
-                                # 4. Sync updates to the FreeRADIUS SQL tables
-                                creds.sync_to_radius()
-                                
-                                # 5. Ensure the service object is marked active
-                                if service.status == 'SUSPENDED':
-                                    service.status = 'ACTIVE'
-                                    service.save(update_fields=['status'])
-                                    
-                                logger.info(f"Successfully activated PPPoE service for {payment.customer}. New expiry: {new_expiry}")
-                                
-                                # 6. Send renewal SMS notification
-                                try:
-                                    from apps.messaging.services.notification_sender import SMSNotifier
-                                    plan_name = plan.name if plan else ''
-                                    SMSNotifier.pppoe_renewal(
-                                        customer=payment.customer,
-                                        plan_name=plan_name,
-                                        expires_at=new_expiry,
-                                    )
-                                    logger.info(f"Renewal SMS sent to {payment.customer.phone} for PPPoE renewal")
-                                except Exception as e:
-                                    logger.warning(f"Renewal SMS failed for payment {payment.payment_number}: {e}")
-                                
-                                # 7. (Optional but recommended) Kick the suspended session off the router
-                                # so it immediately reconnects and picks up the new active profile.
-                                try:
-                                    from apps.radius.services.coa_service import CoAService
-                                    coa = CoAService()
-                                    coa.disconnect_user(creds.username)
-                                except ImportError:
-                                    pass # CoAService might not be implemented yet
-                                except Exception as e:
-                                    logger.warning(f"Failed to send CoA disconnect for {creds.username}: {e}")
-                                    
+                            activate_pppoe_from_payment(payment)
                         except Exception as e:
-                            logger.error(f"Error activating PPPoE service for payment {payment.payment_number}: {e}")
+                            logger.exception("PPPoE activation failed for %s: %s", payment.payment_number, e)
 
                     # ================================================================
                     # HOTSPOT REVENUE ACCUMULATION
