@@ -3050,14 +3050,31 @@ class TenantUserLedgerListView(APIView):
                 tenant = getattr(subscription.company, "tenant", None)
                 if not tenant:
                     continue
-                BillingCycle.objects.get_or_create(
-                    tenant=tenant,
-                    subscription=subscription,
-                    status='active',
-                    defaults={
-                        "start_date": subscription.current_period_start or timezone.now(),
-                        "end_date": subscription.current_period_end or subscription.next_period_end(timezone.now()),
-                    },
+                cycle_start = subscription.current_period_start or timezone.now()
+                cycle_end = subscription.current_period_end or subscription.next_period_end(cycle_start)
+                active_cycle = (
+                    BillingCycle.objects.filter(
+                        tenant=tenant,
+                        subscription=subscription,
+                        status='active',
+                        start_date=cycle_start,
+                        end_date=cycle_end,
+                    )
+                    .order_by('-start_date', '-id')
+                    .first()
+                )
+                if not active_cycle:
+                    active_cycle = BillingCycle.objects.create(
+                        tenant=tenant,
+                        subscription=subscription,
+                        status='active',
+                        start_date=cycle_start,
+                        end_date=cycle_end,
+                    )
+                BillingCycle.normalize_active_cycles(
+                    tenant,
+                    subscription,
+                    preferred_cycle=active_cycle,
                 )
 
             active_cycles = BillingCycle.objects.filter(status='active').select_related(
@@ -4163,15 +4180,30 @@ class SubscriptionInvoiceReconcileView(APIView):
                 start_date__lt=cycle.end_date,
             ).exclude(pk=cycle.pk).update(status="paid")
 
-            BillingCycle.objects.get_or_create(
-                tenant=cycle.tenant,
-                subscription=subscription,
-                status="active",
-                defaults={
-                    "start_date": next_start,
-                    "end_date": next_end,
-                    "is_first_paid_cycle": False,
-                },
+            next_cycle = (
+                BillingCycle.objects.filter(
+                    tenant=cycle.tenant,
+                    subscription=subscription,
+                    status="active",
+                    start_date=next_start,
+                    end_date=next_end,
+                )
+                .order_by("-start_date", "-id")
+                .first()
+            )
+            if not next_cycle:
+                next_cycle = BillingCycle.objects.create(
+                    tenant=cycle.tenant,
+                    subscription=subscription,
+                    status="active",
+                    start_date=next_start,
+                    end_date=next_end,
+                    is_first_paid_cycle=False,
+                )
+            BillingCycle.normalize_active_cycles(
+                cycle.tenant,
+                subscription,
+                preferred_cycle=next_cycle,
             )
 
         _log_action(
