@@ -1,4 +1,3 @@
-
 """
 Public TR-069 webhooks. These run BEFORE any tenant is known:
 1. credentials lookup  — called by the GenieACS extension on every CWMP auth check.
@@ -9,8 +8,10 @@ Public TR-069 webhooks. These run BEFORE any tenant is known:
 import hmac
 import json
 import logging
+import re
 
 from django.conf import settings
+from django.db.models import Q
 from django.http import JsonResponse
 from django.utils import timezone
 from django.views.decorators.csrf import csrf_exempt
@@ -20,6 +21,31 @@ from django_tenants.utils import schema_context
 from .models import Tr069DeviceIndex
 
 logger = logging.getLogger(__name__)
+
+_HUAWEI_LABEL = re.compile(r'^[A-Za-z]{4}[0-9A-Fa-f]{8}$')
+_HUAWEI_HEX = re.compile(r'^[0-9A-Fa-f]{16}$')
+
+
+def _serial_candidates(serial: str) -> list[str]:
+    s = serial.strip()
+    out = [s]
+    if _HUAWEI_LABEL.match(s):                       # HWTC1234ABCD -> 4857544312 34ABCD
+        out.append(s[:4].encode().hex().upper() + s[4:].upper())
+    elif _HUAWEI_HEX.match(s):                       # reverse direction
+        try:
+            head = bytes.fromhex(s[:8]).decode('ascii')
+            if head.isalpha():
+                out.append(head.upper() + s[8:].upper())
+        except ValueError:
+            pass
+    return out
+
+
+def _find_index_entry(serial: str):
+    q = Q()
+    for c in _serial_candidates(serial):
+        q |= Q(serial_number__iexact=c)
+    return Tr069DeviceIndex.objects.filter(q, is_active=True).first()
 
 
 def _check_secret(request) -> bool:
@@ -41,7 +67,7 @@ def tr069_credentials_lookup(request):
     if not serial:
         return JsonResponse({'error': 'serial required'}, status=400)
 
-    entry = Tr069DeviceIndex.objects.filter(serial_number=serial, is_active=True).first()
+    entry = _find_index_entry(serial)
     if not entry:
         return JsonResponse({'error': 'not found'}, status=404)
 
@@ -66,10 +92,12 @@ def tr069_inform_webhook(request):
     if not serial:
         return JsonResponse({'error': 'serial_number required'}, status=400)
 
-    entry = Tr069DeviceIndex.objects.filter(serial_number=serial, is_active=True).first()
+    entry = _find_index_entry(serial)
     if not entry:
         logger.info("TR-069 Inform for unenrolled serial %s — ignoring", serial)
         return JsonResponse({'status': 'unenrolled'})
+
+    serial = entry.serial_number   # use the enrolled form for the tenant-side lookup
 
     if genieacs_device_id and entry.genieacs_device_id != genieacs_device_id:
         entry.genieacs_device_id = genieacs_device_id
