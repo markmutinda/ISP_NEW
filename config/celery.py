@@ -164,6 +164,16 @@ app.conf.beat_schedule = {
         'options': {'queue': 'radius'}
     },
 
+    # ────────────────────────────────────────────────────────────────
+    # TR-069 offline reconciler - Every 2 minutes
+    # Flips devices that have gone quiet into 'not_answering'.
+    # ────────────────────────────────────────────────────────────────
+    'tr069-reconcile-devices-every-2-min': {
+        'task': 'apps.tr069.tasks.reconcile_all_tenants',
+        'schedule': crontab(minute='*/2'),
+        'options': {'queue': 'default'}
+    },
+
     # ════════════════════════════════════════════════════════════════
     # CLOUD CONTROLLER — Hotspot RADIUS Cleanup
     # ════════════════════════════════════════════════════════════════

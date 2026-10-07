@@ -53,6 +53,24 @@ def _val(node):
     return node.get('_value') if isinstance(node, dict) else None
 
 
+def _flatten_tree(tree: dict) -> dict:
+    """
+    Convert GenieACS NBI's nested tree into {'A.B.C': {'_value': ...}} leaf entries,
+    which is the shape every _extract_* helper and _PATHS lookup expects.
+    Iterative (no recursion limit) and single pass, so it stays cheap on large Huawei trees.
+    """
+    flat = {}
+    stack = [(k, v) for k, v in tree.items() if not k.startswith('_') and isinstance(v, dict)]
+    while stack:
+        path, node = stack.pop()
+        if '_value' in node:
+            flat[path] = node
+        for k, v in node.items():
+            if not k.startswith('_') and isinstance(v, dict):
+                stack.append((f'{path}.{k}', v))
+    return flat
+
+
 def _log_task(device, task_type, params, user=None):
     return CPETaskLog.objects.create(device=device, task_type=task_type, params=params, status='queued', created_by=user)
 
@@ -295,9 +313,10 @@ def sync_device_from_genieacs(device: CPEDevice) -> CPEDevice:
             return device
         device.genieacs_device_id = genieacs_id
 
-    remote = client.get_device(genieacs_id)
-    if not remote:
+    raw = client.get_device(genieacs_id)
+    if not raw:
         return device
+    remote = _flatten_tree(raw)
 
     data_model = _detect_data_model(remote)
     paths = _PATHS[data_model]

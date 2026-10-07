@@ -32,21 +32,29 @@ def reconcile_all_tenants():
     """
     from datetime import timedelta
 
-    TenantModel = get_tenant_model()
     threshold = getattr(settings, 'TR069_OFFLINE_AFTER_SECONDS', 900)
     cutoff = timezone.now() - timedelta(seconds=threshold)
 
     flipped = 0
-    for tenant in TenantModel.objects.exclude(schema_name='public'):
+    from apps.core.models import Tr069DeviceIndex
+    from django_tenants.utils import get_public_schema_name
+
+    with schema_context(get_public_schema_name()):
+        schemas = list(
+            Tr069DeviceIndex.objects.filter(is_active=True)
+            .values_list('tenant_schema', flat=True).distinct()
+        )
+
+    for schema in schemas:
         try:
-            with schema_context(tenant.schema_name):
+            with schema_context(schema):
                 from .models import CPEDevice
 
                 flipped += CPEDevice.objects.filter(
                     status='online', last_inform_at__lt=cutoff
                 ).update(status='not_answering')
         except Exception as e:
-            logger.error("[TR069 RECONCILE] tenant=%s error=%s", tenant.schema_name, e)
+            logger.error("[TR069 RECONCILE] tenant=%s error=%s", schema, e)
 
     logger.info("[TR069 RECONCILE] flipped %s device(s) to not_answering", flipped)
     return {'flipped': flipped}
