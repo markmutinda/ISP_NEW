@@ -302,6 +302,15 @@ services:
       - DB_PORT=5432
       - DB_SCHEMA=public
       - VPN_NETWORK_CIDR=${VPN_NETWORK_CIDR:-10.8.0.0/16}
+      # === INSERTED (step 4) ===
+      # Thread pool tuning read by docker/radius-entrypoint.sh.
+      # Keep RADIUS_MAX_SERVERS <= sql.conf pool.max (currently 16).
+      - RADIUS_START_SERVERS=${RADIUS_START_SERVERS:-4}
+      - RADIUS_MAX_SERVERS=${RADIUS_MAX_SERVERS:-16}
+      - RADIUS_MIN_SPARE_SERVERS=${RADIUS_MIN_SPARE_SERVERS:-3}
+      - RADIUS_MAX_SPARE_SERVERS=${RADIUS_MAX_SPARE_SERVERS:-8}
+      - RADIUS_DEBUG=${RADIUS_DEBUG:-false}
+      # === END INSERTED (step 4) ===
     volumes:
       - ../radius_config/sites-available/default:/etc/freeradius/sites-enabled/default:ro
       - ../radius_config/mods-config/sql/main/postgresql/queries.conf:/etc/freeradius/mods-config/sql/main/postgresql/queries.conf:ro
@@ -314,7 +323,11 @@ services:
       resources:
         limits:
           cpus: "0.5"
-          memory: 128M
+          # CHANGED (step 4): 128M -> 256M. A threaded FreeRADIUS process
+          # with up to 16 worker threads plus the SQL pool needs more than
+          # 128M headroom. Plan says: watch docker stats, drop back to 192M
+          # if it stays under ~150MB after a day.
+          memory: 256M
     logging:
       driver: "json-file"
       options:

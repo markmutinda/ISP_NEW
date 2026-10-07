@@ -63,6 +63,50 @@ fi
 chown freerad:freerad "${GENERATED_SQL_MODULE}"
 chown freerad:freerad "${CLIENTS_CONF}"
 
+# === INSERTED (step 2) ======================================================
+# ============================================================================
+# THREAD POOL TUNING (env-driven, idempotent, scoped to `thread pool {}` only)
+# ============================================================================
+RADIUSD_CONF="${CONF_ROOT}/radiusd.conf"
+RADIUS_START_SERVERS="${RADIUS_START_SERVERS:-4}"
+RADIUS_MAX_SERVERS="${RADIUS_MAX_SERVERS:-16}"
+RADIUS_MIN_SPARE_SERVERS="${RADIUS_MIN_SPARE_SERVERS:-3}"
+RADIUS_MAX_SPARE_SERVERS="${RADIUS_MAX_SPARE_SERVERS:-8}"
+RADIUS_MAX_REQUESTS_PER_SERVER="${RADIUS_MAX_REQUESTS_PER_SERVER:-0}"
+
+if [ -f "${RADIUSD_CONF}" ]; then
+    echo "Tuning thread pool: start=${RADIUS_START_SERVERS} max=${RADIUS_MAX_SERVERS} spare=${RADIUS_MIN_SPARE_SERVERS}-${RADIUS_MAX_SPARE_SERVERS}"
+    sed -i -E "/^thread pool \{/,/^\}/ {
+        s/^([[:space:]]*start_servers[[:space:]]*=[[:space:]]*).*/\1${RADIUS_START_SERVERS}/
+        s/^([[:space:]]*max_servers[[:space:]]*=[[:space:]]*).*/\1${RADIUS_MAX_SERVERS}/
+        s/^([[:space:]]*min_spare_servers[[:space:]]*=[[:space:]]*).*/\1${RADIUS_MIN_SPARE_SERVERS}/
+        s/^([[:space:]]*max_spare_servers[[:space:]]*=[[:space:]]*).*/\1${RADIUS_MAX_SPARE_SERVERS}/
+        s/^([[:space:]]*max_requests_per_server[[:space:]]*=[[:space:]]*).*/\1${RADIUS_MAX_REQUESTS_PER_SERVER}/
+    }" "${RADIUSD_CONF}"
+    chown root:freerad "${RADIUSD_CONF}" && chmod 640 "${RADIUSD_CONF}"
+else
+    echo "WARNING: ${RADIUSD_CONF} not found; thread pool left at defaults"
+fi
+
+# ============================================================================
+# RUN MODE: production by default, -X only when explicitly requested
+# ============================================================================
+if [ "${RADIUS_DEBUG:-false}" = "true" ]; then
+    echo "⚠ RADIUS_DEBUG=true -> single-threaded debug mode (-X). Do NOT leave enabled."
+    set -- freeradius -X
+fi
+
+# Fail fast on a broken config (visible in `docker logs`, restart loop is obvious)
+if [ "${RADIUS_CONFIG_CHECK:-true}" = "true" ] && [ "$1" = "freeradius" ]; then
+    echo "Validating FreeRADIUS configuration..."
+    if ! gosu freerad freeradius -C -d "${CONF_ROOT}" -l stdout >/tmp/radius-check.log 2>&1; then
+        echo "✗ Config check failed:"; tail -n 40 /tmp/radius-check.log
+        exit 1
+    fi
+    echo "✓ Config OK"
+fi
+# === END INSERTED (step 2) ==================================================
+
 echo "Testing database connection..."
 if PGPASSWORD="${DB_PASSWORD}" psql -h "${DB_HOST}" -p "${DB_PORT}" -U "${DB_USER}" -d "${DB_NAME}" -c "SELECT current_schema(), current_setting('search_path');" 2>/dev/null; then
     echo "✓ Database connection successful"

@@ -42,4 +42,12 @@ EXPOSE 1812/udp 1813/udp 3799/udp
 
 # Start using the fixed entrypoint
 ENTRYPOINT ["/usr/local/bin/radius-entrypoint.sh"]
-CMD ["freeradius", "-X"]
+
+# ----------------------------------------------------------------------------
+# CHANGED: Production run mode.
+#   -f        run in foreground (required for Docker to keep the container up)
+#   -l stdout send logs to stdout so `docker logs` works
+#   Debug mode (-X, single-threaded + per-packet logging) is now opt-in at
+#   runtime by setting RADIUS_DEBUG=true in the environment.
+# ----------------------------------------------------------------------------
+CMD ["freeradius", "-f", "-l", "stdout"]
