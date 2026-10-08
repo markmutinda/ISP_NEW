@@ -1,5 +1,6 @@
 from datetime import datetime, timedelta
 from decimal import Decimal
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 from django.test import SimpleTestCase, TestCase
@@ -9,9 +10,41 @@ from apps.core.models import Company, Tenant
 from apps.subscriptions.models import CompanySubscription, NetilyPlan
 from apps.superadmin.serializers import PlatformExpenditureSerializer, TenantListSerializer
 from apps.superadmin.views import DashboardView, PlatformExpenditureView, SubscriptionPaymentListView
+from apps.superadmin.management.commands.record_business_account_transfer import Command as RecordTransferCommand
 
 
 class PlatformExpenditureLedgerTests(SimpleTestCase):
+    def test_transfer_changes_calculated_positions_but_not_receipts(self):
+        request = SimpleNamespace(query_params={})
+        manual = MagicMock()
+        manual.aggregate.return_value = {"total": Decimal("11422.00")}
+        manual.count.return_value = 0
+        manual.__getitem__.return_value = []
+        with patch("apps.superadmin.views._ensure_public"), patch.object(
+            PlatformExpenditureView, "_cutover_payment", return_value=None
+        ), patch.object(PlatformExpenditureView, "_manual_qs", return_value=manual), patch.object(
+            PlatformExpenditureView, "_subscription_total", return_value=Decimal("10891.70")
+        ), patch.object(PlatformExpenditureView, "_sms_topup_total", return_value=Decimal("504.60")), patch.object(
+            PlatformExpenditureView, "_transfer_total", return_value=Decimal("18000.00")
+        ):
+            view = PlatformExpenditureView()
+            view.ledger_key = "new_business"
+            summary = view.get(request).data["summary"]
+        self.assertEqual(summary["accrued_total"], "11396.30")
+        self.assertEqual(summary["net_profit"], "-25.70")
+        self.assertEqual(summary["transfer_in_total"], "18000.00")
+        self.assertEqual(summary["calculated_position"], "17974.30")
+
+    def test_record_transfer_command_does_not_write_without_apply(self):
+        with patch("apps.superadmin.management.commands.record_business_account_transfer.schema_context"), patch(
+            "apps.superadmin.management.commands.record_business_account_transfer.get_public_schema_name", return_value="public"
+        ), patch("apps.superadmin.management.commands.record_business_account_transfer.BusinessAccountTransfer.objects") as transfers:
+            RecordTransferCommand().handle(
+                amount="18000", effective_at="2026-09-06T23:29:00+03:00",
+                reference="CUTOVER-TRANSFER", apply=False,
+            )
+        transfers.get_or_create.assert_not_called()
+
     def test_receipts_after_boundary_belong_to_new_account(self):
         cutover = datetime.fromisoformat("2026-09-29T16:39:20+03:00")
         with patch.object(PlatformExpenditureView, "_cutover_payment") as payment:

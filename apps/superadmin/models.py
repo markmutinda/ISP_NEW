@@ -152,6 +152,17 @@ class PlatformExpenditure(models.Model):
         return f"{self.title} - {self.currency} {self.amount}"
 
 
+class BusinessAccountTransfer(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    reference = models.CharField(max_length=100, unique=True)
+    amount = models.DecimalField(max_digits=14, decimal_places=2)
+    effective_at = models.DateTimeField(db_index=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-effective_at", "-created_at"]
+
+
 class SupportExecutiveProfile(models.Model):
     """Platform-owned support identity attached to a normal User account."""
 

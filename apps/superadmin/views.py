@@ -36,7 +36,7 @@ from rest_framework.views import APIView
 from apps.core.models import Tenant, Company, Domain, User, AuditLog, GlobalSystemSettings, SystemSettings, Changelog, FeatureRequest
 from apps.core.rbac_defaults import normalize_role_access_policies
 from .permissions import IsSuperAdmin
-from .models import PlatformExpenditure, TenantDeletionJob
+from .models import BusinessAccountTransfer, PlatformExpenditure, TenantDeletionJob
 from .serializers import (
     TenantListSerializer,
     TenantDetailSerializer,
@@ -5078,6 +5078,11 @@ class PlatformExpenditureView(APIView):
             qs = qs.filter(incurred_on__lte=end_date)
         return qs
 
+    def _transfer_total(self, start_date, end_date):
+        qs = BusinessAccountTransfer.objects.all()
+        qs = self._apply_date_filter(qs, "effective_at", start_date, end_date)
+        return qs.aggregate(total=Sum("amount"))["total"] or Decimal("0.00")
+
     def get(self, request):
         _ensure_public()
         start_date, end_date = self._parse_range(request)
@@ -5092,6 +5097,10 @@ class PlatformExpenditureView(APIView):
         sms_total = self._sms_topup_total(start_date, end_date, cutover_at)
         accrued_total = subscription_total + sms_total
         net_profit = accrued_total - manual_total
+        transfer_total = self._transfer_total(start_date, end_date)
+        transfer_in = transfer_total if self.ledger_key == PlatformExpenditure.LEDGER_NEW_BUSINESS else Decimal("0.00")
+        transfer_out = transfer_total if self.ledger_key == PlatformExpenditure.LEDGER_PRIMARY else Decimal("0.00")
+        calculated_position = net_profit + transfer_in - transfer_out
 
         count = manual_qs.count()
         start = (page - 1) * page_size
@@ -5123,6 +5132,9 @@ class PlatformExpenditureView(APIView):
                 "accrued_total": self._money(accrued_total),
                 "manual_expenditure_total": self._money(manual_total),
                 "net_profit": self._money(net_profit),
+                "transfer_in_total": self._money(transfer_in),
+                "transfer_out_total": self._money(transfer_out),
+                "calculated_position": self._money(calculated_position),
             },
             "count": count,
             "page": page,
