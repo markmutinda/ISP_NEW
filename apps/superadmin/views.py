@@ -4475,13 +4475,16 @@ class SubscriptionPaymentListView(APIView):
     payment_methods = {"mpesa_paybill", "bank_transfer", "card"}
     billing_periods = {"monthly", "yearly"}
 
-    def _payment_row(self, payment):
+    def _payment_row(self, payment, cutover_at=None):
         reference = (
             payment.mpesa_receipt
             or payment.bank_reference
             or payment.payhero_reference
             or ""
         )
+        effective_account = payment.business_account
+        if not effective_account and payment.status == "completed" and payment.completed_at and cutover_at:
+            effective_account = "primary" if payment.completed_at <= cutover_at else "new_business"
         return {
             "id": str(payment.id),
             "company_name": payment.subscription.company.name if payment.subscription and payment.subscription.company else "-",
@@ -4491,6 +4494,8 @@ class SubscriptionPaymentListView(APIView):
             "amount": str(payment.amount),
             "currency": payment.currency,
             "payment_method": payment.payment_method,
+            "business_account": payment.business_account,
+            "effective_business_account": effective_account,
             "status": payment.status,
             "reference": reference,
             "mpesa_receipt": payment.mpesa_receipt or "",
@@ -4548,6 +4553,7 @@ class SubscriptionPaymentListView(APIView):
         reference,
         phone_number,
         paid_at,
+        business_account=None,
     ):
         receipt_value, bank_value, card_value = self._reference_values(payment_method, reference)
         period_anchor = (
@@ -4566,6 +4572,8 @@ class SubscriptionPaymentListView(APIView):
         payment.currency = "KES"
         payment.payment_method = payment_method
         payment.phone_number = phone_number or None
+        if business_account is not None:
+            payment.business_account = business_account
         payment.mpesa_receipt = receipt_value
         payment.bank_reference = bank_value
         payment.payhero_reference = card_value
@@ -4581,6 +4589,7 @@ class SubscriptionPaymentListView(APIView):
             "currency",
             "payment_method",
             "phone_number",
+            "business_account",
             "mpesa_receipt",
             "bank_reference",
             "payhero_reference",
@@ -4626,8 +4635,9 @@ class SubscriptionPaymentListView(APIView):
             total = qs.count()
             start = (page - 1) * page_size
             payments = qs[start: start + page_size]
-
-            results = [self._payment_row(payment) for payment in payments]
+            boundary = PlatformExpenditureView()._cutover_payment()
+            cutover_at = boundary.completed_at if boundary else datetime.fromisoformat("2026-09-29T16:39:59+03:00")
+            results = [self._payment_row(payment, cutover_at) for payment in payments]
 
         return Response({
             "count": total,
@@ -4657,6 +4667,7 @@ class SubscriptionPaymentListView(APIView):
         plan_id = str(data.get("plan_id") or "").strip()
         phone_number = str(data.get("phone_number") or "").strip()
         notes = str(data.get("notes") or "").strip()
+        business_account = str(data.get("business_account") or "").strip()
         apply_to_subscription = data.get("apply_to_subscription", True) is not False
         notify_tenant = data.get("notify_tenant", True) is not False
 
@@ -4674,6 +4685,8 @@ class SubscriptionPaymentListView(APIView):
             return Response({"detail": "Billing period must be monthly or yearly."}, status=status.HTTP_400_BAD_REQUEST)
         if not reference:
             return Response({"detail": "Payment reference is required."}, status=status.HTTP_400_BAD_REQUEST)
+        if business_account and business_account not in ("primary", "new_business"):
+            return Response({"detail": "Choose a valid business account."}, status=status.HTTP_400_BAD_REQUEST)
 
         amount = self._parse_amount(data.get("amount"))
         if amount is None:
@@ -4682,6 +4695,8 @@ class SubscriptionPaymentListView(APIView):
         paid_at = self._parse_paid_at(data.get("completed_at"))
         if paid_at is None:
             return Response({"detail": "Payment date is invalid."}, status=status.HTTP_400_BAD_REQUEST)
+        if not business_account:
+            business_account = "primary" if paid_at <= datetime.fromisoformat("2026-09-29T16:39:59+03:00") else "new_business"
 
         with schema_context(get_public_schema_name()):
             subscription_qs = CompanySubscription.objects.select_related("company", "plan")
@@ -4712,6 +4727,12 @@ class SubscriptionPaymentListView(APIView):
                 .filter(self._reference_q(reference))
                 .first()
             )
+            if existing_payment and "ACCD33A971EF0" in (
+                (existing_payment.mpesa_receipt or "").upper(),
+                (existing_payment.bank_reference or "").upper(),
+                (existing_payment.payhero_reference or "").upper(),
+            ):
+                return Response({"detail": "The account cutover payment cannot be replaced."}, status=status.HTTP_400_BAD_REQUEST)
             replaced_existing = existing_payment is not None
             previous_snapshot = self._payment_row(existing_payment) if existing_payment else None
             with transaction.atomic():
@@ -4729,6 +4750,7 @@ class SubscriptionPaymentListView(APIView):
                     reference=reference,
                     phone_number=phone_number,
                     paid_at=paid_at,
+                    business_account=business_account,
                 )
 
             invoice = None
@@ -4775,6 +4797,7 @@ class SubscriptionPaymentListView(APIView):
                     "amount": str(amount),
                     "payment_method": payment_method,
                     "reference": reference,
+                    "business_account": business_account,
                     "replaced_existing": replaced_existing,
                     "previous": previous_snapshot,
                     "subscription_activated": subscription_activated,
@@ -4832,6 +4855,9 @@ class SubscriptionPaymentDetailView(SubscriptionPaymentListView):
         subscription_id = str(data.get("subscription_id") or "").strip()
         phone_number = str(data.get("phone_number") or "").strip()
         notes = str(data.get("notes") or "").strip()
+        business_account = str(data.get("business_account") or "").strip()
+        if business_account and business_account not in ("primary", "new_business"):
+            return Response({"detail": "Choose a valid business account."}, status=status.HTTP_400_BAD_REQUEST)
 
         if payment_method and payment_method not in self.payment_methods:
             return Response(
@@ -4848,6 +4874,13 @@ class SubscriptionPaymentDetailView(SubscriptionPaymentListView):
                 ).get(pk=pk)
             except SubscriptionPayment.DoesNotExist:
                 return Response({"detail": "Payment not found."}, status=status.HTTP_404_NOT_FOUND)
+
+            if "ACCD33A971EF0" in (
+                (payment.mpesa_receipt or "").upper(),
+                (payment.bank_reference or "").upper(),
+                (payment.payhero_reference or "").upper(),
+            ):
+                return Response({"detail": "The account cutover payment cannot be edited."}, status=status.HTTP_400_BAD_REQUEST)
 
             amount = self._parse_amount(data.get("amount", payment.amount))
             if amount is None:
@@ -4910,6 +4943,7 @@ class SubscriptionPaymentDetailView(SubscriptionPaymentListView):
                     reference=next_reference,
                     phone_number=phone_number,
                     paid_at=paid_at,
+                    business_account=business_account or None,
                 )
 
             _log_action(
@@ -4979,10 +5013,10 @@ class PlatformExpenditureView(APIView):
             .select_related("subscription__company")
             .filter(status="completed", completed_at__isnull=False)
             .filter(
-                Q(subscription__company__name__icontains="bentrex")
-                | Q(subscription__company__slug__icontains="bentrex")
+                Q(mpesa_receipt__iexact="ACCD33A971EF0")
+                | Q(bank_reference__iexact="ACCD33A971EF0")
+                | Q(payhero_reference__iexact="ACCD33A971EF0")
             )
-            .order_by("-completed_at", "-created_at")
             .first()
         )
 
@@ -4998,18 +5032,23 @@ class PlatformExpenditureView(APIView):
 
         qs = SubscriptionPayment.objects.filter(status="completed")
         qs = self._apply_date_filter(qs, "completed_at", start_date, end_date)
-        qs = self._apply_ledger_window(qs, "completed_at", cutover_at)
+        explicit = Q(business_account=self.ledger_key)
+        if cutover_at:
+            legacy = Q(business_account__isnull=True, completed_at__gt=cutover_at) if self.ledger_key == PlatformExpenditure.LEDGER_NEW_BUSINESS else Q(business_account__isnull=True, completed_at__lte=cutover_at)
+        else:
+            legacy = Q(pk__in=[]) if self.ledger_key == PlatformExpenditure.LEDGER_NEW_BUSINESS else Q(business_account__isnull=True)
+        qs = qs.filter(explicit | legacy)
         return qs.aggregate(total=Sum("amount"))["total"] or Decimal("0.00")
 
     def _sms_topup_total(self, start_date, end_date, cutover_at):
         total = Decimal("0.00")
-        tenants = Tenant.objects.filter(is_active=True).exclude(schema_name__in=PROTECTED_SCHEMAS)
+        tenants = Tenant.objects.exclude(schema_name__in=PROTECTED_SCHEMAS)
         for tenant in tenants.only("schema_name"):
             try:
                 with schema_context(tenant.schema_name):
                     qs = SMSUnitTopup.objects.filter(status="completed")
-                    qs = self._apply_date_filter(qs, "updated_at", start_date, end_date)
-                    qs = self._apply_ledger_window(qs, "updated_at", cutover_at)
+                    qs = self._apply_date_filter(qs, "completed_at", start_date, end_date)
+                    qs = self._apply_ledger_window(qs, "completed_at", cutover_at)
                     total += qs.aggregate(total=Sum("amount_paid"))["total"] or Decimal("0.00")
             except Exception as exc:
                 logger.warning("Expenditure SMS total skipped schema %s: %s", tenant.schema_name, exc)
@@ -5027,7 +5066,7 @@ class PlatformExpenditureView(APIView):
         _ensure_public()
         start_date, end_date = self._parse_range(request)
         cutover_payment = self._cutover_payment()
-        cutover_at = cutover_payment.completed_at if cutover_payment else None
+        cutover_at = cutover_payment.completed_at if cutover_payment else datetime.fromisoformat("2026-09-29T16:39:59+03:00")
         page = max(int(request.query_params.get("page", 1)), 1)
         page_size = min(max(int(request.query_params.get("page_size", PAGE_SIZE)), 1), 100)
 
@@ -5051,12 +5090,13 @@ class PlatformExpenditureView(APIView):
                 "ledger_description": ledger_config["description"],
                 "ledger_route": ledger_config["route"],
                 "cutover_at": cutover_at.isoformat() if cutover_at else None,
+                "cutover_verified": bool(cutover_payment),
                 "cutover_reference": (
                     cutover_payment.mpesa_receipt
                     or cutover_payment.bank_reference
                     or cutover_payment.payhero_reference
                     or ""
-                ) if cutover_payment else "",
+                ) if cutover_payment else "ACCD33A971EF0",
                 "cutover_company": (
                     cutover_payment.subscription.company.name
                     if cutover_payment and cutover_payment.subscription and cutover_payment.subscription.company
@@ -5096,9 +5136,41 @@ class PlatformExpenditureDetailView(APIView):
     permission_classes = SUPERADMIN_PERMS
     ledger_key = PlatformExpenditure.LEDGER_PRIMARY
 
+    def post(self, request, pk):
+        _ensure_public()
+        reason = str((request.data or {}).get("reason") or "").strip()
+        if not reason:
+            return Response({"detail": "Give a reason for this correction."}, status=status.HTTP_400_BAD_REQUEST)
+        with transaction.atomic():
+            expenditure = get_object_or_404(
+                PlatformExpenditure.objects.select_for_update(), pk=pk, ledger=self.ledger_key
+            )
+            if expenditure.reverses_id or PlatformExpenditure.objects.filter(reverses=expenditure).exists():
+                return Response({"detail": "This entry is already a correction or has been reversed."}, status=status.HTTP_400_BAD_REQUEST)
+            correction = PlatformExpenditure.objects.create(
+                ledger=expenditure.ledger,
+                category=expenditure.category,
+                title=f"Reversal: {expenditure.title}"[:160],
+                amount=-expenditure.amount,
+                currency=expenditure.currency,
+                incurred_on=timezone.localdate(),
+                notes=reason,
+                reverses=expenditure,
+                created_by=request.user,
+            )
+        _log_action(
+            request.user, "reverse", "PlatformExpenditure",
+            object_repr=f"{expenditure.title} - {expenditure.currency} {expenditure.amount}",
+            object_id=expenditure.id,
+            changes={"reason": reason, "correction_id": str(correction.id)}, request=request,
+        )
+        return Response(PlatformExpenditureSerializer(correction).data, status=status.HTTP_201_CREATED)
+
     def patch(self, request, pk):
         _ensure_public()
         expenditure = get_object_or_404(PlatformExpenditure, pk=pk, ledger=self.ledger_key)
+        if expenditure.reverses_id or PlatformExpenditure.objects.filter(reverses=expenditure).exists():
+            return Response({"detail": "A reversed entry cannot be edited."}, status=status.HTTP_400_BAD_REQUEST)
         before = PlatformExpenditureSerializer(expenditure).data
         serializer = PlatformExpenditureSerializer(expenditure, data=request.data, partial=True)
         serializer.is_valid(raise_exception=True)
@@ -5115,21 +5187,7 @@ class PlatformExpenditureDetailView(APIView):
         return Response(serializer.data)
 
     def delete(self, request, pk):
-        _ensure_public()
-        expenditure = get_object_or_404(PlatformExpenditure, pk=pk)
-        snapshot = PlatformExpenditureSerializer(expenditure).data
-        object_repr = f"{expenditure.title} - {expenditure.currency} {expenditure.amount}"
-        expenditure.delete()
-        _log_action(
-            request.user,
-            "delete",
-            "PlatformExpenditure",
-            object_repr=object_repr,
-            object_id=pk,
-            changes={"deleted": snapshot},
-            request=request,
-        )
-        return Response(status=status.HTTP_204_NO_CONTENT)
+        return Response({"detail": "Use a reversal to correct an expenditure entry."}, status=status.HTTP_405_METHOD_NOT_ALLOWED)
 
 
 class LeadListView(APIView):

@@ -123,6 +123,10 @@ class PlatformExpenditure(models.Model):
     category = models.CharField(max_length=40, choices=CATEGORY_CHOICES, default=CATEGORY_OPERATIONS)
     title = models.CharField(max_length=160)
     amount = models.DecimalField(max_digits=14, decimal_places=2)
+    reverses = models.OneToOneField(
+        "self", on_delete=models.PROTECT, null=True, blank=True,
+        related_name="reversal", help_text="Original entry offset by this correction.",
+    )
     currency = models.CharField(max_length=8, default="KES")
     incurred_on = models.DateField(db_index=True)
     notes = models.TextField(blank=True, default="")

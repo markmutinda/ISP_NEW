@@ -1,13 +1,43 @@
 from datetime import datetime, timedelta
 from decimal import Decimal
+from unittest.mock import MagicMock, patch
 
 from django.test import SimpleTestCase, TestCase
 from django.utils import timezone
 
 from apps.core.models import Company, Tenant
 from apps.subscriptions.models import CompanySubscription, NetilyPlan
-from apps.superadmin.serializers import TenantListSerializer
-from apps.superadmin.views import DashboardView
+from apps.superadmin.serializers import PlatformExpenditureSerializer, TenantListSerializer
+from apps.superadmin.views import DashboardView, PlatformExpenditureView
+
+
+class PlatformExpenditureLedgerTests(SimpleTestCase):
+    def test_signed_expenditure_allows_credit_but_not_zero(self):
+        serializer = PlatformExpenditureSerializer()
+        self.assertEqual(serializer.validate_amount(Decimal("-6212.00")), Decimal("-6212.00"))
+        with self.assertRaises(Exception):
+            serializer.validate_amount(Decimal("0.00"))
+
+    def test_cutover_looks_up_fixed_receipt(self):
+        view = PlatformExpenditureView()
+        with patch("apps.subscriptions.models.SubscriptionPayment.objects") as payments:
+            view._cutover_payment()
+        lookup = payments.select_related.return_value.filter.return_value.filter.call_args.args[0]
+        self.assertIn("ACCD33A971EF0", str(lookup))
+        self.assertNotIn("bentrex", str(lookup).lower())
+
+    def test_explicit_manual_account_takes_precedence_over_date(self):
+        view = PlatformExpenditureView()
+        view.ledger_key = "new_business"
+        with patch("apps.subscriptions.models.SubscriptionPayment.objects") as payments:
+            qs = MagicMock()
+            payments.filter.return_value = qs
+            qs.filter.return_value = qs
+            qs.aggregate.return_value = {"total": Decimal("6212.00")}
+            self.assertEqual(view._subscription_total(None, None, datetime.fromisoformat("2026-09-29T16:39:59+03:00")), Decimal("6212.00"))
+        account_filter = str(qs.filter.call_args.args[0])
+        self.assertIn("new_business", account_filter)
+        self.assertIn("business_account__isnull", account_filter)
 
 
 class CompanySubscriptionBillingAnchorTests(SimpleTestCase):

@@ -526,6 +526,14 @@ class SubscriptionPayment(models.Model):
     )
     
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    business_account = models.CharField(
+        max_length=32,
+        choices=(("primary", "Original Business Account"), ("new_business", "New Business Account")),
+        null=True,
+        blank=True,
+        db_index=True,
+        help_text="Explicit allocation for manually recorded payments; legacy payments use the cutover date.",
+    )
     
     # Relationships
     subscription = models.ForeignKey(

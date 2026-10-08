@@ -130,18 +130,22 @@ class SuperAdminActivityLogSerializer(serializers.ModelSerializer):
 
 class PlatformExpenditureSerializer(serializers.ModelSerializer):
     created_by_email = serializers.EmailField(source="created_by.email", read_only=True, allow_null=True)
+    is_reversed = serializers.SerializerMethodField()
+
+    def get_is_reversed(self, obj):
+        return PlatformExpenditure.objects.filter(reverses=obj).exists()
 
     class Meta:
         model = PlatformExpenditure
         fields = [
-            "id", "ledger", "category", "title", "amount", "currency", "incurred_on",
+            "id", "ledger", "category", "title", "amount", "reverses", "is_reversed", "currency", "incurred_on",
             "notes", "created_by", "created_by_email", "created_at", "updated_at",
         ]
-        read_only_fields = ["id", "ledger", "created_by", "created_by_email", "created_at", "updated_at"]
+        read_only_fields = ["id", "ledger", "reverses", "is_reversed", "created_by", "created_by_email", "created_at", "updated_at"]
 
     def validate_amount(self, value):
-        if value <= 0:
-            raise serializers.ValidationError("Amount must be greater than zero.")
+        if value == 0:
+            raise serializers.ValidationError("Amount cannot be zero.")
         return value
 
     def validate_currency(self, value):

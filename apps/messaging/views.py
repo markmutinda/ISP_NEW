@@ -1082,6 +1082,7 @@ class SMSTopupCallbackView(APIView):
 
             if result_code == '0':
                 topup.status = 'completed'
+                topup.completed_at = timezone.now()
                 topup.notes = f"Receipt: {mpesa_receipt}"
                 topup.save()
 
