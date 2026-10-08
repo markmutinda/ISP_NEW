@@ -74,7 +74,7 @@ SHARED_APPS = (
     'django.contrib.contenttypes',     # MUST be in BOTH shared and tenant
     'django.contrib.auth',             # SHOULD be in both
     'django.contrib.sessions',         # SHOULD be in both
-    'django.contrib.messages',         # SHOULD be in both
+    'django.contrib.messages',         # MUST be in both
     'django.contrib.admin',           # SHOULD be in both
     'apps.core',                       # Tenant & Domain models go here - MUST be in BOTH
     'apps.subscriptions',              # Netily platform subscriptions (public schema only)
@@ -196,7 +196,9 @@ REDIS_URL = os.environ.get('REDIS_URL', 'redis://localhost:6379/0')
 
 # Celery Configuration
 CELERY_BROKER_URL = REDIS_URL
-CELERY_RESULT_BACKEND = 'django-db'  # Store results in Django DB
+CELERY_RESULT_BACKEND = REDIS_URL        # no Postgres writes; opt-in tasks expire from Redis
+CELERY_TASK_IGNORE_RESULT = True         # default: store nothing
+CELERY_RESULT_EXPIRES = 3600
 CELERY_CACHE_BACKEND = 'default'
 CELERY_ACCEPT_CONTENT = ['json']
 CELERY_TASK_SERIALIZER = 'json'
