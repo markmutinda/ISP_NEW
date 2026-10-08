@@ -8,10 +8,18 @@ from django.utils import timezone
 from apps.core.models import Company, Tenant
 from apps.subscriptions.models import CompanySubscription, NetilyPlan
 from apps.superadmin.serializers import PlatformExpenditureSerializer, TenantListSerializer
-from apps.superadmin.views import DashboardView, PlatformExpenditureView
+from apps.superadmin.views import DashboardView, PlatformExpenditureView, SubscriptionPaymentListView
 
 
 class PlatformExpenditureLedgerTests(SimpleTestCase):
+    def test_receipts_after_boundary_belong_to_new_account(self):
+        cutover = datetime.fromisoformat("2026-09-29T16:39:20+03:00")
+        with patch.object(PlatformExpenditureView, "_cutover_payment") as payment:
+            payment.return_value.completed_at = cutover
+            view = SubscriptionPaymentListView()
+            self.assertEqual(view._account_for_paid_at(cutover), "primary")
+            self.assertEqual(view._account_for_paid_at(cutover + timedelta(seconds=1)), "new_business")
+
     def test_signed_expenditure_allows_credit_but_not_zero(self):
         serializer = PlatformExpenditureSerializer()
         self.assertEqual(serializer.validate_amount(Decimal("-6212.00")), Decimal("-6212.00"))

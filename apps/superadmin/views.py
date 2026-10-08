@@ -4541,6 +4541,11 @@ class SubscriptionPaymentListView(APIView):
             parsed = timezone.make_aware(parsed)
         return parsed
 
+    def _account_for_paid_at(self, paid_at):
+        cutover = PlatformExpenditureView()._cutover_payment()
+        cutover_at = cutover.completed_at if cutover else datetime.fromisoformat("2026-09-29T16:39:59+03:00")
+        return "primary" if paid_at <= cutover_at else "new_business"
+
     def _apply_payment_fields(
         self,
         payment,
@@ -4695,10 +4700,15 @@ class SubscriptionPaymentListView(APIView):
         paid_at = self._parse_paid_at(data.get("completed_at"))
         if paid_at is None:
             return Response({"detail": "Payment date is invalid."}, status=status.HTTP_400_BAD_REQUEST)
-        if not business_account:
-            business_account = "primary" if paid_at <= datetime.fromisoformat("2026-09-29T16:39:59+03:00") else "new_business"
 
         with schema_context(get_public_schema_name()):
+            expected_account = self._account_for_paid_at(paid_at)
+            if business_account and business_account != expected_account:
+                return Response(
+                    {"detail": "The selected business account does not match this payment date and the Bentrex cutover."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            business_account = expected_account
             subscription_qs = CompanySubscription.objects.select_related("company", "plan")
             try:
                 if subscription_id:
@@ -4889,6 +4899,12 @@ class SubscriptionPaymentDetailView(SubscriptionPaymentListView):
             paid_at = self._parse_paid_at(data.get("completed_at") or payment.completed_at)
             if paid_at is None:
                 return Response({"detail": "Payment date is invalid."}, status=status.HTTP_400_BAD_REQUEST)
+            expected_account = self._account_for_paid_at(paid_at)
+            if business_account and business_account != expected_account:
+                return Response(
+                    {"detail": "The selected business account does not match this payment date and the Bentrex cutover."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
 
             next_method = payment_method or payment.payment_method
             next_reference = reference or self._payment_row(payment)["reference"]
@@ -4943,7 +4959,7 @@ class SubscriptionPaymentDetailView(SubscriptionPaymentListView):
                     reference=next_reference,
                     phone_number=phone_number,
                     paid_at=paid_at,
-                    business_account=business_account or None,
+                    business_account=expected_account,
                 )
 
             _log_action(
