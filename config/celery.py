@@ -189,15 +189,6 @@ app.conf.beat_schedule = {
     },
 
     # ════════════════════════════════════════════════════════════════
-    # HOTSPOT SMS NOTIFICATIONS (Expiry warnings & expired alerts)
-    # ════════════════════════════════════════════════════════════════
-    'hotspot-expiry-warnings-every-5-min': {
-        'task': 'apps.billing.tasks.send_hotspot_expiry_warnings',
-        'schedule': crontab(minute='*/5'),
-        'options': {'queue': 'billing'},
-    },
-
-    # ════════════════════════════════════════════════════════════════
     # PPPOE SMS NOTIFICATIONS (Expiry reminders - EVERY HOUR)
     # Replaces old daily task to provide hour-based reminders
     # ════════════════════════════════════════════════════════════════

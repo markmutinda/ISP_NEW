@@ -161,27 +161,6 @@ def expire_stale_pending_payments():
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# HOTSPOT EXPIRY WARNINGS (SMS) — TEMPORARILY DISABLED
-# ═══════════════════════════════════════════════════════════════════════════
-
-@shared_task(name='apps.billing.tasks.send_hotspot_expiry_warnings')
-def send_hotspot_expiry_warnings():
-    """
-    Send expiry warning SMS to hotspot users whose sessions are about
-    to expire. (Temporarily disabled due to missing model fields).
-    """
-    def _warn(tenant):
-        # Hotspot expiry minutes logic removed/disabled
-        return {'warned': 0}
-
-    try:
-        return _for_each_tenant(_warn)
-    except Exception as e:
-        logger.error(f"Hotspot expiry warning task failed: {e}", exc_info=True)
-        return {'error': str(e)}
-
-
-# ═══════════════════════════════════════════════════════════════════════════
 # EMAIL NOTIFICATIONS — Billing reminders & payment confirmations
 # ═══════════════════════════════════════════════════════════════════════════
 

@@ -372,12 +372,6 @@ def send_loyalty_notification_sms(self, customer_id, message_type='points_earned
 # HOTSPOT TASKS
 # ─────────────────────────────────────────────────────────────────────────────
 
-@shared_task(name='apps.billing.tasks.send_hotspot_expiry_warnings')
-def send_hotspot_expiry_warnings():
-    """Deprecated — expiry warning toggle removed. No-op."""
-    return {'warned': 0}
-
-
 def _dispatch_router_offline_sms(router_name: str, schema_name: str = None):
     """
     Inner function that runs inside the correct tenant schema context.
