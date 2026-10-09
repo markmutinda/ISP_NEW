@@ -181,39 +181,6 @@ def send_hotspot_expiry_warnings():
         return {'error': str(e)}
 
 
-@shared_task(name='apps.billing.tasks.notify_expired_hotspot_sessions')
-def notify_expired_hotspot_sessions():
-    """
-    Send 'session expired' SMS after marking sessions expired.
-    Runs every 5 minutes (chained with cleanup task).
-    """
-    def _notify(tenant):
-        from apps.billing.models.hotspot_models import HotspotSession
-        from apps.messaging.services.notification_sender import SMSNotifier
-
-        # Find sessions that just expired (within last 10 min) and haven't been notified
-        now = timezone.now()
-        recently_expired = HotspotSession.objects.filter(
-            status='expired',
-            expires_at__gte=now - timedelta(minutes=10),
-            expires_at__lte=now,
-        )
-        count = 0
-        for session in recently_expired:
-            try:
-                SMSNotifier.hotspot_session_expired(session)
-                count += 1
-            except Exception as e:
-                logger.warning(f"Expired SMS failed for {session.session_id}: {e}")
-        return {'notified': count}
-
-    try:
-        return _for_each_tenant(_notify)
-    except Exception as e:
-        logger.error(f"Notify expired sessions task failed: {e}", exc_info=True)
-        return {'error': str(e)}
-
-
 # ═══════════════════════════════════════════════════════════════════════════
 # EMAIL NOTIFICATIONS — Billing reminders & payment confirmations
 # ═══════════════════════════════════════════════════════════════════════════

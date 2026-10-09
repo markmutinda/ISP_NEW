@@ -311,7 +311,6 @@ class SMSNotificationSettingsSerializer(serializers.ModelSerializer):
             'use_inbuilt_system',
             # hotspot — only two remain
             'hotspot_welcome',
-            'hotspot_session_expired',
             # pppoe
             'pppoe_welcome',
             'pppoe_payment_confirmation',  # MERGED: handles both payment AND renewal confirmations

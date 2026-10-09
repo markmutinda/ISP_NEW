@@ -712,34 +712,8 @@ class SMSNotifier:
             schema_name=schema_name,
         )
 
-    @staticmethod
-    def hotspot_session_expired(session, schema_name: str = None) -> bool:
-        """Notify when hotspot session has fully expired."""
-        s = _get_notif_settings()
-        if s and not s.hotspot_session_expired:
-            return False
-        phone = _fmt_phone(session.phone_number)
-        if not phone:
-            return False
-
-        plan_name = session.plan.name if session.plan else ''
-
-        default_msg = (
-            f"Your WiFi session has ended. "
-            f"Visit the portal to buy a new plan and reconnect. Thank you!"
-        )
-        msg = _get_rendered_message(
-            'hotspot_session_expired',
-            default_msg,
-            plan_name=plan_name,
-        )
-        return _send_once(
-            f"hs_expired:{session.session_id}",
-            phone, msg, ttl=3600,
-            schema_name=schema_name,
-        )
-
     # REMOVED METHODS:
+    # - hotspot_session_expired
     # - hotspot_new_subscription
     # - hotspot_expiry_warning
     # - hotspot_payment_failed

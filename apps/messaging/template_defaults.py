@@ -6,11 +6,6 @@ DEFAULTS = [
      'WiFi Active! Code: {access_code}. Plan: {plan_name} ({duration}). Expires: {expiry_time}. Speed: {speed}. Enjoy!',
      ['{access_code}', '{plan_name}', '{duration}', '{expiry_time}', '{speed}']),
 
-    ('hotspot_session_expired',
-     'Hotspot — Session Expired',
-     'Your WiFi session has ended. Visit the portal to buy a new plan and reconnect. Thank you!',
-     []),
-
     # ── PPPOE / STATIC TEMPLATES ────────────────────────────────────────
     ('pppoe_welcome',
      'PPPoE — Welcome',

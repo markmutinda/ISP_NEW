@@ -196,11 +196,6 @@ app.conf.beat_schedule = {
         'schedule': crontab(minute='*/5'),
         'options': {'queue': 'billing'},
     },
-    'notify-expired-hotspot-every-5-min': {
-        'task': 'apps.billing.tasks.notify_expired_hotspot_sessions',
-        'schedule': crontab(minute='*/5'),
-        'options': {'queue': 'billing'},
-    },
 
     # ════════════════════════════════════════════════════════════════
     # PPPOE SMS NOTIFICATIONS (Expiry reminders - EVERY HOUR)

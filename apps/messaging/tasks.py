@@ -378,59 +378,6 @@ def send_hotspot_expiry_warnings():
     return {'warned': 0}
 
 
-def _for_each_tenant(func):
-    """
-    Helper to run a function for each tenant schema.
-    Returns aggregated results.
-    """
-    from django_tenants.utils import schema_context, get_tenant_model
-    TenantModel = get_tenant_model()
-    results = {}
-    
-    for tenant in TenantModel.objects.exclude(schema_name='public'):
-        with schema_context(tenant.schema_name):
-            try:
-                result = func(tenant)
-                results[tenant.schema_name] = result
-            except Exception as e:
-                logger.error(f"Error in tenant {tenant.schema_name}: {e}")
-                results[tenant.schema_name] = {'error': str(e)}
-    
-    return results
-
-
-@shared_task(name='apps.billing.tasks.notify_expired_hotspot_sessions')
-def notify_expired_hotspot_sessions():
-    """
-    Send 'session expired' SMS after marking sessions expired.
-    Runs every 5 minutes.
-    """
-    def _notify(tenant):
-        from apps.billing.models.hotspot_models import HotspotSession
-        from apps.messaging.services.notification_sender import SMSNotifier
-
-        now = timezone.now()
-        recently_expired = HotspotSession.objects.filter(
-            status='expired',
-            expires_at__gte=now - timedelta(minutes=10),
-            expires_at__lte=now,
-        )
-        count = 0
-        for session in recently_expired:
-            try:
-                SMSNotifier.hotspot_session_expired(session)
-                count += 1
-            except Exception as e:
-                logger.warning(f"Expired SMS failed for {session.session_id}: {e}")
-        return {'notified': count}
-
-    try:
-        return _for_each_tenant(_notify)
-    except Exception as e:
-        logger.error(f"Notify expired sessions task failed: {e}", exc_info=True)
-        return {'error': str(e)}
-
-
 def _dispatch_router_offline_sms(router_name: str, schema_name: str = None):
     """
     Inner function that runs inside the correct tenant schema context.
