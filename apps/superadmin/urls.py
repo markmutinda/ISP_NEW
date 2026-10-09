@@ -7,12 +7,14 @@ All endpoints live under /api/v1/superadmin/
 from django.urls import path
 
 from . import views
+from .financial_csv import FinancialCSVView
 from . import support_views
 from apps.core.views_support import SuperadminSupportChatConversationDetailView, SuperadminSupportChatConversationListView
 
 app_name = "superadmin"
 
 urlpatterns = [
+    path("financial-csv/<str:kind>/", FinancialCSVView.as_view(), name="financial-csv"),
     # Dashboard KPIs
     path("dashboard/", views.DashboardView.as_view(), name="dashboard"),
 

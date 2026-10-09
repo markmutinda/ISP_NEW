@@ -11,6 +11,35 @@ from apps.subscriptions.models import CompanySubscription, NetilyPlan
 from apps.superadmin.serializers import PlatformExpenditureSerializer, TenantListSerializer
 from apps.superadmin.views import DashboardView, PlatformExpenditureView, SubscriptionPaymentListView
 from apps.superadmin.management.commands.record_business_account_transfer import Command as RecordTransferCommand
+from apps.superadmin.financial_csv import FinancialCSVView, _amount, _csv_response, _paid_at, _safe_cell, _sms_reference
+from django.core.files.uploadedfile import SimpleUploadedFile
+
+
+class FinancialCSVTests(SimpleTestCase):
+    def test_text_cells_are_safe_for_spreadsheets(self):
+        self.assertEqual(_safe_cell("=HYPERLINK(\"https://example.com\")"), "'=HYPERLINK(\"https://example.com\")")
+        self.assertEqual(_safe_cell("Normal entry"), "Normal entry")
+        self.assertEqual(_amount("12.345"), None)
+        self.assertIsNone(_paid_at("2026-02-31"))
+        self.assertEqual(_sms_reference(SimpleNamespace(payment_reference="", notes="Receipt: UJT123", checkout_request_id="checkout")), "UJT123")
+
+    def test_export_has_header_and_preserves_signed_numeric_amount(self):
+        response = _csv_response("expenditure", [("2026-10-09", "operations", "=unsafe", Decimal("-10.00"), "credit")])
+        body = response.content.decode("utf-8-sig")
+        self.assertIn("date,category,title,amount,notes", body)
+        self.assertIn("'=unsafe,-10.00,credit", body)
+
+    def test_preview_reports_duplicate_rows_without_saving(self):
+        content = b"date,category,title,amount,notes\n2026-10-09,operations,Hosting,12.00,\n2026-10-09,operations,Hosting,12.00,\n"
+        file = SimpleUploadedFile("expense.csv", content, content_type="text/csv")
+        request = SimpleNamespace(FILES={"file": file}, data={}, user=SimpleNamespace(), META={})
+        with patch("apps.superadmin.financial_csv._ensure_public"), patch.object(
+            FinancialCSVView, "_check_expenditure", return_value=({"title": "Hosting"}, ("primary", "Hosting", "12.00"))
+        ):
+            response = FinancialCSVView().post(request, "expenditure")
+        self.assertEqual(response.data["valid"], 1)
+        self.assertEqual(response.data["invalid"], 1)
+        self.assertIn("Duplicate row", response.data["rows"][1]["errors"][0])
 
 
 class PlatformExpenditureLedgerTests(SimpleTestCase):
