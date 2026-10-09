@@ -73,7 +73,7 @@ else:
 # ────────────────────────────────────────────────────────────────
 REDIS_URL = os.environ.get('REDIS_URL', 'redis://localhost:6379/0')
 CELERY_BROKER_URL = REDIS_URL
-CELERY_RESULT_BACKEND = 'django-db'
+CELERY_RESULT_BACKEND = REDIS_URL        # was 'django-db'
 
 # ────────────────────────────────────────────────────────────────
 #  CACHE — Redis (required for OTP, rate-limiting, etc.)

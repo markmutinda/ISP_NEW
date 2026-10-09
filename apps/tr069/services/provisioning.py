@@ -35,12 +35,28 @@ _PATHS = {
         'uptime': 'InternetGatewayDevice.DeviceInfo.UpTime',
         'wan_ip': 'InternetGatewayDevice.WANDevice.1.WANConnectionDevice.1.WANIPConnection.1.ExternalIPAddress',
         'inform_interval': 'InternetGatewayDevice.ManagementServer.PeriodicInformInterval',
-        'rx_power': 'InternetGatewayDevice.WANDevice.1.WANPONInterfaceConfig.RXPower',
-        'tx_power': 'InternetGatewayDevice.WANDevice.1.WANPONInterfaceConfig.TXPower',
+        'rx_power': 'InternetGatewayDevice.WANDevice.1.X_GponInterafceConfig.RXPower',
+        'tx_power': 'InternetGatewayDevice.WANDevice.1.X_GponInterafceConfig.TXPower',
         'wifi_ssid_root': 'InternetGatewayDevice.LANDevice.1.WLANConfiguration.',
         'hosts_root': 'InternetGatewayDevice.LANDevice.1.Hosts.Host.',
     },
 }
+
+OUI_VENDORS = {'00259E': 'Huawei', 'E48D8C': 'MikroTik'}
+
+
+def _identity(raw):
+    did = raw.get('_deviceId', {}) or {}
+    oui = (did.get('_OUI') or '').upper()
+    maker = (did.get('_Manufacturer') or '').strip()
+    if not maker or maker.startswith('Technologies'):
+        maker = OUI_VENDORS.get(oui, maker)
+    return {
+        'oui': oui,
+        'product_class': did.get('_ProductClass') or '',
+        'manufacturer': maker,
+        'model_name': did.get('_ProductClass') or '',
+    }
 
 
 class ProvisioningError(Exception):
@@ -69,6 +85,15 @@ def _flatten_tree(tree: dict) -> dict:
             if not k.startswith('_') and isinstance(v, dict):
                 stack.append((f'{path}.{k}', v))
     return flat
+
+
+def _find_wan_ip(remote):
+    for key, node in remote.items():
+        if 'WANDevice' in key and key.endswith('.ExternalIPAddress'):
+            ip = _val(node)
+            if ip and ip != '0.0.0.0' and not ip.startswith('169.254'):
+                return ip
+    return None
 
 
 def _log_task(device, task_type, params, user=None):
@@ -318,19 +343,25 @@ def sync_device_from_genieacs(device: CPEDevice) -> CPEDevice:
         return device
     remote = _flatten_tree(raw)
 
+    for k, v in _identity(raw).items():
+        if v:
+            setattr(device, k, v)
+
     data_model = _detect_data_model(remote)
     paths = _PATHS[data_model]
 
+    model = _val(remote.get(f"{paths['device_info']}ModelName"))
+    if model:
+        device.model_name = model
+
     device.data_model = data_model
-    device.manufacturer = _val(remote.get(f"{paths['device_info']}Manufacturer")) or device.manufacturer
-    device.model_name = _val(remote.get(f"{paths['device_info']}ModelName")) or device.model_name
     device.software_version = _val(remote.get(f"{paths['device_info']}SoftwareVersion")) or device.software_version
     device.hardware_version = _val(remote.get(f"{paths['device_info']}HardwareVersion")) or device.hardware_version
 
     uptime = _val(remote.get(paths['uptime']))
     device.uptime_seconds = int(uptime) if uptime is not None else device.uptime_seconds
 
-    wan_ip = _val(remote.get(paths['wan_ip']))
+    wan_ip = _find_wan_ip(remote)
     device.wan_ip = wan_ip or device.wan_ip
 
     interval = _val(remote.get(paths['inform_interval']))
