@@ -330,8 +330,6 @@ class SMSNotificationSettings(models.Model):
     # ── HOTSPOT NOTIFICATIONS ─────────────────────────────────────────────
     hotspot_welcome = models.BooleanField(default=False,
         help_text="Welcome SMS when a hotspot session activates")
-    hotspot_session_expired = models.BooleanField(default=False,
-        help_text="Notify when hotspot session has fully expired")
 
     # ── PPPOE / STATIC NOTIFICATIONS ─────────────────────────────────────
     pppoe_welcome = models.BooleanField(default=False,
