@@ -3,8 +3,9 @@
 DEFAULTS = [
     ('hotspot_welcome',
      'Hotspot — Session Active',
-     'WiFi Active! Code: {access_code}. Plan: {plan_name} ({duration}). Expires: {expiry_time}. Speed: {speed}. Enjoy!',
-     ['{access_code}', '{plan_name}', '{duration}', '{expiry_time}', '{speed}']),
+     'WiFi Active!\n{credentials}\nPlan: {plan_name} ({duration}). Expires: {expiry_time}. Speed: {speed}. Enjoy!',
+     ['{credentials}', '{username}', '{password}', '{device_count}',
+      '{access_code}', '{plan_name}', '{duration}', '{expiry_time}', '{speed}']),
 
     # ── PPPOE / STATIC TEMPLATES ────────────────────────────────────────
     ('pppoe_welcome',

@@ -49,6 +49,15 @@ from apps.subscriptions.models import CommissionLedger
 # --- CoA import added for pre-clear disconnect ---
 from apps.radius.services.coa_service import CoAService
 
+# ── NEW: Hotspot credential reconnect helpers ──
+import hmac
+import re  # (skip if already imported)
+
+from apps.billing.services.hotspot_credentials import (
+    SLOT_CODE_RE, device_limit, device_password,
+)
+from apps.core.tenant_cache import resolve_tenant_cached
+
 logger = logging.getLogger(__name__)
 
 
@@ -2215,6 +2224,199 @@ class HotspotPhoneReconnectView(APIView):
             finally:
                 # BUG 3 FIX: release the slot lock
                 cache.delete(slot_lock_key)
+
+
+# ============================================================
+# NEW: Credential (username + password) based reconnect
+# ============================================================
+
+class _ReconnectError(Exception):
+    def __init__(self, message, http_status):
+        super().__init__(message)
+        self.message = message
+        self.http_status = http_status
+
+
+class HotspotCredentialReconnectView(APIView):
+    """
+    Reconnect a device with username + password (from the payment SMS).
+
+    POST /api/v1/hotspot/credentials-reconnect/
+    {
+        "username": "MXA-BKCS", "password": "MXA-BKCS",
+        "router_id": "...", "mac_address": "AA:BB:..", "tenant": "myisp"
+    }
+
+    - Verifies the password against RADIUS (radcheck), constant-time.
+    - Rebinds the RADIUS MAC lock to the connecting device (handles MAC randomisation).
+    - For multi-device plans, lazily provisions "<base>-<n>" slots (n <= plan limit)
+      on first login, so nothing extra is written at payment time.
+    - Throttled per IP and per username; one generic error message (no enumeration).
+    """
+    permission_classes = [AllowAny]
+    authentication_classes = []
+
+    _TTL = 600
+    _IP_LIMIT = 20
+    _USER_LIMIT = 5
+    _INVALID = 'Invalid username or password, or your plan has expired.'
+
+    @staticmethod
+    def _client_ip(request):
+        xff = request.META.get('HTTP_X_FORWARDED_FOR', '')
+        ip = xff.split(',')[0].strip() if xff else request.META.get('REMOTE_ADDR', '')
+        return ip or 'unknown'
+
+    def _hit(self, key):
+        """Atomic counter with TTL; returns the new count."""
+        if cache.add(key, 1, timeout=self._TTL):
+            return 1
+        try:
+            return cache.incr(key)
+        except ValueError:
+            cache.set(key, 1, timeout=self._TTL)
+            return 1
+
+    @staticmethod
+    def _active_session(code, now):
+        return (
+            HotspotSession.objects
+            .filter(access_code=code, status='active', expires_at__gt=now)
+            .select_related('plan', 'router', 'hotspot_client')
+            .order_by('-activated_at')
+            .first()
+        )
+
+    def _provision_extra_slot(self, schema, username, mac_address, now):
+        m = SLOT_CODE_RE.match(username)
+        if not m:
+            return None
+        slot = int(m.group('slot'))
+        base = self._active_session(m.group('base'), now)
+        if not base or slot < 2 or slot > device_limit(base.plan):
+            return None
+
+        # Lock is intentionally left to expire (not deleted) so a concurrent
+        # request can't slip in before this transaction commits.
+        if not cache.add(f"cred_slot_lock:{schema}:{username}", '1', timeout=10):
+            raise _ReconnectError('Another connection is in progress. Please retry shortly.', 409)
+
+        existing = self._active_session(username, now)
+        if existing:
+            return existing
+
+        return HotspotSession.objects.create(
+            session_id=HotspotSession.generate_session_id(),
+            router=base.router,
+            plan=base.plan,
+            phone_number=base.phone_number,
+            mac_address=mac_address,
+            amount=Decimal('0'),          # already paid on the base session
+            status='active',
+            access_code=username,
+            radius_username=username,
+            activated_at=now,
+            expires_at=base.expires_at,   # same expiry as the purchase
+            hotspot_client=base.hotspot_client,
+        )
+
+    def post(self, request):
+        data = request.data
+        tenant_subdomain = data.get('tenant') or request.query_params.get('tenant')
+        router_id = data.get('router_id')
+        username = (data.get('username') or '').strip().upper()
+        password = (data.get('password') or '').strip()
+        mac_address = _normalize_mac(data.get('mac_address', ''))
+
+        if not (tenant_subdomain and router_id and username and password):
+            return Response({'error': 'Username and password are required'},
+                            status=status.HTTP_400_BAD_REQUEST)
+        if len(username) > 25 or len(password) > 64:
+            return Response({'error': self._INVALID}, status=status.HTTP_401_UNAUTHORIZED)
+
+        tenant_info = resolve_tenant_cached(tenant_subdomain)
+        if not tenant_info:
+            return Response({'error': 'Invalid tenant'}, status=status.HTTP_400_BAD_REQUEST)
+        schema = tenant_info['schema_name']
+
+        ip_key = f"cred_reconnect_ip:{schema}:{self._client_ip(request)}"
+        user_key = f"cred_reconnect_user:{schema}:{username}"
+        if self._hit(ip_key) > self._IP_LIMIT or self._hit(user_key) > self._USER_LIMIT:
+            return Response(
+                {'error': 'Too many attempts. Please wait 10 minutes before trying again.',
+                 'rate_limited': True},
+                status=status.HTTP_429_TOO_MANY_REQUESTS,
+            )
+
+        with schema_context(schema):
+            now = timezone.now()
+
+            try:
+                router = Router.objects.get(id=router_id, is_active=True)
+            except (Router.DoesNotExist, ValueError):
+                router = Router.objects.filter(name=router_id, is_active=True).first()
+            if router is None:
+                return Response({'error': 'Router not found'}, status=status.HTTP_404_NOT_FOUND)
+
+            # ── Verify password (constant time) ──
+            from apps.radius.models import RadCheck
+            stored = (
+                RadCheck.objects
+                .filter(username=username, attribute='Cleartext-Password')
+                .values_list('value', flat=True)
+                .first()
+            ) or device_password(username)
+            if not hmac.compare_digest(str(stored).encode(), password.encode()):
+                return Response({'error': self._INVALID}, status=status.HTTP_401_UNAUTHORIZED)
+
+            session = self._active_session(username, now)
+            if session is None and not SLOT_CODE_RE.match(username):
+                return Response({'error': self._INVALID}, status=status.HTTP_401_UNAUTHORIZED)
+
+            try:
+                with transaction.atomic():
+                    if session is None:
+                        session = self._provision_extra_slot(schema, username, mac_address, now)
+                        if session is None:
+                            raise _ReconnectError(self._INVALID, 401)
+
+                    mac_ok = bool(mac_address) and mac_address != '00:00:00:00:00:00'
+                    if mac_ok and session.mac_address != mac_address:
+                        session.mac_address = mac_address
+                        session.save(update_fields=['mac_address', 'updated_at'])
+                    if mac_ok and session.hotspot_client:
+                        HotspotClientDevice.record_device(
+                            client=session.hotspot_client, mac_address=mac_address
+                        )
+
+                    from apps.billing.services.hotspot_radius_service import HotspotRadiusService
+                    ok = HotspotRadiusService().create_hotspot_credentials(
+                        username=session.access_code,
+                        password=password,
+                        router=router,
+                        plan=session.plan,
+                        expires_at=session.expires_at,
+                        mac_address=mac_address,
+                    )
+                    if not ok:
+                        raise _ReconnectError('Failed to restore connection. Please try again.', 503)
+            except _ReconnectError as e:
+                return Response({'error': e.message}, status=e.http_status)
+
+            cache.delete(user_key)  # legit success must not burn the user's budget
+
+            remaining_minutes = max(0, int((session.expires_at - now).total_seconds() / 60))
+            logger.info(f"Credential reconnect: user={username} mac={mac_address} schema={schema}")
+            return Response({
+                'status': 'reconnected',
+                'message': 'Welcome back! Your connection has been restored.',
+                'access_code': session.access_code,
+                'expires_at': session.expires_at.isoformat(),
+                'remaining_minutes': remaining_minutes,
+                'plan_name': session.plan.name,
+                'device_slot': 'existing',
+                'credentials': {'username': session.access_code, 'password': password},
+            })
 
 
 # ============================================================

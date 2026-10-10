@@ -660,7 +660,7 @@ class SMSNotifier:
 
     @staticmethod
     def hotspot_welcome(session, schema_name: str = None) -> bool:
-        """Welcome SMS when a hotspot session activates."""
+        """Welcome SMS when a hotspot session activates (includes device logins)."""
         s = _get_notif_settings()
         if s and not s.hotspot_welcome:
             return False
@@ -668,9 +668,10 @@ class SMSNotifier:
         if not phone:
             return False
 
+        from apps.billing.services.hotspot_credentials import build_device_credentials
+
         plan = session.plan
 
-        # Build expiry string
         expiry_time = 'N/A'
         if session.expires_at:
             from django.utils import timezone as _tz
@@ -684,27 +685,37 @@ class SMSNotifier:
         plan_name = plan.name if plan else ''
         access_code = session.access_code or ''
 
-        # NEW: amount context — session.amount is the actual paid value
         amount_val = float(session.amount or 0)
         amount_fmt = f"{amount_val:,.0f}"
-        amount_due_fmt = f"KES {amount_fmt}"
+
+        # ── Device credentials (1 login per allowed device) ──
+        creds = build_device_credentials(session)
+        if len(creds) == 1:
+            credentials_text = f"User: {creds[0]['username']} Pass: {creds[0]['password']}"
+        else:
+            credentials_text = "\n".join(
+                f"Device {c['slot']}: User {c['username']} Pass {c['password']}" for c in creds
+            )
 
         default_msg = (
-            f"WiFi Active! Code: {access_code}. "
-            f"Plan: {plan_name} ({duration}). "
-            f"Expires: {expiry_time}. Speed: {speed}. Enjoy!"
+            f"WiFi Active!\n{credentials_text}\n"
+            f"Plan: {plan_name} ({duration}). Expires: {expiry_time}. Speed: {speed}. Enjoy!"
         )
         msg = _get_rendered_message(
             'hotspot_welcome',
             default_msg,
             access_code=access_code,
+            username=creds[0]['username'],
+            password=creds[0]['password'],
+            credentials=credentials_text,
+            device_count=len(creds),
             plan_name=plan_name,
             duration=duration,
             expiry_time=expiry_time,
             speed=speed,
-            amount=amount_fmt,          # NEW
-            amount_due=amount_due_fmt,  # NEW
-            amount_paid=amount_fmt,     # NEW alias, in case template uses this
+            amount=amount_fmt,
+            amount_due=f"KES {amount_fmt}",
+            amount_paid=amount_fmt,
         )
         return _send_once(
             f"hs_welcome:{session.session_id}",

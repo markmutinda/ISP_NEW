@@ -740,6 +740,7 @@ class HotspotSession(models.Model):
         max_length=20,
         blank=True,
         null=True,
+        db_index=True,   # NEW
         help_text="WiFi access code (e.g., WIFI-1234)"
     )
     

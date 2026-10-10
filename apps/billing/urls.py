@@ -6,7 +6,8 @@ from .views.VoucherViews import VoucherBatchViewSet, VoucherViewSet
 
 from .views.hotspot_views import (
     CaptivePortalView, HotspotPlansView, HotspotPurchaseView, HotspotPurchaseStatusView,
-    HotspotVoucherRedeemView, HotspotPhoneReconnectView, HotspotFreeTrialView  # ADDED: HotspotFreeTrialView
+    HotspotVoucherRedeemView, HotspotPhoneReconnectView, HotspotFreeTrialView,  # ADDED: HotspotFreeTrialView
+    HotspotCredentialReconnectView,  # NEW
 )
 
 from .views.cloud_portal_views import (
@@ -136,6 +137,7 @@ hotspot_urlpatterns = [
     path('device-auth/status/', HotspotDeviceAuthStatusView.as_view(), name='hotspot-device-auth-status'),
     path('voucher-redeem/', HotspotVoucherRedeemView.as_view(), name='hotspot-voucher-redeem'),
     path('phone-reconnect/', HotspotPhoneReconnectView.as_view(), name='hotspot-phone-reconnect'),
+    path('credentials-reconnect/', HotspotCredentialReconnectView.as_view(), name='hotspot-credentials-reconnect'),
     # FREE TRIAL URL - ADDED
     path('free-trial/', HotspotFreeTrialView.as_view(), name='hotspot-free-trial'),
     # REMOVED: path('tv/generate-code/', GenerateTVCodeView.as_view(), name='hotspot-tv-generate-code'),

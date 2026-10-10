@@ -121,7 +121,12 @@ def send_hotspot_welcome_sms(session_id: str, schema_name: str):
     from apps.messaging.services.notification_sender import SMSNotifier
 
     with schema_context(schema_name):
-        session = HotspotSession.objects.filter(session_id=session_id).first()
+        session = (
+            HotspotSession.objects
+            .select_related('plan')
+            .filter(session_id=session_id)
+            .first()
+        )
         if not session:
             logger.warning("Hotspot welcome SMS: Session %s not found in %s", session_id, schema_name)
             return
