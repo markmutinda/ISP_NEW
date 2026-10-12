@@ -18,7 +18,7 @@ import string
 from datetime import timedelta
 from decimal import Decimal
 
-from django.db import connection
+from django.db import connection, IntegrityError, transaction
 from django.db.models import F, Q
 from django.http import StreamingHttpResponse, HttpResponse
 from django.utils import timezone
@@ -32,12 +32,19 @@ from rest_framework.views import APIView
 
 from django_tenants.utils import schema_context, get_public_schema_name
 
-from apps.billing.models.ad_models import HotspotAd, HotspotAdGrant
+from apps.billing.models.ad_models import HotspotAd, HotspotAdGrant, HotspotAdView
 from apps.core.permissions import HasRoleAccessPolicy, IsAdminOrStaff
 from apps.network.models.router_models import Router
 
 
 # ─── Helpers ────────────────────────────────────────────────────────────────
+
+ZERO_MAC = '00:00:00:00:00:00'
+
+
+def _valid_mac(mac: str) -> bool:
+    return bool(mac) and mac != ZERO_MAC
+
 
 def _resolve_tenant(subdomain: str):
     if not subdomain:
@@ -83,6 +90,11 @@ class HotspotAdServeView(APIView):
     def get(self, request):
         router_id = request.query_params.get('router_id')
         tenant_subdomain = request.query_params.get('tenant')
+        mac = _normalize_mac(request.query_params.get('mac', ''))
+
+        # No identifiable device = no reward possible = no ad, no fake impression
+        if not _valid_mac(mac):
+            return Response({'ad': None})
 
         tenant = _resolve_tenant(tenant_subdomain)
         if not tenant:
@@ -91,23 +103,25 @@ class HotspotAdServeView(APIView):
         with schema_context(tenant.schema_name):
             now = timezone.now()
             ad = (
-                HotspotAd.objects.filter(
-                    schema_name=tenant.schema_name,
-                    is_active=True,
-                ).filter(
+                HotspotAd.objects.filter(schema_name=tenant.schema_name, is_active=True)
+                .filter(
                     Q(start_date__isnull=True) | Q(start_date__lte=now),
                     Q(end_date__isnull=True) | Q(end_date__gte=now),
-                ).filter(
-                    Q(router__isnull=True) | Q(router_id=router_id)
-                ).order_by('priority', '-created_at')
+                )
+                .filter(Q(router__isnull=True) | Q(router_id=router_id))
+                .exclude(grants__mac_address=mac)          # already rewarded on this ad → skip
+                .order_by('priority', '-created_at')
                 .first()
             )
-
             if not ad:
                 return Response({'ad': None})
 
-            # Atomic impression count — never use ad.impressions += 1
-            HotspotAd.objects.filter(pk=ad.pk).update(impressions=F('impressions') + 1)
+            # Unique impression: one per (ad, device)
+            _, created = HotspotAdView.objects.get_or_create(
+                ad=ad, mac_address=mac, defaults={'schema_name': tenant.schema_name},
+            )
+            if created:
+                HotspotAd.objects.filter(pk=ad.pk).update(impressions=F('impressions') + 1)
 
             return Response({
                 'ad': {
@@ -135,7 +149,7 @@ class HotspotAdGrantView(APIView):
         router_id = request.data.get('router_id')
         tenant_subdomain = request.data.get('tenant')
 
-        if not all([ad_id, mac_address, router_id, tenant_subdomain]):
+        if not all([ad_id, router_id, tenant_subdomain]) or not _valid_mac(mac_address):
             return Response({'error': 'Missing required fields'}, status=status.HTTP_400_BAD_REQUEST)
 
         tenant = _resolve_tenant(tenant_subdomain)
@@ -160,23 +174,37 @@ class HotspotAdGrantView(APIView):
 
             now = timezone.now()
 
-            # Check cooldown: don't grant if MAC already has active grant on this router
-            existing = HotspotAdGrant.objects.filter(
-                mac_address=mac_address,
-                router=router,
-                expires_at__gt=now,
+            # 1) Already claimed THIS ad → never rewarded twice (even after the reward expired)
+            claimed = HotspotAdGrant.objects.filter(ad=ad, mac_address=mac_address).first()
+            if claimed:
+                if claimed.expires_at > now:
+                    remaining = max(0, int((claimed.expires_at - now).total_seconds() / 60))
+                    return Response({
+                        'error': f'Already has active ad access. {remaining} minute(s) remaining.',
+                        'access_code': claimed.access_code,
+                        'expires_at': claimed.expires_at.isoformat(),
+                        'already_active': True,
+                    }, status=status.HTTP_409_CONFLICT)
+                return Response(
+                    {'error': 'You have already claimed the reward for this ad.', 'already_claimed': True},
+                    status=status.HTTP_409_CONFLICT,
+                )
+
+            # 2) Any other active ad grant on this router (existing cooldown behaviour)
+            active = HotspotAdGrant.objects.filter(
+                mac_address=mac_address, router=router, expires_at__gt=now,
                 schema_name=tenant.schema_name,
             ).first()
-            if existing:
-                remaining_mins = max(0, int((existing.expires_at - now).total_seconds() / 60))
+            if active:
+                remaining = max(0, int((active.expires_at - now).total_seconds() / 60))
                 return Response({
-                    'error': f'Already has active ad access. {remaining_mins} minute(s) remaining.',
-                    'access_code': existing.access_code,
-                    'expires_at': existing.expires_at.isoformat(),
+                    'error': f'Already has active ad access. {remaining} minute(s) remaining.',
+                    'access_code': active.access_code,
+                    'expires_at': active.expires_at.isoformat(),
                     'already_active': True,
                 }, status=status.HTTP_409_CONFLICT)
 
-            # Generate unique access code
+            # 3) Unique access code
             from apps.billing.models.hotspot_models import HotspotSession
             access_code = _generate_ad_access_code()
             for _ in range(20):
@@ -187,31 +215,32 @@ class HotspotAdGrantView(APIView):
 
             expires_at = now + timedelta(minutes=ad.reward_minutes)
 
-            # Create RADIUS credentials
+            # 4) Reserve the claim FIRST. The DB unique constraint makes double-taps
+            #    and parallel requests impossible to both win.
+            try:
+                with transaction.atomic():
+                    grant = HotspotAdGrant.objects.create(
+                        ad=ad, mac_address=mac_address, router=router,
+                        access_code=access_code, expires_at=expires_at,
+                        schema_name=tenant.schema_name,
+                    )
+            except IntegrityError:
+                return Response(
+                    {'error': 'You have already claimed the reward for this ad.', 'already_claimed': True},
+                    status=status.HTTP_409_CONFLICT,
+                )
+
+            # 5) Provision RADIUS; release the claim if it fails so the user can retry
             from apps.billing.services.hotspot_radius_service import HotspotRadiusService
-            plan = _AdPlan(ad.reward_minutes)
             ok = HotspotRadiusService().create_hotspot_credentials(
-                username=access_code,
-                password=access_code,
-                router=router,
-                plan=plan,
-                expires_at=expires_at,
-                mac_address=mac_address,
+                username=access_code, password=access_code, router=router,
+                plan=_AdPlan(ad.reward_minutes), expires_at=expires_at, mac_address=mac_address,
             )
             if not ok:
-                return Response({'error': 'Failed to create RADIUS credentials'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+                grant.delete()
+                return Response({'error': 'Failed to create RADIUS credentials'},
+                                status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
-            # Persist grant record
-            HotspotAdGrant.objects.create(
-                ad=ad,
-                mac_address=mac_address,
-                router=router,
-                access_code=access_code,
-                expires_at=expires_at,
-                schema_name=tenant.schema_name,
-            )
-
-            # Atomic completion counter
             HotspotAd.objects.filter(pk=ad.pk).update(completions=F('completions') + 1)
 
             return Response({

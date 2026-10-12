@@ -79,6 +79,19 @@ class HotspotAd(models.Model):
         return self.media_url  # External URLs served as-is
 
 
+class HotspotAdView(models.Model):
+    """One row per (ad, MAC). Makes impressions unique-viewer counts. Cascades when the ad is deleted."""
+    schema_name = models.SlugField(max_length=63, editable=False, default="default_schema")
+    ad = models.ForeignKey(HotspotAd, on_delete=models.CASCADE, related_name='views')
+    mac_address = models.CharField(max_length=17)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(fields=['ad', 'mac_address'], name='uniq_ad_view_per_mac'),
+        ]
+
+
 class HotspotAdGrant(models.Model):
     """Tracks ad-sponsored internet grants per MAC address to prevent abuse."""
     schema_name = models.SlugField(max_length=63, editable=False, default="default_schema")
@@ -92,6 +105,10 @@ class HotspotAdGrant(models.Model):
     class Meta:
         indexes = [
             models.Index(fields=['schema_name', 'mac_address', 'expires_at']),
+        ]
+        constraints = [
+            # One reward per ad per device, enforced by the DB (race-proof)
+            models.UniqueConstraint(fields=['ad', 'mac_address'], name='uniq_ad_grant_per_mac'),
         ]
 
     def __str__(self):
