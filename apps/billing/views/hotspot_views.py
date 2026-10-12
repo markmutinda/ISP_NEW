@@ -33,12 +33,11 @@ from apps.billing.models.hotspot_models import (
 )
 from apps.billing.models.billing_models import Plan
 from apps.billing.models.payment_models import (
-    Payment, TenantTumaConfig, InvoiceItemPayment, StkCancellationTracker  # 🚨 ADDED: StkCancellationTracker
+    Payment, TenantTumaConfig, InvoiceItemPayment, StkCancellationTracker
 )
 from apps.billing.models.voucher_models import Voucher
 from apps.billing.services.tuma_service import TumaClient
 from apps.billing.integrations.mpesa_integration import MpesaSTKPush
-# 🚨 NEW: Import Netily Paybill service
 from apps.billing.services.netily_paybill_service import (
     resolve_destination, stk_push, NetilyPaybillError,
 )
@@ -46,7 +45,6 @@ from apps.billing.utils.payment_errors import humanize_payment_failure
 from apps.core.models import TumaCallbackMap
 from apps.network.models.router_models import Router
 from apps.subscriptions.models import CommissionLedger
-# --- CoA import added for pre-clear disconnect ---
 from apps.radius.services.coa_service import CoAService
 
 # ── NEW: Hotspot credential reconnect helpers ──
@@ -55,14 +53,13 @@ import re  # (skip if already imported)
 
 from apps.billing.services.hotspot_credentials import (
     SLOT_CODE_RE, device_limit, device_password,
-    schedule_tv_login_push,   # NEW: TV push-login scheduler
+    schedule_tv_login_push,
 )
 from apps.core.tenant_cache import resolve_tenant_cached
 
 logger = logging.getLogger(__name__)
 
 
-# ── Constant for M-Pesa capable methods (kept for compatibility, but no longer used in method resolution) ──
 MPESA_CAPABLE_METHOD_TYPES = [
     'MPESA_STK', 'MPESA_PAYBILL', 'MPESA_TILL', 'MOBILE_MONEY', 'MPESA',
 ]
@@ -91,45 +88,37 @@ def _normalize_mac(mac: str) -> str:
     return (mac or "").upper().replace("-", ":").strip()
 
 
+def _kick_router_slot_after_commit(access_code, router):
+    """
+    Free the router-side hotspot slot once the surrounding DB transaction commits
+    (runs immediately if none is open). No DB access inside, never raises.
+
+    See apps/billing/services/hotspot_radius_service.py::kick_active_session.
+
+    Using transaction.on_commit ensures the MikroTik API call (up to ~10s over
+    the VPN) does not hold a PgBouncer session-mode connection open while the
+    surrounding @transaction.atomic block in HotspotPhoneReconnectView is still
+    active. on_commit still fires before the HTTP response goes out.
+    """
+    from apps.billing.services.hotspot_radius_service import HotspotRadiusService
+    transaction.on_commit(
+        lambda c=access_code, r=router: HotspotRadiusService().kick_active_session(c, r)
+    )
+
+
 def _canonical_phone(phone: str, country_code: str = 'KE') -> str:
-    """
-    Canonicalize phone number using the tenant's country configuration.
-    
-    Args:
-        phone: Raw phone number string
-        country_code: ISO country code (e.g., 'KE', 'GH', 'NG')
-    
-    Returns:
-        Canonicalized phone number in international format
-    """
     from utils.phone import normalize_phone_number
     return normalize_phone_number(phone, country_code)
 
 
 def _get_tenant_country(tenant) -> str:
-    """
-    Safely get a tenant's country code.
-    
-    This handles the case where tenant.company may not exist (Company.DoesNotExist)
-    which getattr() cannot catch because it only catches AttributeError.
-    
-    Args:
-        tenant: Tenant object from the public schema
-        
-    Returns:
-        str: Country code (defaults to 'KE')
-    """
     try:
-        # Access the company through the OneToOne relationship
-        # This will raise Company.DoesNotExist if the company doesn't exist
         return tenant.company.country or 'KE'
     except Exception:
-        # Catch any exception (Company.DoesNotExist, AttributeError, etc.)
         return 'KE'
 
 
 def _plan_data_limit_display(plan):
-    """Human-readable data limit string for a Plan model object."""
     if plan.data_limit is None:
         return 'Unlimited'
     if plan.data_limit >= 1024:
@@ -139,7 +128,6 @@ def _plan_data_limit_display(plan):
 
 
 def _plan_validity_value(plan):
-    """Extract the raw validity value from a Plan model object."""
     vtype = (plan.validity_type or 'DAYS').upper()
     if vtype == 'MINUTES':
         return plan.validity_minutes or 0
@@ -153,7 +141,6 @@ def _plan_validity_value(plan):
 
 
 def _serialize_plan(plan):
-    """Serialize a Plan (billing_models.Plan) to the captive-portal response format."""
     return {
         'id': str(plan.id),
         'name': plan.name,
@@ -176,7 +163,6 @@ def _serialize_plan(plan):
 
 
 def _serialize_hotspot_plan(plan):
-    """Serialize a HotspotPlan to the captive-portal response format."""
     return {
         'id': str(plan.id),
         'name': plan.name,
@@ -196,38 +182,25 @@ def _serialize_hotspot_plan(plan):
         'data_limit_display': plan.data_limit_display,
         'simultaneous_devices': plan.simultaneous_devices,
         'is_popular': plan.is_popular,
-        # NEW FREE TRIAL FIELDS
         'is_free_trial': getattr(plan, 'is_free_trial', False),
-        # NEW TV PLAN FIELD
-        'is_tv_plan': getattr(plan, 'is_tv_plan', False),   # <-- ADD THIS
+        'is_tv_plan': getattr(plan, 'is_tv_plan', False),
     }
 
 
 def _close_prior_radacct_rows_for_renewal(session, username: str):
-    """
-    Close open radacct rows that belong to a prior subscription period.
-
-    We anchor on session.activated_at (the CURRENT session's start time).
-    Any open row that started BEFORE this session was activated belongs to a
-    previous period and must be closed so usage resets correctly.
-    """
     from apps.radius.models import RadAcct
 
     if not username:
         return 0
-
-    # Only meaningful for returning clients (hotspot_client links sessions)
     if not session.hotspot_client:
         return 0
-
-    # Need a concrete start time to anchor the cut-off
     if not session.activated_at:
         return 0
 
     closed = RadAcct.objects.filter(
         username=username,
         acctstoptime__isnull=True,
-        acctstarttime__lt=session.activated_at,   # ← was prev.activated_at (wrong)
+        acctstarttime__lt=session.activated_at,
     ).update(
         acctstoptime=timezone.now(),
         acctterminatecause='Session-Timeout',
@@ -235,8 +208,7 @@ def _close_prior_radacct_rows_for_renewal(session, username: str):
 
     if closed:
         logger.info(
-            "Closed %d prior-period radacct row(s) for %s "
-            "(new period started %s)",
+            "Closed %d prior-period radacct row(s) for %s (new period started %s)",
             closed, username, session.activated_at.isoformat(),
         )
 
@@ -244,24 +216,9 @@ def _close_prior_radacct_rows_for_renewal(session, username: str):
 
 
 class CaptivePortalView(APIView):
-    """
-    Public captive-portal endpoint — returns portal config + plans for a
-    given router, resolving the tenant explicitly via query parameters.
-
-    GET /api/v1/hotspot/captive-portal/?router={router_id}&tenant={tenant}
-
-    Plan resolution order:
-      1. HotspotPlan records linked to this specific router (primary)
-      2. Fallback: Plan records with plan_type='HOTSPOT' (tenant-wide)
-
-    This is the canonical endpoint for the public WiFi captive portal pages.
-    It does NOT require authentication.
-    """
-
     permission_classes = [AllowAny]
     authentication_classes = []
 
-    # FIX 1: Optimized with caching, versioning, and stampede guard (non-blocking)
     def get(self, request):
         router_id = request.query_params.get('router')
         tenant_subdomain = request.query_params.get('tenant')
@@ -276,7 +233,6 @@ class CaptivePortalView(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        # ---- FAST PATH: resolved tenant with caching ----
         from apps.core.tenant_cache import resolve_tenant_cached
         from apps.core.cache_versioning import get_cache_version
 
@@ -295,23 +251,15 @@ class CaptivePortalView(APIView):
         if cached_payload is not None:
             return Response(cached_payload)
 
-        # Stampede guard: only one worker computes on a cold cache per (tenant, router)
-        # FIX: Non-blocking — serve stale if available instead of sleeping
         lock_key = f"{cache_key}:lock"
         if not cache.add(lock_key, "1", timeout=5):
-            # Someone else is computing it — don't block this worker.
-            # Serve the previous cached payload if it still exists (version bump
-            # only creates a NEW key, it doesn't delete the old one), else compute
-            # anyway. Never sleep synchronously.
             stale_key = f"hotspot:captive:v2:{schema_name}:{router_id}:{version - 1}"
             stale_payload = cache.get(stale_key)
             if stale_payload is not None:
                 return Response(stale_payload)
-            # fall through and compute — accept the rare double-compute
 
         try:
             with schema_context(schema_name):
-                # Router lookup - with select_related for branding
                 router_qs = Router.objects.filter(is_active=True).select_related('hotspot_branding')
 
                 router = None
@@ -339,7 +287,6 @@ class CaptivePortalView(APIView):
                     }
                     branding_data = None
                 else:
-                    # Build portal_config with router_logo_url
                     router_logo_url = None
                     if getattr(router, 'logo', None):
                         try:
@@ -359,10 +306,8 @@ class CaptivePortalView(APIView):
                     }
 
                     branding_data = None
-                    # Now joined via select_related, no extra query
                     branding = getattr(router, 'hotspot_branding', None)
-                    
-                    # FIX 7: Cached default branding fallback (no extra query on cache miss)
+
                     if branding is None:
                         default_branding_key = f"hotspot:default_branding:{schema_name}"
                         branding = cache.get(default_branding_key)
@@ -375,7 +320,7 @@ class CaptivePortalView(APIView):
                             cache.set(default_branding_key, branding or False, timeout=3600)
                         elif branding is False:
                             branding = None
-                            
+
                     if branding:
                         branding_data = {
                             'company_name': branding.company_name,
@@ -393,7 +338,6 @@ class CaptivePortalView(APIView):
                         if not portal_config['support_phone'] and branding.support_phone:
                             portal_config['support_phone'] = branding.support_phone
 
-                    # ── FALLBACK: use Router.logo if no branding logo set ──
                     if router and getattr(router, 'logo', None):
                         try:
                             router_logo_url = request.build_absolute_uri(router.logo.url)
@@ -410,15 +354,15 @@ class CaptivePortalView(APIView):
                         hotspot_plans = HotspotPlan.objects.filter(
                             router=router,
                             is_active=True,
-                            **{_today_valid_day_field(): True},   # ← ADDED: only show plans valid today
+                            **{_today_valid_day_field(): True},
                         ).only(
                             'id', 'name', 'description', 'price', 'currency',
                             'validity_type', 'validity_value',
                             'download_speed', 'upload_speed', 'speed_unit',
                             'limitation_type', 'data_limit_value', 'data_limit_unit',
                             'simultaneous_devices', 'is_popular', 'duration_minutes', 'data_limit_mb',
-                            'is_free_trial',  # NEW FREE TRIAL FIELDS
-                            'is_tv_plan',     # <-- ADD THIS
+                            'is_free_trial',
+                            'is_tv_plan',
                         ).order_by('sort_order', 'price')
                         plans_data = [_serialize_hotspot_plan(p) for p in hotspot_plans]
                     except ProgrammingError:
@@ -457,10 +401,8 @@ class CaptivePortalView(APIView):
             'plans': plans_data,
         }
 
-        # Long TTL is safe: version-bump signals invalidate instantly on any write
         cache.set(cache_key, payload, timeout=3600)
-        
-        # FIX 2: Browser-level caching — skip network entirely on repeat loads
+
         from django.http import JsonResponse
         response = JsonResponse(payload)
         response["Cache-Control"] = "public, max-age=15, stale-while-revalidate=60"
@@ -468,18 +410,9 @@ class CaptivePortalView(APIView):
 
 
 class HotspotPlansView(APIView):
-    """
-    Get hotspot plans for a specific router.
-    
-    PUBLIC ENDPOINT - No authentication required.
-    
-    GET /api/v1/hotspot/routers/{router_id}/plans/
-    """
-    
     permission_classes = [AllowAny]
     authentication_classes = []
-    
-    # FIX 2: Cached version with leaner DB field selection
+
     def get(self, request, router_id):
         cache_key = f"hotspot:plans:v1:{router_id}"
         cached_payload = cache.get(cache_key)
@@ -506,14 +439,14 @@ class HotspotPlansView(APIView):
         plans = HotspotPlan.objects.filter(
             router=router,
             is_active=True,
-            **{_today_valid_day_field(): True},   # ← ADDED: only show plans valid today
+            **{_today_valid_day_field(): True},
         ).only(
             'id', 'name', 'price', 'currency', 'duration_minutes', 'data_limit_mb',
             'download_speed', 'upload_speed', 'speed_unit', 'description',
             'is_popular', 'validity_type', 'validity_value',
             'limitation_type', 'data_limit_value', 'data_limit_unit',
             'is_free_trial',
-            'is_tv_plan',     # <-- ADD THIS
+            'is_tv_plan',
         ).order_by('sort_order', 'price')
 
         try:
@@ -539,7 +472,7 @@ class HotspotPlansView(APIView):
                 'description': plan.description,
                 'is_popular': plan.is_popular,
                 'is_free_trial': plan.is_free_trial,
-                'is_tv_plan': plan.is_tv_plan,   # <-- ADD THIS
+                'is_tv_plan': plan.is_tv_plan,
             }
             for plan in plans
         ]
@@ -560,7 +493,6 @@ class HotspotPlansView(APIView):
                 'support_email': branding.support_email,
             }
 
-        # FALLBACK: use Router.logo if no branding logo
         router_logo_url = None
         if getattr(router, 'logo', None):
             try:
@@ -594,8 +526,7 @@ class HotspotPlansView(APIView):
         }
 
         cache.set(cache_key, payload, timeout=30)
-        
-        # FIX 2: Browser-level caching
+
         from django.http import JsonResponse
         response = JsonResponse(payload)
         response["Cache-Control"] = "public, max-age=15, stale-while-revalidate=60"
@@ -603,44 +534,21 @@ class HotspotPlansView(APIView):
 
 
 class HotspotPurchaseView(APIView):
-    """
-    Initiate hotspot purchase with REAL STK Push via Netily's own Paybill.
-    Creates pending session, initiates STK payment, and returns pending status.
-    
-    Supports TV pairing: if tv_code is provided, resolves MAC address server-side.
-    """
-    
     permission_classes = [AllowAny]
     authentication_classes = []
-    
+
     def generate_unique_code(self):
-        """
-        Generates a 9-character code like 'MXTV-827S'
-        4 random chars + hyphen + 4 random chars
-        """
         chars = string.ascii_uppercase + string.digits
-        
+
         while True:
             part1 = ''.join(random.choices(chars, k=4))
             part2 = ''.join(random.choices(chars, k=4))
             code = f"{part1}-{part2}"
-            
+
             if not HotspotSession.objects.filter(access_code=code).exists():
                 return code
 
-    # ============================================================
-    # 🚨 UPDATED: _get_active_hotspot_payment_method
-    # Uses resolve_destination() as the single source of truth
-    # ============================================================
     def _get_active_hotspot_payment_method(self, schema_name: str):
-        """
-        Resolve the active payment method for hotspot checkout.
-        Priority order:
-          1. Daraja (own Safaricom keys) — mpesa_configuration linked + active
-          2. Any active method that resolves to a real settlement destination
-             (bank/till/paybill) via the Netily Paybill routing service.
-        """
-        # ── Priority 1: Tenant's own Daraja keys ──────────────────────────
         daraja_method = (
             InvoiceItemPayment.objects
             .filter(
@@ -660,7 +568,6 @@ class HotspotPurchaseView(APIView):
             )
             return daraja_method
 
-        # ── Priority 2: Any active method that can route via Netily Paybill ──
         from apps.billing.services.netily_paybill_service import resolve_destination
 
         candidates = (
@@ -680,9 +587,6 @@ class HotspotPurchaseView(APIView):
         return None
 
     def _ensure_mpesa_stk_callback_url(self, mpesa_cfg):
-        """
-        Ensure STK callback URL points to the STK callback endpoint, not C2B.
-        """
         if mpesa_cfg.callback_url:
             return
 
@@ -710,45 +614,36 @@ class HotspotPurchaseView(APIView):
             phone_number = request.data.get('phone_number')
             mac_address = request.data.get('mac_address', '')
             tv_code = (request.data.get('tv_code') or '').strip().upper()
-            
+
             if not all([router_id, plan_id, phone_number]):
                 return Response({
                     'error': 'Missing required fields: router_id, plan_id, phone_number'
                 }, status=status.HTTP_400_BAD_REQUEST)
-            
-            # ============================================================
-            # GET COUNTRY FROM TENANT'S COMPANY FOR PHONE NORMALIZATION
-            # FIX: Use try/except to handle Company.DoesNotExist
-            # ============================================================
+
             customer_country = _get_tenant_country(tenant)
-            
-            # ============================================================
-            # TV CODE RESOLUTION: If tv_code provided, resolve MAC server-side
-            # ============================================================
+
             reserved_access_code = None
-            
+
             if tv_code:
                 tv_cache_key = f"tv_code:{tenant.schema_name}:{tv_code}"
                 tv_payload = cache.get(tv_cache_key)
-                
+
                 if not tv_payload:
                     return Response(
                         {'error': 'Invalid or expired TV code. Please refresh the TV screen and try again.'},
                         status=status.HTTP_400_BAD_REQUEST
                     )
-                
-                # Bind purchase to the TV identity from cache
+
                 mac_address = tv_payload.get('mac_address', '')
                 router_id_from_code = tv_payload.get('router_id')
-                
+
                 if router_id_from_code:
                     router_id = router_id_from_code
-                
-                # Get the reserved access_code from the TV payload
+
                 reserved_access_code = tv_payload.get('access_code') or tv_code
-                
+
                 logger.info(f"TV code {tv_code} resolved to MAC {mac_address}, router {router_id}, reserved access_code: {reserved_access_code}")
-            
+
             try:
                 router = Router.objects.get(id=router_id, is_active=True)
             except (Router.DoesNotExist, ValueError):
@@ -756,20 +651,16 @@ class HotspotPurchaseView(APIView):
                     router = Router.objects.get(name=router_id, is_active=True)
                 except Router.DoesNotExist:
                     return Response({'error': 'Router not found'}, status=status.HTTP_404_NOT_FOUND)
-            
+
             try:
                 plan = HotspotPlan.objects.get(id=plan_id, router=router, is_active=True)
             except HotspotPlan.DoesNotExist:
                 return Response({'error': 'Plan not found'}, status=status.HTTP_404_NOT_FOUND)
-            
+
             mac_address = _normalize_mac(mac_address)
-            
-            # ============================================================
-            # CANONICALIZE PHONE NUMBER USING COUNTRY-AWARE UTILITY
-            # ============================================================
+
             phone_canonical = _canonical_phone(phone_number, customer_country)
 
-            # ── 🚨 ANTI-ABUSE: Block STK for 3 min after 3 consecutive cancellations ──
             stk_tracker = StkCancellationTracker.get_or_create_tracker(
                 tenant.schema_name, phone_canonical
             )
@@ -781,33 +672,22 @@ class HotspotPurchaseView(APIView):
                     },
                     status=status.HTTP_429_TOO_MANY_REQUESTS
                 )
-            
-            # ══════════════════════════════════════════════════════════════
-            # RESOLVE HOTSPOT IDENTITY
-            # Identity priority: phone number → MAC → anonymous
-            # The client's canonical_username IS their permanent RADIUS login.
-            # ══════════════════════════════════════════════════════════════
+
             from apps.billing.models.hotspot_models import HotspotClient, HotspotClientDevice
 
-            # Resolve the persistent client record
             hotspot_client = HotspotClient.get_or_create_by_mac(
                 schema_name=tenant.schema_name,
                 mac_address=mac_address,
                 phone_number=phone_canonical,
             )
 
-            # Register this specific device under the client
             if hotspot_client and mac_address:
                 HotspotClientDevice.record_device(
                     client=hotspot_client,
                     mac_address=mac_address,
                 )
 
-            # ══════════════════════════════════════════════════════════════
-            # DETERMINE ACCESS CODE - FIXED FOR MULTIPLE DEVICES
-            # ══════════════════════════════════════════════════════════════
             if tv_code and reserved_access_code:
-                # TV pairing: the TV code itself was pre-reserved as the access_code
                 friendly_username = reserved_access_code
                 is_roaming = False
                 roamed_from_name = None
@@ -815,8 +695,7 @@ class HotspotPurchaseView(APIView):
 
             elif hotspot_client and hotspot_client.canonical_username:
                 base_username = hotspot_client.canonical_username
-                
-                # Check if this exact MAC already has an active session with the canonical name
+
                 existing_for_this_mac = HotspotSession.objects.filter(
                     hotspot_client=hotspot_client,
                     access_code=base_username,
@@ -824,33 +703,27 @@ class HotspotPurchaseView(APIView):
                     status__in=('active', 'paid'),
                     expires_at__gt=timezone.now()
                 ).exists()
-                
+
                 if existing_for_this_mac:
-                    # Same device reconnecting — reuse canonical name (auto-login case)
                     friendly_username = base_username
                     is_roaming = False
                     roamed_from_name = None
                     logger.info(f"🔄 RE-CONNECT: Same device {mac_address} using {friendly_username}")
                 else:
-                    # Different device for same client — assign a device-specific slot
                     active_count = HotspotSession.objects.filter(
                         hotspot_client=hotspot_client,
                         status__in=('active', 'paid'),
                         expires_at__gt=timezone.now()
                     ).exclude(mac_address=mac_address).count()
-                    
+
                     if active_count == 0:
-                        # No other active sessions — use canonical name
                         friendly_username = base_username
                         is_roaming = False
                         roamed_from_name = None
                         logger.info(f"🏠 FIRST DEVICE: {friendly_username} at {router.name}")
                     else:
-                        # Other devices already using this client's slots
-                        # Issue a numbered device credential: MXA-BKCS-2, MXA-BKCS-3, etc.
                         device_slot = active_count + 1
                         friendly_username = f"{base_username}-{device_slot}"
-                        # Ensure uniqueness (collision guard)
                         while HotspotSession.objects.filter(
                             access_code=friendly_username,
                             status__in=('active', 'paid'),
@@ -858,12 +731,11 @@ class HotspotPurchaseView(APIView):
                         ).exists():
                             device_slot += 1
                             friendly_username = f"{base_username}-{device_slot}"
-                        
+
                         is_roaming = False
                         roamed_from_name = None
                         logger.info(f"📱 ADDITIONAL DEVICE: {friendly_username} (slot {device_slot}) at {router.name}")
 
-                # Roaming detection: did they connect here from a different router?
                 prev_session = (
                     HotspotSession.objects
                     .filter(hotspot_client=hotspot_client, access_code=friendly_username)
@@ -877,8 +749,6 @@ class HotspotPurchaseView(APIView):
                     logger.info(f"📍 ROAMING: {friendly_username} moved from {roamed_from_name} → {router.name}")
 
             else:
-                # Fallback: generate a one-off code (should rarely happen given
-                # get_or_create_by_mac always sets canonical_username)
                 friendly_username = self.generate_unique_code()
                 is_roaming = False
                 roamed_from_name = None
@@ -899,10 +769,9 @@ class HotspotPurchaseView(APIView):
                 access_code=friendly_username,
                 is_roaming=is_roaming,
                 roamed_from=roamed_from_name,
-                hotspot_client=hotspot_client,  # Link to transient client
+                hotspot_client=hotspot_client,
             )
 
-            # ── NEW: flag this purchase as a TV push-login if the client requested it ──
             if request.data.get('target_device') == 'tv':
                 cache.set(
                     f"hs_tv_push:{tenant.schema_name}:{session.session_id}",
@@ -910,7 +779,6 @@ class HotspotPurchaseView(APIView):
                     timeout=3600,
                 )
 
-            # Resolve active/default tenant payment method (MPESA_STK)
             payment_method = self._get_active_hotspot_payment_method(tenant.schema_name)
             if not payment_method:
                 session.mark_failed("No active M-Pesa payment method configured")
@@ -927,7 +795,6 @@ class HotspotPurchaseView(APIView):
 
             payment_ref = f"HS-{session.session_id}-{int(time.time())}".replace(" ", "-")
 
-            # Create payment linked to selected method with service_type='HOTSPOT'
             payment = Payment.objects.create(
                 customer=None,
                 payment_method=payment_method,
@@ -940,15 +807,10 @@ class HotspotPurchaseView(APIView):
                 schema_name=tenant.schema_name,
                 hotspot_session=session,
                 tuma_status='pending',
-                service_type='HOTSPOT',   # Permanent classification for analytics
+                service_type='HOTSPOT',
             )
 
-            # ===============================
-            # Provider branch: Daraja (own keys) first, else Netily Paybill
-            # ===============================
             try:
-                # Branch 1: Tenant's own Daraja credentials (MpesaConfiguration)
-                # This is the ONLY case where we bypass Netily Paybill
                 if (payment_method.mpesa_configuration and 
                     payment_method.mpesa_configuration.is_active):
                     mpesa_cfg = payment_method.mpesa_configuration
@@ -979,10 +841,6 @@ class HotspotPurchaseView(APIView):
                     session.save(update_fields=['tuma_merchant_request_id', 'tuma_checkout_request_id', 'payment'])
 
                 else:
-                    # ============================================================
-                    # 🚨 BRANCH 2: ROUTE THROUGH NETILY'S OWN MASTER PAYBILL
-                    # (Replaces Tuma passthrough for STK routing)
-                    # ============================================================
                     destination = resolve_destination(payment_method)
                     if not destination:
                         payment.status = 'FAILED'
@@ -1011,8 +869,7 @@ class HotspotPurchaseView(APIView):
                         payment.failure_reason = humanize_payment_failure(str(e))
                         payment.save(update_fields=['status', 'tuma_status', 'failure_reason'])
                         session.mark_failed(payment.failure_reason)
-                        
-                        # ── TELEGRAM FAILURE ALERT ──
+
                         try:
                             from apps.notifications.tasks import send_telegram_payment_alert_task
                             from apps.core.telegram_notify import build_payment_failure_message
@@ -1027,7 +884,7 @@ class HotspotPurchaseView(APIView):
                             ], retry=False)
                         except Exception as alert_err:
                             logger.warning(f"Telegram failure alert enqueue failed: {alert_err}")
-                        
+
                         return Response({'error': payment.failure_reason}, status=status.HTTP_400_BAD_REQUEST)
 
                     payment.tuma_merchant_request_id = result['merchant_request_id']
@@ -1056,15 +913,13 @@ class HotspotPurchaseView(APIView):
 
             except Exception as e:
                 err_text = str(e)
-                
-                # Determine if this is a 403 blacklist error
+
                 is_403 = "403" in err_text or "blacklisted" in err_text.lower()
-                
-                # Use appropriate log level and suppress traceback for 403s
+
                 log_fn = logger.warning if is_403 else logger.error
                 log_fn(
                     f"STK initiation failed for session {session.session_id}: {err_text}",
-                    exc_info=not is_403,  # suppress traceback for known 403s
+                    exc_info=not is_403,
                 )
 
                 retriable_markers = ["404", "429", "502", "503", "504", "timed out", "connection", "temporar"]
@@ -1096,15 +951,6 @@ class HotspotPurchaseView(APIView):
                     status=status.HTTP_400_BAD_REQUEST,
                 )
 
-            # ============================================================
-            # SMS: REMOVED - hotspot_new_subscription toggle no longer exists
-            # ============================================================
-            # The hotspot_new_subscription method was removed from SMSNotifier.
-            # Welcome SMS will be sent when the session is activated (paid/active status).
-
-            # ============================================================
-            # OPTIONALLY invalidate used TV code after successful payment init
-            # ============================================================
             if tv_code:
                 try:
                     tv_cache_key = f"tv_code:{tenant.schema_name}:{tv_code}"
@@ -1126,20 +972,12 @@ class HotspotPurchaseView(APIView):
 
 
 class HotspotPurchaseStatusView(APIView):
-    """
-    Poll hotspot purchase status.
-    
-    PUBLIC ENDPOINT - No authentication required.
-    
-    GET /api/v1/hotspot/purchase/{session_id}/status/
-    """
-    
     permission_classes = [AllowAny]
     authentication_classes = []
-    
+
     def _check_tuma_payment_status(self, session, tenant_schema):
         payment = None
-        
+
         if getattr(session, 'payment_id', None):
             try:
                 payment = Payment.objects.filter(id=session.payment_id).first()
@@ -1147,7 +985,7 @@ class HotspotPurchaseStatusView(APIView):
                     logger.debug(f"Found payment via explicit FK: {payment.payment_number}")
             except Exception as e:
                 logger.warning(f"Error fetching payment by FK: {e}")
-        
+
         if not payment:
             if hasattr(session, 'tuma_checkout_request_id') and session.tuma_checkout_request_id:
                 payment = Payment.objects.filter(
@@ -1155,14 +993,14 @@ class HotspotPurchaseStatusView(APIView):
                 ).first()
                 if payment:
                     logger.debug(f"Found payment via checkout_request_id: {session.tuma_checkout_request_id}")
-            
+
             if not payment and hasattr(session, 'tuma_merchant_request_id') and session.tuma_merchant_request_id:
                 payment = Payment.objects.filter(
                     tuma_merchant_request_id=session.tuma_merchant_request_id
                 ).first()
                 if payment:
                     logger.debug(f"Found payment via merchant_request_id: {session.tuma_merchant_request_id}")
-        
+
         if not payment:
             payments = Payment.objects.filter(
                 payer_phone=session.phone_number,
@@ -1172,10 +1010,10 @@ class HotspotPurchaseStatusView(APIView):
             payment = payments.first()
             if payment:
                 logger.debug(f"Found payment via phone+amount fallback: {payment.payment_number}")
-        
+
         if not payment:
             return ('pending', 'No payment record found', None)
-        
+
         if payment.status == 'COMPLETED':
             return ('completed', 'Payment successful', payment)
         elif payment.status == 'FAILED':
@@ -1190,7 +1028,7 @@ class HotspotPurchaseStatusView(APIView):
                 return ('failed', humanize_payment_failure(payment.tuma_result_desc), None)
             else:
                 return ('pending', 'Waiting for payment confirmation...', None)
-    
+
     @transaction.atomic
     def get(self, request, session_id):
         tenant_subdomain = request.query_params.get('tenant')
@@ -1212,7 +1050,7 @@ class HotspotPurchaseStatusView(APIView):
                     {'error': 'Session not found'},
                     status=status.HTTP_404_NOT_FOUND
                 )
-            
+
             if session.status == 'active':
                 return Response({
                     'status': 'success',
@@ -1224,34 +1062,31 @@ class HotspotPurchaseStatusView(APIView):
                     'speed': f"{session.plan.speed_limit_mbps}Mbps",
                     'login_url': request.query_params.get('login_url', ''),
                 })
-            
+
             elif session.status == 'failed':
                 return Response({
                     'status': 'failed',
                     'message': session.failure_reason or 'Payment failed. Please try again.',
                 })
-            
+
             elif session.status == 'expired':
                 return Response({
                     'status': 'expired',
                     'message': 'Session has expired.',
                 })
-            
+
             elif session.status == 'paid':
                 session.activate(session.access_code)
-                
-                # ────────────────────────────────────────────────────────────
-                # FIX 2: Close only prior radacct rows for renewal
-                # ────────────────────────────────────────────────────────────
+
                 closed_count = _close_prior_radacct_rows_for_renewal(session, session.access_code)
                 if closed_count > 0:
                     logger.info(
                         f"Closed {closed_count} old RADIUS sessions for {session.access_code} before renewal activation"
                     )
-                
+
                 try:
                     from apps.billing.services.hotspot_radius_service import HotspotRadiusService
-                    
+
                     radius_service = HotspotRadiusService()
                     radius_service.create_hotspot_credentials(
                         username=session.access_code,
@@ -1262,16 +1097,13 @@ class HotspotPurchaseStatusView(APIView):
                         mac_address=session.mac_address or '',
                     )
 
-                    # NEW: server-side push login for TVs
                     schedule_tv_login_push(session, tenant.schema_name)
                 except Exception as e:
                     logger.error(f"RADIUS activation failed for paid session {session.session_id}: {e}")
-                
-                # ── SMS: welcome with access code ──
-                # FIX: Fire-and-forget async task — SMS sending is off the critical path
+
                 from apps.messaging.tasks import send_hotspot_welcome_sms
                 send_hotspot_welcome_sms.delay(session.session_id, tenant.schema_name)
-                
+
                 return Response({
                     'status': 'success',
                     'message': 'Payment received! You are now connected.',
@@ -1282,34 +1114,31 @@ class HotspotPurchaseStatusView(APIView):
                     'speed': f"{session.plan.speed_limit_mbps}Mbps",
                     'login_url': request.query_params.get('login_url', ''),
                 })
-            
+
             if session.phone_number:
                 status, message, payment = self._check_tuma_payment_status(session, tenant.schema_name)
-                
+
                 if status == 'completed':
                     mpesa_receipt = payment.mpesa_receipt if payment else ''
                     session.mark_paid(mpesa_receipt)
-                    
+
                     if payment:
                         session.tuma_checkout_request_id = payment.tuma_checkout_request_id
                         session.tuma_merchant_request_id = payment.tuma_merchant_request_id
                         session.payment = payment
                         session.save(update_fields=['tuma_checkout_request_id', 'tuma_merchant_request_id', 'payment'])
-                    
+
                     session.activate(session.access_code)
-                    
-                    # ────────────────────────────────────────────────────────────
-                    # FIX 2: Close only prior radacct rows for renewal
-                    # ────────────────────────────────────────────────────────────
+
                     closed_count = _close_prior_radacct_rows_for_renewal(session, session.access_code)
                     if closed_count > 0:
                         logger.info(
                             f"Closed {closed_count} old RADIUS sessions for {session.access_code} before renewal activation"
                         )
-                    
+
                     try:
                         from apps.billing.services.hotspot_radius_service import HotspotRadiusService
-                        
+
                         radius_service = HotspotRadiusService()
                         radius_service.create_hotspot_credentials(
                             username=session.access_code,
@@ -1320,7 +1149,6 @@ class HotspotPurchaseStatusView(APIView):
                             mac_address=session.mac_address or '',
                         )
 
-                        # NEW: server-side push login for TVs
                         schedule_tv_login_push(session, tenant.schema_name)
                     except Exception as e:
                         logger.error(
@@ -1328,12 +1156,10 @@ class HotspotPurchaseStatusView(APIView):
                             f"{session.session_id}: {e}",
                             exc_info=True
                         )
-                    
-                    # ── SMS: welcome ──
-                    # FIX: Fire-and-forget async task — SMS sending is off the critical path
+
                     from apps.messaging.tasks import send_hotspot_welcome_sms
                     send_hotspot_welcome_sms.delay(session.session_id, tenant.schema_name)
-                    
+
                     return Response({
                         'status': 'success',
                         'message': 'Payment received! You are now connected.',
@@ -1343,18 +1169,18 @@ class HotspotPurchaseStatusView(APIView):
                         'data_remaining_mb': session.data_remaining_mb,
                         'speed': f"{session.plan.speed_limit_mbps}Mbps",
                     })
-                
+
                 elif status == 'failed':
                     session.mark_failed(message)
-                    
+
                     return Response({
                         'status': 'failed',
                         'message': message or 'Payment failed. Please try again.',
                     })
-                
+
                 elif status == 'pending':
                     logger.debug(f"Hotspot payment pending for session {session_id}: {message}")
-            
+
             return Response({
                 'status': 'pending',
                 'message': 'Waiting for payment confirmation on your phone...',
@@ -1363,22 +1189,6 @@ class HotspotPurchaseStatusView(APIView):
 
 
 class HotspotVoucherRedeemView(APIView):
-    """
-    Redeem a voucher code on the hotspot captive portal.
-
-    PUBLIC ENDPOINT - No authentication required.
-    The user enters a voucher code (and optional PIN) received from the ISP.
-    If valid, a hotspot session is created and RADIUS credentials returned.
-
-    POST /api/v1/hotspot/voucher-redeem/
-    {
-        "code": "ABC123",
-        "router_id": 5,           # Still required to know which router to connect to
-        "mac_address": "AA:BB:CC:DD:EE:FF",
-        "tenant": "indigo3"
-    }
-    """
-
     permission_classes = [AllowAny]
     authentication_classes = []
 
@@ -1414,15 +1224,12 @@ class HotspotVoucherRedeemView(APIView):
             if not router_id:
                 return Response({'error': 'Router ID is required'}, status=status.HTTP_400_BAD_REQUEST)
 
-            # ════════════════════════════════════════════════════════════════
-            # 🆕 IDEMPOTENCY GUARD: Return existing session if already redeemed
-            # ════════════════════════════════════════════════════════════════
             existing_session = HotspotSession.objects.filter(
                 payhero_checkout_id=f'VOUCHER_{voucher_code}',
                 mac_address=mac_address,
                 status__in=('active', 'paid'),
             ).select_related('plan').first()
-            
+
             if existing_session:
                 return Response({
                     'status': 'success',
@@ -1435,26 +1242,19 @@ class HotspotVoucherRedeemView(APIView):
                     'remaining_voucher_value': None,
                 })
 
-            # ════════════════════════════════════════════════════════════════
-            # 🆕 SHORT LOCK: Prevent race conditions on double-tap
-            # ════════════════════════════════════════════════════════════════
             lock_key = f"voucher_redeem_lock:{tenant.schema_name}:{voucher_code}:{mac_address}"
             if not cache.add(lock_key, "1", timeout=15):
                 return Response(
                     {'error': 'Redemption already in progress. Please wait a moment.'},
                     status=status.HTTP_409_CONFLICT,
                 )
-            
+
             try:
-                # ============================================================
-                # FIX: Auto-detect plan from voucher - no plan_id required!
-                # ============================================================
                 try:
                     voucher = Voucher.objects.select_related('batch', 'batch__hotspot_plan').get(code__iexact=voucher_code)
                 except Voucher.DoesNotExist:
                     return Response({'error': 'Invalid voucher code'}, status=status.HTTP_404_NOT_FOUND)
 
-                # Check if voucher is expired or used
                 if not voucher.is_valid():
                     if voucher.status == 'EXPIRED' or (voucher.valid_to and voucher.valid_to < timezone.now()):
                         reason = 'Voucher has expired'
@@ -1464,31 +1264,24 @@ class HotspotVoucherRedeemView(APIView):
                         reason = 'Voucher is not available'
                     return Response({'error': reason}, status=status.HTTP_400_BAD_REQUEST)
 
-                # ============================================================
-                # Auto-detect the plan from the voucher
-                # ============================================================
                 plan = None
-                # First check if voucher has hotspot_plan directly
                 if hasattr(voucher, 'hotspot_plan') and voucher.hotspot_plan:
                     plan = voucher.hotspot_plan
-                # Then check the batch's hotspot_plan
                 elif voucher.batch and voucher.batch.hotspot_plan:
                     plan = voucher.batch.hotspot_plan
-                
+
                 if not plan:
                     return Response(
                         {'error': 'This voucher is not linked to a valid plan'},
                         status=status.HTTP_400_BAD_REQUEST
                     )
 
-                # Verify the plan is active
                 if not plan.is_active:
                     return Response(
                         {'error': 'The plan linked to this voucher is no longer available'},
                         status=status.HTTP_400_BAD_REQUEST
                     )
 
-                # Get the router
                 try:
                     router = Router.objects.get(id=router_id, is_active=True)
                 except (Router.DoesNotExist, ValueError):
@@ -1497,9 +1290,6 @@ class HotspotVoucherRedeemView(APIView):
                     except Router.DoesNotExist:
                         return Response({'error': 'Router not found'}, status=status.HTTP_404_NOT_FOUND)
 
-                # ============================================================
-                # FIX: Enforce voucher plan restriction (if voucher is plan-restricted)
-                # ============================================================
                 voucher_plan_id = getattr(voucher.batch, 'hotspot_plan_id', None)
                 if voucher_plan_id and str(voucher_plan_id) != str(plan.id):
                     logger.warning(
@@ -1511,49 +1301,35 @@ class HotspotVoucherRedeemView(APIView):
                         status=status.HTTP_400_BAD_REQUEST
                     )
 
-                # Check if voucher has sufficient balance
                 if voucher.remaining_value is not None and voucher.remaining_value < plan.price:
                     return Response({
                         'error': f'Voucher balance (KES {voucher.remaining_value}) is insufficient for this plan (KES {plan.price})'
                     }, status=status.HTTP_400_BAD_REQUEST)
 
-                # ══════════════════════════════════════════════════════════════
-                # RESOLVE HOTSPOT IDENTITY FOR VOUCHER (using new canonical_username)
-                # ══════════════════════════════════════════════════════════════
                 from apps.billing.models.hotspot_models import HotspotClient, HotspotClientDevice
-                
-                # Use MAC as a fallback identifier if real phone isn't provided
+
                 provided_phone = request.data.get('phone_number') or ''
-                # MAC-derived fallback must stay within max_length=15: "MAC-" (4) + 11 chars = 15
                 phone_to_use = provided_phone if provided_phone else f"MAC-{mac_address.replace(':', '')[:11]}"
-                
-                # Resolve the persistent client record
+
                 hotspot_client = HotspotClient.get_or_create_by_mac(
                     schema_name=tenant.schema_name,
                     mac_address=mac_address,
                     phone_number=phone_to_use,
                 )
-                
+
                 if hotspot_client and mac_address:
                     HotspotClientDevice.record_device(
                         client=hotspot_client, 
                         mac_address=mac_address
                     )
-                
-                # Use the client's permanent canonical_username as the access code
+
                 if hotspot_client and hotspot_client.canonical_username:
                     friendly_username = hotspot_client.canonical_username
                     logger.info(f"🔄 VOUCHER: Using permanent username {friendly_username} for {mac_address}")
                 else:
-                    # Fallback: generate new code (should rarely happen)
                     friendly_username = self._generate_code()
                     logger.warning(f"⚠️ VOUCHER: No canonical_username, using generated code {friendly_username}")
 
-                # ────────────────────────────────────────────────────────────
-                # BUG 1 FIX: Create session FIRST, provision RADIUS, THEN mark
-                # voucher used. Any failure raises and rolls back the whole
-                # @transaction.atomic block, leaving the voucher untouched.
-                # ────────────────────────────────────────────────────────────
                 session_id = HotspotSession.generate_session_id()
                 session = HotspotSession.objects.create(
                     session_id=session_id,
@@ -1584,7 +1360,6 @@ class HotspotVoucherRedeemView(APIView):
                     if not ok:
                         raise RuntimeError("RADIUS provisioning returned False")
 
-                    # Only NOW mark the voucher consumed — atomic with everything above
                     voucher.use_count = (voucher.use_count or 0) + 1
                     if voucher.remaining_value is not None:
                         voucher.remaining_value = max(Decimal('0'), voucher.remaining_value - plan.price)
@@ -1596,11 +1371,8 @@ class HotspotVoucherRedeemView(APIView):
 
                 except Exception as e:
                     logger.error(f"Voucher redeem activation failed, rolling back: {e}", exc_info=True)
-                    # Re-raise so @transaction.atomic actually rolls back the session AND
-                    # leaves the voucher untouched — safe to retry immediately.
                     raise
 
-                # fire-and-forget welcome SMS AFTER the atomic block commits successfully
                 from apps.messaging.tasks import send_hotspot_welcome_sms
                 send_hotspot_welcome_sms.delay(session.session_id, tenant.schema_name)
 
@@ -1622,7 +1394,6 @@ class HotspotVoucherRedeemView(APIView):
                     status=status.HTTP_503_SERVICE_UNAVAILABLE,
                 )
             finally:
-                # Always release the lock
                 cache.delete(lock_key)
 
 
@@ -1631,33 +1402,13 @@ class HotspotVoucherRedeemView(APIView):
 # ============================================================
 
 class HotspotPhoneReconnectView(APIView):
-    """
-    Reconnect / add a new device using the phone number that paid.
-    
-    POST /api/v1/hotspot/phone-reconnect/
-    {
-        "phone_number": "0712345678",
-        "router_id": "...",
-        "mac_address": "AA:BB:CC:DD:EE:FF",
-        "tenant": "myisp"
-    }
-    
-    Logic:
-    - Find the HotspotClient for this phone
-    - Find their most recent active session on this router
-    - If this MAC already has a slot → reconnect (reseed RADIUS)
-    - If new MAC and slots remaining under plan.simultaneous_devices → create new slot
-    - If slots full → attempt MAC rotation takeover (replace stale session with rotated MAC)
-    """
     permission_classes = [AllowAny]
     authentication_classes = []
 
-    # Rate limit: max 5 attempts per phone per 10 minutes (anti-abuse)
-    _RATE_LIMIT_TTL = 600   # 10 minutes in seconds
+    _RATE_LIMIT_TTL = 600
     _RATE_LIMIT_MAX = 5
 
     def _check_rate_limit(self, tenant_schema: str, phone: str) -> bool:
-        """Returns True if request is allowed, False if rate-limited."""
         cache_key = f"phone_reconnect_attempts:{tenant_schema}:{phone}"
         attempts = cache.get(cache_key, 0)
         if attempts >= self._RATE_LIMIT_MAX:
@@ -1666,9 +1417,6 @@ class HotspotPhoneReconnectView(APIView):
         return True
 
     def _canonicalize_phone(self, phone: str, country_code: str = 'KE') -> str:
-        """
-        Canonicalize phone number using the tenant's country configuration.
-        """
         from utils.phone import normalize_phone_number
         return normalize_phone_number(phone, country_code)
 
@@ -1679,7 +1427,6 @@ class HotspotPhoneReconnectView(APIView):
         router_id = request.data.get('router_id')
         mac_address = _normalize_mac(request.data.get('mac_address', ''))
 
-        # ── Basic validation ──────────────────────────────────────
         if not tenant_subdomain:
             return Response({'error': 'Tenant is required'}, status=status.HTTP_400_BAD_REQUEST)
         if not raw_phone:
@@ -1687,7 +1434,6 @@ class HotspotPhoneReconnectView(APIView):
         if not router_id:
             return Response({'error': 'Router ID is required'}, status=status.HTTP_400_BAD_REQUEST)
 
-        # ── Resolve tenant ────────────────────────────────────────
         try:
             from apps.core.models import Tenant
             with schema_context(get_public_schema_name()):
@@ -1698,21 +1444,16 @@ class HotspotPhoneReconnectView(APIView):
         except Exception:
             return Response({'error': 'Invalid tenant'}, status=status.HTTP_400_BAD_REQUEST)
 
-        # ── Get country from tenant's company ──────────────────────
-        # FIX: Use try/except to handle Company.DoesNotExist
         customer_country = _get_tenant_country(tenant)
 
-        # ── Canonicalize phone using country-aware utility ──────
         phone_canonical = self._canonicalize_phone(raw_phone, customer_country)
 
-        # Basic format check — must be valid international format
         if not phone_canonical:
             return Response(
                 {'error': 'Invalid phone number format. Please enter a valid number.'},
                 status=status.HTTP_400_BAD_REQUEST
             )
 
-        # ── Rate limit (per tenant + phone) ──────────────────────
         if not self._check_rate_limit(tenant.schema_name, phone_canonical):
             return Response(
                 {
@@ -1725,7 +1466,6 @@ class HotspotPhoneReconnectView(APIView):
         with schema_context(tenant.schema_name):
             now = timezone.now()
 
-            # ── Find router ───────────────────────────────────────
             try:
                 router = Router.objects.get(id=router_id, is_active=True)
             except (Router.DoesNotExist, ValueError):
@@ -1734,11 +1474,6 @@ class HotspotPhoneReconnectView(APIView):
                 except Router.DoesNotExist:
                     return Response({'error': 'Router not found'}, status=status.HTTP_404_NOT_FOUND)
 
-            # ============================================================
-            # IMPROVED PHONE LOOKUP: multiple formats + session fallback
-            # ============================================================
-            # We already have phone_canonical from the country-aware normalizer
-            # But also try local formats for backward compatibility
             phone_local = '0' + phone_canonical[3:] if len(phone_canonical) > 3 else ''
             phone_short = phone_canonical[3:] if len(phone_canonical) > 3 else ''
 
@@ -1748,9 +1483,7 @@ class HotspotPhoneReconnectView(APIView):
                 Q(canonical_phone=phone_short)
             ).first()
 
-            # ── NEW: Also search sessions directly by phone number if client not found ──
             if not client:
-                # Try to find active sessions directly by phone number variants
                 direct_session = HotspotSession.objects.filter(
                     Q(phone_number=phone_canonical) |
                     Q(phone_number=phone_local) |
@@ -1758,26 +1491,20 @@ class HotspotPhoneReconnectView(APIView):
                     status='active',
                     expires_at__gt=now,
                 ).select_related('hotspot_client', 'plan', 'router').order_by('-created_at').first()
-                
+
                 if direct_session:
-                    # Use this session's client if it has one, or work with session directly
                     client = direct_session.hotspot_client
-                    
+
                     if not client:
-                        # Session exists but no client — handle directly
                         plan = direct_session.plan
                         plan_device_limit = getattr(plan, 'simultaneous_devices', 1) or 1
-                        
-                        # FIXED: When plan supports 1 device and the user is the legitimate owner
-                        # (proven by phone number), allow reconnection by just reseeding RADIUS
-                        # credentials with the new MAC, updating the session's MAC address.
+
                         if plan_device_limit <= 1:
                             base_session = direct_session
-                            # Update the stored MAC so auto-login works next time
                             if mac_address and mac_address != '00:00:00:00:00:00':
                                 base_session.mac_address = mac_address
                                 base_session.save(update_fields=['mac_address'])
-                            
+
                             access_code = base_session.access_code
                             try:
                                 from apps.billing.services.hotspot_radius_service import HotspotRadiusService
@@ -1795,6 +1522,11 @@ class HotspotPhoneReconnectView(APIView):
                                     {'error': 'Failed to restore connection. Please try again.'},
                                     status=status.HTTP_500_INTERNAL_SERVER_ERROR
                                 )
+
+                            # NEW: free the router-side slot (ghost / old MAC) once the
+                            # surrounding DB transaction commits, before the portal
+                            # submits the login to MikroTik.
+                            _kick_router_slot_after_commit(access_code, router)
 
                             remaining_minutes = max(
                                 0, int((base_session.expires_at - now).total_seconds() / 60)
@@ -1814,15 +1546,13 @@ class HotspotPhoneReconnectView(APIView):
                                 'device_slot': 'existing',
                                 'credentials': {'username': access_code, 'password': access_code},
                             })
-                        
-                        # Only block if this is a NEW device trying to join a single-device plan.
-                        # If this MAC already matches the session's MAC, it's a reconnect — always allow.
+
                         is_same_device = (
                             mac_address and 
                             direct_session.mac_address and 
                             mac_address.upper() == direct_session.mac_address.upper()
                         )
-                        
+
                         if plan_device_limit <= 1 and not is_same_device:
                             return Response(
                                 {
@@ -1832,7 +1562,7 @@ class HotspotPhoneReconnectView(APIView):
                                 },
                                 status=status.HTTP_403_FORBIDDEN
                             )
-                        
+
                         access_code = direct_session.access_code
                         try:
                             from apps.billing.services.hotspot_radius_service import HotspotRadiusService
@@ -1850,7 +1580,11 @@ class HotspotPhoneReconnectView(APIView):
                                 {'error': 'Failed to restore connection. Please try again.'},
                                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
                             )
-                        
+
+                        # NEW: free the router-side slot (ghost / old MAC) once the
+                        # surrounding DB transaction commits.
+                        _kick_router_slot_after_commit(access_code, router)
+
                         remaining_minutes = max(
                             0, int((direct_session.expires_at - now).total_seconds() / 60)
                         )
@@ -1875,10 +1609,6 @@ class HotspotPhoneReconnectView(APIView):
                     status=status.HTTP_404_NOT_FOUND
                 )
 
-            # ═══════════════════════════════════════════════════════════════
-            # BUG 3 FIX: Slot allocation lock — prevent TOCTOU race when two
-            # devices reconnect simultaneously and both pass the slot check.
-            # ═══════════════════════════════════════════════════════════════
             slot_lock_key = f"phone_reconnect_slot_lock:{tenant.schema_name}:{client.id}"
             if not cache.add(slot_lock_key, "1", timeout=10):
                 return Response(
@@ -1887,8 +1617,6 @@ class HotspotPhoneReconnectView(APIView):
                 )
 
             try:
-                # ── Find the most recent active session for this client ─
-                # FIXED: Also search by phone_number directly to catch sessions without client link
                 logger.info(
                     f"Phone reconnect lookup: raw={raw_phone} canonical={phone_canonical} "
                     f"client_id={client.id} client_phone={client.canonical_phone} "
@@ -1910,7 +1638,6 @@ class HotspotPhoneReconnectView(APIView):
                 )
 
                 if not active_sessions.exists():
-                    # Check if there is a 'paid' session (activation pending)
                     paid_session = HotspotSession.objects.filter(
                         Q(hotspot_client=client) |
                         Q(phone_number=phone_canonical) |
@@ -1920,10 +1647,8 @@ class HotspotPhoneReconnectView(APIView):
                     ).order_by('-created_at').first()
 
                     if paid_session:
-                        # Activate it now AND create RADIUS credentials
                         paid_session.activate(paid_session.access_code or HotspotSession.generate_access_code())
-                        
-                        # Create RADIUS credentials for the newly activated session
+
                         try:
                             from apps.billing.services.hotspot_radius_service import HotspotRadiusService
                             HotspotRadiusService().create_hotspot_credentials(
@@ -1936,7 +1661,7 @@ class HotspotPhoneReconnectView(APIView):
                             )
                         except Exception as e:
                             logger.error(f"Phone reconnect paid->active RADIUS failed: {e}")
-                        
+
                         active_sessions = HotspotSession.objects.filter(
                             Q(hotspot_client=client) |
                             Q(phone_number=phone_canonical) |
@@ -1956,8 +1681,6 @@ class HotspotPhoneReconnectView(APIView):
                         status=status.HTTP_404_NOT_FOUND
                     )
 
-                # ── Use the canonical (first-device) session as the reference ─
-                # The "base" session holds the plan and expiry that all devices share
                 base_session = active_sessions.filter(
                     access_code=client.canonical_username
                 ).first() or active_sessions.first()
@@ -1965,28 +1688,19 @@ class HotspotPhoneReconnectView(APIView):
                 plan = base_session.plan
                 plan_device_limit = getattr(plan, 'simultaneous_devices', 1) or 1
 
-                # ── ANTI-ABUSE: single-device plans cannot add NEW devices ──
-                # But always allow reconnect if this MAC already has an active session.
                 existing_mac_session = active_sessions.filter(mac_address=mac_address).first()
 
-                # FIXED: For single-device plans, allow reconnect when MAC is new but user is the owner
-                # This handles MAC randomization on phones
                 if plan_device_limit <= 1 and not existing_mac_session:
-                    # MAC likely randomized — this IS their device, just with a new MAC.
-                    # Since they proved ownership via phone number, allow reconnect and
-                    # update the session MAC so future auto-logins work correctly.
                     base_session_updated = base_session
                     if mac_address and mac_address != '00:00:00:00:00:00':
-                        # Update the stored MAC so auto-login works next time
                         base_session_updated.mac_address = mac_address
                         base_session_updated.save(update_fields=['mac_address'])
-                        # Also register this device under the client
                         if base_session_updated.hotspot_client:
                             HotspotClientDevice.record_device(
                                 client=base_session_updated.hotspot_client,
                                 mac_address=mac_address
                             )
-                    
+
                     access_code = base_session.access_code
                     try:
                         from apps.billing.services.hotspot_radius_service import HotspotRadiusService
@@ -2004,6 +1718,10 @@ class HotspotPhoneReconnectView(APIView):
                             {'error': 'Failed to restore connection. Please try again.'},
                             status=status.HTTP_500_INTERNAL_SERVER_ERROR
                         )
+
+                    # NEW: free the router-side slot (ghost / old MAC) once the
+                    # surrounding DB transaction commits.
+                    _kick_router_slot_after_commit(access_code, router)
 
                     remaining_minutes = max(
                         0, int((base_session.expires_at - now).total_seconds() / 60)
@@ -2024,13 +1742,11 @@ class HotspotPhoneReconnectView(APIView):
                         'credentials': {'username': access_code, 'password': access_code},
                     })
 
-                # ── Check if this MAC already has an active session (reconnect) ──
                 existing_session_for_mac = active_sessions.filter(
                     mac_address=mac_address
                 ).first()
 
                 if existing_session_for_mac:
-                    # This MAC already has a slot — just reseed RADIUS credentials
                     access_code = existing_session_for_mac.access_code
                     try:
                         from apps.billing.services.hotspot_radius_service import HotspotRadiusService
@@ -2048,6 +1764,12 @@ class HotspotPhoneReconnectView(APIView):
                             {'error': 'Failed to restore connection. Please try again.'},
                             status=status.HTTP_500_INTERNAL_SERVER_ERROR
                         )
+
+                    # NEW: free the router-side slot (ghost / old MAC) once the
+                    # surrounding DB transaction commits. This branch was missed
+                    # in the original fix — a ghost entry at a new IP hits the
+                    # same "no more sessions are allowed" error here.
+                    _kick_router_slot_after_commit(access_code, router)
 
                     remaining_minutes = max(
                         0, int((existing_session_for_mac.expires_at - now).total_seconds() / 60)
@@ -2067,42 +1789,25 @@ class HotspotPhoneReconnectView(APIView):
                         'credentials': {'username': access_code, 'password': access_code},
                     })
 
-                # ── New MAC — check if device slots are available ─────
-                # Count distinct active sessions for this client
-                # Each session with a unique access_code counts as one device slot
                 occupied_slots = active_sessions.values('access_code').distinct().count()
 
-                # ═══════════════════════════════════════════════════════════════
-                # FIX: MAC ROTATION TAKEOVER - When slots are full but the 
-                # requesting phone owns ALL of them, replace the stale session
-                # ═══════════════════════════════════════════════════════════════
                 if occupied_slots >= plan_device_limit:
-                    # Before rejecting, check if ALL occupied slots belong to this client.
-                    # If so, one of them may have a stale/rotated MAC — allow takeover.
-                    
-                    # Find sessions NOT matching current MAC (potential stale slots)
                     stale_sessions = active_sessions.exclude(mac_address=mac_address).order_by('activated_at')
-                    
+
                     if stale_sessions.exists():
-                        # All slots are occupied by other MACs — could be legitimate other devices
-                        # OR stale rotated MACs. Since all sessions belong to this client (same phone),
-                        # replace the OLDEST stale session with this new MAC.
                         oldest_stale = stale_sessions.first()
-                        
+
                         logger.info(
                             f"MAC rotation takeover: phone={phone_canonical} "
                             f"replacing stale session {oldest_stale.access_code} "
                             f"old_mac={oldest_stale.mac_address} new_mac={mac_address}"
                         )
-                        
-                        # Update the old session's MAC to the new one
+
                         oldest_stale.mac_address = mac_address
                         oldest_stale.save(update_fields=['mac_address'])
-                        
-                        # Register new device
+
                         HotspotClientDevice.record_device(client=client, mac_address=mac_address)
-                        
-                        # Reseed RADIUS with new MAC
+
                         access_code = oldest_stale.access_code
                         try:
                             from apps.billing.services.hotspot_radius_service import HotspotRadiusService
@@ -2120,7 +1825,13 @@ class HotspotPhoneReconnectView(APIView):
                                 {'error': 'Failed to restore connection. Please try again.'},
                                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
                             )
-                        
+
+                        # NEW: free the router-side slot (ghost / old MAC) once the
+                        # surrounding DB transaction commits. Without this the
+                        # router still thinks the old device is active and refuses
+                        # the new login with "no more sessions are allowed".
+                        _kick_router_slot_after_commit(access_code, router)
+
                         remaining_minutes = max(
                             0, int((oldest_stale.expires_at - now).total_seconds() / 60)
                         )
@@ -2139,8 +1850,7 @@ class HotspotPhoneReconnectView(APIView):
                             'device_slot': 'existing',
                             'credentials': {'username': access_code, 'password': access_code},
                         })
-                    
-                    # No stale sessions found — genuinely full with different active MACs
+
                     return Response(
                         {
                             'error': (
@@ -2156,8 +1866,6 @@ class HotspotPhoneReconnectView(APIView):
                         status=status.HTTP_403_FORBIDDEN
                     )
 
-                # ── Create a new device slot ──────────────────────────
-                # Device slot number: canonical = 1, next = 2, 3, ...
                 device_slot = occupied_slots + 1
 
                 if device_slot == 1 and client.canonical_username:
@@ -2165,7 +1873,6 @@ class HotspotPhoneReconnectView(APIView):
                 else:
                     base_username = client.canonical_username or base_session.access_code
                     new_access_code = f"{base_username}-{device_slot}"
-                    # Collision guard
                     attempt = device_slot
                     while HotspotSession.objects.filter(
                         access_code=new_access_code,
@@ -2175,26 +1882,25 @@ class HotspotPhoneReconnectView(APIView):
                         attempt += 1
                         new_access_code = f"{base_username}-{attempt}"
 
-                # ── Register the new device ───────────────────────────
                 HotspotClientDevice.record_device(client=client, mac_address=mac_address)
 
-                # Create a new session record for this device
                 new_session = HotspotSession.objects.create(
                     session_id=HotspotSession.generate_session_id(),
                     router=router,
                     plan=plan,
                     phone_number=phone_canonical,
                     mac_address=mac_address,
-                    amount=Decimal('0'),   # Already paid — no additional charge
+                    amount=Decimal('0'),
                     status='active',
                     access_code=new_access_code,
                     radius_username=new_access_code,
                     activated_at=now,
-                    expires_at=base_session.expires_at,   # Same expiry as original purchase
+                    expires_at=base_session.expires_at,
                     hotspot_client=client,
                 )
 
-                # ── Seed RADIUS for the new device ────────────────────
+                # NOTE: No kick_active_session here — a brand-new slot has
+                # nothing to kick. Only genuine takeovers (above) kick.
                 try:
                     from apps.billing.services.hotspot_radius_service import HotspotRadiusService
                     HotspotRadiusService().create_hotspot_credentials(
@@ -2206,7 +1912,6 @@ class HotspotPhoneReconnectView(APIView):
                         mac_address=mac_address,
                     )
                 except Exception as e:
-                    # Roll back the session we just created
                     new_session.delete()
                     logger.error(f"Phone reconnect new-device RADIUS failed: {e}")
                     return Response(
@@ -2237,7 +1942,6 @@ class HotspotPhoneReconnectView(APIView):
                 })
 
             finally:
-                # BUG 3 FIX: release the slot lock
                 cache.delete(slot_lock_key)
 
 
@@ -2253,21 +1957,6 @@ class _ReconnectError(Exception):
 
 
 class HotspotCredentialReconnectView(APIView):
-    """
-    Reconnect a device with username + password (from the payment SMS).
-
-    POST /api/v1/hotspot/credentials-reconnect/
-    {
-        "username": "MXA-BKCS", "password": "MXA-BKCS",
-        "router_id": "...", "mac_address": "AA:BB:..", "tenant": "myisp"
-    }
-
-    - Verifies the password against RADIUS (radcheck), constant-time.
-    - Rebinds the RADIUS MAC lock to the connecting device (handles MAC randomisation).
-    - For multi-device plans, lazily provisions "<base>-<n>" slots (n <= plan limit)
-      on first login, so nothing extra is written at payment time.
-    - Throttled per IP and per username; one generic error message (no enumeration).
-    """
     permission_classes = [AllowAny]
     authentication_classes = []
 
@@ -2283,7 +1972,6 @@ class HotspotCredentialReconnectView(APIView):
         return ip or 'unknown'
 
     def _hit(self, key):
-        """Atomic counter with TTL; returns the new count."""
         if cache.add(key, 1, timeout=self._TTL):
             return 1
         try:
@@ -2311,8 +1999,6 @@ class HotspotCredentialReconnectView(APIView):
         if not base or slot < 2 or slot > device_limit(base.plan):
             return None
 
-        # Lock is intentionally left to expire (not deleted) so a concurrent
-        # request can't slip in before this transaction commits.
         if not cache.add(f"cred_slot_lock:{schema}:{username}", '1', timeout=10):
             raise _ReconnectError('Another connection is in progress. Please retry shortly.', 409)
 
@@ -2326,12 +2012,12 @@ class HotspotCredentialReconnectView(APIView):
             plan=base.plan,
             phone_number=base.phone_number,
             mac_address=mac_address,
-            amount=Decimal('0'),          # already paid on the base session
+            amount=Decimal('0'),
             status='active',
             access_code=username,
             radius_username=username,
             activated_at=now,
-            expires_at=base.expires_at,   # same expiry as the purchase
+            expires_at=base.expires_at,
             hotspot_client=base.hotspot_client,
         )
 
@@ -2373,7 +2059,6 @@ class HotspotCredentialReconnectView(APIView):
             if router is None:
                 return Response({'error': 'Router not found'}, status=status.HTTP_404_NOT_FOUND)
 
-            # ── Verify password (constant time) ──
             from apps.radius.models import RadCheck
             stored = (
                 RadCheck.objects
@@ -2418,7 +2103,14 @@ class HotspotCredentialReconnectView(APIView):
             except _ReconnectError as e:
                 return Response({'error': e.message}, status=e.http_status)
 
-            cache.delete(user_key)  # legit success must not burn the user's budget
+            # NEW: free the router-side slot (old device / ghost entry) before
+            # the portal submits the login to MikroTik. Runs AFTER the inner
+            # with transaction.atomic() block has committed, so no DB
+            # transaction is held open during the network call to the router.
+            from apps.billing.services.hotspot_radius_service import HotspotRadiusService
+            HotspotRadiusService().kick_active_session(session.access_code, router)
+
+            cache.delete(user_key)
 
             remaining_minutes = max(0, int((session.expires_at - now).total_seconds() / 60))
             logger.info(f"Credential reconnect: user={username} mac={mac_address} schema={schema}")
@@ -2439,10 +2131,6 @@ class HotspotCredentialReconnectView(APIView):
 # ============================================================
 
 class HotspotFreeTrialView(APIView):
-    """
-    POST /api/v1/hotspot/free-trial/
-    Claim free trial for a device. One claim per MAC address, ever.
-    """
     permission_classes = [AllowAny]
     authentication_classes = []
 
@@ -2467,7 +2155,6 @@ class HotspotFreeTrialView(APIView):
             return Response({'error': 'Invalid tenant'}, status=400)
 
         with schema_context(tenant.schema_name):
-            # Check if this MAC already claimed a trial
             if HotspotFreeTrialUsage.objects.filter(mac_address=mac_address).exists():
                 return Response({
                     'error': 'This device has already used the free trial.',
@@ -2484,7 +2171,6 @@ class HotspotFreeTrialView(APIView):
             except HotspotPlan.DoesNotExist:
                 return Response({'error': 'Free trial plan not found'}, status=404)
 
-            # Resolve or create hotspot client
             hotspot_client = HotspotClient.get_or_create_by_mac(
                 schema_name=tenant.schema_name,
                 mac_address=mac_address,
@@ -2492,13 +2178,11 @@ class HotspotFreeTrialView(APIView):
             if hotspot_client and mac_address:
                 HotspotClientDevice.record_device(client=hotspot_client, mac_address=mac_address)
 
-            # Determine access code (canonical username or generated)
             if hotspot_client and hotspot_client.canonical_username:
                 access_code = hotspot_client.canonical_username
             else:
                 access_code = HotspotSession.generate_access_code()
 
-            # Create and activate the session immediately (no payment)
             session_id = HotspotSession.generate_session_id()
             session = HotspotSession.objects.create(
                 session_id=session_id,
@@ -2513,14 +2197,12 @@ class HotspotFreeTrialView(APIView):
             )
             session.activate(access_code)
 
-            # Record the trial claim (atomic with session creation)
             HotspotFreeTrialUsage.objects.create(
                 mac_address=mac_address,
                 router=router,
                 access_code=access_code,
             )
 
-            # Provision RADIUS
             try:
                 from apps.billing.services.hotspot_radius_service import HotspotRadiusService
                 HotspotRadiusService().create_hotspot_credentials(
@@ -2534,8 +2216,6 @@ class HotspotFreeTrialView(APIView):
             except Exception as e:
                 logger.error(f"Free trial RADIUS provisioning failed: {e}")
 
-            # ── SMS: welcome for free trial ──
-            # FIX: Fire-and-forget async task — SMS sending is off the critical path
             from apps.messaging.tasks import send_hotspot_welcome_sms
             send_hotspot_welcome_sms.delay(session.session_id, tenant.schema_name)
 

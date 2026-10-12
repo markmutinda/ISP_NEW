@@ -89,12 +89,9 @@ class HotspotRadiusService:
             True if credentials were created successfully
         """
         try:
-            # Debounce FIRST — before any CoA call or DB write. A debounced
-            # call means valid credentials for this (username, mac) were
-            # already issued moments ago (e.g. webhook + status-poll racing
-            # each other). Previously the CoA disconnect ran BEFORE this
-            # check, so the second caller would force-kick a client that
-            # the first caller had just connected.
+            # Debounce FIRST — a debounced call means valid credentials for
+            # this (username, mac) were already issued moments ago (e.g.
+            # webhook + status-poll racing each other).
             #
             # Keyed by (username, mac_address) — NOT username alone. A phone
             # reconnect after MAC rotation legitimately needs a fresh write to
@@ -110,19 +107,22 @@ class HotspotRadiusService:
                 )
                 return True
 
-            # CoA pre-clear — dispatched async. Correctness never depended on
-            # the NAS ack (a timeout is already treated as success inside
-            # CoAService), so blocking the request thread for 3-5s here was
-            # pure latency and the direct cause of client-side request aborts
-            # on reconnect.
-            if router:
-                router_ip = getattr(router, 'vpn_ip_address', None) or getattr(router, 'ip_address', None)
-                if router_ip:
-                    try:
-                        from apps.radius.tasks import send_coa_disconnect_async
-                        send_coa_disconnect_async.delay(router_ip, username)
-                    except Exception as coa_err:
-                        logger.warning(f"CoA pre-clear dispatch failed for {username} (non-fatal): {coa_err}")
+            # ─────────────────────────────────────────────────────────────
+            # CoA pre-clear — REMOVED (Step 5b).
+            #
+            # Previously: dispatched send_coa_disconnect_async.delay() here
+            # to try to kick any live session for this user before writing
+            # new credentials. It never worked (wrong shared secret) so the
+            # NAS silently dropped the packet, and even once the secret was
+            # fixed it would have kicked a healthy client on every credential
+            # reseed — which is exactly wrong for the common case.
+            #
+            # Replacement: HotspotCredentialReconnectView and
+            # HotspotPhoneReconnectView now explicitly call
+            # kick_active_session() only on genuine takeovers (device 3 takes
+            # device 1's slot), which is synchronous and uses the correct
+            # MikroTik API path. No wasted Celery work per credential write.
+            # ─────────────────────────────────────────────────────────────
 
             # ALWAYS run this — closes stale radacct rows. This is what
             # actually fixes "no more sessions are allowed": a ghost radacct
@@ -392,6 +392,34 @@ class HotspotRadiusService:
 
         logger.info(f"Fully revoked and disconnected hotspot identity: {username}")
         return True
+
+    # ============================================================
+    # NEW: Fast router-side hotspot kick (used by reconnect paths)
+    # ============================================================
+    def kick_active_session(self, username: str, router) -> int:
+        """
+        Free the router-side hotspot slot so a different device can log in with
+        this username. Safe no-op if the user isn't active. Never raises.
+
+        Replaces the old CoA pre-clear approach which silently failed (wrong
+        shared secret → timeout treated as success). MikroTik API is
+        synchronous, uses the correct credentials, and works over the VPN.
+
+        Only called on genuine takeovers (a new device replacing an old one);
+        NOT called on every credential reseed, since that would kick healthy
+        clients on every purchase.
+
+        Returns:
+            Number of router-side sessions removed (0 if none), or -1 on error.
+        """
+        if not (router and username):
+            return -1
+        try:
+            from apps.network.integrations.mikrotik_api import MikrotikAPI
+            return MikrotikAPI(router).kick_hotspot_user_fast(username)
+        except Exception as e:
+            logger.warning(f"kick_active_session failed for {username}: {e}")
+            return -1
     
     def extend_session(
         self,

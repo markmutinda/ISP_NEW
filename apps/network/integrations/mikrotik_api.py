@@ -477,6 +477,27 @@ class MikrotikAPI:
             return False
         finally:
             self.disconnect()
+
+    def kick_hotspot_user_fast(self, username: str) -> int:
+        """
+        Remove the user's entry from /ip/hotspot/active using a router-side filter,
+        so we don't download the whole active table. Returns number removed, -1 on error.
+        """
+        try:
+            if not self.connect():
+                return -1
+            active = self.api.path('ip', 'hotspot', 'active')
+            rows = list(active.select(Key('.id')).where(Key('user') == username))
+            for r in rows:
+                active.remove(r['.id'])
+            if rows:
+                logger.info(f"Kicked {len(rows)} hotspot session(s) for {username} on {self.device.name}")
+            return len(rows)
+        except Exception as e:
+            logger.warning(f"kick_hotspot_user_fast failed for {username}: {e}")
+            return -1
+        finally:
+            self.disconnect()
     
     def remove_pppoe_active_user(self, username: str) -> bool:
         """

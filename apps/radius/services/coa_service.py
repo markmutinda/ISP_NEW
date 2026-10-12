@@ -32,14 +32,14 @@ COA_TIMEOUT = getattr(settings, 'RADIUS_COA_TIMEOUT', 5)
 class CoAService:
     """
     Sends RADIUS Change of Authorization (CoA) packets.
-    
+
     In the Cloud Controller architecture, CoA goes:
     Django (Cloud) → FreeRADIUS (CoA proxy) → MikroTik NAS
-    
+
     This avoids needing direct access to the MikroTik from Django —
     everything goes through the VPN tunnel to FreeRADIUS.
     """
-    
+
     def __init__(self, nas_ip: str = None, secret: str = None):
         """
         Args:
@@ -48,7 +48,38 @@ class CoAService:
         """
         self.nas_ip = nas_ip or getattr(settings, 'VPN_SERVER_IP', '10.8.0.1')
         self.secret = (secret or 'testing123').encode('utf-8')
-    
+
+    def _resolve_secret(self, nas_ip: str) -> bytes:
+        """
+        Per-router secret from public GlobalRouterMap (what FreeRADIUS uses).
+
+        Cached 5 minutes per NAS IP to avoid hitting the DB on every CoA
+        packet — force_close_expired_sessions can fire many CoA requests in
+        a burst, and the secret for a given router doesn't change often.
+
+        Falls back to self.secret (the constructor default, or a
+        caller-supplied value) if the router isn't mapped or the lookup fails.
+        """
+        from django.core.cache import cache
+
+        key = f"coa_secret:{nas_ip}"
+        s = cache.get(key)
+        if not s:
+            try:
+                from django_tenants.utils import schema_context
+                from apps.core.models import GlobalRouterMap
+                with schema_context('public'):
+                    s = (GlobalRouterMap.objects
+                         .filter(nas_ip=nas_ip, is_active=True)
+                         .values_list('nas_secret', flat=True)
+                         .first())
+                if s:
+                    cache.set(key, s, 300)
+            except Exception as e:
+                logger.warning(f"CoA secret lookup failed for {nas_ip}: {e}")
+
+        return s.encode('utf-8') if s else self.secret
+
     def disconnect_user(
         self,
         username: str,
@@ -57,12 +88,12 @@ class CoAService:
     ) -> bool:
         """
         Send a Disconnect-Request (CoA) to terminate a user's session.
-        
+
         Args:
             username: RADIUS username (access code or MAC)
             nas_ip_address: The NAS (router) IP where user is connected
             session_id: RADIUS Acct-Session-Id (more precise targeting)
-        
+
         Returns:
             True if disconnect was acknowledged
         """
@@ -75,19 +106,19 @@ class CoAService:
         except Exception as e:
             logger.error(f"CoA disconnect failed for {username}: {e}")
             return False
-    
+
     def disconnect_user_via_coa(self, username: str, nas_ip: str, session_id: str = None) -> bool:
         """
         Sends a CoA Disconnect-Request UDP packet directly to the NAS.
         More reliable than the existing method - handles timeout gracefully.
-        
+
         Args:
             username: RADIUS username to disconnect
             nas_ip: IP address of the NAS (router)
             session_id: Optional Acct-Session-Id for more precise targeting
-        
+
         Returns:
-            True if disconnect was acknowledged OR timeout (treat as disconnected)
+            True if disconnect was acknowledged (ACK). Timeout / NAK / error → False.
         """
         import hashlib
         import os
@@ -118,7 +149,9 @@ class CoAService:
         packet = header + attrs
 
         # Compute proper authenticator: MD5(code+id+length+zeros+attrs+secret)
-        md5 = hashlib.md5(packet + self.secret).digest()
+        # Secret is resolved per-router so the NAS actually verifies the packet.
+        secret = self._resolve_secret(nas_ip)
+        md5 = hashlib.md5(packet + secret).digest()
         packet = struct.pack('!BBH', COA_CODE, identifier, length) + md5 + attrs
 
         try:
@@ -135,14 +168,17 @@ class CoAService:
                 logger.warning(f"CoA disconnect NAK for {username}@{nas_ip}: code={response[0]}")
                 return False
         except socket.timeout:
-            # Timeout means NAS is unreachable — session is already dead
-            # Still return True so we close the DB record
-            logger.info(f"CoA timeout for {username}@{nas_ip} — treating as disconnected")
-            return True
+            # Timeout is NOT proof the session is dead. With a wrong secret
+            # (or if the NAS doesn't have 'radius incoming accept=yes'), the
+            # router silently drops the packet — the session stays alive.
+            # Returning False forces the caller to fall back to the MikroTik
+            # API kick instead of silently pretending success.
+            logger.warning(f"CoA timeout for {username}@{nas_ip} (check secret / 'radius incoming')")
+            return False
         except Exception as e:
             logger.error(f"CoA error for {username}: {e}")
             return False
-    
+
     def disconnect_mac(
         self,
         mac_address: str,
@@ -150,7 +186,7 @@ class CoAService:
     ) -> bool:
         """
         Disconnect a device by MAC address (Calling-Station-Id).
-        
+
         Args:
             mac_address: Client MAC (format: AA:BB:CC:DD:EE:FF or AA-BB-CC-DD-EE-FF)
         """
@@ -163,7 +199,7 @@ class CoAService:
         except Exception as e:
             logger.error(f"CoA MAC disconnect failed for {mac_address}: {e}")
             return False
-    
+
     def change_authorization(
         self,
         username: str,
@@ -174,7 +210,7 @@ class CoAService:
         """
         Send a CoA packet to change a user's authorization attributes
         (e.g., bandwidth change without disconnecting).
-        
+
         Note: MikroTik support for CoA attribute changes is limited.
         Often it's simpler to disconnect and let the user reconnect
         with new attributes from RADIUS.
@@ -185,7 +221,7 @@ class CoAService:
                 reply_attrs['Mikrotik-Rate-Limit'] = new_rate_limit
             if new_session_timeout:
                 reply_attrs['Session-Timeout'] = str(new_session_timeout)
-            
+
             return self._send_coa_packet(
                 code='coa',
                 username=username,
@@ -195,7 +231,7 @@ class CoAService:
         except Exception as e:
             logger.error(f"CoA change auth failed for {username}: {e}")
             return False
-    
+
     def _send_coa_packet(
         self,
         code: str = 'disconnect',
@@ -207,7 +243,7 @@ class CoAService:
     ) -> bool:
         """
         Build and send a CoA/Disconnect-Request packet.
-        
+
         Uses pyrad if available, falls back to raw socket.
         """
         try:
@@ -222,7 +258,7 @@ class CoAService:
         except ImportError:
             logger.warning("pyrad not installed, falling back to raw CoA packet")
             return self._send_raw_disconnect(username, nas_ip_address, session_id)
-    
+
     def _send_with_pyrad(
         self,
         code: str,
@@ -236,25 +272,25 @@ class CoAService:
         from pyrad.client import Client
         from pyrad.dictionary import Dictionary
         from pyrad import packet
-        
+
         # Use the default FreeRADIUS dictionary
         # In production, point to the actual dictionary file
         import os
         dict_path = os.path.join(
             settings.BASE_DIR, 'radius_config', 'dictionary'
         )
-        
+
         # Fallback to pyrad default if our dictionary doesn't exist
         if not os.path.exists(dict_path):
             dict_path = None
-        
+
         try:
             if dict_path:
                 radius_dict = Dictionary(dict_path)
             else:
                 # Create a minimal dictionary for the attributes we need
                 radius_dict = self._get_minimal_dictionary()
-            
+
             # Create client targeting FreeRADIUS
             client = Client(
                 server=self.nas_ip,
@@ -262,13 +298,13 @@ class CoAService:
                 dict=radius_dict,
             )
             client.timeout = COA_TIMEOUT
-            
+
             # Create packet
             if code == 'disconnect':
                 pkt = client.CreateCoAPacket(code=packet.DisconnectRequest)
             else:
                 pkt = client.CreateCoAPacket(code=packet.CoARequest)
-            
+
             # Add attributes
             if username:
                 pkt['User-Name'] = username
@@ -278,7 +314,7 @@ class CoAService:
                 pkt['NAS-IP-Address'] = nas_ip_address
             if session_id:
                 pkt['Acct-Session-Id'] = session_id
-            
+
             # Add reply attributes for CoA changes
             if reply_attributes:
                 for attr, value in reply_attributes.items():
@@ -286,10 +322,10 @@ class CoAService:
                         pkt[attr] = value
                     except Exception:
                         logger.warning(f"Could not add CoA attribute: {attr}={value}")
-            
+
             # Send and get response
             response = client.SendPacket(pkt)
-            
+
             if response.code in (packet.DisconnectACK, packet.CoAACK):
                 logger.info(
                     f"CoA {code} success: user={username} mac={calling_station_id}"
@@ -300,16 +336,16 @@ class CoAService:
                     f"CoA {code} rejected: user={username} code={response.code}"
                 )
                 return False
-                
+
         except Exception as e:
             logger.error(f"pyrad CoA error: {e}", exc_info=True)
             return False
-    
+
     def _send_raw_disconnect(self, username: str, nas_ip: str = None, session_id: str = None) -> bool:
         """
         Send a raw RADIUS Disconnect-Request via UDP.
         Improved version that properly handles CoA packets directly to NAS.
-        
+
         Args:
             username: RADIUS username to disconnect
             nas_ip: IP address of the NAS (router)
@@ -324,19 +360,19 @@ class CoAService:
         # RADIUS Disconnect-Request (Code 40)
         DISCONNECT_REQUEST = 40
         COA_PORT = 3799
-        
+
         # Use provided NAS IP or fallback to configured
         target_ip = nas_ip or self.nas_ip
-        
+
         # Build minimal RADIUS disconnect packet
         identifier = os.urandom(1)[0]
-        
+
         # Attributes
         def make_attr(attr_type: int, value: bytes) -> bytes:
             return bytes([attr_type, 2 + len(value)]) + value
-        
+
         attrs = make_attr(1, username.encode())  # User-Name = type 1
-        
+
         if target_ip and target_ip != self.nas_ip:
             # Only add NAS-IP-Address if targeting a specific NAS
             try:
@@ -344,33 +380,35 @@ class CoAService:
                 attrs += make_attr(4, packed_ip)  # NAS-IP-Address = type 4
             except Exception:
                 pass
-        
+
         if session_id:
             attrs += make_attr(44, session_id.encode())  # Acct-Session-Id = type 44
-        
+
         length = 20 + len(attrs)
         authenticator = b'\x00' * 16  # Zeroed for request
-        
+
         # Build packet without auth
         header = struct.pack('!BBH16s', DISCONNECT_REQUEST, identifier, length, authenticator)
         packet = header + attrs
-        
+
         # Calculate Response Authenticator
         # Auth = MD5(Code + ID + Length + Request-Auth + Attributes + Secret)
-        md5 = hashlib.md5(packet + self.secret).digest()
-        
+        # Secret is resolved per-router so the NAS actually verifies the packet.
+        secret = self._resolve_secret(target_ip)
+        md5 = hashlib.md5(packet + secret).digest()
+
         # Build final packet with proper auth
         final_packet = struct.pack('!BBH', DISCONNECT_REQUEST, identifier, length) + md5 + attrs
-        
+
         try:
             sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             sock.settimeout(COA_TIMEOUT)
             sock.sendto(final_packet, (target_ip, COA_PORT))
-            
+
             # Wait for response
             response, _ = sock.recvfrom(4096)
             sock.close()
-            
+
             # Check response code (41 = Disconnect-ACK, 42 = Disconnect-NAK)
             resp_code = response[0]
             if resp_code == 41:
@@ -379,29 +417,32 @@ class CoAService:
             else:
                 logger.warning(f"Raw CoA disconnect rejected: user={username} code={resp_code}")
                 return False
-                
+
         except socket.timeout:
-            # Timeout means NAS is unreachable — session is already dead
-            # Still return True so we close the DB record
-            logger.info(f"Raw CoA timeout for {username}@{target_ip} — treating as disconnected")
-            return True
+            # Timeout is NOT proof the session is dead. With a wrong secret
+            # (or if the NAS doesn't have 'radius incoming accept=yes'), the
+            # router silently drops the packet — the session stays alive.
+            # Returning False forces the caller to fall back to the MikroTik
+            # API kick instead of silently pretending success.
+            logger.warning(f"Raw CoA timeout for {username}@{target_ip} (check secret / 'radius incoming')")
+            return False
         except Exception as e:
             logger.error(f"Raw CoA error for {username}: {e}")
             return False
-    
+
     @staticmethod
     def _build_radius_attribute(attr_type: int, value: bytes) -> bytes:
         """Build a single RADIUS attribute TLV."""
         import struct
         length = 2 + len(value)
         return struct.pack('!BB', attr_type, length) + value
-    
+
     def _get_minimal_dictionary(self):
         """Create a minimal pyrad Dictionary for CoA packets."""
         from pyrad.dictionary import Dictionary
         import tempfile
         import os
-        
+
         dict_content = """
 ATTRIBUTE	User-Name		1	string
 ATTRIBUTE	NAS-IP-Address		4	ipaddr
