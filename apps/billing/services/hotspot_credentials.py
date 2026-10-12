@@ -8,6 +8,9 @@ HotspotPurchaseView / HotspotPhoneReconnectView.
 import re
 from typing import Dict, List
 
+from django.core.cache import cache
+from django.db import transaction
+
 BASE_CODE_RE = re.compile(r'^[A-Z0-9]{4}-[A-Z0-9]{4}$')
 SLOT_CODE_RE = re.compile(r'^(?P<base>[A-Z0-9]{4}-[A-Z0-9]{4})-(?P<slot>\d{1,2})$')
 MAX_DEVICE_SLOTS = 10  # hard cap: protects SMS length and abuse
@@ -44,3 +47,22 @@ def build_device_credentials(session) -> List[Dict]:
         user = base if n == 1 else f"{base}-{n}"
         out.append({'slot': n, 'username': user, 'password': device_password(user)})
     return out
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# TV PUSH-LOGIN SCHEDULING — server-side hotspot login for Smart TVs
+# ═══════════════════════════════════════════════════════════════════════════
+
+def schedule_tv_login_push(session, schema_name: str) -> None:
+    """Queue a server-side login if this purchase was flagged as 'pay for TV'."""
+    if not cache.get(f"hs_tv_push:{schema_name}:{session.session_id}"):
+        return
+    # Webhook + status poll can both reach activation; queue only once
+    if not cache.add(f"hs_tv_push_queued:{schema_name}:{session.session_id}", 1, timeout=60):
+        return
+
+    def _queue():
+        from apps.billing.tasks import push_hotspot_login
+        push_hotspot_login.apply_async(args=[session.session_id, schema_name], countdown=2)
+
+    transaction.on_commit(_queue)

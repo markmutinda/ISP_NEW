@@ -1258,6 +1258,55 @@ class MikrotikAPI:
     # HOTSPOT IP BINDING (bypassed) — devices that skip the captive portal
     # ────────────────────────────────────────────────────────────────
 
+    def hotspot_active_login(self, username: str, password: str, mac_address: str) -> Dict[str, Any]:
+        """
+        Server-side hotspot login for a device that is on the WiFi but hasn't
+        opened the captive portal (Smart TVs). Idempotent: returns ok if the
+        MAC is already active.
+        """
+        mac = (mac_address or '').upper().replace('-', ':')
+        try:
+            if not self.connect():
+                return {'ok': False, 'reason': 'connect_failed'}
+
+            # Already logged in? Nothing to do.
+            for a in self.api.path('ip', 'hotspot', 'active'):
+                if (a.get('mac-address') or '').upper() == mac:
+                    return {'ok': True, 'reason': 'already_active'}
+
+            # Find the device's current IP: hotspot host table first, DHCP lease as fallback
+            ip = None
+            for h in self.api.path('ip', 'hotspot', 'host'):
+                if (h.get('mac-address') or '').upper() == mac and h.get('address'):
+                    ip = h['address']
+                    break
+            if not ip:
+                for l in self.api.path('ip', 'dhcp-server', 'lease'):
+                    if (l.get('mac-address') or '').upper() == mac and l.get('address'):
+                        ip = l['address']
+                        break
+            if not ip:
+                return {'ok': False, 'reason': 'host_not_found'}
+
+            tuple(self.api.path('ip', 'hotspot', 'active')(
+                'login',
+                **{'user': username, 'password': password, 'ip': ip, 'mac-address': mac},
+            ))
+            logger.info(f"Hotspot push-login OK: {username} {mac} {ip} on {self.device.name}")
+            return {'ok': True, 'reason': 'logged_in', 'ip': ip}
+
+        except TrapError as e:
+            msg = str(e).lower()
+            if 'already' in msg:
+                return {'ok': True, 'reason': 'already_active'}
+            logger.warning(f"Hotspot push-login trap for {username}/{mac}: {e}")
+            return {'ok': False, 'reason': f'trap: {e}'}
+        except Exception as e:
+            logger.error(f"Hotspot push-login failed for {username}/{mac}: {e}")
+            return {'ok': False, 'reason': str(e)}
+        finally:
+            self.disconnect()
+
     def add_ip_binding(self, mac_address: str, ip_address: str = '', comment: str = '') -> Optional[str]:
         try:
             if not self.connect():

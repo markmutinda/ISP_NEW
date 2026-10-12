@@ -676,3 +676,33 @@ def post_renewal_actions(tenant_schema, customer_id, plan_name='', expires_at_is
                 )
             except Exception as e:
                 logger.warning(f"[RENEW] SMS failed for customer {customer_id}: {e}")
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# HOTSPOT PUSH-LOGIN — server-side login for Smart TVs (no captive portal)
+# ═══════════════════════════════════════════════════════════════════════════
+
+@shared_task(bind=True, max_retries=6, ignore_result=True)
+def push_hotspot_login(self, session_id: str, schema_name: str):
+    """Log a paid TV straight into the MikroTik hotspot (no portal visit needed)."""
+    from django.utils import timezone
+    from django_tenants.utils import schema_context
+    from apps.billing.models.hotspot_models import HotspotSession
+    from apps.network.integrations.mikrotik_api import MikrotikAPI
+
+    with schema_context(schema_name):
+        s = (HotspotSession.objects
+             .select_related('router')
+             .filter(session_id=session_id, status='active', expires_at__gt=timezone.now())
+             .first())
+        if not s or not s.access_code or not s.mac_address or not s.router:
+            return
+
+        res = MikrotikAPI(s.router).hotspot_active_login(
+            s.access_code, s.access_code, s.mac_address
+        )
+        if res.get('ok'):
+            return
+
+    # TV may not have generated traffic yet (no host entry); retry every 5s (~30s total)
+    raise self.retry(countdown=5)

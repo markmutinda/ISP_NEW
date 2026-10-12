@@ -12,6 +12,7 @@ from apps.core.models import Tenant, TumaCallbackMap
 
 from apps.billing.models.payment_models import Payment, StkCancellationTracker
 from apps.billing.utils.payment_errors import humanize_payment_failure
+from apps.billing.services.hotspot_credentials import schedule_tv_login_push
 
 
 # ── Safaricom/Daraja result code mapping ──
@@ -305,6 +306,10 @@ class TumaWebhookView(APIView):
                                     expires_at=hotspot_session.expires_at,
                                     mac_address=hotspot_session.mac_address or '',
                                 )
+
+                                # NEW: queue server-side push login for TVs (no captive portal)
+                                schedule_tv_login_push(hotspot_session, payment_schema)
+
                                 logger.info(
                                     f"🚀 Webhook Core: Successfully auto-activated session {hotspot_session.session_id} "
                                     f"and provisioned RADIUS profiles directly to disk."

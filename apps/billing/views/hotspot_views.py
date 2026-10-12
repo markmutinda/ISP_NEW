@@ -55,6 +55,7 @@ import re  # (skip if already imported)
 
 from apps.billing.services.hotspot_credentials import (
     SLOT_CODE_RE, device_limit, device_password,
+    schedule_tv_login_push,   # NEW: TV push-login scheduler
 )
 from apps.core.tenant_cache import resolve_tenant_cached
 
@@ -901,6 +902,14 @@ class HotspotPurchaseView(APIView):
                 hotspot_client=hotspot_client,  # Link to transient client
             )
 
+            # ── NEW: flag this purchase as a TV push-login if the client requested it ──
+            if request.data.get('target_device') == 'tv':
+                cache.set(
+                    f"hs_tv_push:{tenant.schema_name}:{session.session_id}",
+                    1,
+                    timeout=3600,
+                )
+
             # Resolve active/default tenant payment method (MPESA_STK)
             payment_method = self._get_active_hotspot_payment_method(tenant.schema_name)
             if not payment_method:
@@ -1252,6 +1261,9 @@ class HotspotPurchaseStatusView(APIView):
                         expires_at=session.expires_at,
                         mac_address=session.mac_address or '',
                     )
+
+                    # NEW: server-side push login for TVs
+                    schedule_tv_login_push(session, tenant.schema_name)
                 except Exception as e:
                     logger.error(f"RADIUS activation failed for paid session {session.session_id}: {e}")
                 
@@ -1307,6 +1319,9 @@ class HotspotPurchaseStatusView(APIView):
                             expires_at=session.expires_at,
                             mac_address=session.mac_address or '',
                         )
+
+                        # NEW: server-side push login for TVs
+                        schedule_tv_login_push(session, tenant.schema_name)
                     except Exception as e:
                         logger.error(
                             f"Failed to create RADIUS credentials for session "
