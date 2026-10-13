@@ -738,6 +738,12 @@ class CustomerRadiusCredentials(models.Model):
         
         if self.expiration_date:
             check_attrs['Expiration'] = self.expiration_date.strftime('%b %d %Y %H:%M:%S')
+
+            # Router-side expiry: NAS drops the session at expiry.
+            # Capped at 30d (RouterOS time values overflow near ~49d); long plans just redial and get a fresh value.
+            remaining = int((self.expiration_date - timezone.now()).total_seconds())
+            if remaining > 0:
+                reply_attrs['Session-Timeout'] = str(min(remaining, 30 * 24 * 3600))
         
         # ── Cloud-Led IPAM: Prefer assigned_ip_address (Framed-IP-Address) ──
         # Priority: assigned_ip_address FK > static_ip field > ip_pool (legacy Framed-Pool)
@@ -773,7 +779,8 @@ class CustomerRadiusCredentials(models.Model):
         else:
             service.disable_radius_user(
                 username=self.username,
-                reason=self.disabled_reason or "Account disabled"
+                reason=self.disabled_reason or "Account disabled",
+                kick=True,
             )
         
         # Update sync status

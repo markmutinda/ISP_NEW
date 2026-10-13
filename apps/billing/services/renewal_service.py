@@ -216,11 +216,6 @@ def renew_subscription(
             RadiusExpiryReminderLog.objects.filter(customer_id=str(customer.pk)).delete()
 
             # ── After commit: CoA (only if needed) + SMS, off the request path ──
-            nas_ip = None
-            if was_disabled and creds.router_id:
-                router = creds.router
-                nas_ip = router.vpn_ip_address or router.ip_address
-
             post = dict(
                 tenant_schema=schema,
                 customer_id=customer.pk,
@@ -228,8 +223,8 @@ def renew_subscription(
                 expires_at_iso=new_expiry.isoformat() if new_expiry else None,
                 reference=(payment.payment_reference if payment else ''),
                 send_sms=bool(send_sms),
-                kick_username=creds.username if nas_ip else None,
-                nas_ip=nas_ip,
+                kick_username=creds.username,
+                nas_ip=None,
             )
             transaction.on_commit(lambda: _dispatch_post_renewal(**post))
 

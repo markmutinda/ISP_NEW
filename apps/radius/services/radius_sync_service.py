@@ -237,22 +237,44 @@ class RadiusSyncService:
             logger.info(f"Updated RADIUS user in tenant schema: {username}")
             return True
     
-    def disable_radius_user(self, username: str, reason: str = "Disabled") -> bool:
+    def disable_radius_user(self, username: str, reason: str = "Disabled", kick: bool = False) -> bool:
         """Disable user strictly in the tenant schema."""
         if not RadCheck.objects.filter(username=username).exists():
             return False
-        
-        # Add Auth-Type := Reject in tenant schema
+
         RadCheck.objects.update_or_create(
             username=username,
             attribute=self.ATTR_AUTH_TYPE,
             defaults={'op': ':=', 'value': 'Reject'}
         )
-        
-        # Terminate active sessions to disconnect the user NOW
+
+        if kick:
+            # Must capture live sessions BEFORE disconnect_user() closes the radacct rows
+            self._queue_router_kick(username)
+
         self.disconnect_user(username)
         logger.info(f"Disabled RADIUS user: {username} - {reason}")
         return True
+
+    def _queue_router_kick(self, username: str) -> None:
+        from ..models import RadAcct
+        sessions = [
+            (str(ip), sid) for ip, sid in
+            RadAcct.objects.filter(username=username, acctstoptime__isnull=True)
+            .values_list('nasipaddress', 'acctsessionid')
+        ]
+        if not sessions:
+            return
+        schema = self._get_tenant_schema()
+
+        def _go():
+            try:
+                from apps.radius.tasks import kick_pppoe_session
+                kick_pppoe_session.delay(schema, username, sessions)
+            except Exception as e:
+                logger.warning(f"Could not queue router kick for {username}: {e}")
+
+        transaction.on_commit(_go)
     
     def disconnect_user(self, username: str) -> int:
         """Disconnect a RADIUS user by terminating active sessions in tenant schema."""
