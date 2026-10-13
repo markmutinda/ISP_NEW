@@ -25,6 +25,8 @@ from django_tenants.utils import schema_context, get_public_schema_name
 from .models import GlobalSystemSettings
 from .serializers import GlobalSystemSettingsSerializer, CustomTokenRefreshSerializer
 from rest_framework_simplejwt.exceptions import InvalidToken
+from rest_framework.exceptions import ValidationError as DRFValidationError
+from rest_framework.throttling import UserRateThrottle
 from .serializers import CompanyRegisterSerializer
 from django.template.loader import render_to_string
 from django.utils.html import strip_tags
@@ -32,7 +34,7 @@ from .models import Domain
 import logging
 from django.http import Http404
 from django.shortcuts import get_object_or_404
-from django.db import DatabaseError, transaction
+from django.db import DatabaseError, connection, transaction
 from django.db.models import Q
 from .otp_service import OTPService, OTPError, OTPRateLimitedError
 from .email_delivery import send_transactional_email
@@ -59,6 +61,10 @@ from apps.superadmin.permissions import IsSuperAdmin
 from .session_tokens import issue_refresh_token
 
 logger = logging.getLogger(__name__)
+
+
+class StaffMutationRateThrottle(UserRateThrottle):
+    scope = "staff_mutation"
 
 
 def _threaded_db_task(fn):
@@ -281,6 +287,17 @@ class CustomTokenObtainPairView(TokenObtainPairView):
             return Response({"detail": "Invalid email or password."}, status=status.HTTP_401_UNAUTHORIZED)
         if not user.is_active:
             return Response({"detail": "Account is disabled."}, status=status.HTTP_403_FORBIDDEN)
+        if not user.dashboard_role_is_trusted:
+            logger.warning(
+                "Blocked untrusted dashboard login user_id=%s email=%s tenant=%s",
+                user.id,
+                user.email,
+                getattr(getattr(request, "tenant", None), "schema_name", None),
+            )
+            return Response(
+                {"detail": "This dashboard account is not authorized. Contact the tenant administrator."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
         tenant = getattr(request, "tenant", None)
         if (
             tenant
@@ -462,12 +479,19 @@ class UserViewSet(viewsets.ModelViewSet):
     serializer_class = UserSerializer
     permission_classes = [IsAuthenticated, IsAdminOrStaff, HasRoleAccessPolicy]
     required_rbac_path = "/admin/users"
+    delegated_staff_roles = {"staff", "support", "technician", "accountant"}
+    all_dashboard_roles = delegated_staff_roles | {"admin"}
+
+    def get_throttles(self):
+        if getattr(self, "action", None) in {"create", "update", "partial_update", "destroy"}:
+            return [StaffMutationRateThrottle()]
+        return super().get_throttles()
 
     def get_required_rbac_path(self, request):
         if getattr(self, "action", None) in ("me", "update_profile", "change_password"):
             return None
 
-        staff_roles = {"admin", "support", "technician", "accountant", "staff"}
+        staff_roles = self.all_dashboard_roles
         staff_only = str(request.query_params.get("staff_only", "")).lower() in {"1", "true", "yes"}
         requested_role = str(request.data.get("role", "")).strip().lower() if hasattr(request, "data") else ""
         if staff_only or requested_role in staff_roles:
@@ -497,47 +521,84 @@ class UserViewSet(viewsets.ModelViewSet):
             permissions_list = [IsAuthenticated()]
             return permissions_list
         elif self.action in ['update', 'partial_update']:
-            return [IsAuthenticated(), IsAdminOrStaff(), HasRoleAccessPolicy()]
+            return [IsAuthenticated(), IsAdmin(), HasRoleAccessPolicy()]
         return [IsAuthenticated(), IsAdminOrStaff(), HasRoleAccessPolicy()]
     
     def get_queryset(self):
         qs = super().get_queryset().select_related('company')
-        
+        staff_only = str(self.request.query_params.get("staff_only", "")).lower() in {"1", "true", "yes"}
+        current_schema = getattr(connection, "schema_name", get_public_schema_name())
+
         if self.request.user.is_superuser:
             company_id = self.request.query_params.get('company_id')
             if company_id:
-                return qs.filter(company_id=company_id)
-            return qs
-
-        company, _tenant = get_current_public_company_and_tenant(self.request)
-        if company:
-            qs = qs.filter(company=company)
-        elif hasattr(self.request.user, 'company') and self.request.user.company:
-            qs = qs.filter(company=self.request.user.company)
+                qs = qs.filter(company_id=company_id)
+            elif current_schema == get_public_schema_name() and staff_only:
+                # Never expose a cross-tenant staff directory from the public schema.
+                return qs.none()
+        elif current_schema == get_public_schema_name():
+            company, _tenant = get_current_public_company_and_tenant(self.request)
+            if company:
+                qs = qs.filter(company=company)
+            elif getattr(self.request.user, 'company', None):
+                qs = qs.filter(company=self.request.user.company)
+            else:
+                return qs.none()
         else:
-            return qs.none()
+            # The PostgreSQL schema is already the tenant boundary. Tenant-local
+            # users intentionally have null public Company/Tenant foreign keys,
+            # so filtering those FKs made valid historical staff disappear.
+            request_tenant = getattr(self.request, "tenant", None)
+            if getattr(request_tenant, "schema_name", current_schema) != current_schema:
+                logger.warning(
+                    "Blocked user query with mismatched tenant schema actor=%s schema=%s request_tenant=%s",
+                    self.request.user.pk,
+                    current_schema,
+                    getattr(request_tenant, "schema_name", None),
+                )
+                return qs.none()
 
-        staff_only = str(self.request.query_params.get("staff_only", "")).lower() in {"1", "true", "yes"}
         if staff_only:
             qs = qs.filter(
-                role__in=["admin", "staff", "support", "technician", "accountant"],
+                role__in=self.delegated_staff_roles,
             ).exclude(is_superuser=True)
 
         return qs
     
     def perform_create(self, serializer):
-        role = self.request.data.get('role')
-        staff_roles = ['admin', 'support', 'technician', 'accountant', 'staff']
-        is_staff_status = role in staff_roles
-        
+        role = serializer.validated_data['role']
+        company, tenant = get_current_public_company_and_tenant(self.request)
+        current_schema = getattr(connection, "schema_name", get_public_schema_name())
+
+        if role not in self.delegated_staff_roles:
+            raise DRFValidationError("Only delegated tenant staff roles can be created here.")
+
         save_kwargs = {
-            'is_staff': is_staff_status,
-            'is_verified': True if is_staff_status else False
+            'is_staff': True,
+            'is_superuser': False,
+            'is_verified': True,
         }
-        
-        if not self.request.user.is_superuser:
-            if hasattr(self.request.user, 'company') and self.request.user.company:
-                save_kwargs['company'] = self.request.user.company
+
+        if current_schema == get_public_schema_name():
+            if not company:
+                raise DRFValidationError("A tenant company is required to create staff.")
+            save_kwargs.update({
+                'company': company,
+                'tenant': tenant,
+                'company_name': company.name,
+                'tenant_subdomain': getattr(tenant, 'subdomain', None),
+            })
+        else:
+            # Cross-schema foreign keys are unsafe. Preserve ownership through
+            # denormalized tenant identity while the schema enforces isolation.
+            save_kwargs.update({
+                'company': None,
+                'tenant': None,
+                'company_name': getattr(company, 'name', None)
+                    or getattr(self.request.user, 'company_name', None),
+                'tenant_subdomain': getattr(tenant, 'subdomain', None)
+                    or getattr(self.request.user, 'tenant_subdomain', None),
+            })
         
         user = serializer.save(**save_kwargs)
         AuditLog.log_action(
@@ -556,16 +617,18 @@ class UserViewSet(viewsets.ModelViewSet):
             user_agent=self.request.META.get("HTTP_USER_AGENT", ""),
             tenant=getattr(self.request, "tenant", None),
         )
-        logger.info(f"UserViewSet: Created {role} user {serializer.instance.email}. is_staff={is_staff_status}")
+        logger.info("UserViewSet: Created %s user %s in schema %s", role, user.email, current_schema)
 
     def perform_update(self, serializer):
+        if serializer.instance.is_superuser or serializer.instance.role == "admin":
+            raise DRFValidationError("The principal administrator cannot be changed here.")
         before = {
             "email": serializer.instance.email,
             "role": serializer.instance.role,
             "is_active": serializer.instance.is_active,
             "custom_allowed_paths": serializer.instance.custom_allowed_paths,
         }
-        user = serializer.save()
+        user = serializer.save(is_staff=True, is_superuser=False, is_verified=True)
         AuditLog.log_action(
             user=self.request.user,
             action="update",
@@ -598,6 +661,11 @@ class UserViewSet(viewsets.ModelViewSet):
         if instance.is_superuser:
             return Response(
                 {"detail": "Platform administrator accounts cannot be deleted here."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+        if instance.role == "admin":
+            return Response(
+                {"detail": "The principal administrator cannot be deleted here."},
                 status=status.HTTP_403_FORBIDDEN,
             )
 
@@ -1252,38 +1320,6 @@ class DashboardView(APIView):
         return Response(serializer.data)
 
 
-@api_view(['POST'])
-@permission_classes([AllowAny])
-def register_user(request):
-    """
-    Register a new user (function-based view for compatibility)
-    """
-    serializer = UserCreateSerializer(data=request.data)
-    if serializer.is_valid():
-        user = serializer.save()
-        
-        refresh = issue_refresh_token(user)
-        
-        AuditLog.log_action(
-            user=user,
-            action='create',
-            model_name='User',
-            object_id=str(user.id),
-            object_repr=str(user),
-            ip_address=request.META.get('REMOTE_ADDR'),
-            user_agent=request.META.get('HTTP_USER_AGENT', '')
-        )
-        
-        return Response({
-            'user': UserSerializer(user).data,
-            'refresh': str(refresh),
-            'access': str(refresh.access_token),
-            'message': 'User registered successfully'
-        }, status=status.HTTP_201_CREATED)
-    
-    return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
-
-
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
 def dashboard(request):
@@ -1819,8 +1855,12 @@ class CompanyRegisterView(generics.CreateAPIView):
 class CompanyRegistrationStatusView(APIView):
     """Confirm whether a public registration request completed successfully."""
     permission_classes = [AllowAny]
+    throttle_scope = "company_registration"
 
     def get(self, request):
+        if not getattr(settings, "PUBLIC_TENANT_REGISTRATION_ENABLED", False):
+            raise Http404
+
         from django.db import connection
 
         connection.set_schema_to_public()

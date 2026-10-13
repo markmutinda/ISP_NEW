@@ -307,6 +307,7 @@ REST_FRAMEWORK = {
         'platform_login': '10/min',
         'company_registration': '3/hour',
         'self_service_register': '5/hour',
+        'staff_mutation': '60/hour',
     },
 }
 

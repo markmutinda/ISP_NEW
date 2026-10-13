@@ -52,6 +52,7 @@ from .serializers import (
 )
 from apps.core.serializers import ChangelogSerializer, FeatureRequestSerializer
 from apps.subscriptions.models import BillingCycle
+from apps.subscriptions.system_accounts import get_tenant_billing_customer
 from django_tenants.utils import schema_context, get_public_schema_name
 from django.shortcuts import get_object_or_404
 from .tasks import queue_changelog_notifications, queue_tenant_deletion
@@ -3465,20 +3466,7 @@ def _get_or_create_subscription_invoice(cycle, *, create=False):
         if invoice or not create:
             return invoice
 
-        billing_user, _ = User.objects.get_or_create(
-            email="billing@netily.io",
-            defaults={
-                "first_name": "Netily",
-                "last_name": "Platform",
-                "role": "admin",
-                "is_staff": True,
-                "is_active": True,
-            },
-        )
-        sys_customer, _ = Customer.objects.get_or_create(
-            customer_code="NET-001",
-            defaults={"user": billing_user, "status": "active"},
-        )
+        sys_customer = get_tenant_billing_customer()
 
         now_ts = timezone.now()
         due_date = (

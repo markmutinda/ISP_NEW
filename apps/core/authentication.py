@@ -16,6 +16,11 @@ class SessionBoundJWTAuthentication(JWTAuthentication):
 
     def get_user(self, validated_token):
         user = super().get_user(validated_token)
+        if not user.dashboard_role_is_trusted:
+            raise AuthenticationFailed(
+                "This dashboard account is not authorized. Contact the tenant administrator.",
+                code="untrusted_dashboard_role",
+            )
         if not token_matches_user_session(validated_token, user):
             raise AuthenticationFailed(
                 "Your session has expired. Please sign in again.",

@@ -20,6 +20,7 @@ from apps.subscriptions.models import (
 )
 from apps.billing.models import Invoice, InvoiceItem
 from apps.customers.models import Customer
+from apps.subscriptions.system_accounts import get_tenant_billing_customer
 
 logger = logging.getLogger(__name__)
 User = get_user_model()
@@ -802,17 +803,7 @@ def generate_metered_invoices():
                     
                 # ─── CREATE INVOICE IN TENANT SCHEMA ───
                 with schema_context(tenant.schema_name):
-                    # Ensure System User exists
-                    user, _ = User.objects.get_or_create(
-                        email='billing@netily.io',
-                        defaults={'first_name': 'Netily', 'last_name': 'Platform'}
-                    )
-                    
-                    # Ensure System Customer exists
-                    sys_customer, _ = Customer.objects.get_or_create(
-                        customer_code='NET-001',
-                        defaults={'user': user, 'status': 'active'}
-                    )
+                    sys_customer = get_tenant_billing_customer()
 
                     # Reuse a tenant NET-BILL invoice for the same period if it already exists.
                     new_invoice = _existing_net_bill_invoice_for_cycle(cycle)

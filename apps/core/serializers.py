@@ -140,7 +140,13 @@ class UserSerializer(serializers.ModelSerializer):
 
 
 class UserCreateSerializer(serializers.ModelSerializer):
-    """Serializer for user registration/creation"""
+    """Create a delegated tenant staff account.
+
+    Tenant ownership and Django privilege flags are deliberately not writable.
+    They are derived from the authenticated tenant context in ``UserViewSet``.
+    """
+
+    DELEGATED_STAFF_ROLES = {'staff', 'technician', 'accountant', 'support'}
     
     password = serializers.CharField(
         write_only=True, 
@@ -159,13 +165,13 @@ class UserCreateSerializer(serializers.ModelSerializer):
         fields = [
             'id', 'email', 'password', 'confirm_password',
             'first_name', 'last_name', 'phone_number', 'id_number',
-            'gender', 'date_of_birth', 'role', 'company', 'tenant',
+            'gender', 'date_of_birth', 'role',
             'custom_allowed_paths',
         ]
         read_only_fields = ['id']
     
     def validate(self, attrs):
-        """Validate that passwords match - only if confirm_password is provided"""
+        """Validate credentials and prevent client-controlled tenant ownership."""
         password = attrs.get('password')
         confirm_password = attrs.get('confirm_password')
         
@@ -174,13 +180,31 @@ class UserCreateSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError({
                 "password": "Password fields didn't match."
             })
-        if attrs.get('custom_allowed_paths') is not None:
-            role = attrs.get('role', 'customer')
-            if role not in {'staff', 'technician', 'accountant', 'support'}:
-                raise serializers.ValidationError({
-                    'custom_allowed_paths': 'Custom dashboard access is only available for staff roles.'
-                })
+
+        forbidden_fields = {'company', 'tenant', 'is_staff', 'is_superuser', 'is_verified'}
+        supplied_forbidden = sorted(forbidden_fields.intersection(self.initial_data.keys()))
+        if supplied_forbidden:
+            raise serializers.ValidationError({
+                field: 'This field is assigned by the server.'
+                for field in supplied_forbidden
+            })
+
+        role = str(attrs.get('role') or '').strip().lower()
+        if role not in self.DELEGATED_STAFF_ROLES:
+            raise serializers.ValidationError({
+                'role': 'Choose staff, technician, accountant, or support.'
+            })
+        attrs['role'] = role
+
         return attrs
+
+    def validate_email(self, value):
+        if not value:
+            raise serializers.ValidationError('An email address is required for dashboard access.')
+        normalized = User.objects.normalize_email(value).strip().lower()
+        if User.objects.filter(email__iexact=normalized).exists():
+            raise serializers.ValidationError('A user with this email already exists.')
+        return normalized
 
     def validate_custom_allowed_paths(self, value):
         return validate_dashboard_access_tokens(value)
@@ -190,15 +214,7 @@ class UserCreateSerializer(serializers.ModelSerializer):
         validated_data.pop('confirm_password', None)
         password = validated_data.pop('password')
         
-        # Set default role if not provided
-        if 'role' not in validated_data:
-            validated_data['role'] = 'customer'
-        
-        user = User.objects.create(**validated_data)
-        user.set_password(password)
-        user.save()
-        
-        return user
+        return User.objects.create_user(password=password, **validated_data)
 
 
 class UserUpdateSerializer(serializers.ModelSerializer):
@@ -281,6 +297,14 @@ class AdminUserUpdateSerializer(serializers.ModelSerializer):
     def validate_custom_allowed_paths(self, value):
         return validate_dashboard_access_tokens(value)
 
+    def validate_role(self, value):
+        role = str(value or '').strip().lower()
+        if role not in UserCreateSerializer.DELEGATED_STAFF_ROLES:
+            raise serializers.ValidationError(
+                'Choose staff, technician, accountant, or support.'
+            )
+        return role
+
     def validate(self, attrs):
         if attrs.get('custom_allowed_paths') is not None:
             role = attrs.get('role', getattr(self.instance, 'role', None))
@@ -358,6 +382,11 @@ class LoginSerializer(serializers.Serializer):
             logger.warning("Login attempted for inactive account: email=%s", email)
             raise serializers.ValidationError({
                 "email": "Account is deactivated."
+            })
+        if not user.dashboard_role_is_trusted:
+            logger.warning("Blocked untrusted dashboard role during login: user_id=%s", user.id)
+            raise serializers.ValidationError({
+                "email": "This dashboard account is not authorized. Contact the tenant administrator."
             })
         
         # Generate tokens
@@ -639,6 +668,11 @@ class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
             
             # Add user data to response
             user = self.user
+            if not user.dashboard_role_is_trusted:
+                logger.warning("Blocked untrusted dashboard role during JWT login: user_id=%s", user.id)
+                raise serializers.ValidationError({
+                    "detail": "This dashboard account is not authorized. Contact the tenant administrator."
+                })
             tenant_subdomain = getattr(user, "tenant_subdomain", None)
             company_name = getattr(user, "company_name", None)
 

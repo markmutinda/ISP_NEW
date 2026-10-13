@@ -8,13 +8,15 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from rest_framework.permissions import IsAuthenticated
+from rest_framework.exceptions import AuthenticationFailed
 from rest_framework.test import APIRequestFactory, force_authenticate
 from rest_framework.serializers import ValidationError
 
 from apps.core.models import User
+from apps.core.authentication import SessionBoundJWTAuthentication
 from apps.core.email_delivery import send_transactional_email
 from apps.core.otp_service import OTPService, OTPRateLimitedError, OTPError
-from apps.core.permissions import HasCompanyAccess, HasRoleAccessPolicy, IsAdminOrStaff
+from apps.core.permissions import HasCompanyAccess, HasRoleAccessPolicy, IsAdmin, IsAdminOrStaff
 from apps.core.rbac_defaults import DEFAULT_ROLE_ACCESS_POLICIES
 from apps.core.serializers import UserCreateSerializer
 from apps.core.session_tokens import (
@@ -22,7 +24,7 @@ from apps.core.session_tokens import (
     bind_token_to_user,
     token_matches_user_session,
 )
-from apps.core.views import CompanyViewSet, RoleAccessPolicyViewSet, TenantViewSet
+from apps.core.views import CompanyViewSet, RoleAccessPolicyViewSet, TenantViewSet, UserViewSet
 from apps.notifications.services.lead_alert_service import build_lead_alert_message
 from apps.superadmin.permissions import IsSuperAdmin
 
@@ -462,6 +464,114 @@ class PlatformMutationPermissionTests(SimpleTestCase):
 
         self.assertIn(IsAuthenticated, permission_types)
         self.assertIn(IsSuperAdmin, permission_types)
+
+
+class StaffAccountSecurityTests(SimpleTestCase):
+    @patch("rest_framework_simplejwt.authentication.JWTAuthentication.get_user")
+    def test_existing_token_for_role_only_admin_is_rejected(self, base_get_user):
+        base_get_user.return_value = User(
+            role="admin",
+            is_staff=False,
+            is_superuser=False,
+            is_active=True,
+        )
+
+        with self.assertRaises(AuthenticationFailed):
+            SessionBoundJWTAuthentication().get_user({})
+
+    def test_role_string_alone_does_not_grant_admin_access(self):
+        user = SimpleNamespace(
+            is_authenticated=True,
+            is_superuser=False,
+            is_staff=False,
+            role="admin",
+            company=SimpleNamespace(pk=1),
+        )
+        request = SimpleNamespace(user=user)
+
+        self.assertFalse(IsAdmin().has_permission(request, None))
+
+    def test_role_string_alone_does_not_grant_staff_access(self):
+        user = SimpleNamespace(
+            is_authenticated=True,
+            is_superuser=False,
+            is_staff=False,
+            role="support",
+            company=SimpleNamespace(pk=1),
+        )
+        request = SimpleNamespace(user=user)
+
+        self.assertFalse(IsAdminOrStaff().has_permission(request, None))
+
+    def test_unapproved_dashboard_role_is_not_trusted(self):
+        user = User(role="admin", is_staff=False, is_superuser=False)
+
+        self.assertFalse(user.dashboard_role_is_trusted)
+
+    def test_staff_account_creation_requires_a_tenant_admin(self):
+        view = UserViewSet()
+        view.action = "create"
+
+        permission_types = {type(permission) for permission in view.get_permissions()}
+
+        self.assertIn(IsAuthenticated, permission_types)
+        self.assertIn(IsAdmin, permission_types)
+        self.assertNotIn(IsAdminOrStaff, permission_types)
+
+    def test_staff_account_updates_require_a_tenant_admin(self):
+        view = UserViewSet()
+        view.action = "partial_update"
+
+        permission_types = {type(permission) for permission in view.get_permissions()}
+
+        self.assertIn(IsAuthenticated, permission_types)
+        self.assertIn(IsAdmin, permission_types)
+        self.assertNotIn(IsAdminOrStaff, permission_types)
+
+    def test_staff_account_creation_rejects_principal_admin_role(self):
+        serializer = UserCreateSerializer(data={
+            "email": "new-admin@example.com",
+            "phone_number": "+254700000099",
+            "first_name": "New",
+            "last_name": "Admin",
+            "password": "StrongPassword123!",
+            "confirm_password": "StrongPassword123!",
+            "role": "admin",
+        })
+
+        with patch("apps.core.serializers.User.objects.filter") as queryset:
+            queryset.return_value.exists.return_value = False
+            self.assertFalse(serializer.is_valid())
+
+        self.assertIn("role", serializer.errors)
+
+    def test_staff_account_creation_rejects_client_owned_tenant_fields(self):
+        serializer = UserCreateSerializer(data={
+            "email": "staff@example.com",
+            "phone_number": "+254700000098",
+            "first_name": "Tenant",
+            "last_name": "Staff",
+            "password": "StrongPassword123!",
+            "confirm_password": "StrongPassword123!",
+            "role": "support",
+            "company": "39f5d662-e188-4e4f-bb49-a53013b0c701",
+        })
+
+        with patch("apps.core.serializers.User.objects.filter") as queryset:
+            queryset.return_value.exists.return_value = False
+            self.assertFalse(serializer.is_valid())
+
+        self.assertIn("company", serializer.errors)
+
+    def test_technician_is_consistently_treated_as_staff_member(self):
+        user = User(role="technician", is_staff=True)
+
+        self.assertTrue(user.is_staff_member)
+
+    def test_unapproved_technician_is_not_treated_as_staff_member(self):
+        user = User(role="technician", is_staff=False)
+
+        self.assertFalse(user.is_staff_member)
 
 
 class RoleAccessBootstrapTests(SimpleTestCase):

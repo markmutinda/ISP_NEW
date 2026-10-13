@@ -217,15 +217,18 @@ class User(AbstractUser, AuditMixin):
 
     @property
     def is_admin(self):
-        return self.role == 'admin' or self.is_superuser
+        return self.is_superuser or (self.role == 'admin' and self.is_staff)
     
     @property
     def is_staff_member(self):
-        return self.role in ['admin', 'staff', 'accountant', 'support']
+        return self.is_superuser or (
+            self.is_staff
+            and self.role in ['admin', 'staff', 'accountant', 'support', 'technician']
+        )
     
     @property
     def is_technician(self):
-        return self.role == 'technician'
+        return self.role == 'technician' and self.is_staff
     
     @property
     def is_customer(self):
@@ -234,12 +237,25 @@ class User(AbstractUser, AuditMixin):
     @property
     def is_company_admin(self):
         """Check if user is admin of their company"""
-        return self.role == 'admin' or self.is_superuser
+        return self.is_superuser or (self.role == 'admin' and self.is_staff)
     
     @property
     def is_company_staff(self):
         """Check if user is staff of their company"""
-        return self.role in ['admin', 'staff', 'accountant', 'support', 'technician']
+        return self.is_superuser or (
+            self.is_staff
+            and self.role in ['admin', 'staff', 'accountant', 'support', 'technician']
+        )
+
+    @property
+    def dashboard_role_is_trusted(self):
+        """Require the server-issued staff flag for every dashboard role."""
+        dashboard_roles = {'admin', 'staff', 'technician', 'accountant', 'support'}
+        return (
+            self.role not in dashboard_roles
+            or self.is_superuser
+            or self.is_staff
+        )
 
 
 class RoleAccessPolicy(AuditMixin):

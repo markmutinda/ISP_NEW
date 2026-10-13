@@ -6,6 +6,7 @@ from django.utils import timezone
 from django_tenants.utils import get_public_schema_name, schema_context
 
 from apps.core.email_delivery import send_transactional_email
+from apps.subscriptions.system_accounts import get_tenant_billing_customer
 
 logger = logging.getLogger(__name__)
 
@@ -144,26 +145,8 @@ def sync_subscription_invoice_payment(payment, *, notify=True):
     candidate_refs = _candidate_invoice_references(subscription, tenant, payment)
 
     with schema_context(tenant.schema_name):
-        from django.contrib.auth import get_user_model
-
         from apps.billing.models import Invoice, InvoiceItem
-        from apps.customers.models import Customer
-
-        User = get_user_model()
-        billing_user, _ = User.objects.get_or_create(
-            email="billing@netily.io",
-            defaults={
-                "first_name": "Netily",
-                "last_name": "Platform",
-                "role": "admin",
-                "is_staff": True,
-                "is_active": True,
-            },
-        )
-        sys_customer, _ = Customer.objects.get_or_create(
-            customer_code="NET-001",
-            defaults={"user": billing_user, "status": "active"},
-        )
+        sys_customer = get_tenant_billing_customer()
 
         unpaid = (
             Invoice.objects.select_for_update().filter(invoice_number__startswith="NET-BILL")

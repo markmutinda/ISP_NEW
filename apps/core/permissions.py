@@ -110,6 +110,8 @@ class IsCompanyAdmin(permissions.BasePermission):
         
         if request.user.role != 'admin':
             return False
+        if not getattr(request.user, 'is_staff', False):
+            return False
 
         # Public-schema users have a real FK; tenant-schema users often carry
         # tenant/company context through middleware plus denormalized fields.
@@ -141,6 +143,8 @@ class IsCompanyStaff(permissions.BasePermission):
         
         allowed_roles = ['admin', 'staff', 'technician', 'accountant', 'support']
         if request.user.role not in allowed_roles:
+            return False
+        if not getattr(request.user, 'is_staff', False):
             return False
 
         if getattr(request.user, 'company', None):
@@ -537,7 +541,10 @@ class HasRoleAccessPolicy(permissions.BasePermission):
 
         role = self._normalize(getattr(user, "role", None))
         access_level = self._normalize(getattr(user, "access_level", None))
-        if role in self.admin_roles or access_level in self.admin_roles:
+        if (
+            (role in self.admin_roles or access_level in self.admin_roles)
+            and getattr(user, "is_staff", False)
+        ):
             return True
 
         required_paths = self._required_paths(request, view)
