@@ -25,7 +25,6 @@ router.register(r'role-access', views.RoleAccessPolicyViewSet, basename='role-ac
 
 urlpatterns = [
     # Authentication endpoints
-    path('auth/register/', views.RegisterView.as_view(), name='register'),
     path('auth/login/', views.CustomTokenObtainPairView.as_view(), name='login'),
     path('auth/login/otp/resend/', views.ResendLoginOTPView.as_view(), name='login-otp-resend'),
     path('auth/login/legacy/', views.LoginView.as_view(), name='login_legacy'),

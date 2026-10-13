@@ -55,6 +55,7 @@ from .serializers import (
     FeatureRequestSerializer, CompanyBrandingSerializer, RoleAccessPolicySerializer
 )
 from .permissions import HasRoleAccessPolicy, IsAdmin, IsAdminOrStaff, IsCustomer, IsTechnician
+from apps.superadmin.permissions import IsSuperAdmin
 from .session_tokens import issue_refresh_token
 
 logger = logging.getLogger(__name__)
@@ -240,6 +241,7 @@ class DebugAuthView(APIView):
 class CustomTokenObtainPairView(TokenObtainPairView):
     """Custom JWT token view with additional user data"""
     serializer_class = CustomTokenObtainPairSerializer
+    throttle_scope = "platform_login"
 
     def post(self, request, *args, **kwargs):
         email = (request.data.get("email") or "").strip().lower()
@@ -452,41 +454,6 @@ class ResendLoginOTPView(APIView):
         }, status=status.HTTP_200_OK)
 
 
-class RegisterView(generics.CreateAPIView):
-    """View for user registration"""
-    permission_classes = [AllowAny]
-    serializer_class = UserCreateSerializer
-    
-    def create(self, request, *args, **kwargs):
-        serializer = self.get_serializer(data=request.data)
-        if serializer.is_valid():
-            user = serializer.save()
-            
-            if not user.company and not user.tenant:
-                pass
-            
-            refresh = issue_refresh_token(user)
-            
-            AuditLog.log_action(
-                user=user,
-                action='create',
-                model_name='User',
-                object_id=str(user.id),
-                object_repr=str(user),
-                ip_address=request.META.get('REMOTE_ADDR'),
-                user_agent=request.META.get('HTTP_USER_AGENT', '')
-            )
-            
-            return Response({
-                'user': UserSerializer(user).data,
-                'refresh': str(refresh),
-                'access': str(refresh.access_token),
-                'message': 'User registered successfully'
-            }, status=status.HTTP_201_CREATED)
-        
-        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
-
-
 class UserViewSet(viewsets.ModelViewSet):
     """
     ViewSet for User management - filtered by company
@@ -554,7 +521,6 @@ class UserViewSet(viewsets.ModelViewSet):
         if staff_only:
             qs = qs.filter(
                 role__in=["admin", "staff", "support", "technician", "accountant"],
-                is_staff=True,
             ).exclude(is_superuser=True)
 
         return qs
@@ -939,7 +905,7 @@ class CompanyViewSet(viewsets.ModelViewSet):
     
     def get_permissions(self):
         if self.action in ['create', 'destroy']:
-            permission_classes = [IsAuthenticated, IsAdmin, HasRoleAccessPolicy]
+            permission_classes = [IsAuthenticated, IsSuperAdmin]
         else:
             permission_classes = self.permission_classes
         return [permission() for permission in permission_classes]
@@ -1069,7 +1035,9 @@ class TenantViewSet(viewsets.ModelViewSet):
     
     def get_permissions(self):
         if self.action in ['create', 'destroy']:
-            permission_classes = [IsAuthenticated, IsAdmin]
+            permission_classes = [IsAuthenticated, IsSuperAdmin]
+        else:
+            permission_classes = self.permission_classes
         return [permission() for permission in permission_classes]
     
     @action(detail=True, methods=['post'])
@@ -1491,8 +1459,12 @@ class CompanyRegisterView(generics.CreateAPIView):
     """Public endpoint to register a new ISP/company + first admin user"""
     permission_classes = [AllowAny]
     serializer_class = CompanyRegisterSerializer
+    throttle_scope = "company_registration"
     
     def create(self, request, *args, **kwargs):
+        if not getattr(settings, "PUBLIC_TENANT_REGISTRATION_ENABLED", False):
+            raise Http404
+
         import logging as _logging
         import traceback as _traceback
         _log = _logging.getLogger(__name__)

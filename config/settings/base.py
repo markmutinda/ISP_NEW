@@ -304,6 +304,9 @@ REST_FRAMEWORK = {
         'affiliate_login': '20/min',
         'affiliate_verify': '10/hour',
         'lead_submit': '10/hour',
+        'platform_login': '10/min',
+        'company_registration': '3/hour',
+        'self_service_register': '5/hour',
     },
 }
 
@@ -401,6 +404,9 @@ AFFILIATE_CLICK_DEDUP_MINUTES = int(os.getenv('AFFILIATE_CLICK_DEDUP_MINUTES', '
 TENANT_BASE_DOMAIN = os.getenv('TENANT_BASE_DOMAIN', 'localhost')
 # Frontend URL (Next.js app) — used for admin panel links et al
 FRONTEND_URL = os.getenv('FRONTEND_URL', 'http://localhost:3000')
+PUBLIC_TENANT_REGISTRATION_ENABLED = os.getenv(
+    'PUBLIC_TENANT_REGISTRATION_ENABLED', 'False'
+).lower() in ('1', 'true', 'yes', 'on')
 
 # ── WebAuthn / Passkey settings ──
 WEBAUTHN_RP_ID = os.getenv('WEBAUTHN_RP_ID', 'localhost')       # e.g. 'netily.co.ke' in prod

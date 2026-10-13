@@ -46,6 +46,7 @@ class CustomerSelfRegisterView(generics.CreateAPIView):
     
     permission_classes = [AllowAny]
     authentication_classes = []  # No auth required
+    throttle_scope = 'self_service_register'
 
     serializer_class = CustomerSelfRegisterSerializer
     

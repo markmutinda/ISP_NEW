@@ -7,6 +7,7 @@ import uuid
 from types import SimpleNamespace
 from unittest.mock import patch
 
+from rest_framework.permissions import IsAuthenticated
 from rest_framework.test import APIRequestFactory, force_authenticate
 from rest_framework.serializers import ValidationError
 
@@ -21,8 +22,9 @@ from apps.core.session_tokens import (
     bind_token_to_user,
     token_matches_user_session,
 )
-from apps.core.views import RoleAccessPolicyViewSet
+from apps.core.views import CompanyViewSet, RoleAccessPolicyViewSet, TenantViewSet
 from apps.notifications.services.lead_alert_service import build_lead_alert_message
+from apps.superadmin.permissions import IsSuperAdmin
 
 
 class SessionTokenTests(SimpleTestCase):
@@ -433,7 +435,37 @@ class CompanyObjectAccessTests(SimpleTestCase):
         self.assertFalse(HasCompanyAccess().has_object_permission(request, None, router))
 
 
+class PlatformMutationPermissionTests(SimpleTestCase):
+    def test_tenant_list_uses_declared_permissions(self):
+        view = TenantViewSet()
+        view.action = "list"
+
+        permission_types = {type(permission) for permission in view.get_permissions()}
+
+        self.assertIn(IsAuthenticated, permission_types)
+        self.assertIn(IsAdminOrStaff, permission_types)
+
+    def test_tenant_creation_requires_platform_superadmin(self):
+        view = TenantViewSet()
+        view.action = "create"
+
+        permission_types = {type(permission) for permission in view.get_permissions()}
+
+        self.assertIn(IsAuthenticated, permission_types)
+        self.assertIn(IsSuperAdmin, permission_types)
+
+    def test_company_creation_requires_platform_superadmin(self):
+        view = CompanyViewSet()
+        view.action = "create"
+
+        permission_types = {type(permission) for permission in view.get_permissions()}
+
+        self.assertIn(IsAuthenticated, permission_types)
+        self.assertIn(IsSuperAdmin, permission_types)
+
+
 class RoleAccessBootstrapTests(SimpleTestCase):
+
     def test_me_read_does_not_require_staff_page_permission(self):
         view = RoleAccessPolicyViewSet()
         view.action = "me"

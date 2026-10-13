@@ -208,22 +208,18 @@ urlpatterns = [
     # Reachable as /api/v1/tr069/webhook/credentials/ and /api/v1/tr069/webhook/inform/
     path('api/v1/', include(tr069_webhook_urlpatterns)),
     
-    # API Documentation
-    path('swagger/', schema_view.with_ui('swagger', cache_timeout=0), name='schema-swagger-ui'),
-    path('redoc/', schema_view.with_ui('redoc', cache_timeout=0), name='schema-redoc'),
-    path('swagger.json/', schema_view.without_ui(cache_timeout=0), name='schema-json'),
-    
     # Health check
     path('health/', include('health_check.urls')),
 ]
 
-# Authentication URLs (for Django REST Framework browsable API)
-urlpatterns += [
-    path('api-auth/', include('rest_framework.urls')),
-]
-
 # Serve static and media files in development
 if settings.DEBUG:
+    urlpatterns += [
+        path('swagger/', schema_view.with_ui('swagger', cache_timeout=0), name='schema-swagger-ui'),
+        path('redoc/', schema_view.with_ui('redoc', cache_timeout=0), name='schema-redoc'),
+        path('swagger.json/', schema_view.without_ui(cache_timeout=0), name='schema-json'),
+        path('api-auth/', include('rest_framework.urls')),
+    ]
     urlpatterns += static(settings.STATIC_URL, document_root=settings.STATIC_ROOT)
     urlpatterns += static(settings.MEDIA_URL, document_root=settings.MEDIA_ROOT)
     

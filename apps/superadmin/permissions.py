@@ -6,6 +6,8 @@ These permissions run in the PUBLIC schema context.
 """
 
 from rest_framework.permissions import BasePermission
+from django.db import connection
+from django_tenants.utils import get_public_schema_name
 
 
 class IsSuperAdmin(BasePermission):
@@ -19,6 +21,7 @@ class IsSuperAdmin(BasePermission):
             request.user
             and request.user.is_authenticated
             and request.user.is_superuser
+            and connection.schema_name == get_public_schema_name()
         )
 
 
