@@ -657,12 +657,12 @@ def post_renewal_actions(tenant_schema, customer_id, plan_name='', expires_at_is
         if not customer:
             return
 
-        if kick_username and nas_ip:
+        if kick_username:
             try:
-                from apps.radius.services.coa_service import CoAService
-                CoAService().disconnect_user(username=kick_username, nas_ip_address=nas_ip)
+                from apps.radius.services.session_control import kick_pppoe_user
+                kick_pppoe_user(kick_username)
             except Exception as e:
-                logger.warning(f"[RENEW] CoA failed for {kick_username}: {e}")
+                logger.warning(f"[RENEW] kick failed for {kick_username}: {e}")
 
         if send_sms:
             try:

@@ -78,16 +78,13 @@ def activate_pppoe_from_payment(payment):
         RadiusExpiryReminderLog.objects.filter(customer_id=str(payment.customer_id)).delete()
         Payment.objects.filter(pk=payment.pk).update(notes=f"{fresh.notes or ''} {marker}".strip())
 
-        nas_ip = None
-        if creds.router_id:
-            nas_ip = creds.router.vpn_ip_address or creds.router.ip_address
         post = dict(
             tenant_schema=schema, customer_id=payment.customer_id, plan_name=plan.name or "",
             expires_at_iso=new_expiry.isoformat() if new_expiry else None,
             reference=payment.mpesa_receipt or payment.payment_reference or "",
             send_sms=True,
-            kick_username=creds.username if (nas_ip and was_disabled) else None,
-            nas_ip=nas_ip,
+            kick_username=creds.username,
+            nas_ip=None,
         )
         transaction.on_commit(lambda: post_renewal_actions.delay(**post))
 

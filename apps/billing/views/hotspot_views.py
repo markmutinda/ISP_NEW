@@ -1218,6 +1218,7 @@ class HotspotVoucherRedeemView(APIView):
             voucher_code = (request.data.get('code') or '').strip()
             router_id = request.data.get('router_id')
             mac_address = (request.data.get('mac_address') or '00:00:00:00:00:00').upper().replace('-', ':')
+            is_tv_target = request.data.get('target_device') == 'tv'
 
             if not voucher_code:
                 return Response({'error': 'Voucher code is required'}, status=status.HTTP_400_BAD_REQUEST)
@@ -1231,6 +1232,9 @@ class HotspotVoucherRedeemView(APIView):
             ).select_related('plan').first()
 
             if existing_session:
+                if is_tv_target:
+                    cache.set(f"hs_tv_push:{tenant.schema_name}:{existing_session.session_id}", 1, timeout=3600)
+                    schedule_tv_login_push(existing_session, tenant.schema_name)
                 return Response({
                     'status': 'success',
                     'message': f'Voucher already redeemed! You are connected with {existing_session.plan.name} plan.',
@@ -1359,6 +1363,10 @@ class HotspotVoucherRedeemView(APIView):
                     )
                     if not ok:
                         raise RuntimeError("RADIUS provisioning returned False")
+
+                    if is_tv_target:
+                        cache.set(f"hs_tv_push:{tenant.schema_name}:{session.session_id}", 1, timeout=3600)
+                        schedule_tv_login_push(session, tenant.schema_name)
 
                     voucher.use_count = (voucher.use_count or 0) + 1
                     if voucher.remaining_value is not None:

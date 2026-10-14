@@ -116,31 +116,68 @@ def track_service_status_change(sender, instance, **kwargs):
 # CUSTOMER RADIUS CREDENTIALS SIGNALS
 # ────────────────────────────────────────────────────────────────
 
+_UNSET = object()
+
+
+@receiver(pre_save, sender='radius.CustomerRadiusCredentials')
+def track_credentials_expiration(sender, instance, **kwargs):
+    """Remember the DB expiry before save so post_save can detect a change."""
+    if getattr(instance, '_is_syncing', False):
+        return
+    instance._expiry_before = _UNSET
+    if instance.pk:
+        rows = list(
+            sender.objects.filter(pk=instance.pk)
+            .values_list('expiration_date', flat=True)[:1]
+        )
+        if rows:
+            instance._expiry_before = rows[0]
+
+
+def _queue_pppoe_kick(username):
+    from django.db import connection
+    schema = connection.schema_name
+
+    def _go():
+        try:
+            from apps.radius.tasks import kick_pppoe_session
+            kick_pppoe_session.delay(schema, username)
+        except Exception as e:
+            logger.warning(f"Could not queue kick for {username}: {e}")
+
+    transaction.on_commit(_go)
+
+
 @receiver(post_save, sender='radius.CustomerRadiusCredentials')
 def sync_credentials_to_radius(sender, instance, created, **kwargs):
     """
     Sync CustomerRadiusCredentials to RADIUS tables (RadCheck/RadReply).
     Includes RECURSION GUARD to prevent infinite loops.
     """
-    # 🛑 RECURSION GUARD: Stop if we are already syncing this instance
     if getattr(instance, '_is_syncing', False):
         return
 
+    # capture BEFORE sync (sync_to_radius re-saves the instance)
+    expiry_before = getattr(instance, '_expiry_before', _UNSET)
+
     try:
-        # Set the flag to indicate we are busy
         instance._is_syncing = True
 
-        # Use transaction to ensure atomicity
         with transaction.atomic():
             instance.sync_to_radius()
-        
+
         action = "Created" if created else "Updated"
         logger.info(f"{action} RADIUS sync for: {instance.username}")
-        
+
+        # Expiry moved on an existing, enabled account -> live session has a stale Session-Timeout
+        if (not created and instance.is_enabled
+                and expiry_before is not _UNSET
+                and expiry_before != instance.expiration_date):
+            _queue_pppoe_kick(instance.username)
+
     except Exception as e:
         logger.error(f"Failed to sync RADIUS credentials {instance.username}: {e}")
     finally:
-        # Always release the flag, even if it failed
         instance._is_syncing = False
 
 

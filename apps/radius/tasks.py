@@ -1035,3 +1035,14 @@ def send_coa_disconnect_async(nas_ip: str, username: str, session_id: str = None
         CoAService(nas_ip=nas_ip).disconnect_user_via_coa(username, nas_ip, session_id)
     except Exception as e:
         logger.warning(f"[ASYNC COA] disconnect failed for {username}@{nas_ip}: {e}")
+
+
+@shared_task(name='apps.radius.tasks.kick_pppoe_session', queue='radius', ignore_result=True)
+def kick_pppoe_session(tenant_schema: str, username: str, sessions=None):
+    """Fire-and-forget: kick a user's live router session after a DB commit."""
+    from apps.radius.services.session_control import kick_pppoe_user
+    try:
+        with schema_context(tenant_schema):
+            kick_pppoe_user(username, [tuple(s) for s in sessions] if sessions else None)
+    except Exception as e:
+        logger.warning(f"[KICK TASK] {username}@{tenant_schema} failed: {e}")

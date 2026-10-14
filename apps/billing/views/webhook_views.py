@@ -608,16 +608,6 @@ class MpesaC2BWebhookView(APIView):
                                 except Exception as e:
                                     logger.error(f"FreeRADIUS cluster sync failed: {e}")
 
-                                try:
-                                    from apps.radius.services.coa_service import CoAService
-                                    coa = CoAService()
-                                    router_ip = radius_cred.router.vpn_ip_address or radius_cred.router.ip_address if radius_cred.router else None
-                                    if router_ip:
-                                        coa.disconnect_user(username=radius_cred.username, nas_ip_address=router_ip)
-                                        logger.info(f"CoA session reset sent via NAS IP: {router_ip}")
-                                except Exception as coa_err:
-                                    logger.warning(f"CoA disconnection bypassed (non-fatal): {coa_err}")
-
                             if plan_changed:
                                 service.plan = matched_plan
                                 service.monthly_price = matched_plan.base_price
