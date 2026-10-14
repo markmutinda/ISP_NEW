@@ -25,7 +25,7 @@ from django_tenants.utils import schema_context, get_public_schema_name
 from .models import GlobalSystemSettings
 from .serializers import GlobalSystemSettingsSerializer, CustomTokenRefreshSerializer
 from rest_framework_simplejwt.exceptions import InvalidToken
-from rest_framework.exceptions import ValidationError as DRFValidationError
+from rest_framework.exceptions import PermissionDenied, ValidationError as DRFValidationError
 from rest_framework.throttling import UserRateThrottle
 from .serializers import CompanyRegisterSerializer
 from django.template.loader import render_to_string
@@ -1492,14 +1492,45 @@ class CustomTokenRefreshView(TokenRefreshView):
 
 
 class CompanyRegisterView(generics.CreateAPIView):
-    """Public endpoint to register a new ISP/company + first admin user"""
+    """Create a new ISP/company and its principal tenant administrator.
+
+    Public onboarding remains controlled by ``PUBLIC_TENANT_REGISTRATION_ENABLED``.
+    When it is disabled, authenticated platform operators may still use the
+    Selfie onboarding workflow without reopening anonymous registration.
+    """
     permission_classes = [AllowAny]
     serializer_class = CompanyRegisterSerializer
     throttle_scope = "company_registration"
+
+    @staticmethod
+    def _platform_operator_can_register(request):
+        user = getattr(request, "user", None)
+        if not user or not user.is_authenticated or not user.is_active:
+            return False
+        if connection.schema_name != get_public_schema_name():
+            return False
+        if user.is_superuser:
+            return True
+
+        profile = getattr(user, "platform_support_profile", None)
+        return bool(
+            profile
+            and profile.is_active
+            and profile.can_register_tenants
+        )
+
+    @classmethod
+    def _enforce_registration_access(cls, request):
+        if getattr(settings, "PUBLIC_TENANT_REGISTRATION_ENABLED", False):
+            return
+        if not getattr(getattr(request, "user", None), "is_authenticated", False):
+            # Keep the retired public endpoint undiscoverable to anonymous scans.
+            raise Http404
+        if not cls._platform_operator_can_register(request):
+            raise PermissionDenied("Tenant registration permission is required.")
     
     def create(self, request, *args, **kwargs):
-        if not getattr(settings, "PUBLIC_TENANT_REGISTRATION_ENABLED", False):
-            raise Http404
+        self._enforce_registration_access(request)
 
         import logging as _logging
         import traceback as _traceback
@@ -1739,6 +1770,23 @@ class CompanyRegisterView(generics.CreateAPIView):
             email_result.get("sent"),
         )
 
+        if getattr(request.user, "is_authenticated", False):
+            AuditLog.log_action(
+                user=request.user,
+                action="create",
+                model_name="Tenant",
+                object_id=str(tenant.id),
+                object_repr=tenant.subdomain,
+                changes={
+                    "event": "platform_tenant_registration",
+                    "company": company.name,
+                    "admin_email": user.email,
+                    "request_id": request_id,
+                },
+                ip_address=request.META.get("REMOTE_ADDR"),
+                user_agent=request.META.get("HTTP_USER_AGENT", ""),
+            )
+
         return Response(response_payload, status=status.HTTP_201_CREATED)
 
     def _cleanup_registration_artifacts(
@@ -1858,8 +1906,7 @@ class CompanyRegistrationStatusView(APIView):
     throttle_scope = "company_registration"
 
     def get(self, request):
-        if not getattr(settings, "PUBLIC_TENANT_REGISTRATION_ENABLED", False):
-            raise Http404
+        CompanyRegisterView._enforce_registration_access(request)
 
         from django.db import connection
 

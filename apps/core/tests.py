@@ -24,7 +24,7 @@ from apps.core.session_tokens import (
     bind_token_to_user,
     token_matches_user_session,
 )
-from apps.core.views import CompanyViewSet, RoleAccessPolicyViewSet, TenantViewSet, UserViewSet
+from apps.core.views import CompanyRegisterView, CompanyViewSet, RoleAccessPolicyViewSet, TenantViewSet, UserViewSet
 from apps.notifications.services.lead_alert_service import build_lead_alert_message
 from apps.superadmin.permissions import IsSuperAdmin
 
@@ -572,6 +572,52 @@ class StaffAccountSecurityTests(SimpleTestCase):
         user = User(role="technician", is_staff=False)
 
         self.assertFalse(user.is_staff_member)
+
+
+class PlatformTenantRegistrationAccessTests(SimpleTestCase):
+    @patch("apps.core.views.get_public_schema_name", return_value="public")
+    @patch("apps.core.views.connection")
+    def test_public_schema_superadmin_can_use_selfie_registration(self, db_connection, _public_schema):
+        db_connection.schema_name = "public"
+        request = SimpleNamespace(user=SimpleNamespace(
+            is_authenticated=True,
+            is_active=True,
+            is_superuser=True,
+        ))
+
+        self.assertTrue(CompanyRegisterView._platform_operator_can_register(request))
+
+    @patch("apps.core.views.get_public_schema_name", return_value="public")
+    @patch("apps.core.views.connection")
+    def test_authorized_support_operator_can_use_selfie_registration(self, db_connection, _public_schema):
+        db_connection.schema_name = "public"
+        request = SimpleNamespace(user=SimpleNamespace(
+            is_authenticated=True,
+            is_active=True,
+            is_superuser=False,
+            platform_support_profile=SimpleNamespace(
+                is_active=True,
+                can_register_tenants=True,
+            ),
+        ))
+
+        self.assertTrue(CompanyRegisterView._platform_operator_can_register(request))
+
+    @patch("apps.core.views.get_public_schema_name", return_value="public")
+    @patch("apps.core.views.connection")
+    def test_support_without_registration_grant_is_rejected(self, db_connection, _public_schema):
+        db_connection.schema_name = "public"
+        request = SimpleNamespace(user=SimpleNamespace(
+            is_authenticated=True,
+            is_active=True,
+            is_superuser=False,
+            platform_support_profile=SimpleNamespace(
+                is_active=True,
+                can_register_tenants=False,
+            ),
+        ))
+
+        self.assertFalse(CompanyRegisterView._platform_operator_can_register(request))
 
 
 class RoleAccessBootstrapTests(SimpleTestCase):

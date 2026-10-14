@@ -5,8 +5,9 @@ from django.db.models import Q
 from django.utils import timezone
 from django.utils.dateparse import parse_datetime
 from django_tenants.utils import get_public_schema_name, schema_context
+from ipaddress import ip_address
 
-from apps.core.models import Tenant, User
+from apps.core.models import AuditLog, Tenant, User
 from apps.subscriptions.system_accounts import SYSTEM_BILLING_EMAIL, get_tenant_billing_customer
 
 
@@ -43,6 +44,15 @@ class Command(BaseCommand):
             help="Hide accounts without a detected consistency or privilege warning.",
         )
         parser.add_argument(
+            "--source-ip",
+            action="append",
+            default=[],
+            help=(
+                "Show tenant audit events recorded for this source IP. Repeat for several IPs. "
+                "This is read-only and is useful for incident correlation."
+            ),
+        )
+        parser.add_argument(
             "--repair-flags",
             action="store_true",
             help="Remove unsafe customer flags and repair missing tenant identity. Never grants access.",
@@ -75,6 +85,7 @@ class Command(BaseCommand):
         approved_staff_emails = {
             value.strip().lower() for value in options["approve_staff_email"] if value.strip()
         }
+        source_ips = self._parse_source_ips(options["source_ip"])
         if approved_staff_emails and not tenant_selectors:
             raise CommandError("--approve-staff-email requires at least one explicit --tenant.")
 
@@ -90,7 +101,14 @@ class Command(BaseCommand):
         if not tenants:
             raise CommandError("No matching tenants were found.")
 
-        totals = {"tenants": 0, "accounts": 0, "warnings": 0, "repaired": 0, "deactivated": 0}
+        totals = {
+            "tenants": 0,
+            "accounts": 0,
+            "warnings": 0,
+            "repaired": 0,
+            "deactivated": 0,
+            "source_events": 0,
+        }
         for tenant in tenants:
             try:
                 result = self._audit_tenant(
@@ -102,12 +120,13 @@ class Command(BaseCommand):
                     approved_staff_emails=approved_staff_emails,
                     normalize_system_accounts=options["normalize_system_accounts"],
                     deactivate_emails=deactivate_emails,
+                    source_ips=source_ips,
                 )
             except DatabaseError as exc:
                 self.stderr.write(f"{tenant.schema_name}: skipped ({exc})")
                 continue
             totals["tenants"] += 1
-            for key in ("accounts", "warnings", "repaired", "deactivated"):
+            for key in ("accounts", "warnings", "repaired", "deactivated", "source_events"):
                 totals[key] += result[key]
 
         self.stdout.write(
@@ -115,7 +134,7 @@ class Command(BaseCommand):
                 "Staff audit complete: "
                 f"tenants={totals['tenants']} accounts={totals['accounts']} "
                 f"warnings={totals['warnings']} repaired={totals['repaired']} "
-                f"deactivated={totals['deactivated']}"
+                f"deactivated={totals['deactivated']} source_events={totals['source_events']}"
             )
         )
 
@@ -130,8 +149,15 @@ class Command(BaseCommand):
         approved_staff_emails,
         normalize_system_accounts,
         deactivate_emails,
+        source_ips,
     ):
-        counters = {"accounts": 0, "warnings": 0, "repaired": 0, "deactivated": 0}
+        counters = {
+            "accounts": 0,
+            "warnings": 0,
+            "repaired": 0,
+            "deactivated": 0,
+            "source_events": 0,
+        }
         company_name = getattr(getattr(tenant, "company", None), "name", None)
 
         with schema_context(tenant.schema_name):
@@ -231,6 +257,28 @@ class Command(BaseCommand):
                     f"trusted={user.dashboard_role_is_trusted} created={created} warnings={warning_text}"
                 )
 
+            if source_ips:
+                events = list(
+                    AuditLog.objects.filter(ip_address__in=source_ips)
+                    .select_related("user")
+                    .order_by("timestamp", "id")
+                )
+                if events:
+                    self.stdout.write(f"  Source-IP audit events: {len(events)}")
+                for event in events:
+                    actor = getattr(event.user, "email", None) or "anonymous"
+                    occurred = (
+                        timezone.localtime(event.timestamp).isoformat()
+                        if event.timestamp
+                        else "unknown"
+                    )
+                    self.stdout.write(
+                        f"  - at={occurred} ip={event.ip_address} actor={actor} "
+                        f"action={event.action} model={event.model_name} "
+                        f"object_id={event.object_id or '-'} object={event.object_repr or '-'}"
+                    )
+                counters["source_events"] += len(events)
+
         return counters
 
     @staticmethod
@@ -286,4 +334,17 @@ class Command(BaseCommand):
             raise CommandError("--since must be an ISO-8601 timestamp.")
         if timezone.is_naive(parsed):
             parsed = timezone.make_aware(parsed, timezone.get_current_timezone())
+        return parsed
+
+    @staticmethod
+    def _parse_source_ips(values):
+        parsed = set()
+        for value in values or []:
+            candidate = str(value or "").strip()
+            if not candidate:
+                continue
+            try:
+                parsed.add(str(ip_address(candidate)))
+            except ValueError as exc:
+                raise CommandError(f"Invalid --source-ip value: {candidate}") from exc
         return parsed

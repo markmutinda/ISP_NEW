@@ -8,7 +8,7 @@ Status: Persistence indicators confirmed; code fixes prepared; production cleanu
 
 The activity was not a harmless website scan. A remote actor used the public registration endpoint to create accounts, received valid sessions, changed a profile, explored protected APIs, and used the registration flow that led to unauthorized tenant creation.
 
-The supplied Nginx log does **not** show a successful staff-management request. It does, however, show successful public registrations. Production UI evidence now confirms matching unauthorized administrator accounts inside more than one existing tenant. The most likely path is the old public `/core/auth/register/` endpoint: it accepted a client-supplied `role="admin"` while creating an account without the server-issued staff or superuser flags. Permission checks then trusted the role string by itself.
+The supplied Nginx log does **not** show a successful staff-management request. It does, however, show two successful public dashboard registrations, two successful customer self-registrations, and a successful self-profile update. Production UI evidence now confirms matching unauthorized administrator accounts inside more than one existing tenant. The most likely path is the old public `/core/auth/register/` endpoint: it accepted a client-supplied `role="admin"` while creating an account without the server-issued staff or superuser flags. Permission checks then trusted the role string by itself.
 
 The repeated accounts `lpen02@yopmail.com`, `atkloopenet@yopmail.com`, `dpen02@yopmail.com`, and `atkdantenet@yopmail.com` are strong scripted-persistence indicators. They must be disabled after the deployment audit confirms their exact tenant schemas.
 
@@ -27,8 +27,14 @@ All Nginx timestamps below are UTC. Kenya time is three hours later.
 | 12 Oct 22:43:29-31 | 13 Oct 01:43:29-31 | Attempts to retrieve other user IDs returned `403`. |
 | 12 Oct 22:43:33 | 13 Oct 01:43:33 | User listing returned `403`; dashboard access returned `200`. |
 | 12 Oct 22:44:03 | 13 Oct 01:44:03 | The actor changed their own profile successfully. |
+| 12 Oct 22:46:37 | 13 Oct 01:46:37 | Customer self-registration returned `201`. |
+| 12 Oct 22:46:47 | 13 Oct 01:46:47 | A second customer self-registration returned `201`. |
+| 12 Oct 22:46:59-47:27 | 13 Oct 01:46:59-01:47:27 | The customer session accessed its own profile, invoices, payments, dashboard, online status, and usage. |
 | 12 Oct 22:47:30 | 13 Oct 01:47:30 | A second public registration returned `201`. |
 | 12 Oct 22:47:44 | 13 Oct 01:47:44 | Company and user listings returned `403`. |
+| 12 Oct 22:47:45 | 13 Oct 01:47:45 | The second forged dashboard identity reached empty router and RADIUS collection responses (`200`, 24 and 52 bytes). |
+| 12 Oct 22:48:51-49:15 | 13 Oct 01:48:51-01:49:15 | The actor tested captive-portal parameters for SSRF, traversal, and SQL injection. |
+| 12 Oct 22:49:46-50:06 | 13 Oct 01:49:46-01:50:06 | The actor posted malformed or unmatched payloads to M-Pesa callback aliases. |
 
 The wider incident evidence also identified unauthorized tenants named `kibera-fiber`, `pentest-2`, and `pentest-limited-1`. Those records should remain incident indicators even if they have already been purged.
 
@@ -45,9 +51,35 @@ Production Staff & Access evidence additionally showed:
 ## What is not confirmed
 
 - No supplied line shows a successful `POST /api/v1/core/users/`; the unauthorized administrators were most likely created through the vulnerable public registration endpoint instead of the authenticated staff endpoint.
+- Nginx recorded two successful dashboard registrations but the Staff & Access evidence contains four suspicious addresses. The access log alone cannot prove which address belongs to each `201`, or whether two accounts were created outside this retained log window.
 - Kelvin Ndungu in the supplied audit history is a PPPoE customer login, not a staff login.
 - There is no evidence in the supplied window that existing tenant customer data was read successfully.
-- Nginx access logs alone cannot identify roles or tenant ownership from a successful registration because they do not record the JSON request body.
+- Nginx access logs alone cannot identify roles, emails, tenant ownership, or the tenant hostname from a successful registration because the current format does not record the JSON body or `$host`.
+- The `200` callback responses do not show a payment being completed. The response size matches the generic `Accepted` acknowledgement, and payment mutation requires a matching stored checkout request.
+
+## Additional findings from the full log
+
+### Forged dashboard access
+
+The first registered identity could open the small dashboard summary and its own profile, but user, company, customer, router, RADIUS, payment, and M-Pesa configuration requests returned `403`. The second registered identity could additionally list routers and RADIUS credentials. Both responses were very small and are consistent with empty paginated collections, not evidence that router secrets or customer passwords were returned. This nevertheless confirms that trusting a client-supplied role exposed authenticated dashboard surfaces.
+
+The new authentication policy rejects every dashboard role that lacks a server-issued `is_staff` flag. This applies when an existing JWT is used, so merely keeping an old token does not preserve access after deployment.
+
+### Customer self-registration
+
+Two `/self-service/register/` calls returned `201`. Those accounts could access only their own self-service records; attempts to enumerate customer IDs returned `403`. This is separate from staff persistence. Customer registration is an intended tenant feature and is already throttled, but the two records should still be reviewed and removed if they do not belong to real customers.
+
+### M-Pesa callback probes
+
+The callback endpoints must remain public so Safaricom can reach them. The probed payloads received the generic acknowledgement used for malformed, failed, or unmatched callbacks. The handler only completes a payment after an existing `CheckoutRequestID` is found. No supplied log line proves a payment, invoice, service, or hotspot session changed. Payment and M-Pesa transaction records around 13 October 01:49 EAT should still be checked for defence in depth.
+
+### Captive portal probes
+
+The captive-portal code treats `router` as a database identifier or router name. It does not fetch the supplied URL, open local files, or execute the tenant string, so the `169.254.169.254`, `127.0.0.1`, and `file:///etc/passwd` probes are not evidence of SSRF or file disclosure. Identical 254-byte responses came from the fallback portal payload. Invalid tenant values mostly returned `400`; one null-byte request caused a `500` and should be treated as input-hardening work, not confirmed data access.
+
+### Availability and reconnaissance
+
+The source used curl and Nmap scripts to enumerate API, auth, VPN, source-control, documentation, XSS, SQL injection, and traversal paths. The repeated tenant requests hit the known permission bug and produced `500` responses. Upstream `502` responses show the application container was unavailable briefly, but the access log does not establish that the scan caused the restart or outage.
 
 ## Root causes
 
@@ -91,6 +123,16 @@ Focus on accounts created around the incident:
 docker exec -it netily_backend python manage.py audit_tenant_staff_accounts \
   --since 2026-10-12T21:00:00Z
 ```
+
+Correlate the source IP with audit events in every tenant schema:
+
+```bash
+docker exec -it netily_backend python manage.py audit_tenant_staff_accounts \
+  --since 2026-10-12T21:00:00Z \
+  --source-ip 206.168.173.191
+```
+
+This is read-only. It can reveal the exact email and tenant when an action wrote an `AuditLog`. A missing row does not clear an account because the retired public dashboard registration path did not reliably record every registration event.
 
 Show only records with detected privilege or consistency warnings:
 
@@ -174,8 +216,11 @@ Then verify with a normal tenant administrator:
 ## Remaining operational actions
 
 - Review all accounts created from 12 October 2026 onward, not only names containing `pentest`.
+- Review and remove the two customer self-registration records created at approximately 13 October 01:46:37 and 01:46:47 EAT if they are not legitimate.
 - Search every tenant for additional non-superuser `admin` accounts and repeated Yopmail naming patterns.
+- Compare M-Pesa transaction and payment update timestamps around 13 October 01:49-01:50 EAT; the current evidence indicates no match, but the database is authoritative.
 - Preserve Nginx, Django, database, and audit logs for the incident window before log rotation.
 - Reset passwords for any principal administrator whose credentials may have been exposed.
 - Keep the public registration route blocked at both Nginx and Django.
 - Add alerts for public registration attempts, repeated `403` enumeration, cross-tenant ownership input, and tenant creation outside the approved superadmin workflow.
+- Change the Nginx security log format to include `$host`, request time, upstream status, and a request ID. Do not log authorization headers, passwords, tokens, or full request bodies.
