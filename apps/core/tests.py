@@ -1,5 +1,6 @@
 from django.core import mail
 from django.core.cache import cache
+from django.http import Http404
 from django.test import SimpleTestCase, TestCase, override_settings
 from django.utils import timezone
 from datetime import timedelta
@@ -24,7 +25,14 @@ from apps.core.session_tokens import (
     bind_token_to_user,
     token_matches_user_session,
 )
-from apps.core.views import CompanyRegisterView, CompanyViewSet, RoleAccessPolicyViewSet, TenantViewSet, UserViewSet
+from apps.core.views import (
+    CompanyRegisterView,
+    CompanyViewSet,
+    PlatformCompanyRegisterView,
+    RoleAccessPolicyViewSet,
+    TenantViewSet,
+    UserViewSet,
+)
 from apps.notifications.services.lead_alert_service import build_lead_alert_message
 from apps.superadmin.permissions import IsSuperAdmin
 
@@ -575,6 +583,13 @@ class StaffAccountSecurityTests(SimpleTestCase):
 
 
 class PlatformTenantRegistrationAccessTests(SimpleTestCase):
+    @override_settings(PUBLIC_TENANT_REGISTRATION_ENABLED=True)
+    def test_dashboard_registration_never_allows_anonymous_access(self):
+        request = SimpleNamespace(user=SimpleNamespace(is_authenticated=False))
+
+        with self.assertRaises(Http404):
+            PlatformCompanyRegisterView._enforce_registration_access(request)
+
     @patch("apps.core.views.get_public_schema_name", return_value="public")
     @patch("apps.core.views.connection")
     def test_public_schema_superadmin_can_use_selfie_registration(self, db_connection, _public_schema):

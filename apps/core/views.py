@@ -1962,6 +1962,25 @@ class CompanyRegistrationStatusView(APIView):
         )
 
 
+class PlatformCompanyRegisterView(CompanyRegisterView):
+    """Dashboard-only tenant provisioning, independent of public signup flags."""
+
+    @classmethod
+    def _enforce_registration_access(cls, request):
+        if not getattr(getattr(request, "user", None), "is_authenticated", False):
+            raise Http404
+        if not cls._platform_operator_can_register(request):
+            raise PermissionDenied("Tenant registration permission is required.")
+
+
+class PlatformCompanyRegistrationStatusView(CompanyRegistrationStatusView):
+    """Dashboard-only status lookup for the tenant provisioning workflow."""
+
+    def get(self, request):
+        PlatformCompanyRegisterView._enforce_registration_access(request)
+        return super().get(request)
+
+
 class PlatformChangelogView(APIView):
     """
     Read-only view for ISPs to see platform updates.

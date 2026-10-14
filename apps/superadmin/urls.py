@@ -6,6 +6,11 @@ All endpoints live under /api/v1/superadmin/
 
 from django.urls import path
 
+from apps.core.views import (
+    PlatformCompanyRegistrationStatusView,
+    PlatformCompanyRegisterView,
+)
+
 from . import views
 from .financial_csv import FinancialCSVView
 from . import support_views
@@ -23,6 +28,12 @@ urlpatterns = [
 
     # Tenant CRUD
     path("tenants/", views.TenantListView.as_view(), name="tenant-list"),
+    path("tenants/register/", PlatformCompanyRegisterView.as_view(), name="tenant-register"),
+    path(
+        "tenants/register/status/",
+        PlatformCompanyRegistrationStatusView.as_view(),
+        name="tenant-register-status",
+    ),
     path("tenants/create/", views.TenantCreateView.as_view(), name="tenant-create"),
     path("tenants/role-access/normalize/", views.TenantRoleAccessNormalizeView.as_view(), name="tenant-role-access-normalize"),
     path("tenants/<uuid:pk>/", views.TenantDetailView.as_view(), name="tenant-detail"),
