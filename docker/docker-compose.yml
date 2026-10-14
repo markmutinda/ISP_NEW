@@ -352,6 +352,7 @@ services:
     environment:
       - NODE_ENV=production
       - NEXT_TELEMETRY_DISABLED=1
+      - API_INTERNAL_URL=http://web:8000
     depends_on:
       - web
     deploy:
