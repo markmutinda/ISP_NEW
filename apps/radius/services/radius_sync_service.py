@@ -256,13 +256,23 @@ class RadiusSyncService:
         logger.info(f"Disabled RADIUS user: {username} - {reason}")
         return True
 
-    def _queue_router_kick(self, username: str) -> None:
-        from ..models import RadAcct
-        sessions = [
-            (str(ip), sid) for ip, sid in
-            RadAcct.objects.filter(username=username, acctstoptime__isnull=True)
-            .values_list('nasipaddress', 'acctsessionid')
-        ]
+    def _queue_router_kick(self, username: str, sessions: List[tuple] = None) -> None:
+        """
+        Queue a CoA/Disconnect-Request against the NAS for the given user's
+        live sessions.
+
+        Must be called WHILE the radacct rows are still open, otherwise we
+        can't read nasipaddress + acctsessionid to target the kick.
+
+        If `sessions` is not supplied, we snapshot the open rows here.
+        """
+        if sessions is None:
+            from ..models import RadAcct
+            sessions = [
+                (str(ip), sid) for ip, sid in
+                RadAcct.objects.filter(username=username, acctstoptime__isnull=True)
+                .values_list('nasipaddress', 'acctsessionid')
+            ]
         if not sessions:
             return
         schema = self._get_tenant_schema()
@@ -277,7 +287,14 @@ class RadiusSyncService:
         transaction.on_commit(_go)
     
     def disconnect_user(self, username: str) -> int:
-        """Disconnect a RADIUS user by terminating active sessions in tenant schema."""
+        """
+        Disconnect a RADIUS user by terminating active sessions in tenant schema.
+
+        IMPORTANT: A Disconnect-Request is queued against the NAS *before* we
+        mark the rows closed. Previously we only flipped acctstoptime in the DB,
+        which left the PPPoE session alive on the MikroTik while the panel
+        reported the user as offline ("Offline but really online").
+        """
         from ..models import RadAcct
         
         now = timezone.now()
@@ -289,12 +306,26 @@ class RadiusSyncService:
         )
         count = active_sessions.count()
         if count > 0:
+            # Snapshot (nasipaddress, acctsessionid) BEFORE the update closes the rows,
+            # otherwise the kick task has nothing to target.
+            sessions_snapshot = [
+                (str(ip), sid) for ip, sid in
+                active_sessions.values_list('nasipaddress', 'acctsessionid')
+            ]
+
             active_sessions.update(
                 acctstoptime=now,
                 acctterminatecause='Admin-Reset'
             )
             terminated += count
-            logger.info(f"Terminated {count} active session(s) in tenant schema for: {username}")
+
+            # Queue the router-side kick. Runs on transaction commit.
+            self._queue_router_kick(username, sessions_snapshot)
+
+            logger.info(
+                f"Terminated {count} active session(s) in tenant schema for: {username} "
+                f"(kick queued for {len(sessions_snapshot)} session(s))"
+            )
         
         return terminated
     
