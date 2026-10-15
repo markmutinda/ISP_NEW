@@ -1905,8 +1905,12 @@ class CompanyRegistrationStatusView(APIView):
     permission_classes = [AllowAny]
     throttle_scope = "company_registration"
 
-    def get(self, request):
+    @staticmethod
+    def _enforce_registration_access(request):
         CompanyRegisterView._enforce_registration_access(request)
+
+    def get(self, request):
+        self._enforce_registration_access(request)
 
         from django.db import connection
 
@@ -1964,21 +1968,21 @@ class CompanyRegistrationStatusView(APIView):
 
 class PlatformCompanyRegisterView(CompanyRegisterView):
     """Dashboard-only tenant provisioning, independent of public signup flags."""
+    permission_classes = [IsAuthenticated]
 
     @classmethod
     def _enforce_registration_access(cls, request):
-        if not getattr(getattr(request, "user", None), "is_authenticated", False):
-            raise Http404
         if not cls._platform_operator_can_register(request):
             raise PermissionDenied("Tenant registration permission is required.")
 
 
 class PlatformCompanyRegistrationStatusView(CompanyRegistrationStatusView):
     """Dashboard-only status lookup for the tenant provisioning workflow."""
+    permission_classes = [IsAuthenticated]
 
-    def get(self, request):
+    @staticmethod
+    def _enforce_registration_access(request):
         PlatformCompanyRegisterView._enforce_registration_access(request)
-        return super().get(request)
 
 
 class PlatformChangelogView(APIView):

@@ -1,6 +1,5 @@
 from django.core import mail
 from django.core.cache import cache
-from django.http import Http404
 from django.test import SimpleTestCase, TestCase, override_settings
 from django.utils import timezone
 from datetime import timedelta
@@ -29,6 +28,7 @@ from apps.core.views import (
     CompanyRegisterView,
     CompanyViewSet,
     PlatformCompanyRegisterView,
+    PlatformCompanyRegistrationStatusView,
     RoleAccessPolicyViewSet,
     TenantViewSet,
     UserViewSet,
@@ -585,10 +585,47 @@ class StaffAccountSecurityTests(SimpleTestCase):
 class PlatformTenantRegistrationAccessTests(SimpleTestCase):
     @override_settings(PUBLIC_TENANT_REGISTRATION_ENABLED=True)
     def test_dashboard_registration_never_allows_anonymous_access(self):
-        request = SimpleNamespace(user=SimpleNamespace(is_authenticated=False))
+        factory = APIRequestFactory()
 
-        with self.assertRaises(Http404):
-            PlatformCompanyRegisterView._enforce_registration_access(request)
+        create_response = PlatformCompanyRegisterView.as_view()(
+            factory.post("/api/v1/superadmin/tenants/register/", {}, format="json")
+        )
+        status_response = PlatformCompanyRegistrationStatusView.as_view()(
+            factory.get("/api/v1/superadmin/tenants/register/status/")
+        )
+
+        self.assertEqual(create_response.status_code, 401)
+        self.assertEqual(status_response.status_code, 401)
+
+    @patch("apps.core.views.get_public_schema_name", return_value="public")
+    @patch("apps.core.views.connection")
+    def test_authenticated_superadmin_reaches_registration_validation(self, db_connection, _public_schema):
+        db_connection.schema_name = "public"
+        user = User(email="owner@example.com", is_active=True, is_superuser=True)
+        request = APIRequestFactory().post(
+            "/api/v1/superadmin/tenants/register/", {}, format="json"
+        )
+        force_authenticate(request, user=user)
+
+        response = PlatformCompanyRegisterView.as_view()(request)
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("company_name", response.data)
+
+    @override_settings(PUBLIC_TENANT_REGISTRATION_ENABLED=False)
+    @patch("apps.core.views.get_public_schema_name", return_value="public")
+    @patch("apps.core.views.connection")
+    @patch("django.db.connection")
+    def test_authenticated_superadmin_can_check_registration_status(self, _django_connection, db_connection, _public_schema):
+        db_connection.schema_name = "public"
+        user = User(email="owner@example.com", is_active=True, is_superuser=True)
+        request = APIRequestFactory().get("/api/v1/superadmin/tenants/register/status/")
+        force_authenticate(request, user=user)
+
+        response = PlatformCompanyRegistrationStatusView.as_view()(request)
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("company_name and company_email are required", response.data["detail"])
 
     @patch("apps.core.views.get_public_schema_name", return_value="public")
     @patch("apps.core.views.connection")
