@@ -890,8 +890,7 @@ class Payment(models.Model):
     amount = models.DecimalField(max_digits=12, decimal_places=2, validators=[MinValueValidator(0.01)])
     transaction_fee = models.DecimalField(max_digits=12, decimal_places=2, default=0)
     net_amount = models.DecimalField(max_digits=12, decimal_places=2, default=0)
-    # FIX: Changed default to empty string to allow currency derivation from tenant
-    currency = models.CharField(max_length=3, default='')  # was default='KES'
+    # FIX: Changed default to empty string to allow currency derivation from tenant    currency = models.CharField(max_length=3, default='')  # was default='KES'
 
     # 🔧 FIX: Changed from PROTECT to SET_NULL to allow payment method deletion while preserving payment history
     payment_method = models.ForeignKey(
@@ -943,7 +942,7 @@ class Payment(models.Model):
     tuma_result_desc = models.TextField(blank=True)
     tuma_callback_payload = models.JSONField(null=True, blank=True)
 
-    iotec_transaction_id = models.CharField(max_length=64, blank=True)
+    iotec_transaction_id = models.CharField(max_length=64, blank=True, null=True)
 
     schema_name = models.SlugField(
         max_length=63,

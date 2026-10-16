@@ -16,7 +16,7 @@ class Migration(migrations.Migration):
         migrations.AddField(
             model_name='payment',
             name='iotec_transaction_id',
-            field=models.CharField(blank=True, max_length=64),
+            field=models.CharField(blank=True, max_length=64, null=True),
         ),
         migrations.AlterField(
             model_name='invoiceitempayment',
