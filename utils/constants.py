@@ -669,7 +669,8 @@ COUNTRY_PAYMENT_METHODS = {
         'VOUCHER',
     ],
     'UG': [
-        'MOBILE_MONEY',   # MTN MoMo/Airtel Money
+        'IOTEC_MOMO',     # iotec: MTN MoMo / Airtel Money
+        'MOBILE_MONEY',
         'BANK_TRANSFER',
         'CASH',
         'VOUCHER',

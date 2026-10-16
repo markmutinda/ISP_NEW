@@ -4,7 +4,7 @@ from django.utils import timezone
 from decimal import Decimal
 from django.core.exceptions import ValidationError
 from django.db.models import Sum
-from ..models.payment_models import MpesaConfiguration, MpesaTransaction, Payment, Receipt, InvoiceItemPayment
+from ..models.payment_models import MpesaConfiguration, MpesaTransaction, Payment, Receipt, InvoiceItemPayment, IotecConfiguration
 
 from customers.serializers import CustomerSerializer
 from ..serializers.invoice_serializers import InvoiceSerializer
@@ -255,14 +255,14 @@ class PaymentMethodSerializer(serializers.ModelSerializer):
         model = InvoiceItemPayment
         fields = [
             'id', 'name', 'code', 'method_type', 'description',
-            'mpesa_configuration', 'mpesa_configuration_details',
+            'mpesa_configuration', 'mpesa_configuration_details', 'iotec_configuration',
             'till_number', 'paybill_number', 'account_number', 'bank_name', 'custom_link', 'is_default',
             'is_active', 'requires_confirmation', 'confirmation_timeout',
             'transaction_fee', 'fee_type', 'minimum_amount', 'maximum_amount',
             'integration_class', 'config_json', 'status', 'last_used',
             'created_by_name', 'created_at', 'updated_at'
         ]
-        read_only_fields = ['created_at', 'updated_at', 'last_used']
+        read_only_fields = ['created_at', 'updated_at', 'last_used', 'iotec_configuration']
 
     # ═════════════════════════════════════════════════════════════════
     # VALIDATE METHOD - FRONTEND BRIDGING INTERCEPTOR
@@ -736,3 +736,46 @@ class ReceiptListSerializer(serializers.ModelSerializer):
             'id', 'receipt_number', 'customer', 'customer_name', 'payment', 
             'payment_number', 'amount', 'status', 'receipt_date'
         ]
+
+
+class IotecConfigurationSerializer(serializers.ModelSerializer):
+    client_secret = serializers.CharField(write_only=True, required=False, trim_whitespace=True)
+    has_client_secret = serializers.SerializerMethodField()
+
+    class Meta:
+        model = IotecConfiguration
+        fields = [
+            'id', 'name', 'client_id', 'client_secret', 'has_client_secret', 'wallet_id',
+            'is_sandbox', 'transaction_charges_category', 'is_active',
+            'last_validated_at', 'validation_status', 'validation_error',
+            'created_at', 'updated_at',
+        ]
+        read_only_fields = ['id', 'last_validated_at', 'validation_status',
+                            'validation_error', 'created_at', 'updated_at']
+
+    def get_has_client_secret(self, obj):
+        return bool(obj.client_secret_encrypted)
+
+    def validate_client_id(self, value):
+        value = value.strip()
+        if not value:
+            raise serializers.ValidationError("Client ID is required")
+        return value
+
+    def validate(self, attrs):
+        if not self.instance and not attrs.get('client_secret'):
+            raise serializers.ValidationError({'client_secret': 'Client secret is required'})
+        return attrs
+
+    def create(self, validated_data):
+        secret = validated_data.pop('client_secret')
+        instance = IotecConfiguration(**validated_data)
+        instance.set_client_secret(secret)
+        instance.save()
+        return instance
+
+    def update(self, instance, validated_data):
+        secret = validated_data.pop('client_secret', None)
+        if secret:
+            instance.set_client_secret(secret)
+        return super().update(instance, validated_data)

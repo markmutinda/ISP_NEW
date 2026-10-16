@@ -371,6 +371,12 @@ app.conf.beat_schedule = {
         'schedule': crontab(hour=8, minute=15),  # Daily at 8:15 AM
         'options': {'queue': 'billing'}
     },
+
+    'reconcile-pending-iotec-payments-every-2-min': {
+        'task': 'apps.billing.tasks.reconcile_pending_iotec_payments',
+        'schedule': crontab(minute='*/2'),
+        'options': {'queue': 'billing'}
+    },
 }
 
 # ════════════════════════════════════════════════════════════════════════════

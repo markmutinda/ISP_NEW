@@ -48,6 +48,11 @@ from .views.webhook_views import (
 )
 
 # ==========================
+# iotec URLs (Uganda mobile money)
+# ==========================
+from .views.iotec_views import IotecConfigurationViewSet
+
+# ==========================
 # Tuma URLs (New Payment Gateway)
 # ==========================
 from .views.tuma_views import (
@@ -116,6 +121,9 @@ router.register(r'payments', PaymentViewSet, basename='payment')
 # M-Pesa Configuration URLs
 router.register(r'mpesa-config', MpesaConfigurationViewSet, basename='mpesa-config')
 router.register(r'mpesa-transactions', MpesaTransactionViewSet, basename='mpesa-transaction')
+
+# iotec Configuration URLs
+router.register(r'iotec-config', IotecConfigurationViewSet, basename='iotec-config')
 
 # Voucher URLs
 router.register(r'voucher-batches', VoucherBatchViewSet, basename='voucher-batch')

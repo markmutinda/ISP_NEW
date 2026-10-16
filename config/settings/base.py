@@ -171,8 +171,6 @@ TENANT_COLOR_ADMIN_APPS = False
 TENANT_LIMIT_ADMIN_ACCESS = True
 SHOW_PUBLIC_IF_NO_TENANT_FOUND = True
 
-
-
 # ────────────────────────────────────────────────────────────────
 #  DATABASE
 # ────────────────────────────────────────────────────────────────
@@ -367,7 +365,6 @@ CORS_ALLOW_METHODS = [
 if DEBUG:
     CORS_ALLOW_ALL_ORIGINS = True  # ← Add this line for dev - REM
 
-
 # ────────────────────────────────────────────────────────────────
 #  EMAIL (development)
 # ────────────────────────────────────────────────────────────────
@@ -475,7 +472,6 @@ NOTIFICATION_SETTINGS = {
     },
 }
 
-
 # Email is configured above via .env — Gmail SMTP is the sole provider
 
 AFRICASTALKING_USERNAME = os.getenv('AFRICASTALKING_USERNAME', 'sandbox')
@@ -578,6 +574,12 @@ NETILY_SUBSCRIPTION_PAYBILL_CALLBACK = os.getenv(
     'https://api.netily.co.ke/api/v1/webhooks/netily-paybill/subscription-callback/',
 )
 
+# ── iotec (Uganda mobile money) ──
+IOTEC_API_BASE_URL = os.getenv('IOTEC_API_BASE_URL', 'https://pay.iotec.io')
+IOTEC_TOKEN_URL = os.getenv('IOTEC_TOKEN_URL', 'https://id.iotec.io/connect/token')
+IOTEC_TOKEN_SCOPE = os.getenv('IOTEC_TOKEN_SCOPE', '')          # leave blank unless iotec requires a scope
+IOTEC_ENCRYPTION_KEY = os.getenv('IOTEC_ENCRYPTION_KEY', '')    # Fernet key; falls back to a SECRET_KEY-derived key
+
 # NETILY SYSTEM PAYMENT SIMULATOR
 # Disabled by default and isolated from subscription/payment ledgers.
 NETILY_SYSTEM_PAYMENT_SIMULATOR_ENABLED = os.getenv("NETILY_SYSTEM_PAYMENT_SIMULATOR_ENABLED", "False")
@@ -598,7 +600,6 @@ WG_SERVER_PUBLIC_KEY = os.environ.get('WG_SERVER_PUBLIC_KEY', '')
 WG_INTERFACE         = os.environ.get('WG_INTERFACE', 'wg0')
 WG_PEERS_DIR         = os.environ.get('WG_PEERS_DIR', '/etc/wireguard/peers')
 
-
 # ────────────────────────────────────────────────────────────────
 #  TR-069 / GenieACS
 # ────────────────────────────────────────────────────────────────
@@ -609,7 +610,6 @@ TR069_CONNECTION_REQUEST_TIMEOUT = int(os.environ.get('TR069_CONNECTION_REQUEST_
 TR069_RECOMMENDED_INFORM_INTERVAL = 300
 TR069_OFFLINE_AFTER_SECONDS = 900  # 3 missed 5-min check-ins → not_answering
 TR069_WEAK_SIGNAL_DBM = -27
-
 
 # ────────────────────────────────────────────────────────────────
 #  TELEGRAM NOTIFICATIONS

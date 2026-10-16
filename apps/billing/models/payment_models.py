@@ -11,6 +11,11 @@ from apps.core.models import Company, AuditMixin
 from .billing_models import Invoice
 from django.conf import settings
 
+import base64
+import hashlib
+from cryptography.fernet import Fernet, InvalidToken
+from django.core.cache import cache
+
 
 class MpesaConfiguration(AuditMixin):
     """
@@ -651,10 +656,78 @@ class TenantTumaConfig(models.Model):
         }
 
 
+def _iotec_fernet():
+    key = getattr(settings, 'IOTEC_ENCRYPTION_KEY', '') or ''
+    if not key:
+        key = base64.urlsafe_b64encode(
+            hashlib.sha256(settings.SECRET_KEY.encode()).digest()
+        ).decode()
+    return Fernet(key.encode())
+
+
+class IotecConfiguration(AuditMixin):
+    """Tenant-owned iotec Pay credentials (Uganda mobile money). Money lands in the tenant's own wallet."""
+    CHARGE_CHOICES = [
+        ('ChargeWallet', 'Tenant absorbs iotec fees'),
+        ('ChargeCustomer', 'Customer pays iotec fees on top'),
+    ]
+
+    schema_name = models.SlugField(max_length=63, editable=False)
+    name = models.CharField(max_length=100, default='iotec Mobile Money')
+    client_id = models.CharField(max_length=255)
+    client_secret_encrypted = models.TextField()
+    wallet_id = models.UUIDField()
+    is_sandbox = models.BooleanField(default=True, help_text="Sandbox uses currency ITX")
+    transaction_charges_category = models.CharField(
+        max_length=20, choices=CHARGE_CHOICES, default='ChargeWallet'
+    )
+    is_active = models.BooleanField(default=False)
+
+    last_validated_at = models.DateTimeField(null=True, blank=True)
+    validation_status = models.CharField(
+        max_length=20,
+        choices=[('PENDING', 'Pending'), ('VALID', 'Valid'), ('INVALID', 'Invalid')],
+        default='PENDING',
+    )
+    validation_error = models.TextField(blank=True)
+
+    class Meta:
+        verbose_name = 'iotec Configuration'
+        verbose_name_plural = 'iotec Configurations'
+        indexes = [models.Index(fields=['schema_name', 'is_active'])]
+        unique_together = [['schema_name', 'wallet_id']]
+
+    def __str__(self):
+        env = 'Sandbox' if self.is_sandbox else 'Live'
+        return f"iotec {env} wallet {self.wallet_id} {'✓' if self.is_active else '✗'}"
+
+    @property
+    def token_cache_key(self):
+        return f"iotec:token:{self.schema_name}:{self.pk}"
+
+    def set_client_secret(self, raw: str):
+        self.client_secret_encrypted = _iotec_fernet().encrypt(raw.encode()).decode()
+
+    def get_client_secret(self) -> str:
+        try:
+            return _iotec_fernet().decrypt(self.client_secret_encrypted.encode()).decode()
+        except (InvalidToken, ValueError):
+            return ''
+
+    def save(self, *args, **kwargs):
+        if self.is_active:
+            IotecConfiguration.objects.filter(
+                schema_name=self.schema_name, is_active=True
+            ).exclude(pk=self.pk).update(is_active=False)
+        super().save(*args, **kwargs)
+        cache.delete(self.token_cache_key)   # credentials may have changed
+
+
 # ==================== InvoiceItemPayment Model (UPDATED - PayHero Removed) ====================
 
 class InvoiceItemPayment(models.Model):
     METHOD_TYPES = [
+        ('IOTEC_MOMO', 'iotec Mobile Money (UG)'),
         ('MPESA_STK', 'M-Pesa STK Push'),
         ('MPESA_TILL', 'M-Pesa Till'),
         ('MPESA_PAYBILL', 'M-Pesa Paybill'),
@@ -702,6 +775,14 @@ class InvoiceItemPayment(models.Model):
 
     tuma_configuration = models.ForeignKey(
         'billing.TenantTumaConfig',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='payment_methods'
+    )
+
+    iotec_configuration = models.ForeignKey(
+        'billing.IotecConfiguration',
         on_delete=models.SET_NULL,
         null=True,
         blank=True,
@@ -861,6 +942,8 @@ class Payment(models.Model):
     tuma_result_code = models.IntegerField(null=True, blank=True)
     tuma_result_desc = models.TextField(blank=True)
     tuma_callback_payload = models.JSONField(null=True, blank=True)
+
+    iotec_transaction_id = models.CharField(max_length=64, blank=True)
 
     schema_name = models.SlugField(
         max_length=63,

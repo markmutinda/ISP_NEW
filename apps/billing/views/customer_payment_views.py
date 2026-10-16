@@ -130,6 +130,57 @@ class InitiateCustomerPaymentView(APIView):
             )
         return None  # No block
 
+    def _initiate_iotec(self, customer, payment_method, amount, phone_number, invoice, schema):
+        from apps.billing.services.iotec_service import initiate_collection, IotecError
+
+        config = payment_method.iotec_configuration
+        if not config or not config.is_active:
+            return Response({'error': 'Payment gateway is not active. Please contact support.'},
+                            status=status.HTTP_400_BAD_REQUEST)
+
+        reference = f"PAY-{customer.customer_code}-{int(time.time())}".replace(" ", "-")
+        payment = Payment.objects.create(
+            customer=customer,
+            invoice=invoice,
+            amount=Decimal(str(amount)),
+            payment_method=payment_method,
+            payer_phone=phone_number,
+            payment_reference=reference,
+            status='PROCESSING',
+            notes="Customer initiated payment via dashboard (iotec)",
+            schema_name=schema,
+            service_type='PPPOE',
+        )
+        try:
+            initiate_collection(
+                config,
+                payment=payment,
+                phone_number=phone_number,
+                amount=amount,
+                external_id=payment.payment_number,
+                payer_note=f"Internet {customer.customer_code}",
+                payee_note=customer.customer_code,
+                payer_name=customer.full_name or '',
+            )
+        except IotecError as e:
+            payment.status = 'FAILED'
+            payment.failure_reason = humanize_payment_failure(str(e))
+            payment.save(update_fields=['status', 'failure_reason'])
+            return Response({'status': 'error', 'message': payment.failure_reason},
+                            status=status.HTTP_400_BAD_REQUEST)
+
+        return Response({
+            'status': 'pending',
+            'payment_id': payment.id,
+            'payment_number': payment.payment_number,
+            'tuma_response': {          # same shape the existing frontend already reads
+                'status': 'pending',
+                'merchant_request_id': '',
+                'checkout_request_id': payment.iotec_transaction_id,
+                'message': 'Approve the prompt on your phone to complete payment.',
+            },
+        })
+
     @transaction.atomic
     def post(self, request):
         user = request.user
@@ -198,6 +249,9 @@ class InitiateCustomerPaymentView(APIView):
                 status=status.HTTP_400_BAD_REQUEST
             )
         
+        if payment_method.method_type == 'IOTEC_MOMO':
+            return self._initiate_iotec(customer, payment_method, amount, phone_number, invoice, schema)
+
         # ============================================================
         # 🚨 VALIDATE: Resolve settlement destination
         # ============================================================
@@ -348,6 +402,11 @@ class CustomerPaymentStatusView(APIView):
                 status=status.HTTP_404_NOT_FOUND
             )
         
+        if payment.status in ('PROCESSING', 'PENDING') and payment.iotec_transaction_id:
+            from apps.billing.services.iotec_service import poll_and_settle_payment
+            if poll_and_settle_payment(payment.id):
+                payment.refresh_from_db()
+
         is_finalized = payment.status in ['COMPLETED', 'FAILED', 'CANCELLED']
         
         return Response({
@@ -395,7 +454,7 @@ class CustomerPaymentMethodsView(APIView):
         ).exclude(
             code__startswith='HOTSPOT_',
         ).select_related(
-            'mpesa_configuration', 'tuma_configuration',
+            'mpesa_configuration', 'tuma_configuration', 'iotec_configuration',
         ).order_by('name')
         if is_active is not None:
             methods = methods.filter(is_active=is_active.lower() == 'true')
@@ -436,6 +495,7 @@ class CustomerPaymentMethodsView(APIView):
                 'mpesa_configuration': method.mpesa_configuration_id,
                 'mpesa_configuration_details': _mpesa_cfg(method),
                 'tuma_configuration': method.tuma_configuration_id,
+                'iotec_configuration': method.iotec_configuration_id,
                 'created_at': method.created_at.isoformat() if method.created_at else None,
                 'updated_at': method.updated_at.isoformat() if method.updated_at else None,
             }
@@ -475,6 +535,7 @@ class CustomerPaymentMethodsView(APIView):
             code__startswith='HOTSPOT_',
         ).filter(
             mpesa_configuration__isnull=True,  # Exclude Daraja-linked methods from the cap
+            iotec_configuration__isnull=True,
         ).count()
         
         if existing_count >= 3:

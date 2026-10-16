@@ -11,6 +11,7 @@ from .payment_models import (
     InvoiceItemPayment,
     Payment,
     Receipt,
+    IotecConfiguration,
 )
 
 from .voucher_models import (
@@ -44,6 +45,7 @@ __all__ = [
     'InvoiceItemPayment',
     'Payment',
     'Receipt',
+    'IotecConfiguration',
     # Vouchers
     'Voucher',
     'VoucherBatch',

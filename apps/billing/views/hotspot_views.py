@@ -245,7 +245,7 @@ class CaptivePortalView(APIView):
 
         schema_name = tenant_info['schema_name']
         version = get_cache_version(schema_name)
-        cache_key = f"hotspot:captive:v2:{schema_name}:{router_id}:{version}"
+        cache_key = f"hotspot:captive:v3:{schema_name}:{router_id}:{version}"
 
         cached_payload = cache.get(cache_key)
         if cached_payload is not None:
@@ -253,7 +253,7 @@ class CaptivePortalView(APIView):
 
         lock_key = f"{cache_key}:lock"
         if not cache.add(lock_key, "1", timeout=5):
-            stale_key = f"hotspot:captive:v2:{schema_name}:{router_id}:{version - 1}"
+            stale_key = f"hotspot:captive:v3:{schema_name}:{router_id}:{version - 1}"
             stale_payload = cache.get(stale_key)
             if stale_payload is not None:
                 return Response(stale_payload)
@@ -393,6 +393,11 @@ class CaptivePortalView(APIView):
             return Response({'status': 'error', 'message': 'Internal server error'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
         finally:
             cache.delete(lock_key)
+
+        from apps.core.country_utils import get_tenant_country_and_currency
+        _country, _currency = get_tenant_country_and_currency(schema_name)
+        portal_config['country'] = _country
+        portal_config['currency'] = _currency
 
         payload = {
             'status': 'success',
@@ -567,6 +572,23 @@ class HotspotPurchaseView(APIView):
                 f"(shortcode={daraja_method.mpesa_configuration.business_shortcode})"
             )
             return daraja_method
+
+        iotec_method = (
+            InvoiceItemPayment.objects
+            .filter(
+                schema_name=schema_name,
+                is_active=True,
+                method_type='IOTEC_MOMO',
+                iotec_configuration__isnull=False,
+                iotec_configuration__is_active=True,
+            )
+            .select_related('iotec_configuration')
+            .order_by('-is_default', '-updated_at')
+            .first()
+        )
+        if iotec_method:
+            logger.info(f"[{schema_name}] Hotspot gateway → iotec")
+            return iotec_method
 
         from apps.billing.services.netily_paybill_service import resolve_destination
 
@@ -811,7 +833,31 @@ class HotspotPurchaseView(APIView):
             )
 
             try:
-                if (payment_method.mpesa_configuration and 
+                if payment_method.method_type == 'IOTEC_MOMO':
+                    from apps.billing.services.iotec_service import initiate_collection, IotecError
+                    try:
+                        initiate_collection(
+                            payment_method.iotec_configuration,
+                            payment=payment,
+                            phone_number=phone_canonical,
+                            amount=plan.price,
+                            external_id=payment.payment_number,
+                            payer_note=f"WiFi {plan.name}",
+                            payee_note=session.session_id,
+                        )
+                    except IotecError as e:
+                        payment.status = 'FAILED'
+                        payment.failure_reason = humanize_payment_failure(str(e))
+                        payment.save(update_fields=['status', 'failure_reason'])
+                        session.mark_failed(payment.failure_reason)
+                        return Response({'error': payment.failure_reason}, status=status.HTTP_400_BAD_REQUEST)
+
+                    session.payment = payment
+                    # marker so the status view only polls iotec for iotec sessions (zero cost for KE)
+                    session.payhero_checkout_id = f"IOTEC_{payment.payment_number}"[:100]
+                    session.save(update_fields=['payment', 'payhero_checkout_id'])
+
+                elif (payment_method.mpesa_configuration and 
                     payment_method.mpesa_configuration.is_active):
                     mpesa_cfg = payment_method.mpesa_configuration
                     self._ensure_mpesa_stk_callback_url(mpesa_cfg)
@@ -1050,6 +1096,16 @@ class HotspotPurchaseStatusView(APIView):
                     {'error': 'Session not found'},
                     status=status.HTTP_404_NOT_FOUND
                 )
+
+            # iotec has no push callback: settle by asking iotec (throttled per payment)
+            if (
+                session.status == 'pending'
+                and session.payment_id
+                and (session.payhero_checkout_id or '').startswith('IOTEC_')
+            ):
+                from apps.billing.services.iotec_service import poll_and_settle_payment
+                if poll_and_settle_payment(session.payment_id):
+                    session.refresh_from_db()
 
             if session.status == 'active':
                 return Response({

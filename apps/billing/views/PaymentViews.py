@@ -640,6 +640,7 @@ class PaymentMethodViewSet(viewsets.ModelViewSet):
             schema_name=schema,
         ).filter(
             mpesa_configuration__isnull=True,  # Exclude Daraja-linked methods from the cap
+            iotec_configuration__isnull=True,
         ).count()
         
         if existing_count >= 3:

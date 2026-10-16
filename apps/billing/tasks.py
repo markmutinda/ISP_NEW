@@ -706,3 +706,39 @@ def push_hotspot_login(self, session_id: str, schema_name: str):
 
     # TV may not have generated traffic yet (no host entry); retry every 5s (~30s total)
     raise self.retry(countdown=5)
+
+
+@shared_task(name='apps.billing.tasks.reconcile_pending_iotec_payments')
+def reconcile_pending_iotec_payments():
+    """Settle iotec payments nobody is polling for. Only visits Uganda tenants."""
+    from django_tenants.utils import schema_context, get_public_schema_name
+    from apps.core.models import Tenant
+    from apps.billing.models.payment_models import Payment
+    from apps.billing.services.iotec_service import poll_and_settle_payment
+
+    with schema_context(get_public_schema_name()):
+        schemas = list(
+            Tenant.objects.filter(is_active=True, company__country='UG')
+            .exclude(schema_name='public')
+            .values_list('schema_name', flat=True)
+        )
+
+    now = timezone.now()
+    settled = 0
+    for schema in schemas:
+        try:
+            with schema_context(schema):
+                ids = list(
+                    Payment.objects.filter(
+                        status='PROCESSING',
+                        payment_method__method_type='IOTEC_MOMO',
+                        created_at__gte=now - timedelta(hours=2),
+                        created_at__lte=now - timedelta(seconds=20),
+                    ).order_by('created_at').values_list('id', flat=True)[:200]
+                )
+                for pid in ids:
+                    if poll_and_settle_payment(pid, min_interval=0):
+                        settled += 1
+        except Exception:
+            logger.exception("iotec reconcile failed for schema %s", schema)
+    return {'settled': settled}
