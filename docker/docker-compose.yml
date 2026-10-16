@@ -140,6 +140,7 @@ services:
              python manage.py prepare_migrations &&
              python manage.py migrate_schemas_resilient --shared &&
              python manage.py migrate_schemas_resilient --tenant &&
+             python manage.py refresh_tenant_template &&
              python manage.py fix_tenant_token_blacklist &&
              python manage.py seed_plans &&
              while ! getent hosts netily-openvpn-isp; do sleep 1; done &&
