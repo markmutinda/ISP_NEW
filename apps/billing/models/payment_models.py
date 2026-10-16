@@ -890,7 +890,8 @@ class Payment(models.Model):
     amount = models.DecimalField(max_digits=12, decimal_places=2, validators=[MinValueValidator(0.01)])
     transaction_fee = models.DecimalField(max_digits=12, decimal_places=2, default=0)
     net_amount = models.DecimalField(max_digits=12, decimal_places=2, default=0)
-    # FIX: Changed default to empty string to allow currency derivation from tenant    currency = models.CharField(max_length=3, default='')  # was default='KES'
+    # FIX: Changed default to empty string to allow currency derivation from tenant
+    currency = models.CharField(max_length=3, default='')  # was default='KES'
 
     # 🔧 FIX: Changed from PROTECT to SET_NULL to allow payment method deletion while preserving payment history
     payment_method = models.ForeignKey(
