@@ -1644,27 +1644,9 @@ class CompanyRegisterView(generics.CreateAPIView):
                 is_primary=True
             )
 
-            self._create_schema(tenant.schema_name)
-
-            import subprocess, sys, os as _os
-            migrate_env = _os.environ.copy()
-            migrate_env['DJANGO_SETTINGS_MODULE'] = 'config.settings.production'
-            result = subprocess.run(
-                [sys.executable, 'manage.py', 'migrate_schemas_resilient',
-                 '--schema', tenant.schema_name],
-                cwd=settings.BASE_DIR,
-                env=migrate_env,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                timeout=240,
-            )
-            if result.returncode != 0:
-                self._drop_schema_if_exists(tenant.schema_name)
-                raise RuntimeError(
-                    f"Tenant schema migration failed for {tenant.schema_name}.\n"
-                    f"STDOUT: {result.stdout}\nSTDERR: {result.stderr}"
-                )
+            from .tenant_template import provision_tenant_schema
+            provision_info = provision_tenant_schema(tenant.schema_name)
+            _log.info("Schema provisioned for %s: %s", tenant.schema_name, provision_info)
 
             try:
                 from apps.radius.services.tenant_radius_service import tenant_radius_service

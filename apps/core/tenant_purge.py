@@ -43,7 +43,7 @@ logger = logging.getLogger(__name__)
 User = get_user_model()
 
 PROTECTED_SCHEMAS = frozenset(
-    {"public", "information_schema", "pg_catalog", "pg_toast"}
+    {"public", "information_schema", "pg_catalog", "pg_toast", "template_tenant"}
 )
 _VALID_SCHEMA_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,62}$")
 
@@ -159,18 +159,12 @@ def _cleanup_integrations(
             "purge_tenant: router index cleanup failed for %s: %s", schema_name, exc
         )
 
-    # RadiusTenantConfig
-    try:
-        from apps.radius.models import RadiusTenantConfig
-
-        result.radius_config_deleted = RadiusTenantConfig.objects.filter(
-            schema_name=schema_name
-        ).delete()[0]
-    except Exception as exc:
-        result.warnings.append(f"RADIUS config cleanup warning: {exc}")
-        logger.warning(
-            "purge_tenant: RADIUS config cleanup failed for %s: %s", schema_name, exc
-        )
+    # NOTE (2026-10): The RadiusTenantConfig table lives in each tenant
+    # schema (apps.radius is a TENANT_APP), not in the public schema.
+    # Attempting to query it here always failed with
+    # `relation "radius_radiustenantconfig" does not exist` and produced
+    # noisy warnings. The table is dropped together with the tenant
+    # schema by _drop_schema below, so no explicit cleanup is needed.
 
     # RADIUS service teardown
     try:
@@ -201,8 +195,8 @@ def purge_tenant_completely(tenant_pk) -> PurgeResult:
       6. Company row          (ORM)
       7. DROP SCHEMA … CASCADE  ← outside transaction (DDL cannot be rolled back)
 
-    Integration cleanup (GlobalRouterMap, RouterTenantIndex, RadiusTenantConfig)
-    is also performed within the transaction.
+    Integration cleanup (GlobalRouterMap, RouterTenantIndex) is also performed
+    within the transaction.
     """
     public_schema = get_public_schema_name()
 

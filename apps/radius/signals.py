@@ -5,7 +5,6 @@ from django.db.models.signals import post_delete, post_save
 from django.dispatch import receiver
 
 from apps.core.models import Tenant
-from apps.radius.models import RadiusTenantConfig
 from apps.radius.services.tenant_radius_service import tenant_radius_service
 
 logger = logging.getLogger(__name__)
@@ -17,22 +16,19 @@ def _cleanup_radius_registry(schema_name: str) -> None:
 
     Running this after commit prevents a swallowed database error from
     poisoning the surrounding tenant-deletion transaction.
+
+    NOTE (2026-10): RADIUS is fully shared at the platform level, so
+    there is no per-tenant RADIUS registry to remove. The previous
+    implementation queried RadiusTenantConfig inside the public schema,
+    but that table only exists in tenant schemas, so the query always
+    failed with a DatabaseError that was logged as a warning and then
+    ignored. Removing it eliminates the noise.
     """
     try:
-        RadiusTenantConfig.objects.filter(schema_name=schema_name).delete()
-    except DatabaseError as exc:
-        logger.warning(
-            "[ISP CLEANUP] Could not remove RADIUS registry for %s: %s",
-            schema_name,
-            exc,
-        )
-
-    try:
         tenant_radius_service.remove_tenant_radius(schema_name)
-        logger.info("[ISP CLEANUP] RADIUS records removed for %s.", schema_name)
     except Exception as exc:
         logger.warning(
-            "[ISP CLEANUP] Could not remove RADIUS files for %s: %s",
+            "[ISP CLEANUP] RADIUS cleanup for %s: %s",
             schema_name,
             exc,
         )

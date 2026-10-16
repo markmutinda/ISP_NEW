@@ -1,54 +1,44 @@
 """
 Tenant RADIUS Configuration Service (PURE SHARED ARCHITECTURE)
 
-This service is now 100% database-driven. 
+This service is now 100% database-driven.
 Zero files or folders are generated per tenant.
 Zero Docker commands executed from Python.
+
+NOTE (2026-10): RADIUS is fully shared at the platform level.
+Routing lives in core_globalroutermap (public schema), which is written
+whenever a router is added via the admin UI. FreeRADIUS reads that map
+directly. Nothing is provisioned per tenant.
+
+Historically this service tried to write a RadiusTenantConfig row inside
+schema_context('public'), but RadiusTenantConfig lives in apps.radius,
+which is a TENANT_APP — so its table only exists inside each tenant
+schema, not in public. The query always failed. Because the failure was
+in a code path only used by admin actions (not the router-creation hot
+path), it was silent and harmless in practice. This module is now a
+no-op to remove that dead code.
 """
 
 import logging
-from typing import Dict, Any
-from django_tenants.utils import schema_context, get_public_schema_name
+from typing import Any, Dict
 
 logger = logging.getLogger(__name__)
 
+
 class TenantRadiusConfigService:
-    """
-    Service for managing a Centralized Shared RADIUS environment.
-    No longer creates files, folders, or Docker containers.
-    No longer restarts Docker containers via subprocess.
-    """
-        
-    def configure_tenant_radius(self, schema_name: str, tenant_name: str = None, regenerate: bool = False) -> Dict[str, Any]:
-        """
-        Initializes the database records for a tenant.
-        Does NOT touch the filesystem or Docker.
-        """
+    """RADIUS is fully shared: routing lives in core_globalroutermap (public).
+    Nothing to provision per tenant."""
+
+    def configure_tenant_radius(self, schema_name: str, tenant_name: str = None,
+                                regenerate: bool = False, **_ignored) -> Dict[str, Any]:
         if not schema_name or schema_name == 'public':
             raise ValueError("Cannot configure RADIUS for public schema")
-        
-        tenant_name = tenant_name or schema_name.replace('tenant_', '').title()
-        
-        # Register tenant in the public schema config registry
-        from ..models import RadiusTenantConfig
-        with schema_context(get_public_schema_name()):
-            RadiusTenantConfig.objects.update_or_create(
-                schema_name=schema_name,
-                defaults={
-                    'tenant_name': tenant_name,
-                    'is_active': True,
-                }
-            )
-        
-        logger.info(f"✅ RADIUS database records initialized for tenant: {schema_name}")
+        logger.debug("RADIUS ready for tenant %s", schema_name)
         return {'schema_name': schema_name, 'status': 'ready'}
 
     def remove_tenant_radius(self, schema_name: str) -> bool:
-        """
-        No files to clean up anymore! The database deletion handles everything.
-        """
-        logger.info(f"✅ RADIUS cleanup complete for {schema_name} (Database only).")
         return True
+
 
 # Singleton instance
 tenant_radius_service = TenantRadiusConfigService()
