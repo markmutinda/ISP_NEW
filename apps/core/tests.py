@@ -12,13 +12,13 @@ from rest_framework.exceptions import AuthenticationFailed
 from rest_framework.test import APIRequestFactory, force_authenticate
 from rest_framework.serializers import ValidationError
 
-from apps.core.models import User
+from apps.core.models import Company, User
 from apps.core.authentication import SessionBoundJWTAuthentication
 from apps.core.email_delivery import send_transactional_email
 from apps.core.otp_service import OTPService, OTPRateLimitedError, OTPError
 from apps.core.permissions import HasCompanyAccess, HasRoleAccessPolicy, IsAdmin, IsAdminOrStaff
 from apps.core.rbac_defaults import DEFAULT_ROLE_ACCESS_POLICIES
-from apps.core.serializers import UserCreateSerializer
+from apps.core.serializers import CompanyBrandingSerializer, UserCreateSerializer
 from apps.core.session_tokens import (
     SESSION_HASH_CLAIM,
     bind_token_to_user,
@@ -35,6 +35,17 @@ from apps.core.views import (
 )
 from apps.notifications.services.lead_alert_service import build_lead_alert_message
 from apps.superadmin.permissions import IsSuperAdmin
+
+
+class CompanyBrandingLocaleTests(SimpleTestCase):
+    def test_branding_exposes_locale_without_allowing_it_to_be_edited(self):
+        company = Company(name="Uganda ISP", country="UG", base_currency="UGX")
+        serializer = CompanyBrandingSerializer(company)
+
+        self.assertEqual(serializer.data["country"], "UG")
+        self.assertEqual(serializer.data["base_currency"], "UGX")
+        self.assertTrue(serializer.fields["country"].read_only)
+        self.assertTrue(serializer.fields["base_currency"].read_only)
 
 
 class SessionTokenTests(SimpleTestCase):

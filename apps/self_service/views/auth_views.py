@@ -476,6 +476,8 @@ class AvailablePlansView(APIView):
                     'logo_url': logo_url,
                     'phone': company.phone_number,
                     'email': company.email,
+                    'country': company.country or 'KE',
+                    'base_currency': company.base_currency or 'KES',
                 }
         except Exception:
             pass

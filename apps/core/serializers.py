@@ -510,8 +510,8 @@ class CompanyBrandingSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = Company
-        fields = ['id', 'name', 'logo', 'logo_url', 'remove_logo', 'updated_at']
-        read_only_fields = ['id', 'logo_url', 'updated_at']
+        fields = ['id', 'name', 'logo', 'logo_url', 'country', 'base_currency', 'remove_logo', 'updated_at']
+        read_only_fields = ['id', 'logo_url', 'country', 'base_currency', 'updated_at']
 
     def validate_name(self, value):
         value = value.strip()
