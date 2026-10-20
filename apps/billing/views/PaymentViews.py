@@ -162,9 +162,13 @@ class MpesaConfigurationViewSet(viewsets.ModelViewSet):
         method.tuma_configuration = None
         method.is_active = True
         method.is_default = True
+        # Keep label/type in sync with the Daraja config so a reused legacy
+        # method (e.g. old Tuma "Till") doesn't show a stale name.
+        method.name = f'M-Pesa {config.shortcode_type} (Daraja)'
+        method.method_type = method_type
         method.save(update_fields=[
             'mpesa_configuration', 'tuma_configuration',
-            'is_active', 'is_default', 'updated_at',
+            'is_active', 'is_default', 'name', 'method_type', 'updated_at',
         ])
 
         TenantTumaConfig.objects.filter(schema_name=schema).update(is_active=False)
