@@ -57,10 +57,12 @@ def send_order_confirmation(order_pk):
     if not order or not order.email:
         return
     lines = "\n".join(f"- {i.name} x{i.quantity} ({i.selected_storage or '-'})" for i in order.items.all())
+    track = f"{settings.FRONTEND_URL.rstrip('/')}/shop/track?ref={order.reference}&token={order.tracking_token}"
     plain = (
         f"Hi {order.first_name},\n\nThanks for your order {order.reference}. Payment received"
         f"{' (M-Pesa ' + order.mpesa_receipt + ')' if order.mpesa_receipt else ''}.\n\n"
         f"{lines}\n\nTotal: ${order.total} USD (KES {order.amount_kes})\n\n"
+        f"Track your order: {track}\n\n"
         f"We'll share delivery updates shortly.\nNetily Shop"
     )
     html = "<p>" + plain.replace("\n\n", "</p><p>").replace("\n", "<br>") + "</p>"
