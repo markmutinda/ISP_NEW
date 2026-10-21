@@ -84,6 +84,7 @@ api_urlpatterns = [
     # Subscriptions app (Netily Platform Subscriptions)
     # ─────────────────────────────────────────────────────────────
     path('subscriptions/', include('apps.subscriptions.urls')),
+    path('shop/', include('apps.shop.urls')),
     
     # ISP Payout Configuration (under core/)
     # These use urls from subscriptions.urls.payout_urlpatterns

@@ -54,6 +54,7 @@ PUBLIC_ROUTER_PATHS = (
     '/api/v1/hotspot/loyalty-redeem/',
     '/api/v1/hotspot/scan-devices/',
     '/api/v1/hotspot/chat/',
+    '/api/v1/shop/',
 )
 
 # Known exploit/secret-scanning probes — reject before any DB/schema work

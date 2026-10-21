@@ -377,6 +377,20 @@ app.conf.beat_schedule = {
         'schedule': crontab(minute='*/2'),
         'options': {'queue': 'billing'}
     },
+
+    # ────────────────────────────────────────────────────────────────
+    # SHOP — M-Pesa reconciliation + stale order expiry
+    # ────────────────────────────────────────────────────────────────
+    'shop-reconcile-mpesa-every-2-min': {
+        'task': 'apps.shop.tasks.reconcile_pending_mpesa_orders',
+        'schedule': crontab(minute='*/2'),
+        'options': {'queue': 'default'},
+    },
+    'shop-expire-stale-orders-every-15-min': {
+        'task': 'apps.shop.tasks.expire_stale_orders',
+        'schedule': crontab(minute='*/15'),
+        'options': {'queue': 'default'},
+    },
 }
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -394,6 +408,7 @@ app.conf.task_routes = {
     'apps.vpn.tasks.*': {'queue': 'default'},
     'apps.fup.tasks.*': {'queue': 'radius'},  # FUP tasks use radius queue
     'apps.network.tasks.*': {'queue': 'default'},  # Network tasks (router status, IP binding cleanup)
+    'apps.shop.tasks.*': {'queue': 'default'},
 }
 
 # ════════════════════════════════════════════════════════════════════════════
