@@ -19,7 +19,7 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from apps.core.permissions import HasRoleAccessPolicy
+from apps.core.permissions import HasPaymentMethodPinAccess, HasRoleAccessPolicy
 from apps.billing.models.payment_models import (
     Payment, 
     InvoiceItemPayment, 
@@ -440,7 +440,7 @@ class CustomerPaymentMethodsView(APIView):
     POST /api/v1/billing/payment-methods/
     """
     
-    permission_classes = [IsAuthenticated, HasRoleAccessPolicy]
+    permission_classes = [IsAuthenticated, HasRoleAccessPolicy, HasPaymentMethodPinAccess]
     required_rbac_path = "/admin/payment-methods"
     
     def get(self, request):
@@ -516,8 +516,7 @@ class CustomerPaymentMethodsView(APIView):
         Daraja-linked methods (mpesa_configuration set) belong exclusively to
         the M-Pesa Daraja tab and should not count toward the Netily 3-method limit.
         
-        OTP verification is handled by the frontend OtpGuard at the page level,
-        so no per-request OTP check is required here.
+        Sensitive changes require a recent server-side Payment Methods PIN unlock.
         
         🚨 REMOVED: Tuma provisioning calls (ensure_child_business, sync_active_method_to_tuma)
         These are no longer needed since we route directly through Netily Paybill.
@@ -569,7 +568,7 @@ class PaymentMethodDetailView(APIView):
 
     GET/PATCH/DELETE /api/v1/billing/payment-methods/<id>/
     """
-    permission_classes = [IsAuthenticated, HasRoleAccessPolicy]
+    permission_classes = [IsAuthenticated, HasRoleAccessPolicy, HasPaymentMethodPinAccess]
     required_rbac_path = "/admin/payment-methods"
 
     def _get_method(self, pk):
@@ -590,8 +589,7 @@ class PaymentMethodDetailView(APIView):
         """
         Update a payment method.
         
-        OTP verification is handled by the frontend OtpGuard at the page level,
-        so no per-request OTP check is required here.
+        Sensitive changes require a recent server-side Payment Methods PIN unlock.
         
         🚨 REMOVED: Tuma sync (sync_active_method_to_tuma)
         No longer needed - we route directly through Netily Paybill.
@@ -617,8 +615,7 @@ class PaymentMethodDetailView(APIView):
         """
         Delete a payment method.
         
-        OTP verification is handled by the frontend OtpGuard at the page level,
-        so no per-request OTP check is required here.
+        Sensitive changes require a recent server-side Payment Methods PIN unlock.
         
         🚨 REMOVED: Tuma deactivation (deactivate_tuma_collections, delete_tuma_business)
         No longer needed - we route directly through Netily Paybill.
@@ -664,15 +661,14 @@ class PaymentMethodDetailView(APIView):
 
 class PaymentMethodToggleActiveView(APIView):
     """Toggle active state of a payment method."""
-    permission_classes = [IsAuthenticated, HasRoleAccessPolicy]
+    permission_classes = [IsAuthenticated, HasRoleAccessPolicy, HasPaymentMethodPinAccess]
     required_rbac_path = "/admin/payment-methods"
 
     def post(self, request, pk):
         """
         Toggle the active state of a payment method.
         
-        OTP verification is handled by the frontend OtpGuard at the page level,
-        so no per-request OTP check is required here.
+        Sensitive changes require a recent server-side Payment Methods PIN unlock.
         
         🚨 REMOVED: Tuma sync (sync_active_method_to_tuma, deactivate_tuma_collections)
         No longer needed - we route directly through Netily Paybill.

@@ -3,6 +3,8 @@ Custom permission classes for ISP Management System - Updated for Multi-Tenancy
 """
 from rest_framework import permissions
 
+from apps.core.payment_method_pin import payment_method_pin_is_unlocked
+
 
 class HasCompanyAccess(permissions.BasePermission):
     """
@@ -92,6 +94,17 @@ class HasCompanyAccess(permissions.BasePermission):
         
         # If we can't determine company relationship, be conservative and deny
         return False
+
+
+class HasPaymentMethodPinAccess(permissions.BasePermission):
+    """Require a recent tenant PIN verification for payment-setting changes."""
+
+    message = "Verify the Payment Methods PIN before changing payment settings."
+
+    def has_permission(self, request, view):
+        if request.method in permissions.SAFE_METHODS:
+            return True
+        return payment_method_pin_is_unlocked(request)
 
 
 class IsCompanyAdmin(permissions.BasePermission):

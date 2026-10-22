@@ -10,7 +10,7 @@ from rest_framework.exceptions import ValidationError
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 
-from apps.core.permissions import HasRoleAccessPolicy, IsCompanyAdmin
+from apps.core.permissions import HasPaymentMethodPinAccess, HasRoleAccessPolicy, IsCompanyAdmin
 from apps.core.country_utils import get_tenant_country_code
 from ..models.payment_models import IotecConfiguration, InvoiceItemPayment
 from ..serializers.payment_serializers import IotecConfigurationSerializer
@@ -22,7 +22,7 @@ logger = logging.getLogger(__name__)
 class IotecConfigurationViewSet(viewsets.ModelViewSet):
     """Tenant iotec credentials (Uganda). Secrets are write-only and encrypted at rest."""
     serializer_class = IotecConfigurationSerializer
-    permission_classes = [IsAuthenticated, IsCompanyAdmin, HasRoleAccessPolicy]
+    permission_classes = [IsAuthenticated, IsCompanyAdmin, HasRoleAccessPolicy, HasPaymentMethodPinAccess]
     required_rbac_path = "/admin/payment-methods"
     pagination_class = None
     http_method_names = ['get', 'post', 'patch', 'delete', 'head', 'options']

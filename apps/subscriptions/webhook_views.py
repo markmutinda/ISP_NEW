@@ -74,6 +74,11 @@ def _find_subscription_payment(callback):
     checkout_request_id = callback["checkout_request_id"]
     account_reference = callback["account_reference"]
 
+    # Registration activation payments share this callback URL but have their
+    # own ledger. Never let the amount/phone recovery path claim them.
+    if str(account_reference).startswith("NETILY-ACT-"):
+        return None
+
     query = Q()
     if checkout_request_id:
         query |= Q(payhero_checkout_id=checkout_request_id)
@@ -143,6 +148,9 @@ class SubscriptionPaybillCallbackView(APIView):
 
         payment = _find_subscription_payment(callback)
         if not payment:
+            from apps.core.registration_activation_views import apply_activation_callback
+            if apply_activation_callback(callback):
+                return Response({"ResultCode": 0, "ResultDesc": "Accepted"})
             logger.warning(
                 "Subscription STK callback: no payment match checkout=%s merchant=%s phone=%s amount=%s",
                 checkout_request_id,

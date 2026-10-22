@@ -20,7 +20,7 @@ from django.db.models import ProtectedError
 # Custom permissions
 from ..models.payment_models import Payment
 from apps.core.models import AuditLog
-from apps.core.permissions import HasRoleAccessPolicy, IsCompanyAdmin, IsCompanyStaff
+from apps.core.permissions import HasPaymentMethodPinAccess, HasRoleAccessPolicy, IsCompanyAdmin, IsCompanyStaff
 from apps.customers.models import Customer
 from ..models.billing_models import Invoice
 from ..serializers import (
@@ -43,7 +43,7 @@ class MpesaConfigurationViewSet(viewsets.ModelViewSet):
     """
     ViewSet for managing tenant-specific M-Pesa configurations
     """
-    permission_classes = [IsAuthenticated, IsCompanyAdmin, HasRoleAccessPolicy]
+    permission_classes = [IsAuthenticated, IsCompanyAdmin, HasRoleAccessPolicy, HasPaymentMethodPinAccess]
     required_rbac_path = "/admin/payment-methods"
     filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
     filterset_fields = ['is_active', 'is_default', 'is_sandbox', 'shortcode_type', 'c2b_urls_registered']
@@ -599,7 +599,7 @@ class PaymentMethodViewSet(viewsets.ModelViewSet):
     🚨 UPDATED: Removed all Tuma provisioning/sync calls.
     Payment methods now route directly through Netily Paybill.
     """
-    permission_classes = [IsAuthenticated, IsCompanyAdmin, HasRoleAccessPolicy]
+    permission_classes = [IsAuthenticated, IsCompanyAdmin, HasRoleAccessPolicy, HasPaymentMethodPinAccess]
     required_rbac_path = "/admin/payment-methods"
     filter_backends = [DjangoFilterBackend, filters.SearchFilter]
     filterset_fields = ['method_type', 'is_active', 'status']

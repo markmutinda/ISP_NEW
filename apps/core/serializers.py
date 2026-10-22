@@ -774,7 +774,12 @@ class GlobalSystemSettingsSerializer(serializers.ModelSerializer):
     class Meta:
         model = GlobalSystemSettings
         fields = '__all__'
-        read_only_fields = ['id']
+        read_only_fields = ['id', 'payment_methods_pin_hash', 'payment_methods_pin_updated_at']
+
+    def to_representation(self, instance):
+        data = super().to_representation(instance)
+        data.pop('payment_methods_pin_hash', None)
+        return data
 
     def validate_appearance_font(self, value):
         normalized = (value or "outfit").strip().lower()

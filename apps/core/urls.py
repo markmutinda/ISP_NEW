@@ -6,6 +6,12 @@ from rest_framework.routers import DefaultRouter
 from rest_framework_simplejwt.views import TokenRefreshView
 from . import views
 from .views_support import SupportChatDemoView, TenantSupportChatCurrentView, TenantSupportChatMessagesView
+from .payment_method_pin_views import (
+    PaymentMethodPinChangeView,
+    PaymentMethodPinSetupView,
+    PaymentMethodPinStatusView,
+    PaymentMethodPinVerifyView,
+)
 from .webauthn_views import (
     PasskeyRegisterOptionsView,
     PasskeyRegisterVerifyView,
@@ -65,6 +71,10 @@ urlpatterns = [
     # OTP endpoints
     path('auth/otp/send/', views.SendOTPView.as_view(), name='send-otp'),
     path('auth/otp/verify/', views.VerifyOTPView.as_view(), name='verify-otp'),
+    path('auth/payment-method-pin/status/', views.PaymentMethodPinStatusView.as_view(), name='payment-method-pin-status'),
+    path('auth/payment-method-pin/setup/', views.PaymentMethodPinSetupView.as_view(), name='payment-method-pin-setup'),
+    path('auth/payment-method-pin/verify/', views.PaymentMethodPinVerifyView.as_view(), name='payment-method-pin-verify'),
+    path('auth/payment-method-pin/change/', views.PaymentMethodPinChangeView.as_view(), name='payment-method-pin-change'),
     
     # Tenant lead management and public lead capture
     path('leads/', views.TenantLeadListView.as_view(), name='tenant-leads'),
@@ -79,9 +89,4 @@ urlpatterns = [
     path('auth/passkey/login/verify/', PasskeyLoginVerifyView.as_view(), name='passkey-login-verify'),
     
     # ── Passkey Management (authenticated) ──
-    path('auth/passkey/list/', PasskeyListView.as_view(), name='passkey-list'),
-    path('auth/passkey/delete/<int:pk>/', PasskeyDeleteView.as_view(), name='passkey-delete'),
-    
-    # Include router URLs
-    path('', include(router.urls)),
-]
+    path('auth/passkey/list/', PasskeyListView.as_view(), name='passkey-li

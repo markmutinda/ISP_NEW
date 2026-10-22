@@ -719,6 +719,11 @@ class GlobalSystemSettings(models.Model):
     # Platform-wide affiliate login OTP. Kept off by default for lower-friction onboarding.
     affiliate_email_otp_enabled = models.BooleanField(default=False)
 
+    # Tenant-owned gate for sensitive payment gateway changes. The raw PIN is
+    # never stored; endpoints use Django's password hasher for verification.
+    payment_methods_pin_hash = models.CharField(max_length=255, blank=True, default="")
+    payment_methods_pin_updated_at = models.DateTimeField(null=True, blank=True)
+
     # Customer Portal Settings
     # When enabled, the customer plans page only shows the customer's
     # current plan and plans priced >= their current plan (hides downgrades).
@@ -1219,3 +1224,57 @@ class Tr069DeviceIndex(models.Model):
 
     def __str__(self):
         return f"{self.serial_number} -> {self.tenant_schema}"
+
+
+class TenantActivationPayment(models.Model):
+    """KSh 500 activation collected before a staged tenant is provisioned."""
+
+    STATUS_CHOICES = (
+        ("pending", "Pending"),
+        ("processing", "Processing"),
+        ("completed", "Completed"),
+        ("provisioning", "Provisioning"),
+        ("consumed", "Account created"),
+        ("failed", "Failed"),
+        ("expired", "Expired"),
+    )
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default="pending", db_index=True)
+    amount = models.DecimalField(max_digits=10, decimal_places=2, default="500.00")
+    currency = models.CharField(max_length=3, default="KES")
+    phone_number = models.CharField(max_length=20)
+    registration_data = models.JSONField(default=dict)
+    checkout_request_id = models.CharField(max_length=120, blank=True, null=True, unique=True)
+    merchant_request_id = models.CharField(max_length=120, blank=True, default="")
+    account_reference = models.CharField(max_length=40, unique=True, db_index=True)
+    mpesa_receipt = models.CharField(max_length=50, blank=True, default="")
+    failure_reason = models.TextField(blank=True, default="")
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="tenant_activation_payments",
+    )
+    company = models.ForeignKey(
+        "core.Company",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="activation_payments",
+    )
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    completed_at = models.DateTimeField(null=True, blank=True)
+    consumed_at = models.DateTimeField(null=True, blank=True)
+    expires_at = models.DateTimeField(db_index=True)
+
+    class Meta:
+        app_label = "core"
+        ordering = ["-created_at"]
+        indexes = [models.Index(fields=["status", "created_at"])]
+
+    def __str__(self):
+        company_name = self.registration_data.get("company_name", "New tenant")
+        return f"{company_name} - {self.currency} {self.amount} ({self.status})"

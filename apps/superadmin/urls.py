@@ -10,6 +10,11 @@ from apps.core.views import (
     PlatformCompanyRegistrationStatusView,
     PlatformCompanyRegisterView,
 )
+from apps.core.registration_activation_views import (
+    TenantActivationFinishView,
+    TenantActivationStartView,
+    TenantActivationStatusView,
+)
 
 from . import views
 from .financial_csv import FinancialCSVView
@@ -29,6 +34,9 @@ urlpatterns = [
     # Tenant CRUD
     path("tenants/", views.TenantListView.as_view(), name="tenant-list"),
     path("tenants/register/", PlatformCompanyRegisterView.as_view(), name="tenant-register"),
+    path("tenants/register/activation/", TenantActivationStartView.as_view(), name="tenant-activation-start"),
+    path("tenants/register/activation/<uuid:payment_id>/", TenantActivationStatusView.as_view(), name="tenant-activation-status"),
+    path("tenants/register/activation/<uuid:payment_id>/finish/", TenantActivationFinishView.as_view(), name="tenant-activation-finish"),
     path(
         "tenants/register/status/",
         PlatformCompanyRegistrationStatusView.as_view(),
