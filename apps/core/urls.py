@@ -43,10 +43,10 @@ urlpatterns = [
     # Email verification
     path('auth/verify-email/<uuid:token>/', views.VerifyEmailView.as_view(), name='verify_email'),
     path('auth/resend-verification/', views.ResendVerificationView.as_view(), name='resend_verification'),
-    
+
     # Profile management
     path('profile/', views.ProfileView.as_view(), name='profile'),
-    
+
     # Dashboard
     path('dashboard/', views.DashboardView.as_view(), name='dashboard'),
     
@@ -71,10 +71,10 @@ urlpatterns = [
     # OTP endpoints
     path('auth/otp/send/', views.SendOTPView.as_view(), name='send-otp'),
     path('auth/otp/verify/', views.VerifyOTPView.as_view(), name='verify-otp'),
-    path('auth/payment-method-pin/status/', views.PaymentMethodPinStatusView.as_view(), name='payment-method-pin-status'),
-    path('auth/payment-method-pin/setup/', views.PaymentMethodPinSetupView.as_view(), name='payment-method-pin-setup'),
-    path('auth/payment-method-pin/verify/', views.PaymentMethodPinVerifyView.as_view(), name='payment-method-pin-verify'),
-    path('auth/payment-method-pin/change/', views.PaymentMethodPinChangeView.as_view(), name='payment-method-pin-change'),
+    path('auth/payment-method-pin/status/', PaymentMethodPinStatusView.as_view(), name='payment-method-pin-status'),
+    path('auth/payment-method-pin/setup/', PaymentMethodPinSetupView.as_view(), name='payment-method-pin-setup'),
+    path('auth/payment-method-pin/verify/', PaymentMethodPinVerifyView.as_view(), name='payment-method-pin-verify'),
+    path('auth/payment-method-pin/change/', PaymentMethodPinChangeView.as_view(), name='payment-method-pin-change'),
     
     # Tenant lead management and public lead capture
     path('leads/', views.TenantLeadListView.as_view(), name='tenant-leads'),
@@ -87,6 +87,11 @@ urlpatterns = [
     path('auth/passkey/register/verify/', PasskeyRegisterVerifyView.as_view(), name='passkey-register-verify'),
     path('auth/passkey/login/options/', PasskeyLoginOptionsView.as_view(), name='passkey-login-options'),
     path('auth/passkey/login/verify/', PasskeyLoginVerifyView.as_view(), name='passkey-login-verify'),
-    
+
     # ── Passkey Management (authenticated) ──
-    path('auth/passkey/list/', PasskeyListView.as_view(), name='passkey-li
+    path('auth/passkey/list/', PasskeyListView.as_view(), name='passkey-list'),
+    path('auth/passkey/delete/<int:pk>/', PasskeyDeleteView.as_view(), name='passkey-delete'),
+
+    # Include router URLs
+    path('', include(router.urls)),
+]

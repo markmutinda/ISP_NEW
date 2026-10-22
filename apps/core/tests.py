@@ -17,6 +17,7 @@ from apps.core.authentication import SessionBoundJWTAuthentication
 from apps.core.email_delivery import send_transactional_email
 from apps.core.otp_service import OTPService, OTPRateLimitedError, OTPError
 from apps.core.permissions import HasCompanyAccess, HasRoleAccessPolicy, IsAdmin, IsAdminOrStaff
+from apps.core.payment_method_pin import payment_method_pin_is_unlocked, validate_new_pin
 from apps.core.rbac_defaults import DEFAULT_ROLE_ACCESS_POLICIES
 from apps.core.serializers import CompanyBrandingSerializer, UserCreateSerializer
 from apps.core.session_tokens import (
@@ -76,6 +77,24 @@ class SessionTokenTests(SimpleTestCase):
 
         self.assertIn(SESSION_HASH_CLAIM, token)
         self.assertNotIn("FirstStrongPassword123!", token[SESSION_HASH_CLAIM])
+
+
+class PaymentMethodPinTests(SimpleTestCase):
+    def test_pin_must_be_six_digits(self):
+        self.assertEqual(validate_new_pin("491827"), "491827")
+        with self.assertRaises(ValueError):
+            validate_new_pin("49182")
+        with self.assertRaises(ValueError):
+            validate_new_pin("49A827")
+
+    def test_predictable_pins_are_rejected(self):
+        for pin in ("000000", "111111", "123456", "654321"):
+            with self.subTest(pin=pin), self.assertRaises(ValueError):
+                validate_new_pin(pin)
+
+    def test_superadmin_bypasses_tenant_pin(self):
+        request = SimpleNamespace(user=SimpleNamespace(is_superuser=True))
+        self.assertTrue(payment_method_pin_is_unlocked(request))
 
 
 class LeadAlertMessageTests(SimpleTestCase):
