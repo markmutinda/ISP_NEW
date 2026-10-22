@@ -70,4 +70,11 @@ verb 3
 status /tmp/ovpn-status.log 10
 EOF
 
+# Write auth config readable by nobody (auth.sh sources this file)
+printf 'AUTH_URL="%s"\nOPENVPN_AUTH_TOKEN="%s"\n' \
+  "${AUTH_URL:-http://web:8000/api/v1/vpn/openvpn-auth/}" "${OPENVPN_AUTH_TOKEN:-}" \
+  > /etc/openvpn/auth.conf
+chown nobody:nogroup /etc/openvpn/auth.conf
+chmod 400 /etc/openvpn/auth.conf
+
 exec openvpn --config /etc/openvpn/server.conf
