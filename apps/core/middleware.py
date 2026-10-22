@@ -38,6 +38,12 @@ PUBLIC_ROUTER_PATHS = (
     # and subscription enforcement entirely.
     '/api/v1/tr069/webhook/credentials/',
     '/api/v1/tr069/webhook/inform/',
+    # ── OpenVPN auth-user-pass-verify ────────────────────────
+    # Called ONLY by the openvpn container's auth.sh on every
+    # (re)connect. Runs from the container's network namespace
+    # without any tenant context, so it must bypass tenancy,
+    # audit, and subscription enforcement.
+    '/api/v1/vpn/openvpn-auth/',
     # ── ADDED: these were falling through to full tenant DB resolution
     # + SubscriptionEnforcementMiddleware's cross-schema CompanySubscription
     # query on every single request — the actual cause of slowdowns under
@@ -54,6 +60,7 @@ PUBLIC_ROUTER_PATHS = (
     '/api/v1/hotspot/loyalty-redeem/',
     '/api/v1/hotspot/scan-devices/',
     '/api/v1/hotspot/chat/',
+    '/api/v1/shop/',
 )
 
 # Known exploit/secret-scanning probes — reject before any DB/schema work

@@ -66,6 +66,7 @@ class RouterSerializer(serializers.ModelSerializer):
             'auth_status', 'shared_secret', 'is_editable', 'magic_link',
             # Cloud Controller / VPN fields
             'vpn_provisioned', 'vpn_provisioned_at', 'vpn_ip_address', 'vpn_last_seen',
+            'vpn_protocol',
             'ca_certificate', 'client_certificate', 'client_key',
             # Provisioning fields
             'provision_slug', 'last_provisioned_at', 'routeros_version',

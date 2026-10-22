@@ -52,6 +52,18 @@ app.conf.beat_schedule = {
     },
     
     # ────────────────────────────────────────────────────────────────
+    # Watchdog OpenVPN Status - Runs every 90 seconds
+    # Fast, frequent status sweep for OpenVPN-provisioned routers.
+    # Reads /tmp/ovpn-status.log from the netily-ovpn container via
+    # one docker exec per sweep - no per-router network calls.
+    # ────────────────────────────────────────────────────────────────
+    'watchdog-openvpn-status-every-90s': {
+        'task': 'apps.network.tasks.watchdog_openvpn_status',
+        'schedule': 90,
+        'options': {'queue': 'default'}
+    },
+    
+    # ────────────────────────────────────────────────────────────────
     # Router Uptime Recalculation - Runs hourly at minute 20
     # Recalculates uptime percentages based on RouterEvent history.
     # This ensures the list/grid displays accurate uptime percentages
@@ -377,6 +389,20 @@ app.conf.beat_schedule = {
         'schedule': crontab(minute='*/2'),
         'options': {'queue': 'billing'}
     },
+
+    # ────────────────────────────────────────────────────────────────
+    # SHOP — M-Pesa reconciliation + stale order expiry
+    # ────────────────────────────────────────────────────────────────
+    'shop-reconcile-mpesa-every-2-min': {
+        'task': 'apps.shop.tasks.reconcile_pending_mpesa_orders',
+        'schedule': crontab(minute='*/2'),
+        'options': {'queue': 'default'},
+    },
+    'shop-expire-stale-orders-every-15-min': {
+        'task': 'apps.shop.tasks.expire_stale_orders',
+        'schedule': crontab(minute='*/15'),
+        'options': {'queue': 'default'},
+    },
 }
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -394,6 +420,7 @@ app.conf.task_routes = {
     'apps.vpn.tasks.*': {'queue': 'default'},
     'apps.fup.tasks.*': {'queue': 'radius'},  # FUP tasks use radius queue
     'apps.network.tasks.*': {'queue': 'default'},  # Network tasks (router status, IP binding cleanup)
+    'apps.shop.tasks.*': {'queue': 'default'},
 }
 
 # ════════════════════════════════════════════════════════════════════════════

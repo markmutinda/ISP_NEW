@@ -112,6 +112,35 @@ def watchdog_router_status():
     return {'checked': checked, 'flipped': flipped}
 
 
+@shared_task
+def watchdog_openvpn_status():
+    """Fast status sweep for OpenVPN-provisioned routers (one docker exec for all tenants)."""
+    from apps.vpn.services.openvpn_status import get_connected_vpn_ips
+
+    connected = get_connected_vpn_ips()
+    if connected is None:
+        return {'error': 'status unreadable'}   # never flip everything offline on a read failure
+
+    checked = flipped = 0
+    for tenant in get_tenant_model().objects.exclude(schema_name='public'):
+        try:
+            with schema_context(tenant.schema_name):
+                for router in Router.objects.filter(
+                    is_active=True, vpn_provisioned=True, vpn_protocol='openvpn',
+                    vpn_ip_address__isnull=False,
+                ):
+                    old = router.status
+                    router.sync_status(force=True, tunnel_up=str(router.vpn_ip_address) in connected)
+                    checked += 1
+                    if router.status != old:
+                        flipped += 1
+        except Exception as e:
+            logger.error(f"[OVPN WATCHDOG] tenant={tenant.schema_name} error={e}")
+
+    logger.info(f"[OVPN WATCHDOG] checked={checked} flipped={flipped}")
+    return {'checked': checked, 'flipped': flipped}
+
+
 @shared_task(
     bind=True, 
     queue="celery",

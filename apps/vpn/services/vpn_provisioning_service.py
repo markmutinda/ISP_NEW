@@ -6,7 +6,7 @@ import logging
 from typing import Set
 
 from django.conf import settings
-from django.db import transaction
+from django.db import connection, transaction
 from django.utils import timezone
 from django_tenants.utils import schema_context, get_public_schema_name
 
@@ -25,6 +25,8 @@ class VPNProvisioningError(Exception):
 class VPNProvisioningService:
 
     def provision_router(self, router) -> dict:
+        if getattr(router, 'vpn_protocol', 'wireguard') == 'openvpn':
+            return self._provision_openvpn(router)
         logger.info(f"[WG PROVISION] Starting for router: {router.name} (id={router.id})")
 
         try:
@@ -68,6 +70,8 @@ class VPNProvisioningService:
             raise VPNProvisioningError(str(e))
 
     def deprovision_router(self, router) -> None:
+        if getattr(router, 'vpn_protocol', 'wireguard') == 'openvpn' and router.vpn_ip_address:
+            self._remove_openvpn_ccd(str(router.vpn_ip_address))
         if router.wireguard_public_key:
             remove_peer(router.wireguard_public_key)
 
@@ -86,6 +90,100 @@ class VPNProvisioningService:
     def reprovision_router(self, router) -> dict:
         self.deprovision_router(router)
         return self.provision_router(router)
+
+    # ── OpenVPN ──────────────────────────────────────────────────────────────
+
+    def switch_protocol(self, router, old_protocol: str) -> dict:
+        """Tear down the OLD tunnel type, then provision the router's CURRENT (new) type."""
+        new_protocol = router.vpn_protocol
+        router.vpn_protocol = old_protocol      # so deprovision cleans the old side
+        try:
+            self.deprovision_router(router)
+        finally:
+            router.vpn_protocol = new_protocol
+        return self.provision_router(router)
+
+    def _provision_openvpn(self, router) -> dict:
+        from apps.vpn.services.ccd_manager import CCDManager
+
+        net = ipaddress.ip_network(
+            getattr(settings, 'OPENVPN_NETWORK_CIDR', '10.9.0.0/16'), strict=False
+        )
+        netmask = str(net.netmask)
+        ccd = CCDManager()
+        logger.info(f"[OVPN PROVISION] Starting for router: {router.name} (id={router.id})")
+
+        # Idempotent: perform_create AND the post_save signal both call us
+        if router.vpn_provisioned and router.vpn_ip_address:
+            try:
+                current = ipaddress.ip_address(str(router.vpn_ip_address))
+            except ValueError:
+                current = None
+            if current is not None and current in net:
+                ccd.create_ccd_file(str(current), str(current), netmask)
+                return {'vpn_ip': str(current), 'public_key': None, 'status': 'provisioned'}
+            self.deprovision_router(router)   # was provisioned under the other protocol
+
+        vpn_ip = None
+        try:
+            with transaction.atomic():
+                # Serialize IP allocation across concurrent provisionings (prevents map hijack/duplicates)
+                with connection.cursor() as cur:
+                    cur.execute("SELECT pg_advisory_xact_lock(%s)", [0x4F56504E])
+
+                vpn_ip = self._assign_openvpn_ip(net)
+                ccd.create_ccd_file(vpn_ip, vpn_ip, netmask)   # CN == username == VPN IP
+
+                router.wireguard_private_key = None
+                router.wireguard_public_key  = None
+                router.vpn_ip_address        = vpn_ip
+                router.vpn_provisioned       = True
+                router.vpn_provisioned_at    = timezone.now()
+                router.ip_address            = vpn_ip
+                router.save(update_fields=[
+                    'wireguard_private_key', 'wireguard_public_key',
+                    'vpn_ip_address', 'vpn_provisioned', 'vpn_provisioned_at',
+                    'ip_address', 'updated_at',
+                ])
+
+                self._register_router_globally(router, vpn_ip)
+                with schema_context(get_public_schema_name()):
+                    if not GlobalRouterMap.objects.filter(nas_ip=vpn_ip).exists():
+                        raise VPNProvisioningError("GlobalRouterMap entry was not created (tenant not found)")
+
+                # FreeRADIUS only learns new SQL clients on restart (debounced helper)
+                from apps.network.signals import reload_radius_clients_now
+                transaction.on_commit(reload_radius_clients_now)
+
+            logger.info(f"[OVPN PROVISION] Complete for {router.name}: {vpn_ip}")
+            return {'vpn_ip': vpn_ip, 'public_key': None, 'status': 'provisioned'}
+        except Exception as e:
+            if vpn_ip:
+                self._remove_openvpn_ccd(vpn_ip)
+            logger.error(f"[OVPN PROVISION] Failed for {router.name}: {e}", exc_info=True)
+            raise VPNProvisioningError(str(e))
+
+    def _assign_openvpn_ip(self, net) -> str:
+        reserved = {net.network_address + 1}          # 10.9.0.1 = server tunnel IP
+        assigned: Set[ipaddress.IPv4Address] = set()
+        with schema_context(get_public_schema_name()):
+            for ip_str in GlobalRouterMap.objects.values_list('nas_ip', flat=True):
+                try:
+                    assigned.add(ipaddress.ip_address(ip_str))
+                except ValueError:
+                    pass
+        for host in net.hosts():
+            if host in reserved or host in assigned:
+                continue
+            return str(host)
+        raise VPNProvisioningError(f"No available OpenVPN IPs in {net}")
+
+    def _remove_openvpn_ccd(self, ip: str) -> None:
+        try:
+            from apps.vpn.services.ccd_manager import CCDManager
+            CCDManager().remove_ccd_file(ip)
+        except Exception as e:
+            logger.warning(f"[OVPN] CCD removal failed for {ip}: {e}")
 
     # ── Private helpers ──────────────────────────────────────────────────────
 

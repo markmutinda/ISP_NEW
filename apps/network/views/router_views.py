@@ -421,7 +421,25 @@ class RouterViewSet(viewsets.ModelViewSet):
         except Exception as e:
             logger.error(f"Failed to list routers across tenants: {e}", exc_info=True)
             return Response({'count': 0, 'results': []})
-    
+
+    def perform_update(self, serializer):
+        old_protocol = serializer.instance.vpn_protocol
+        router = serializer.save()
+        if router.vpn_protocol != old_protocol and router.vpn_provisioned:
+            try:
+                from apps.vpn.services.vpn_provisioning_service import VPNProvisioningService
+                VPNProvisioningService().switch_protocol(router, old_protocol)
+                RouterEvent.objects.create(
+                    router=router,
+                    event_type='config_change',
+                    message=f"VPN protocol switched {old_protocol} -> {router.vpn_protocol} (re-run provisioning script on the router)",
+                )
+            except Exception as e:
+                logger.error(f"VPN protocol switch failed for router {router.id}: {e}", exc_info=True)
+                raise serializers.ValidationError(
+                    {"vpn_protocol": f"Switch failed ({e}). Use 'Provision VPN' to retry."}
+                )
+
     def perform_create(self, serializer):
         # The serializer will handle adding company_name and tenant_subdomain
         router = serializer.save()

@@ -80,6 +80,7 @@ SHARED_APPS = (
     'apps.subscriptions',              # Netily platform subscriptions (public schema only)
     'apps.superadmin',
     'apps.affiliate',                  # Platform affiliate accounts and attribution (public schema)
+    'apps.shop',                       # Public storefront (public schema only)
     # NOTE: token_blacklist is intentionally NOT in SHARED_APPS.
     # It must live only in TENANT_APPS so each tenant schema has its own
     # token_blacklist_outstandingtoken table with an FK that correctly
@@ -306,6 +307,8 @@ REST_FRAMEWORK = {
         'company_registration': '3/hour',
         'self_service_register': '5/hour',
         'staff_mutation': '60/hour',
+        'shop_checkout': '30/hour',
+        'shop_status': '120/min',
     },
 }
 
@@ -600,6 +603,13 @@ WG_SERVER_PUBLIC_KEY = os.environ.get('WG_SERVER_PUBLIC_KEY', '')
 WG_INTERFACE         = os.environ.get('WG_INTERFACE', 'wg0')
 WG_PEERS_DIR         = os.environ.get('WG_PEERS_DIR', '/etc/wireguard/peers')
 
+# ── OpenVPN (second VPN option, separate subnet from WireGuard) ──
+OPENVPN_NETWORK_CIDR = os.environ.get('OPENVPN_NETWORK_CIDR', '10.9.0.0/16')
+OPENVPN_GATEWAY_IP   = os.environ.get('OPENVPN_GATEWAY_IP', '10.9.0.1')
+OPENVPN_PUBLIC_HOST  = os.environ.get('OPENVPN_PUBLIC_HOST', '')      # blank = router.openvpn_server
+OPENVPN_PUBLIC_PORT  = int(os.environ.get('OPENVPN_PUBLIC_PORT', '1194'))
+OPENVPN_AUTH_TOKEN   = os.environ.get('OPENVPN_AUTH_TOKEN', '')
+
 # ────────────────────────────────────────────────────────────────
 #  TR-069 / GenieACS
 # ────────────────────────────────────────────────────────────────
@@ -628,3 +638,20 @@ TELEGRAM_PAYMENTS_ADMIN_CHAT_IDS = (
     [x.strip() for x in _tg_payment_admins.split(',') if x.strip()]
     or TELEGRAM_ADMIN_CHAT_IDS
 )
+
+# ────────────────────────────────────────────────────────────────
+#  SHOP (public storefront)
+# ────────────────────────────────────────────────────────────────
+SHOP_USD_KES_RATE = os.getenv('SHOP_USD_KES_RATE', '129')       # catalog is priced in USD, M-Pesa charges KES
+SHOP_SHIPPING_FEE_USD = os.getenv('SHOP_SHIPPING_FEE_USD', '0')
+SHOP_ORDER_EXPIRY_MINUTES = int(os.getenv('SHOP_ORDER_EXPIRY_MINUTES', '60'))
+SHOP_PUBLIC_API_BASE = os.getenv('SHOP_PUBLIC_API_BASE', 'https://api.netily.co.ke')
+SHOP_MPESA_CALLBACK_URL = os.getenv('SHOP_MPESA_CALLBACK_URL', '')   # optional full override
+SHOP_MPESA_CALLBACK_SECRET = os.getenv('SHOP_MPESA_CALLBACK_SECRET', '')  # REQUIRED
+# Optional dedicated shop shortcode; falls back to NETILY_PAYBILL_* when blank
+SHOP_MPESA_CONSUMER_KEY = os.getenv('SHOP_MPESA_CONSUMER_KEY', '')
+SHOP_MPESA_CONSUMER_SECRET = os.getenv('SHOP_MPESA_CONSUMER_SECRET', '')
+SHOP_MPESA_SHORTCODE = os.getenv('SHOP_MPESA_SHORTCODE', '')
+SHOP_MPESA_PASSKEY = os.getenv('SHOP_MPESA_PASSKEY', '')
+SHOP_MPESA_ENVIRONMENT = os.getenv('SHOP_MPESA_ENVIRONMENT', '')
+SHOP_MPESA_TRANSACTION_TYPE = os.getenv('SHOP_MPESA_TRANSACTION_TYPE', 'CustomerPayBillOnline')
