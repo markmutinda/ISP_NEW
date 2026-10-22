@@ -27,6 +27,9 @@ class MikrotikScriptGenerator:
         # ── VPN Gateway Logic ─────────────────────────────────────────
         self.vpn_gateway = getattr(settings, 'VPN_GATEWAY_IP', '10.8.0.1')
         self.vpn_network_cidr = getattr(settings, 'VPN_NETWORK_CIDR', '10.8.0.0/16')
+        if getattr(router, 'vpn_protocol', 'wireguard') == 'openvpn':
+            self.vpn_gateway = getattr(settings, 'OPENVPN_GATEWAY_IP', '10.9.0.1')
+            self.vpn_network_cidr = getattr(settings, 'OPENVPN_NETWORK_CIDR', '10.9.0.0/16')
         
         # ── Production URLs Logic ─────────────────────────────────────
         self.base_url = getattr(settings, 'BASE_URL', 'https://api.netily.co.ke').rstrip('/')
@@ -234,6 +237,8 @@ class MikrotikScriptGenerator:
 """
 
     def _section_openvpn(self, r: Router, cipher: str, auth: str, is_v6: bool) -> str:
+        if getattr(r, 'vpn_protocol', 'wireguard') == 'openvpn':
+            return self._section_openvpn_native(r, is_v6)
         if is_v6:
             vpn_host = self._get_vpn_host(r)
             return f"""# ─────────────────────────────────────────────────────────────
@@ -317,6 +322,24 @@ class MikrotikScriptGenerator:
 :delay 5s
 :put "WireGuard VPN tunnel configured — IP: {vpn_ip} (MTU: 1320)"
 :put "RADIUS accounting traffic allowed via tunnel (stable + long-term compatible)"
+"""
+
+    def _section_openvpn_native(self, r: Router, is_v6: bool) -> str:
+        if not r.vpn_ip_address:
+            return ':put "ERROR: OpenVPN not provisioned for this router - provision VPN in dashboard first"\n'
+        host = getattr(settings, 'OPENVPN_PUBLIC_HOST', '') or self._get_vpn_host(r)
+        port = int(getattr(settings, 'OPENVPN_PUBLIC_PORT', 1194))
+        cipher = "aes256" if is_v6 else "aes256-cbc"
+        user = self._escape_ros_string(str(r.vpn_ip_address))
+        pwd = self._escape_ros_string(r.shared_secret)
+        return f"""# ─────────────────────────────────────────────────────────────
+# 3. OPENVPN TUNNEL (TCP, user/pass)
+# ─────────────────────────────────────────────────────────────
+:put "Configuring OpenVPN tunnel..."
+:do {{ /interface ovpn-client remove [find name="Netily-VPN"] }} on-error={{}}
+/interface ovpn-client add name="Netily-VPN" connect-to="{self._escape_ros_string(host)}" port={port} mode=ip protocol=tcp user="{user}" password="{pwd}" auth=sha1 cipher={cipher} certificate=none verify-server-certificate=no add-default-route=no use-peer-dns=no comment="Netily Cloud Controller OpenVPN"
+:delay 10s
+:put "OpenVPN tunnel configured - IP: {user}"
 """
 
     def _section_firewall(self, r: Router) -> str:
@@ -491,11 +514,11 @@ class MikrotikScriptGenerator:
 # rotation) never pays a cold-DNS penalty inside the walled garden.
 # ─────────────────────────────────────────────────────────────
 :put "Installing DNS pre-warm scheduler..."
-:do {{ /system script remove [find name="netily-dns-warm"] }} on-error={{}}
+:do {{ /system script remove [find name="netily-dns-warm"] }} on-error={{}} 
 /system script add name="netily-dns-warm" comment="Netily-DNS-Prewarm" source={{
 {resolve_lines}
 }}
-:do {{ /system scheduler remove [find name="netily-dns-warm"] }} on-error={{}}
+:do {{ /system scheduler remove [find name="netily-dns-warm"] }} on-error={{}} 
 /system scheduler add name="netily-dns-warm" interval=30s comment="Netily-DNS-Prewarm" on-event="/system script run netily-dns-warm"
 :do {{ /system script run netily-dns-warm }} on-error={{ :put " + DNS pre-warm script ran successfully" }}
 :put " + DNS pre-warm scheduler installed (runs every 30s)"
@@ -554,8 +577,8 @@ class MikrotikScriptGenerator:
 # RB750Gr3, etc.) only expose files under the "flash" alias.
 # ─────────────────────────────────────────────────────────────
 :put "Downloading hotspot pages into netily-hotspot/ and flash/netily-hotspot/..."
-:do {{ /file add name="netily-hotspot" type="directory" }} on-error={{}}
-:do {{ /file add name="flash/netily-hotspot" type="directory" }} on-error={{}}
+:do {{ /file add name="netily-hotspot" type="directory" }} on-error={{}} 
+:do {{ /file add name="flash/netily-hotspot" type="directory" }} on-error={{}} 
 {fetch_block}
 """
 
@@ -565,13 +588,13 @@ class MikrotikScriptGenerator:
 # ─────────────────────────────────────────────────────────────
 :put "Configuring PPPoE Server..."
 
-:do {{ /ip pool remove [find name="netily-pppoe-pool"] }} on-error={{}}
+:do {{ /ip pool remove [find name="netily-pppoe-pool"] }} on-error={{}} 
 /ip pool add name="netily-pppoe-pool" ranges="{r.pppoe_pool}"
 
-:do {{ /ppp profile remove [find name="netily-pppoe-profile"] }} on-error={{}}
+:do {{ /ppp profile remove [find name="netily-pppoe-profile"] }} on-error={{}} 
 /ppp profile add name="netily-pppoe-profile" local-address={pppoe_local} remote-address=netily-pppoe-pool dns-server=8.8.8.8,1.1.1.1 use-encryption=no change-tcp-mss=yes only-one=default
 
-:do {{ /interface pppoe-server server remove [find service-name="netily-pppoe"] }} on-error={{}}
+:do {{ /interface pppoe-server server remove [find service-name="netily-pppoe"] }} on-error={{}} 
 /interface pppoe-server server add service-name="netily-pppoe" interface="netily-bridge" default-profile="netily-pppoe-profile" authentication=pap,chap disabled=no
 
 /ppp aaa set use-radius=yes accounting=yes interim-update=00:03:00
@@ -600,7 +623,7 @@ class MikrotikScriptGenerator:
 # ─────────────────────────────────────────────────────────────
 :put "Configuring NAT..."
 
-:do {{ /ip firewall nat remove [find comment="Netily-Masquerade"] }} on-error={{}}
+:do {{ /ip firewall nat remove [find comment="Netily-Masquerade"] }} on-error={{}} 
 /ip firewall nat add chain=srcnat action=masquerade comment="Netily-Masquerade"
 
 # Force ALL unauthenticated clients' DNS through the router's own resolver.
@@ -608,7 +631,7 @@ class MikrotikScriptGenerator:
 # Private DNS, 8.8.8.8, carrier DoH) get their pre-auth DNS queries silently
 # dropped by the walled garden, causing a ~10s resolver timeout/retry before
 # the captive-portal redirect URL can even be reached.
-:do {{ /ip firewall nat remove [find comment~"Netily-Force-DNS"] }} on-error={{}}
+:do {{ /ip firewall nat remove [find comment~"Netily-Force-DNS"] }} on-error={{}} 
 /ip firewall nat add chain=dstnat action=redirect to-ports=53 protocol=udp dst-port=53 \\
     in-interface="netily-bridge" comment="Netily-Force-DNS"
 /ip firewall nat add chain=dstnat action=redirect to-ports=53 protocol=tcp dst-port=53 \\

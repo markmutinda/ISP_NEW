@@ -52,6 +52,18 @@ app.conf.beat_schedule = {
     },
     
     # ────────────────────────────────────────────────────────────────
+    # Watchdog OpenVPN Status - Runs every 90 seconds
+    # Fast, frequent status sweep for OpenVPN-provisioned routers.
+    # Reads /tmp/ovpn-status.log from the netily-ovpn container via
+    # one docker exec per sweep - no per-router network calls.
+    # ────────────────────────────────────────────────────────────────
+    'watchdog-openvpn-status-every-90s': {
+        'task': 'apps.network.tasks.watchdog_openvpn_status',
+        'schedule': 90,
+        'options': {'queue': 'default'}
+    },
+    
+    # ────────────────────────────────────────────────────────────────
     # Router Uptime Recalculation - Runs hourly at minute 20
     # Recalculates uptime percentages based on RouterEvent history.
     # This ensures the list/grid displays accurate uptime percentages

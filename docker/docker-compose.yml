@@ -154,6 +154,7 @@ services:
       - media_volume:/app/media
       - /var/run/docker.sock:/var/run/docker.sock
       - wireguard_peers:/etc/wireguard/peers
+      - ovpn_ccd:/etc/openvpn/ccd
     env_file: ../.env
     environment:
       - PYTHONPATH=/app
@@ -214,6 +215,7 @@ services:
       - ../:/app
       - /var/run/docker.sock:/var/run/docker.sock
       - wireguard_peers:/etc/wireguard/peers
+      - ovpn_ccd:/etc/openvpn/ccd
     env_file: ../.env
     environment:
       - PYTHONPATH=/app
@@ -499,6 +501,68 @@ services:
         max-file: "3"
 
   # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  # OPENVPN - second VPN option (separate subnet 10.9.0.0/16)
+  # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  openvpn:
+    build:
+      context: ..
+      dockerfile: docker/openvpn/Dockerfile
+    container_name: netily-ovpn
+    restart: unless-stopped
+    cap_add:
+      - NET_ADMIN
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    sysctls:
+      - net.ipv4.ip_forward=1
+    env_file: ../.env
+    environment:
+      - AUTH_URL=http://web:8000/api/v1/vpn/openvpn-auth/
+    ports:
+      - "1194:1194/tcp"
+    volumes:
+      - ovpn_pki:/etc/openvpn/pki
+      - ovpn_ccd:/etc/openvpn/ccd
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 256M
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    networks:
+      isp_network: {}
+      vpn_network:
+        ipv4_address: 10.10.0.251
+
+  # Adds the 10.9.0.0/16 route on host + web/worker/radius WITHOUT editing their startup commands
+  network-healer-ovpn:
+    image: docker:cli
+    container_name: netily_healer_ovpn
+    restart: unless-stopped
+    privileged: true
+    network_mode: "host"
+    command: >
+      sh -c "echo 'OVPN route healer started';
+             while true; do
+               ip route replace 10.9.0.0/16 via 10.10.0.251 2>/dev/null || true;
+               for c in netily_backend netily_worker netily_radius; do
+                 docker exec $$c sh -c 'ip route show 10.9.0.0/16 | grep -q . || ip route add 10.9.0.0/16 via 10.10.0.251' >/dev/null 2>&1 || true;
+               done;
+               sleep 10;
+             done"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
   # TR-069 / GenieACS — CPE remote management
   # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
   genieacs-mongo:
@@ -579,3 +643,5 @@ volumes:
   certbot_certs:
   genieacs_mongo_data:
   genieacs_ext_state:
+  ovpn_pki:
+  ovpn_ccd:

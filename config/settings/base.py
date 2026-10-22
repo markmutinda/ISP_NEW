@@ -603,6 +603,13 @@ WG_SERVER_PUBLIC_KEY = os.environ.get('WG_SERVER_PUBLIC_KEY', '')
 WG_INTERFACE         = os.environ.get('WG_INTERFACE', 'wg0')
 WG_PEERS_DIR         = os.environ.get('WG_PEERS_DIR', '/etc/wireguard/peers')
 
+# ── OpenVPN (second VPN option, separate subnet from WireGuard) ──
+OPENVPN_NETWORK_CIDR = os.environ.get('OPENVPN_NETWORK_CIDR', '10.9.0.0/16')
+OPENVPN_GATEWAY_IP   = os.environ.get('OPENVPN_GATEWAY_IP', '10.9.0.1')
+OPENVPN_PUBLIC_HOST  = os.environ.get('OPENVPN_PUBLIC_HOST', '')      # blank = router.openvpn_server
+OPENVPN_PUBLIC_PORT  = int(os.environ.get('OPENVPN_PUBLIC_PORT', '1194'))
+OPENVPN_AUTH_TOKEN   = os.environ.get('OPENVPN_AUTH_TOKEN', '')
+
 # ────────────────────────────────────────────────────────────────
 #  TR-069 / GenieACS
 # ────────────────────────────────────────────────────────────────

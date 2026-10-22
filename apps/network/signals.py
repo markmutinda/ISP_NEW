@@ -212,6 +212,14 @@ def deprovision_vpn_before_delete(sender, instance, **kwargs):
     except Exception as e:
         logger.warning(f"[PRE-DELETE] CCD removal failed: {e}")
 
+    # 2b. OpenVPN routers: CCD file is named after the VPN IP
+    try:
+        if getattr(instance, 'vpn_protocol', 'wireguard') == 'openvpn' and instance.vpn_ip_address:
+            from apps.vpn.services.ccd_manager import CCDManager
+            CCDManager().remove_ccd_file(str(instance.vpn_ip_address))
+    except Exception as e:
+        logger.warning(f"[PRE-DELETE] OpenVPN CCD removal failed: {e}")
+
     # 3. Free the VPN IP from the global map
     try:
         if instance.vpn_ip_address:

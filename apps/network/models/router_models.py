@@ -62,6 +62,11 @@ class Router(AuditMixin):
         ('full_isp', 'Full ISP with OpenVPN'),
     ]
 
+    VPN_PROTOCOLS = [
+        ('wireguard', 'WireGuard'),
+        ('openvpn', 'OpenVPN'),
+    ]
+
     # ────────────────────────────────────────────────────────────────
     # IDENTITY & TENANCY
     # ────────────────────────────────────────────────────────────────
@@ -169,6 +174,10 @@ class Router(AuditMixin):
     # ────────────────────────────────────────────────────────────────
     # WIREGUARD VPN (replaces OpenVPN certificate-based setup)
     # ────────────────────────────────────────────────────────────────
+    vpn_protocol = models.CharField(
+        max_length=10, choices=VPN_PROTOCOLS, default='wireguard',
+        help_text="Tunnel type used between this router and Netily cloud"
+    )
     wireguard_private_key = models.TextField(
         blank=True, null=True,
         help_text="Router's WireGuard private key (stored server-side, injected into RSC)"
@@ -411,17 +420,21 @@ class Router(AuditMixin):
         
         return float(self.uptime_percentage)
 
-    def sync_status(self, force=False, peer_handshake_age=_UNSET):
+    def sync_status(self, force=False, peer_handshake_age=_UNSET, tunnel_up=_UNSET):
         """
         Fast status check using WireGuard handshake age (primary) or TCP fallback.
         
         For WG-provisioned routers: uses handshake age from WG peer table.
+        For OpenVPN routers: uses caller-provided tunnel_up flag (from OpenVPN status log).
         For non-WG routers: falls back to resilient TCP socket check.
         
         Args:
             force (bool): If True, bypasses the cooldown check and forces a sync.
             peer_handshake_age (int|None|_UNSET): Pre-fetched handshake age from caller.
                 If _UNSET, fetches it lazily via get_peer_handshake_age().
+            tunnel_up (bool|_UNSET): Pre-fetched OpenVPN tunnel state from caller.
+                Only used when vpn_protocol == 'openvpn'. If _UNSET, falls through
+                to the WireGuard / TCP fallback path.
         
         Returns:
             str: The updated status ('online' or 'offline')
@@ -463,6 +476,10 @@ class Router(AuditMixin):
                 new_status = 'online' if (age is not None and age < 180) else 'offline'
             except Exception:
                 new_status = None  # fall through to TCP check below
+
+        # 3a. PRIMARY CHECK (OpenVPN): caller-provided tunnel_up from the OpenVPN status log
+        elif tunnel_up is not _UNSET and self.vpn_provisioned and self.vpn_protocol == 'openvpn':
+            new_status = 'online' if tunnel_up else 'offline'
 
         # 3b. FALLBACK: Resilient socket check (legacy path, non-WG or WG lookup failed)
         if new_status is None:
