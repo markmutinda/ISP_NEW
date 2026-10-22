@@ -136,6 +136,20 @@ jobs:
               sleep 3
             done
 
+            echo "==> Waiting for Gunicorn application readiness..."
+            for i in $(seq 1 90); do
+              if docker compose exec -T web python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/v1/core/health/', timeout=5).read()" >/dev/null 2>&1; then
+                echo "  Gunicorn is accepting HTTP requests."
+                break
+              fi
+              if [ "$i" = "90" ]; then
+                echo "Gunicorn did not become ready within 8 minutes. Dumping web logs:"
+                docker compose logs --tail=100 web
+                exit 1
+              fi
+              sleep 5
+            done
+
             echo "==> Refreshing Nginx upstream resolution..."
             run_step "Validating Nginx configuration" 1m docker compose exec -T nginx nginx -t
             run_step "Reloading Nginx" 1m docker compose exec -T nginx nginx -s reload
