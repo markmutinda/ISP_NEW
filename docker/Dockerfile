@@ -43,7 +43,9 @@ RUN pip install --upgrade pip && \
 COPY . .
 
 # Collect static files (safe even if empty)
-RUN python manage.py collectstatic --noinput || true
+ENV DJANGO_SETTINGS_MODULE=config.settings.production
+RUN DJANGO_SECRET_KEY=build-only-not-used-at-runtime \
+    python manage.py collectstatic --noinput
 
 # Expose Django port
 EXPOSE 8000
