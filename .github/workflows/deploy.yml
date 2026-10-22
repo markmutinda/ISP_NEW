@@ -136,12 +136,31 @@ jobs:
               sleep 3
             done
 
+            echo "==> Refreshing Nginx upstream resolution..."
+            run_step "Validating Nginx configuration" 1m docker compose exec -T nginx nginx -t
+            run_step "Reloading Nginx" 1m docker compose exec -T nginx nginx -s reload
+
             echo "==> Health check: testing Django responds..."
             timeout 2m docker compose exec -T web python -c "import django; django.setup(); print('Django OK')" || {
               echo "❌ Django setup check failed. Dumping logs:"
               docker compose logs --tail=50 web
               exit 1
             }
+
+            echo "==> Health check: testing public API through Nginx..."
+            for i in 1 2 3 4 5; do
+              if curl --fail --silent --show-error --max-time 15 https://api.netily.co.ke/api/v1/core/health/; then
+                echo
+                echo "  Public API health check passed."
+                break
+              fi
+              if [ "$i" = "5" ]; then
+                echo "Public API health check failed. Dumping Nginx and web logs:"
+                docker compose logs --tail=50 nginx web
+                exit 1
+              fi
+              sleep 5
+            done
 
             echo "==> Cleaning up old Docker images..."
             docker image prune -f
