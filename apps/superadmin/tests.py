@@ -101,15 +101,18 @@ class PlatformExpenditureLedgerTests(SimpleTestCase):
     def test_explicit_manual_account_takes_precedence_over_date(self):
         view = PlatformExpenditureView()
         view.ledger_key = "new_business"
-        with patch("apps.subscriptions.models.SubscriptionPayment.objects") as payments:
+        payment = SimpleNamespace(
+            id="payment-1", business_account="new_business", amount=Decimal("6212.00"),
+            completed_at=datetime.fromisoformat("2026-09-20T12:00:00+03:00"),
+        )
+        with patch("apps.subscriptions.models.SubscriptionPayment.objects") as payments, patch(
+            "apps.superadmin.views.PlatformReceiptAllocation.objects"
+        ) as allocations:
             qs = MagicMock()
             payments.filter.return_value = qs
-            qs.filter.return_value = qs
-            qs.aggregate.return_value = {"total": Decimal("6212.00")}
+            qs.iterator.return_value = [payment]
+            allocations.filter.return_value.values_list.return_value = []
             self.assertEqual(view._subscription_total(None, None, datetime.fromisoformat("2026-09-29T16:39:59+03:00")), Decimal("6212.00"))
-        account_filter = str(qs.filter.call_args.args[0])
-        self.assertIn("new_business", account_filter)
-        self.assertIn("business_account__isnull", account_filter)
 
 
 class CompanySubscriptionBillingAnchorTests(SimpleTestCase):

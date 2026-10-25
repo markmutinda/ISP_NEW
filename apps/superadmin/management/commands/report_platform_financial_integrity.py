@@ -359,6 +359,8 @@ class Command(BaseCommand):
             result[account] = None if not item else {
                 "balance": money(item.balance), "balance_at": item.balance_at.isoformat(),
                 "reference": item.reference, "notes": item.notes,
+                "system_balance_before": money(item.system_balance_before) if item.system_balance_before is not None else None,
+                "reconciliation_difference": money(item.reconciliation_difference) if item.reconciliation_difference is not None else None,
             }
         return result
 

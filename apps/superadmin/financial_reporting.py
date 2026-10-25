@@ -15,6 +15,7 @@ from apps.superadmin.models import (
     BusinessAccountBalanceSnapshot,
     BusinessAccountTransfer,
     PlatformExpenditure,
+    PlatformReceiptAllocation,
 )
 
 
@@ -93,6 +94,10 @@ class FinancialReportBuilder:
         self.end = end
         self.protected_schemas = protected_schemas
         self.boundary = cutover_time()
+        self.allocations = {
+            (item.source_type, item.source_id): item.ledger
+            for item in PlatformReceiptAllocation.objects.all().only("source_type", "source_id", "ledger")
+        }
         self.months = {
             account: {key: _new_bucket(key) for key in _month_keys(start, end)}
             for account in (*ACCOUNTS, "combined")
@@ -154,7 +159,7 @@ class FinancialReportBuilder:
         for payment in qs.filter(completed_at__isnull=False).iterator():
             if not self._in_range(payment.completed_at):
                 continue
-            account, allocation = subscription_account(payment, self.boundary)
+            account, allocation = self._subscription_allocation(payment)
             if allocation == "cutover_inference":
                 self.quality["inferred_subscription_allocations"] += 1
             month = _month_key(timezone.localtime(payment.completed_at))
@@ -164,6 +169,7 @@ class FinancialReportBuilder:
                 "type": "subscription", "account": account, "direction": "in", "amount": money(payment.amount),
                 "title": f"{company} subscription", "reference": payment.mpesa_receipt or payment.bank_reference or payment.payhero_reference or "",
                 "occurred_at": payment.completed_at.isoformat(), "allocation": allocation,
+                "source_type": PlatformReceiptAllocation.SOURCE_SUBSCRIPTION, "source_id": str(payment.id),
             })
 
     def _collect_sms(self):
@@ -174,14 +180,17 @@ class FinancialReportBuilder:
                     for topup in SMSUnitTopup.objects.filter(status="completed", completed_at__isnull=False).iterator():
                         if not self._in_range(topup.completed_at):
                             continue
-                        account, allocation = sms_account(topup, self.boundary)
-                        self.quality["inferred_sms_allocations"] += 1
+                        source_id = f"{tenant.schema_name}:{topup.id}"
+                        account, allocation = self._sms_allocation(topup, source_id)
+                        if allocation == "cutover_inference":
+                            self.quality["inferred_sms_allocations"] += 1
                         month = _month_key(timezone.localtime(topup.completed_at))
                         self._add(account, month, "sms", topup.amount_paid)
                         self.events.append({
                             "type": "sms", "account": account, "direction": "in", "amount": money(topup.amount_paid),
                             "title": f"{tenant.subdomain} SMS top-up", "reference": topup.payment_reference or topup.checkout_request_id or "",
                             "occurred_at": topup.completed_at.isoformat(), "allocation": allocation,
+                            "source_type": PlatformReceiptAllocation.SOURCE_SMS, "source_id": source_id,
                         })
             except Exception:
                 self.quality["unreadable_sms_schemas"] += 1
@@ -236,40 +245,73 @@ class FinancialReportBuilder:
         snapshot = BusinessAccountBalanceSnapshot.objects.filter(ledger=account).order_by("-balance_at", "-created_at").first()
         if not snapshot:
             return {"snapshot": None, "movements_after_snapshot": None, "estimated_balance": None, "confidence": "needs_snapshot"}
-        receipts = ZERO
-        for payment in SubscriptionPayment.objects.filter(status="completed", completed_at__gt=snapshot.balance_at).iterator():
-            allocated, _ = subscription_account(payment, self.boundary)
-            if allocated == account:
-                receipts += payment.amount
-        tenants = Tenant.objects.exclude(schema_name__in=self.protected_schemas).only("schema_name")
-        for tenant in tenants:
-            try:
-                with schema_context(tenant.schema_name):
-                    for topup in SMSUnitTopup.objects.filter(status="completed", completed_at__gt=snapshot.balance_at).iterator():
-                        allocated, _ = sms_account(topup, self.boundary)
-                        if allocated == account:
-                            receipts += topup.amount_paid
-            except Exception:
-                continue
-        # Expenditure is date-only, so a statement snapshot is treated as the
-        # account's confirmed closing balance for that calendar date.
-        outflows = PlatformExpenditure.objects.filter(
-            ledger=account, incurred_on__gt=timezone.localtime(snapshot.balance_at).date()
-        ).aggregate(total=Sum("amount"))["total"] or ZERO
-        transfer_in = BusinessAccountTransfer.objects.filter(to_ledger=account, effective_at__gt=snapshot.balance_at).aggregate(total=Sum("amount"))["total"] or ZERO
-        transfer_out = BusinessAccountTransfer.objects.filter(from_ledger=account, effective_at__gt=snapshot.balance_at).aggregate(total=Sum("amount"))["total"] or ZERO
-        movement = receipts - outflows + transfer_in - transfer_out
+        movements = self.cash_movements(account, snapshot.balance_at)
+        movement = movements["net"]
         return {
             "snapshot": {
                 "id": str(snapshot.id), "balance": money(snapshot.balance), "balance_at": snapshot.balance_at.isoformat(),
                 "reference": snapshot.reference, "notes": snapshot.notes,
+                "system_balance_before": money(snapshot.system_balance_before) if snapshot.system_balance_before is not None else None,
+                "reconciliation_difference": money(snapshot.reconciliation_difference) if snapshot.reconciliation_difference is not None else None,
             },
             "movements_after_snapshot": {
-                "receipts": money(receipts), "outflows": money(outflows),
-                "transfer_in": money(transfer_in), "transfer_out": money(transfer_out), "net": money(movement),
+                "receipts": money(movements["receipts"]), "outflows": money(movements["outflows"]),
+                "transfer_in": money(movements["transfer_in"]), "transfer_out": money(movements["transfer_out"]), "net": money(movement),
             },
             "estimated_balance": money(snapshot.balance + movement),
             "confidence": "reconciled_anchor_plus_recorded_movements",
+        }
+
+    def _subscription_allocation(self, payment):
+        override = self.allocations.get((PlatformReceiptAllocation.SOURCE_SUBSCRIPTION, str(payment.id)))
+        return (override, "manual_mapping") if override else subscription_account(payment, self.boundary)
+
+    def _sms_allocation(self, topup, source_id):
+        override = self.allocations.get((PlatformReceiptAllocation.SOURCE_SMS, source_id))
+        return (override, "manual_mapping") if override else sms_account(topup, self.boundary)
+
+    def cash_movements(self, account, after, until=None):
+        payment_qs = SubscriptionPayment.objects.filter(status="completed", completed_at__gt=after)
+        if until:
+            payment_qs = payment_qs.filter(completed_at__lte=until)
+        receipts = ZERO
+        for payment in payment_qs.iterator():
+            allocated, _ = self._subscription_allocation(payment)
+            if allocated == account:
+                receipts += payment.amount
+
+        tenants = Tenant.objects.exclude(schema_name__in=self.protected_schemas).only("schema_name")
+        for tenant in tenants:
+            try:
+                with schema_context(tenant.schema_name):
+                    topup_qs = SMSUnitTopup.objects.filter(status="completed", completed_at__gt=after)
+                    if until:
+                        topup_qs = topup_qs.filter(completed_at__lte=until)
+                    for topup in topup_qs.iterator():
+                        source_id = f"{tenant.schema_name}:{topup.id}"
+                        allocated, _ = self._sms_allocation(topup, source_id)
+                        if allocated == account:
+                            receipts += topup.amount_paid
+            except Exception:
+                continue
+
+        expense_qs = PlatformExpenditure.objects.filter(
+            ledger=account, incurred_on__gt=timezone.localtime(after).date()
+        )
+        if until:
+            expense_qs = expense_qs.filter(incurred_on__lte=timezone.localtime(until).date())
+        outflows = expense_qs.aggregate(total=Sum("amount"))["total"] or ZERO
+
+        transfer_in_qs = BusinessAccountTransfer.objects.filter(to_ledger=account, effective_at__gt=after)
+        transfer_out_qs = BusinessAccountTransfer.objects.filter(from_ledger=account, effective_at__gt=after)
+        if until:
+            transfer_in_qs = transfer_in_qs.filter(effective_at__lte=until)
+            transfer_out_qs = transfer_out_qs.filter(effective_at__lte=until)
+        transfer_in = transfer_in_qs.aggregate(total=Sum("amount"))["total"] or ZERO
+        transfer_out = transfer_out_qs.aggregate(total=Sum("amount"))["total"] or ZERO
+        return {
+            "receipts": receipts, "outflows": outflows, "transfer_in": transfer_in,
+            "transfer_out": transfer_out, "net": receipts - outflows + transfer_in - transfer_out,
         }
 
     def _serialise_bucket(self, bucket):

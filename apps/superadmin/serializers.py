@@ -179,6 +179,11 @@ class BusinessAccountBalanceSnapshotSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError("Enter a valid statement balance.")
         return value
 
+    def validate_balance_at(self, value):
+        if value > timezone.now():
+            raise serializers.ValidationError("Balance time cannot be in the future.")
+        return value
+
 
 class PlatformReceiptAllocationSerializer(serializers.ModelSerializer):
     created_by_email = serializers.EmailField(source="created_by.email", read_only=True, allow_null=True)
@@ -196,12 +201,6 @@ class PlatformReceiptAllocationSerializer(serializers.ModelSerializer):
         if not value:
             raise serializers.ValidationError("Receipt source is required.")
         return value
-
-    def validate_balance_at(self, value):
-        if value > timezone.now():
-            raise serializers.ValidationError("Balance time cannot be in the future.")
-        return value
-
 
 class CompanyBriefSerializer(serializers.ModelSerializer):
     total_customers = serializers.SerializerMethodField()

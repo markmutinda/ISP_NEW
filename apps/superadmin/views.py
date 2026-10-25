@@ -36,7 +36,13 @@ from rest_framework.views import APIView
 from apps.core.models import Tenant, Company, Domain, User, AuditLog, GlobalSystemSettings, SystemSettings, Changelog, FeatureRequest
 from apps.core.rbac_defaults import normalize_role_access_policies
 from .permissions import IsSuperAdmin
-from .models import BusinessAccountBalanceSnapshot, BusinessAccountTransfer, PlatformExpenditure, TenantDeletionJob
+from .models import (
+    BusinessAccountBalanceSnapshot,
+    BusinessAccountTransfer,
+    PlatformExpenditure,
+    PlatformReceiptAllocation,
+    TenantDeletionJob,
+)
 from .serializers import (
     TenantListSerializer,
     TenantDetailSerializer,
@@ -50,6 +56,7 @@ from .serializers import (
     AuditLogSerializer,
     BusinessAccountBalanceSnapshotSerializer,
     PlatformExpenditureSerializer,
+    PlatformReceiptAllocationSerializer,
 )
 from .financial_reporting import FinancialReportBuilder
 from apps.core.serializers import ChangelogSerializer, FeatureRequestSerializer
@@ -4692,13 +4699,9 @@ class SubscriptionPaymentListView(APIView):
             return Response({"detail": "Payment date is invalid."}, status=status.HTTP_400_BAD_REQUEST)
 
         with schema_context(get_public_schema_name()):
-            expected_account = self._account_for_paid_at(paid_at)
-            if business_account and business_account != expected_account:
-                return Response(
-                    {"detail": "The selected business account does not match this payment date and the Bentrex cutover."},
-                    status=status.HTTP_400_BAD_REQUEST,
-                )
-            business_account = expected_account
+            # The cutover is a fallback only. Verified receipts can still land
+            # in either account after that date.
+            business_account = business_account or self._account_for_paid_at(paid_at)
             subscription_qs = CompanySubscription.objects.select_related("company", "plan")
             try:
                 if subscription_id:
@@ -4889,12 +4892,7 @@ class SubscriptionPaymentDetailView(SubscriptionPaymentListView):
             paid_at = self._parse_paid_at(data.get("completed_at") or payment.completed_at)
             if paid_at is None:
                 return Response({"detail": "Payment date is invalid."}, status=status.HTTP_400_BAD_REQUEST)
-            expected_account = self._account_for_paid_at(paid_at)
-            if business_account and business_account != expected_account:
-                return Response(
-                    {"detail": "The selected business account does not match this payment date and the Bentrex cutover."},
-                    status=status.HTTP_400_BAD_REQUEST,
-                )
+            effective_account = business_account or payment.business_account or self._account_for_paid_at(paid_at)
 
             next_method = payment_method or payment.payment_method
             next_reference = reference or self._payment_row(payment)["reference"]
@@ -4949,7 +4947,7 @@ class SubscriptionPaymentDetailView(SubscriptionPaymentListView):
                     reference=next_reference,
                     phone_number=phone_number,
                     paid_at=paid_at,
-                    business_account=expected_account,
+                    business_account=effective_account,
                 )
 
             _log_action(
@@ -4985,12 +4983,12 @@ class PlatformExpenditureView(APIView):
         PlatformExpenditure.LEDGER_PRIMARY: {
             "label": "Original Business Account",
             "route": "/superadmin/expenditure",
-            "description": "Closed ledger ending at the final Bentrex subscription payment on the previous account.",
+            "description": "Original account, including receipts explicitly confirmed there and its recorded costs.",
         },
         PlatformExpenditure.LEDGER_NEW_BUSINESS: {
             "label": "New Business Account",
             "route": "/superadmin/expenditure-2",
-            "description": "Current ledger for payments received after the gateway/business account change.",
+            "description": "New account, including receipts explicitly confirmed there and its recorded costs.",
         },
     }
 
@@ -5036,26 +5034,48 @@ class PlatformExpenditureView(APIView):
     def _subscription_total(self, start_date, end_date, cutover_at):
         from apps.subscriptions.models import SubscriptionPayment
 
-        qs = SubscriptionPayment.objects.filter(status="completed")
+        qs = SubscriptionPayment.objects.filter(status="completed", completed_at__isnull=False)
         qs = self._apply_date_filter(qs, "completed_at", start_date, end_date)
-        explicit = Q(business_account=self.ledger_key)
-        if cutover_at:
-            legacy = Q(business_account__isnull=True, completed_at__gt=cutover_at) if self.ledger_key == PlatformExpenditure.LEDGER_NEW_BUSINESS else Q(business_account__isnull=True, completed_at__lte=cutover_at)
-        else:
-            legacy = Q(pk__in=[]) if self.ledger_key == PlatformExpenditure.LEDGER_NEW_BUSINESS else Q(business_account__isnull=True)
-        qs = qs.filter(explicit | legacy)
-        return qs.aggregate(total=Sum("amount"))["total"] or Decimal("0.00")
+        overrides = dict(
+            PlatformReceiptAllocation.objects.filter(source_type=PlatformReceiptAllocation.SOURCE_SUBSCRIPTION)
+            .values_list("source_id", "ledger")
+        )
+        total = Decimal("0.00")
+        for payment in qs.iterator():
+            account = overrides.get(str(payment.id)) or payment.business_account
+            if not account:
+                account = (
+                    PlatformExpenditure.LEDGER_NEW_BUSINESS
+                    if cutover_at and payment.completed_at > cutover_at
+                    else PlatformExpenditure.LEDGER_PRIMARY
+                )
+            if account == self.ledger_key:
+                total += payment.amount
+        return total
 
     def _sms_topup_total(self, start_date, end_date, cutover_at):
         total = Decimal("0.00")
         tenants = Tenant.objects.exclude(schema_name__in=PROTECTED_SCHEMAS)
+        overrides = dict(
+            PlatformReceiptAllocation.objects.filter(source_type=PlatformReceiptAllocation.SOURCE_SMS)
+            .values_list("source_id", "ledger")
+        )
         for tenant in tenants.only("schema_name"):
             try:
                 with schema_context(tenant.schema_name):
                     qs = SMSUnitTopup.objects.filter(status="completed")
                     qs = self._apply_date_filter(qs, "completed_at", start_date, end_date)
-                    qs = self._apply_ledger_window(qs, "completed_at", cutover_at)
-                    total += qs.aggregate(total=Sum("amount_paid"))["total"] or Decimal("0.00")
+                    for topup in qs.filter(completed_at__isnull=False).iterator():
+                        source_id = f"{tenant.schema_name}:{topup.id}"
+                        account = overrides.get(source_id)
+                        if not account:
+                            account = (
+                                PlatformExpenditure.LEDGER_NEW_BUSINESS
+                                if cutover_at and topup.completed_at > cutover_at
+                                else PlatformExpenditure.LEDGER_PRIMARY
+                            )
+                        if account == self.ledger_key:
+                            total += topup.amount_paid
             except Exception as exc:
                 logger.warning("Expenditure SMS total skipped schema %s: %s", tenant.schema_name, exc)
         return total
@@ -5183,6 +5203,18 @@ class PlatformFinancialReportView(APIView):
         serializer = BusinessAccountBalanceSnapshotSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         values = serializer.validated_data
+        previous = BusinessAccountBalanceSnapshot.objects.filter(
+            ledger=values["ledger"], balance_at__lt=values["balance_at"]
+        ).order_by("-balance_at", "-created_at").first()
+        system_balance_before = None
+        reconciliation_difference = None
+        if previous:
+            report_builder = FinancialReportBuilder(
+                timezone.localdate(previous.balance_at), timezone.localdate(values["balance_at"]), PROTECTED_SCHEMAS
+            )
+            movement = report_builder.cash_movements(values["ledger"], previous.balance_at, values["balance_at"])["net"]
+            system_balance_before = previous.balance + movement
+            reconciliation_difference = values["balance"] - system_balance_before
         snapshot, created = BusinessAccountBalanceSnapshot.objects.update_or_create(
             ledger=values["ledger"],
             balance_at=values["balance_at"],
@@ -5190,6 +5222,8 @@ class PlatformFinancialReportView(APIView):
                 "balance": values["balance"],
                 "reference": values.get("reference", ""),
                 "notes": values.get("notes", ""),
+                "system_balance_before": system_balance_before,
+                "reconciliation_difference": reconciliation_difference,
                 "created_by": request.user,
             },
         )
@@ -5204,6 +5238,42 @@ class PlatformFinancialReportView(APIView):
         )
         return Response(
             BusinessAccountBalanceSnapshotSerializer(snapshot).data,
+            status=status.HTTP_201_CREATED if created else status.HTTP_200_OK,
+        )
+
+
+class PlatformFinancialAllocationView(APIView):
+    """Audited account mapping for otherwise-correct platform receipts."""
+
+    permission_classes = SUPERADMIN_PERMS
+
+    def post(self, request):
+        _ensure_public()
+        serializer = PlatformReceiptAllocationSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        values = serializer.validated_data
+        allocation, created = PlatformReceiptAllocation.objects.update_or_create(
+            source_type=values["source_type"],
+            source_id=values["source_id"],
+            defaults={
+                "reference": values.get("reference", ""),
+                "ledger": values["ledger"],
+                "occurred_at": values.get("occurred_at"),
+                "notes": values.get("notes", ""),
+                "created_by": request.user,
+            },
+        )
+        _log_action(
+            request.user,
+            "create" if created else "update",
+            "PlatformReceiptAllocation",
+            object_repr=f"{allocation.source_type} {allocation.reference or allocation.source_id} -> {allocation.ledger}",
+            object_id=allocation.id,
+            changes=PlatformReceiptAllocationSerializer(allocation).data,
+            request=request,
+        )
+        return Response(
+            PlatformReceiptAllocationSerializer(allocation).data,
             status=status.HTTP_201_CREATED if created else status.HTTP_200_OK,
         )
 
