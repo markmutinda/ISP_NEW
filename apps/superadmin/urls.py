@@ -134,6 +134,7 @@ urlpatterns = [
         views.PlatformExpenditureDetailView.as_view(ledger_key="new_business"),
         name="platform-expenditure-new-business-detail",
     ),
+    path("financial-reports/", views.PlatformFinancialReportView.as_view(), name="platform-financial-reports"),
 
     # Leads
     path("leads/", views.LeadListView.as_view(), name="lead-list"),

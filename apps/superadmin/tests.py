@@ -26,7 +26,7 @@ class FinancialCSVTests(SimpleTestCase):
     def test_export_has_header_and_preserves_signed_numeric_amount(self):
         response = _csv_response("expenditure", [("2026-10-09", "operations", "=unsafe", Decimal("-10.00"), "credit")])
         body = response.content.decode("utf-8-sig")
-        self.assertIn("date,category,title,amount,notes", body)
+        self.assertIn("date,category,title,amount,notes,entry_type,reference", body)
         self.assertIn("'=unsafe,-10.00,credit", body)
 
     def test_preview_reports_duplicate_rows_without_saving(self):
@@ -52,9 +52,11 @@ class PlatformExpenditureLedgerTests(SimpleTestCase):
         with patch("apps.superadmin.views._ensure_public"), patch.object(
             PlatformExpenditureView, "_cutover_payment", return_value=None
         ), patch.object(PlatformExpenditureView, "_manual_qs", return_value=manual), patch.object(
+            PlatformExpenditureView, "_manual_totals", return_value=(Decimal("11422.00"), Decimal("0.00"), Decimal("0.00"))
+        ), patch.object(
             PlatformExpenditureView, "_subscription_total", return_value=Decimal("10891.70")
         ), patch.object(PlatformExpenditureView, "_sms_topup_total", return_value=Decimal("504.60")), patch.object(
-            PlatformExpenditureView, "_transfer_total", return_value=Decimal("18000.00")
+            PlatformExpenditureView, "_transfer_totals", return_value=(Decimal("18000.00"), Decimal("0.00"))
         ):
             view = PlatformExpenditureView()
             view.ledger_key = "new_business"

@@ -107,6 +107,18 @@ class PlatformExpenditure(models.Model):
     CATEGORY_TAX = "tax"
     CATEGORY_OTHER = "other"
 
+    ENTRY_OPERATING_EXPENSE = "operating_expense"
+    ENTRY_BANK_FEE = "bank_fee"
+    ENTRY_OWNER_DRAW = "owner_draw"
+    ENTRY_CASH_ADJUSTMENT = "cash_adjustment"
+
+    ENTRY_TYPE_CHOICES = (
+        (ENTRY_OPERATING_EXPENSE, "Operating expense"),
+        (ENTRY_BANK_FEE, "Bank or transaction fee"),
+        (ENTRY_OWNER_DRAW, "Owner or team distribution"),
+        (ENTRY_CASH_ADJUSTMENT, "Cash reconciliation adjustment"),
+    )
+
     CATEGORY_CHOICES = (
         (CATEGORY_INFRASTRUCTURE, "Infrastructure"),
         (CATEGORY_SMS, "SMS Costs"),
@@ -120,8 +132,10 @@ class PlatformExpenditure(models.Model):
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     ledger = models.CharField(max_length=32, choices=LEDGER_CHOICES, default=LEDGER_PRIMARY, db_index=True)
+    entry_type = models.CharField(max_length=32, choices=ENTRY_TYPE_CHOICES, default=ENTRY_OPERATING_EXPENSE, db_index=True)
     category = models.CharField(max_length=40, choices=CATEGORY_CHOICES, default=CATEGORY_OPERATIONS)
     title = models.CharField(max_length=160)
+    reference = models.CharField(max_length=120, blank=True, default="", db_index=True)
     amount = models.DecimalField(max_digits=14, decimal_places=2)
     reverses = models.OneToOneField(
         "self", on_delete=models.PROTECT, null=True, blank=True,
@@ -155,12 +169,75 @@ class PlatformExpenditure(models.Model):
 class BusinessAccountTransfer(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     reference = models.CharField(max_length=100, unique=True)
+    from_ledger = models.CharField(max_length=32, choices=PlatformExpenditure.LEDGER_CHOICES, default=PlatformExpenditure.LEDGER_PRIMARY)
+    to_ledger = models.CharField(max_length=32, choices=PlatformExpenditure.LEDGER_CHOICES, default=PlatformExpenditure.LEDGER_NEW_BUSINESS)
     amount = models.DecimalField(max_digits=14, decimal_places=2)
     effective_at = models.DateTimeField(db_index=True)
+    notes = models.TextField(blank=True, default="")
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
         ordering = ["-effective_at", "-created_at"]
+
+
+class BusinessAccountBalanceSnapshot(models.Model):
+    """Confirmed statement balance used as a cash-position anchor."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    ledger = models.CharField(max_length=32, choices=PlatformExpenditure.LEDGER_CHOICES, db_index=True)
+    balance = models.DecimalField(max_digits=14, decimal_places=2)
+    balance_at = models.DateTimeField(db_index=True)
+    reference = models.CharField(max_length=120, blank=True, default="")
+    notes = models.TextField(blank=True, default="")
+    system_balance_before = models.DecimalField(max_digits=14, decimal_places=2, null=True, blank=True)
+    reconciliation_difference = models.DecimalField(max_digits=14, decimal_places=2, null=True, blank=True)
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="business_account_balance_snapshots_created",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-balance_at", "-created_at"]
+        indexes = [models.Index(fields=["ledger", "balance_at"], name="sadm_bal_ledger_at_idx")]
+        constraints = [
+            models.UniqueConstraint(fields=["ledger", "balance_at"], name="sadm_unique_ledger_balance_at"),
+        ]
+
+
+class PlatformReceiptAllocation(models.Model):
+    SOURCE_SUBSCRIPTION = "subscription"
+    SOURCE_SMS = "sms"
+    SOURCE_CHOICES = (
+        (SOURCE_SUBSCRIPTION, "Subscription payment"),
+        (SOURCE_SMS, "Tenant SMS top-up"),
+    )
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    source_type = models.CharField(max_length=24, choices=SOURCE_CHOICES)
+    source_id = models.CharField(max_length=160)
+    reference = models.CharField(max_length=120, blank=True, default="")
+    ledger = models.CharField(max_length=32, choices=PlatformExpenditure.LEDGER_CHOICES, db_index=True)
+    occurred_at = models.DateTimeField(null=True, blank=True)
+    notes = models.TextField(blank=True, default="")
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="platform_receipt_allocations_created",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-occurred_at", "-updated_at"]
+        constraints = [
+            models.UniqueConstraint(fields=["source_type", "source_id"], name="sadm_unique_receipt_allocation"),
+        ]
 
 
 class SupportExecutiveProfile(models.Model):

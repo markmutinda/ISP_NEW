@@ -12,7 +12,14 @@ from decimal import Decimal
 
 from apps.core.models import Tenant, Company, Domain, User
 from apps.subscriptions.models import BillingCycle, CompanySubscription, TenantUserLedger
-from apps.superadmin.models import PlatformExpenditure, SuperAdminActivityLog, SupportActivityLog, SupportExecutiveProfile
+from apps.superadmin.models import (
+    BusinessAccountBalanceSnapshot,
+    PlatformExpenditure,
+    PlatformReceiptAllocation,
+    SuperAdminActivityLog,
+    SupportActivityLog,
+    SupportExecutiveProfile,
+)
 
 
 # ──────────────────────────────────────────
@@ -138,7 +145,7 @@ class PlatformExpenditureSerializer(serializers.ModelSerializer):
     class Meta:
         model = PlatformExpenditure
         fields = [
-            "id", "ledger", "category", "title", "amount", "reverses", "is_reversed", "currency", "incurred_on",
+            "id", "ledger", "entry_type", "category", "title", "reference", "amount", "reverses", "is_reversed", "currency", "incurred_on",
             "notes", "created_by", "created_by_email", "created_at", "updated_at",
         ]
         read_only_fields = ["id", "ledger", "reverses", "is_reversed", "created_by", "created_by_email", "created_at", "updated_at"]
@@ -150,6 +157,50 @@ class PlatformExpenditureSerializer(serializers.ModelSerializer):
 
     def validate_currency(self, value):
         return (value or "KES").upper()
+
+
+class BusinessAccountBalanceSnapshotSerializer(serializers.ModelSerializer):
+    created_by_email = serializers.EmailField(source="created_by.email", read_only=True, allow_null=True)
+
+    class Meta:
+        model = BusinessAccountBalanceSnapshot
+        fields = [
+            "id", "ledger", "balance", "balance_at", "reference", "notes",
+            "system_balance_before", "reconciliation_difference",
+            "created_by", "created_by_email", "created_at",
+        ]
+        read_only_fields = [
+            "id", "system_balance_before", "reconciliation_difference",
+            "created_by", "created_by_email", "created_at",
+        ]
+
+    def validate_balance(self, value):
+        if not value.is_finite():
+            raise serializers.ValidationError("Enter a valid statement balance.")
+        return value
+
+
+class PlatformReceiptAllocationSerializer(serializers.ModelSerializer):
+    created_by_email = serializers.EmailField(source="created_by.email", read_only=True, allow_null=True)
+
+    class Meta:
+        model = PlatformReceiptAllocation
+        fields = [
+            "id", "source_type", "source_id", "reference", "ledger", "occurred_at",
+            "notes", "created_by", "created_by_email", "created_at", "updated_at",
+        ]
+        read_only_fields = ["id", "created_by", "created_by_email", "created_at", "updated_at"]
+
+    def validate_source_id(self, value):
+        value = (value or "").strip()
+        if not value:
+            raise serializers.ValidationError("Receipt source is required.")
+        return value
+
+    def validate_balance_at(self, value):
+        if value > timezone.now():
+            raise serializers.ValidationError("Balance time cannot be in the future.")
+        return value
 
 
 class CompanyBriefSerializer(serializers.ModelSerializer):

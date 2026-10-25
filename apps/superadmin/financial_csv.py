@@ -31,13 +31,18 @@ from rest_framework.permissions import IsAuthenticated
 
 
 HEADERS = {
-    "expenditure": ["date", "category", "title", "amount", "notes"],
-    "expenditure-2": ["date", "category", "title", "amount", "notes"],
+    "expenditure": ["date", "category", "title", "amount", "notes", "entry_type", "reference"],
+    "expenditure-2": ["date", "category", "title", "amount", "notes", "entry_type", "reference"],
     "sms": ["tenant_subdomain", "reference", "completed_at", "units", "amount", "payment_method", "status"],
     "subscription-payments": [
         "tenant_subdomain", "reference", "completed_at", "amount", "payment_method",
         "billing_period", "phone_number", "business_account", "status",
     ],
+}
+REQUIRED_HEADERS = {
+    **HEADERS,
+    "expenditure": ["date", "category", "title", "amount", "notes"],
+    "expenditure-2": ["date", "category", "title", "amount", "notes"],
 }
 logger = logging.getLogger(__name__)
 
@@ -113,7 +118,7 @@ class FinancialCSVView(APIView):
                 qs = qs.filter(incurred_on__gte=start)
             if end:
                 qs = qs.filter(incurred_on__lte=end)
-            rows = ((p.incurred_on.isoformat(), p.category, p.title, p.amount, p.notes) for p in qs.iterator())
+            rows = ((p.incurred_on.isoformat(), p.category, p.title, p.amount, p.notes, p.entry_type, p.reference) for p in qs.iterator())
         elif kind == "subscription-payments":
             cutover = PlatformExpenditureView()._cutover_payment()
             cutover_at = cutover.completed_at if cutover else datetime.fromisoformat("2026-09-29T16:39:59+03:00")
@@ -158,8 +163,8 @@ class FinancialCSVView(APIView):
         try:
             content = file.read().decode("utf-8-sig")
             reader = csv.DictReader(io.StringIO(content, newline=""), strict=True)
-            if not reader.fieldnames or not set(HEADERS[kind]).issubset(reader.fieldnames):
-                return Response({"detail": f"CSV needs these columns: {', '.join(HEADERS[kind])}."}, status=400)
+            if not reader.fieldnames or not set(REQUIRED_HEADERS[kind]).issubset(reader.fieldnames):
+                return Response({"detail": f"CSV needs these columns: {', '.join(REQUIRED_HEADERS[kind])}."}, status=400)
             rows = list(reader)
         except (UnicodeError, csv.Error):
             return Response({"detail": "Could not read CSV. Save it as UTF-8 and try again."}, status=400)
@@ -236,17 +241,35 @@ class FinancialCSVView(APIView):
         return Response({"imported": saved, "failed": len(results) - saved, "rows": results})
 
     def _check_expenditure(self, kind, row, amount, errors):
-        payload = {"incurred_on": (row.get("date") or "").strip(), "category": (row.get("category") or "").strip(), "title": (row.get("title") or "").strip(), "amount": str(amount) if amount is not None else "", "notes": (row.get("notes") or "").strip(), "currency": "KES"}
+        payload = {
+            "incurred_on": (row.get("date") or "").strip(),
+            "category": (row.get("category") or "").strip(),
+            "title": (row.get("title") or "").strip(),
+            "amount": str(amount) if amount is not None else "",
+            "notes": (row.get("notes") or "").strip(),
+            "entry_type": (row.get("entry_type") or PlatformExpenditure.ENTRY_OPERATING_EXPENSE).strip(),
+            "reference": (row.get("reference") or "").strip(),
+            "currency": "KES",
+        }
         serializer = PlatformExpenditureSerializer(data=payload)
         if not serializer.is_valid():
             errors.extend(str(value) for values in serializer.errors.values() for value in values)
         ledger = "primary" if kind == "expenditure" else "new_business"
-        key = (ledger, payload["incurred_on"], payload["category"], payload["title"].casefold(), payload["amount"])
+        key = (ledger, payload["incurred_on"], payload["category"], payload["title"].casefold(), payload["amount"], payload["reference"].casefold())
         try:
             valid_date = parse_date(payload["incurred_on"])
         except ValueError:
             valid_date = None
-        if valid_date and amount is not None and PlatformExpenditure.objects.filter(ledger=ledger, incurred_on=valid_date, category=payload["category"], title__iexact=payload["title"], amount=amount).exists():
+        duplicate_qs = PlatformExpenditure.objects.filter(
+            ledger=ledger,
+            incurred_on=valid_date,
+            category=payload["category"],
+            title__iexact=payload["title"],
+            amount=amount,
+        ) if valid_date and amount is not None else PlatformExpenditure.objects.none()
+        if payload["reference"]:
+            duplicate_qs = duplicate_qs.filter(reference__iexact=payload["reference"])
+        if duplicate_qs.exists():
             errors.append("This expenditure already exists in this account.")
         return payload, key
 

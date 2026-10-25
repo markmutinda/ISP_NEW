@@ -36,7 +36,7 @@ from rest_framework.views import APIView
 from apps.core.models import Tenant, Company, Domain, User, AuditLog, GlobalSystemSettings, SystemSettings, Changelog, FeatureRequest
 from apps.core.rbac_defaults import normalize_role_access_policies
 from .permissions import IsSuperAdmin
-from .models import BusinessAccountTransfer, PlatformExpenditure, TenantDeletionJob
+from .models import BusinessAccountBalanceSnapshot, BusinessAccountTransfer, PlatformExpenditure, TenantDeletionJob
 from .serializers import (
     TenantListSerializer,
     TenantDetailSerializer,
@@ -48,8 +48,10 @@ from .serializers import (
     UserDetailSerializer,
     DashboardKPISerializer,
     AuditLogSerializer,
+    BusinessAccountBalanceSnapshotSerializer,
     PlatformExpenditureSerializer,
 )
+from .financial_reporting import FinancialReportBuilder
 from apps.core.serializers import ChangelogSerializer, FeatureRequestSerializer
 from apps.subscriptions.models import BillingCycle
 from apps.subscriptions.system_accounts import get_tenant_billing_customer
@@ -5066,10 +5068,20 @@ class PlatformExpenditureView(APIView):
             qs = qs.filter(incurred_on__lte=end_date)
         return qs
 
-    def _transfer_total(self, start_date, end_date):
+    def _transfer_totals(self, start_date, end_date):
         qs = BusinessAccountTransfer.objects.all()
         qs = self._apply_date_filter(qs, "effective_at", start_date, end_date)
-        return qs.aggregate(total=Sum("amount"))["total"] or Decimal("0.00")
+        transfer_in = qs.filter(to_ledger=self.ledger_key).aggregate(total=Sum("amount"))["total"] or Decimal("0.00")
+        transfer_out = qs.filter(from_ledger=self.ledger_key).aggregate(total=Sum("amount"))["total"] or Decimal("0.00")
+        return transfer_in, transfer_out
+
+    def _manual_totals(self, queryset):
+        operating = queryset.filter(
+            entry_type__in=(PlatformExpenditure.ENTRY_OPERATING_EXPENSE, PlatformExpenditure.ENTRY_BANK_FEE)
+        ).aggregate(total=Sum("amount"))["total"] or Decimal("0.00")
+        owner_draws = queryset.filter(entry_type=PlatformExpenditure.ENTRY_OWNER_DRAW).aggregate(total=Sum("amount"))["total"] or Decimal("0.00")
+        cash_adjustments = queryset.filter(entry_type=PlatformExpenditure.ENTRY_CASH_ADJUSTMENT).aggregate(total=Sum("amount"))["total"] or Decimal("0.00")
+        return operating, owner_draws, cash_adjustments
 
     def get(self, request):
         _ensure_public()
@@ -5080,15 +5092,13 @@ class PlatformExpenditureView(APIView):
         page_size = min(max(int(request.query_params.get("page_size", PAGE_SIZE)), 1), 100)
 
         manual_qs = self._manual_qs(start_date, end_date)
-        manual_total = manual_qs.aggregate(total=Sum("amount"))["total"] or Decimal("0.00")
+        manual_total, owner_draw_total, cash_adjustment_total = self._manual_totals(manual_qs)
         subscription_total = self._subscription_total(start_date, end_date, cutover_at)
         sms_total = self._sms_topup_total(start_date, end_date, cutover_at)
         accrued_total = subscription_total + sms_total
         net_profit = accrued_total - manual_total
-        transfer_total = self._transfer_total(start_date, end_date)
-        transfer_in = transfer_total if self.ledger_key == PlatformExpenditure.LEDGER_NEW_BUSINESS else Decimal("0.00")
-        transfer_out = transfer_total if self.ledger_key == PlatformExpenditure.LEDGER_PRIMARY else Decimal("0.00")
-        calculated_position = net_profit + transfer_in - transfer_out
+        transfer_in, transfer_out = self._transfer_totals(start_date, end_date)
+        calculated_position = net_profit - owner_draw_total - cash_adjustment_total + transfer_in - transfer_out
 
         count = manual_qs.count()
         start = (page - 1) * page_size
@@ -5119,6 +5129,8 @@ class PlatformExpenditureView(APIView):
                 "sms_topups_total": self._money(sms_total),
                 "accrued_total": self._money(accrued_total),
                 "manual_expenditure_total": self._money(manual_total),
+                "owner_draw_total": self._money(owner_draw_total),
+                "cash_adjustment_total": self._money(cash_adjustment_total),
                 "net_profit": self._money(net_profit),
                 "transfer_in_total": self._money(transfer_in),
                 "transfer_out_total": self._money(transfer_out),
@@ -5148,6 +5160,54 @@ class PlatformExpenditureView(APIView):
         return Response(PlatformExpenditureSerializer(expenditure).data, status=status.HTTP_201_CREATED)
 
 
+class PlatformFinancialReportView(APIView):
+    """Combined operating-performance and reconciled cash-position report."""
+
+    permission_classes = SUPERADMIN_PERMS
+
+    def _range(self, request):
+        today = timezone.localdate()
+        start = parse_date(str(request.query_params.get("start") or "").strip()) or today.replace(month=1, day=1)
+        end = parse_date(str(request.query_params.get("end") or "").strip()) or today
+        if start > end:
+            start, end = end, start
+        return start, end
+
+    def get(self, request):
+        _ensure_public()
+        start, end = self._range(request)
+        return Response(FinancialReportBuilder(start, end, PROTECTED_SCHEMAS).build())
+
+    def post(self, request):
+        _ensure_public()
+        serializer = BusinessAccountBalanceSnapshotSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        values = serializer.validated_data
+        snapshot, created = BusinessAccountBalanceSnapshot.objects.update_or_create(
+            ledger=values["ledger"],
+            balance_at=values["balance_at"],
+            defaults={
+                "balance": values["balance"],
+                "reference": values.get("reference", ""),
+                "notes": values.get("notes", ""),
+                "created_by": request.user,
+            },
+        )
+        _log_action(
+            request.user,
+            "create" if created else "update",
+            "BusinessAccountBalanceSnapshot",
+            object_repr=f"{snapshot.get_ledger_display()} - KES {snapshot.balance} at {snapshot.balance_at.isoformat()}",
+            object_id=snapshot.id,
+            changes=BusinessAccountBalanceSnapshotSerializer(snapshot).data,
+            request=request,
+        )
+        return Response(
+            BusinessAccountBalanceSnapshotSerializer(snapshot).data,
+            status=status.HTTP_201_CREATED if created else status.HTTP_200_OK,
+        )
+
+
 class PlatformExpenditureDetailView(APIView):
     permission_classes = SUPERADMIN_PERMS
     ledger_key = PlatformExpenditure.LEDGER_PRIMARY
@@ -5165,8 +5225,10 @@ class PlatformExpenditureDetailView(APIView):
                 return Response({"detail": "This entry is already a correction or has been reversed."}, status=status.HTTP_400_BAD_REQUEST)
             correction = PlatformExpenditure.objects.create(
                 ledger=expenditure.ledger,
+                entry_type=expenditure.entry_type,
                 category=expenditure.category,
                 title=f"Reversal: {expenditure.title}"[:160],
+                reference=f"REV-{expenditure.reference}"[:120] if expenditure.reference else "",
                 amount=-expenditure.amount,
                 currency=expenditure.currency,
                 incurred_on=timezone.localdate(),
