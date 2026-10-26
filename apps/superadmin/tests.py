@@ -12,6 +12,7 @@ from apps.superadmin.serializers import PlatformExpenditureSerializer, TenantLis
 from apps.superadmin.views import DashboardView, PlatformExpenditureView, SubscriptionPaymentListView
 from apps.superadmin.management.commands.record_business_account_transfer import Command as RecordTransferCommand
 from apps.superadmin.financial_csv import FinancialCSVView, _amount, _csv_response, _paid_at, _safe_cell, _sms_reference
+from apps.superadmin.financial_reporting import snapshot_kind
 from django.core.files.uploadedfile import SimpleUploadedFile
 
 
@@ -43,6 +44,10 @@ class FinancialCSVTests(SimpleTestCase):
 
 
 class PlatformExpenditureLedgerTests(SimpleTestCase):
+    def test_estimated_checkpoint_is_not_presented_as_confirmed(self):
+        self.assertEqual(snapshot_kind(SimpleNamespace(reference="ACCOUNT2-APPROX", notes="")), "estimate")
+        self.assertEqual(snapshot_kind(SimpleNamespace(reference="BANK-STATEMENT", notes="Checked live")), "confirmed")
+
     def test_transfer_changes_calculated_positions_but_not_receipts(self):
         request = SimpleNamespace(query_params={})
         manual = MagicMock()

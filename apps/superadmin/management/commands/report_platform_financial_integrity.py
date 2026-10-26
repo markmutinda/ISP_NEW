@@ -13,7 +13,12 @@ from django_tenants.utils import get_public_schema_name, schema_context
 from apps.core.models import Tenant
 from apps.messaging.models import SMSUnitTopup
 from apps.subscriptions.models import SubscriptionPayment
-from apps.superadmin.models import BusinessAccountBalanceSnapshot, BusinessAccountTransfer, PlatformExpenditure
+from apps.superadmin.models import (
+    BusinessAccountBalanceSnapshot,
+    BusinessAccountTransfer,
+    PlatformExpenditure,
+    PlatformReceiptAllocation,
+)
 from apps.superadmin.views import PROTECTED_SCHEMAS
 
 
@@ -61,6 +66,10 @@ class Command(BaseCommand):
         known_transfers = self._known_transfers(options["known_transfer"])
 
         with schema_context(get_public_schema_name()):
+            saved_allocations = {
+                (item.source_type, item.source_id): item.ledger
+                for item in PlatformReceiptAllocation.objects.all().only("source_type", "source_id", "ledger")
+            }
             cutover = self._cutover()
             cutover_at = cutover.completed_at if cutover else timezone.make_aware(
                 datetime(2026, 9, 29, 16, 39, 59)
@@ -79,8 +88,12 @@ class Command(BaseCommand):
                     "opening_balances": {account: money(amount) for account, amount in opening_balances.items()},
                     "known_transfers": known_transfers,
                 },
-                "subscriptions": self._subscriptions(start, end, cutover_at, receipt_overrides, options["details"]),
-                "sms_topups": self._sms_topups(start, end, cutover_at, receipt_overrides, options["details"]),
+                "subscriptions": self._subscriptions(
+                    start, end, cutover_at, receipt_overrides, saved_allocations, options["details"]
+                ),
+                "sms_topups": self._sms_topups(
+                    start, end, cutover_at, receipt_overrides, saved_allocations, options["details"]
+                ),
                 "manual_costs": self._manual_costs(start, end, options["details"]),
                 "transfers": self._transfers(start, end, transfer_directions, known_transfers, options["details"]),
                 "latest_balance_snapshots": self._snapshots(),
@@ -186,7 +199,7 @@ class Command(BaseCommand):
     def _empty_accounts(self):
         return {account: {"count": 0, "total": Decimal("0.00")} for account in ACCOUNTS}
 
-    def _subscriptions(self, start, end, cutover_at, overrides, details):
+    def _subscriptions(self, start, end, cutover_at, overrides, saved_allocations, details):
         base_qs = SubscriptionPayment.objects.select_related("subscription__company").filter(status="completed")
         missing_date = [str(payment.id) for payment in base_qs.filter(completed_at__isnull=True)]
         qs = self._within(
@@ -200,7 +213,8 @@ class Command(BaseCommand):
             expected = self._expected_account(payment.completed_at, cutover_at)
             reference = (payment.mpesa_receipt or payment.bank_reference or payment.payhero_reference or "").upper()
             override = overrides.get(reference)
-            effective = override or payment.business_account or expected
+            saved = saved_allocations.get((PlatformReceiptAllocation.SOURCE_SUBSCRIPTION, str(payment.id)))
+            effective = override or saved or payment.business_account or expected
             accounts[effective]["count"] += 1
             accounts[effective]["total"] += payment.amount
             if payment.business_account and payment.business_account != expected and not override:
@@ -213,14 +227,17 @@ class Command(BaseCommand):
                     "id": str(payment.id), "company": self._company_name(payment), "reference": reference,
                     "amount": money(payment.amount), "completed_at": payment.completed_at.isoformat(),
                     "stored_account": payment.business_account, "effective_account": effective, "expected_account": expected,
-                    "allocation": "report override" if override else ("stored account" if payment.business_account else "cutover-date inference"),
+                    "allocation": (
+                        "report override" if override else "saved mapping" if saved
+                        else "stored account" if payment.business_account else "cutover-date inference"
+                    ),
                 })
         return {
             "accounts": self._serialise_accounts(accounts), "missing_completed_at": missing_date,
             "explicit_account_conflicts": explicit_conflicts, "rows": rows if details else [],
         }
 
-    def _sms_topups(self, start, end, cutover_at, overrides, details):
+    def _sms_topups(self, start, end, cutover_at, overrides, saved_allocations, details):
         accounts = self._empty_accounts()
         missing_date = []
         rows = []
@@ -237,7 +254,9 @@ class Command(BaseCommand):
                     for topup in qs.order_by("completed_at", "created_at"):
                         reference = (topup.payment_reference or topup.checkout_request_id or "").upper()
                         override = overrides.get(reference)
-                        effective = override or self._expected_account(topup.completed_at, cutover_at)
+                        source_id = f"{tenant.schema_name}:{topup.id}"
+                        saved = saved_allocations.get((PlatformReceiptAllocation.SOURCE_SMS, source_id))
+                        effective = override or saved or self._expected_account(topup.completed_at, cutover_at)
                         accounts[effective]["count"] += 1
                         accounts[effective]["total"] += topup.amount_paid
                         if details:
@@ -245,13 +264,17 @@ class Command(BaseCommand):
                                 "tenant": tenant.subdomain, "id": topup.id,
                                 "reference": reference,
                                 "amount": money(topup.amount_paid), "completed_at": topup.completed_at.isoformat(),
-                                "effective_account": effective, "allocation": "report override" if override else "cutover-date inference",
+                                "effective_account": effective,
+                                "allocation": (
+                                    "report override" if override else "saved mapping" if saved
+                                    else "cutover-date inference"
+                                ),
                             })
             except Exception as exc:
                 missing_date.append({"tenant": tenant.subdomain, "error": str(exc)})
         return {
             "accounts": self._serialise_accounts(accounts), "missing_or_unreadable": missing_date,
-            "allocation_note": "SMS top-ups do not store a business-account allocation; every allocation is inferred from cutover date.",
+            "allocation_note": "Saved receipt mappings take precedence; otherwise the cutover date is used as a fallback.",
             "rows": rows if details else [],
         }
 

@@ -82,6 +82,7 @@ docs/
 docs/*
 !docs/security-incident-staff-access-review-2026-10-13.md
 !docs/selfie-tenant-registration-investigation.md
+!docs/financial-recovery-runbook.md
 !rag/
 !rag/netily-support/
 !rag/netily-support/*.md

@@ -59,6 +59,7 @@ from .serializers import (
     PlatformReceiptAllocationSerializer,
 )
 from .financial_reporting import FinancialReportBuilder
+from .financial_backup import build_financial_backup
 from apps.core.serializers import ChangelogSerializer, FeatureRequestSerializer
 from apps.subscriptions.models import BillingCycle
 from apps.subscriptions.system_accounts import get_tenant_billing_customer
@@ -5276,6 +5277,28 @@ class PlatformFinancialAllocationView(APIView):
             PlatformReceiptAllocationSerializer(allocation).data,
             status=status.HTTP_201_CREATED if created else status.HTTP_200_OK,
         )
+
+
+class PlatformFinancialBackupView(APIView):
+    """Download an audited recovery bundle for reporting-only financial records."""
+
+    permission_classes = SUPERADMIN_PERMS
+
+    def get(self, request):
+        _ensure_public()
+        payload = build_financial_backup()
+        response = HttpResponse(
+            json.dumps(payload, indent=2), content_type="application/json; charset=utf-8"
+        )
+        response["Content-Disposition"] = (
+            f'attachment; filename="internetily-financial-backup-{timezone.localdate().isoformat()}.json"'
+        )
+        response["Cache-Control"] = "no-store"
+        _log_action(
+            request.user, "export", "PlatformFinancialBackup",
+            object_repr="Platform financial recovery backup", request=request,
+        )
+        return response
 
 
 class PlatformExpenditureDetailView(APIView):

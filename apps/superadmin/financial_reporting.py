@@ -28,6 +28,12 @@ def money(value):
     return str((value or ZERO).quantize(Decimal("0.01")))
 
 
+def snapshot_kind(snapshot):
+    """Keep estimates visibly distinct from balances checked against a statement."""
+    description = f"{snapshot.reference} {snapshot.notes}".lower()
+    return "estimate" if any(word in description for word in ("approx", "estimate", "unconfirmed")) else "confirmed"
+
+
 def cutover_payment():
     return (
         SubscriptionPayment.objects.select_related("subscription__company")
@@ -125,6 +131,12 @@ class FinancialReportBuilder:
             "combined": combined,
             "accounts": accounts,
             "cash_positions": cash,
+            "checkpoint_history": {
+                account: [self._snapshot_data(item) for item in BusinessAccountBalanceSnapshot.objects.filter(
+                    ledger=account
+                ).order_by("-balance_at", "-created_at")[:12]]
+                for account in ACCOUNTS
+            },
             "known_combined_cash": money(sum(known_cash, ZERO)) if len(known_cash) == len(ACCOUNTS) else None,
             "monthly": [self._serialise_bucket(self.months["combined"][key]) for key in self.months["combined"]],
             "monthly_by_account": {
@@ -139,7 +151,7 @@ class FinancialReportBuilder:
                 "inferred_subscription_allocations": self.quality["inferred_subscription_allocations"],
                 "inferred_sms_allocations": self.quality["inferred_sms_allocations"],
                 "unreconciled_accounts": sum(1 for item in cash.values() if item["snapshot"] is None),
-                "message": "Cash is reliable from each account's latest confirmed snapshot forward. Inferred receipt allocations still need statement review.",
+                "message": "Cash uses each account's latest checkpoint plus recorded activity. Approximate checkpoints remain estimates until checked against a bank or wallet statement. Inferred receipt allocations still need statement review.",
             },
         }
 
@@ -248,18 +260,27 @@ class FinancialReportBuilder:
         movements = self.cash_movements(account, snapshot.balance_at)
         movement = movements["net"]
         return {
-            "snapshot": {
-                "id": str(snapshot.id), "balance": money(snapshot.balance), "balance_at": snapshot.balance_at.isoformat(),
-                "reference": snapshot.reference, "notes": snapshot.notes,
-                "system_balance_before": money(snapshot.system_balance_before) if snapshot.system_balance_before is not None else None,
-                "reconciliation_difference": money(snapshot.reconciliation_difference) if snapshot.reconciliation_difference is not None else None,
-            },
+            "snapshot": self._snapshot_data(snapshot),
             "movements_after_snapshot": {
                 "receipts": money(movements["receipts"]), "outflows": money(movements["outflows"]),
                 "transfer_in": money(movements["transfer_in"]), "transfer_out": money(movements["transfer_out"]), "net": money(movement),
             },
             "estimated_balance": money(snapshot.balance + movement),
-            "confidence": "reconciled_anchor_plus_recorded_movements",
+            "confidence": (
+                "estimated_anchor_plus_recorded_movements"
+                if snapshot_kind(snapshot) == "estimate"
+                else "confirmed_anchor_plus_recorded_movements"
+            ),
+        }
+
+    def _snapshot_data(self, snapshot):
+        return {
+            "id": str(snapshot.id), "balance": money(snapshot.balance),
+            "balance_at": snapshot.balance_at.isoformat(), "reference": snapshot.reference,
+            "notes": snapshot.notes, "kind": snapshot_kind(snapshot),
+            "system_balance_before": money(snapshot.system_balance_before) if snapshot.system_balance_before is not None else None,
+            "reconciliation_difference": money(snapshot.reconciliation_difference) if snapshot.reconciliation_difference is not None else None,
+            "created_at": snapshot.created_at.isoformat(),
         }
 
     def _subscription_allocation(self, payment):
@@ -295,11 +316,16 @@ class FinancialReportBuilder:
             except Exception:
                 continue
 
-        expense_qs = PlatformExpenditure.objects.filter(
-            ledger=account, incurred_on__gt=timezone.localtime(after).date()
+        anchor_date = timezone.localtime(after).date()
+        expense_qs = PlatformExpenditure.objects.filter(ledger=account).filter(
+            Q(incurred_on__gt=anchor_date)
+            | Q(incurred_on=anchor_date, created_at__gt=after)
         )
         if until:
-            expense_qs = expense_qs.filter(incurred_on__lte=timezone.localtime(until).date())
+            until_date = timezone.localtime(until).date()
+            expense_qs = expense_qs.filter(incurred_on__lte=until_date).exclude(
+                incurred_on=until_date, created_at__gt=until
+            )
         outflows = expense_qs.aggregate(total=Sum("amount"))["total"] or ZERO
 
         transfer_in_qs = BusinessAccountTransfer.objects.filter(to_ledger=account, effective_at__gt=after)

@@ -136,6 +136,7 @@ urlpatterns = [
     ),
     path("financial-reports/", views.PlatformFinancialReportView.as_view(), name="platform-financial-reports"),
     path("financial-reports/allocations/", views.PlatformFinancialAllocationView.as_view(), name="platform-financial-allocations"),
+    path("financial-reports/backup/", views.PlatformFinancialBackupView.as_view(), name="platform-financial-backup"),
 
     # Leads
     path("leads/", views.LeadListView.as_view(), name="lead-list"),
