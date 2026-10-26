@@ -356,7 +356,14 @@ class FinancialReportBuilder:
         completed = rows[:-1] if len(rows) > 1 else rows
         sample = completed[-3:]
         if not sample:
-            return {"basis_months": 0, "monthly_receipts": "0.00", "monthly_expenses": "0.00", "monthly_profit": "0.00", "next_three_months_profit": "0.00"}
+            return {
+                "basis_months": 0, "monthly_receipts": "0.00", "monthly_expenses": "0.00",
+                "monthly_profit": "0.00", "next_three_months_profit": "0.00",
+                "horizons": [
+                    {"months": months, "receipts": "0.00", "expenses": "0.00", "profit": "0.00"}
+                    for months in (1, 2, 3)
+                ],
+            }
         divisor = Decimal(len(sample))
         receipts = sum((Decimal(row["receipts"]) for row in sample), ZERO) / divisor
         expenses = sum((Decimal(row["expenses"]) for row in sample), ZERO) / divisor
@@ -365,6 +372,15 @@ class FinancialReportBuilder:
             "basis_months": len(sample), "monthly_receipts": money(receipts),
             "monthly_expenses": money(expenses), "monthly_profit": money(profit),
             "next_three_months_profit": money(profit * Decimal("3")),
+            "horizons": [
+                {
+                    "months": months,
+                    "receipts": money(receipts * Decimal(months)),
+                    "expenses": money(expenses * Decimal(months)),
+                    "profit": money(profit * Decimal(months)),
+                }
+                for months in (1, 2, 3)
+            ],
         }
 
     def _expense_categories(self):
