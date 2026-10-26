@@ -9,7 +9,12 @@ from django.utils import timezone
 from apps.core.models import Company, Tenant
 from apps.subscriptions.models import CompanySubscription, NetilyPlan
 from apps.superadmin.serializers import PlatformExpenditureSerializer, TenantListSerializer
-from apps.superadmin.views import DashboardView, PlatformExpenditureView, SubscriptionPaymentListView
+from apps.superadmin.views import (
+    DashboardView,
+    PlatformExpenditureView,
+    SubscriptionPaymentListView,
+    SubscriptionReminderRecipientListView,
+)
 from apps.superadmin.management.commands.record_business_account_transfer import Command as RecordTransferCommand
 from apps.superadmin.financial_csv import FinancialCSVView, _amount, _csv_response, _paid_at, _safe_cell, _sms_reference
 from apps.superadmin.financial_reporting import snapshot_kind
@@ -41,6 +46,45 @@ class FinancialCSVTests(SimpleTestCase):
         self.assertEqual(response.data["valid"], 1)
         self.assertEqual(response.data["invalid"], 1)
         self.assertIn("Duplicate row", response.data["rows"][1]["errors"][0])
+
+
+class SubscriptionReminderRecipientListTests(SimpleTestCase):
+    def test_expired_tenant_and_available_channels_are_exposed_for_manual_send(self):
+        tenant = SimpleNamespace(
+            pk="tenant-1", schema_name="tenant_example", subdomain="example",
+            status="active",
+        )
+        company = SimpleNamespace(name="Example Networks", tenant=tenant)
+        subscription = SimpleNamespace(
+            company=company,
+            plan=SimpleNamespace(name="Starter"),
+            status="active",
+            current_period_end=timezone.now() - timedelta(days=2),
+            trial_ends_at=None,
+        )
+        request = SimpleNamespace(query_params={})
+        recipients = [{
+            "id": 7,
+            "email": "owner@example.com",
+            "phone_number": "+254700111222",
+            "first_name": "Jane",
+            "last_name": "Owner",
+        }]
+
+        with patch("apps.superadmin.views._ensure_public"), patch(
+            "apps.subscriptions.models.CompanySubscription.objects"
+        ) as subscriptions, patch(
+            "apps.subscriptions.reminder_recipients.tenant_billing_recipients",
+            return_value=recipients,
+        ):
+            subscriptions.select_related.return_value.exclude.return_value = [subscription]
+            response = SubscriptionReminderRecipientListView().get(request)
+
+        row = response.data["results"][0]
+        self.assertEqual(row["reminder_status"], "expired")
+        self.assertTrue(row["can_send"])
+        self.assertEqual(row["recipient_name"], "Jane Owner")
+        self.assertEqual(row["available_channels"], {"sms": True, "email": True, "in_app": True})
 
 
 class PlatformExpenditureLedgerTests(SimpleTestCase):

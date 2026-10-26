@@ -164,6 +164,7 @@ urlpatterns = [
     # ────────────────────────────────────────────────────────────────
     path("subscription-reminders/template/", views.SubscriptionReminderTemplateView.as_view(), name="subscription-reminder-template"),
     path("subscription-reminders/balance/", views.SubscriptionReminderBalanceView.as_view(), name="subscription-reminder-balance"),
+    path("subscription-reminders/recipients/", views.SubscriptionReminderRecipientListView.as_view(), name="subscription-reminder-recipients"),
     path("subscription-reminders/logs/", views.SubscriptionReminderLogListView.as_view(), name="subscription-reminder-logs"),
     path("subscription-reminders/send-now/", views.SubscriptionReminderTestSendView.as_view(), name="subscription-reminder-send-now"),
     path("subscription-reminders/send-manual/", views.SubscriptionReminderManualSendView.as_view(), name="subscription-reminder-send-manual"),

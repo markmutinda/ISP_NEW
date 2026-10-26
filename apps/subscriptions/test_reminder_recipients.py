@@ -116,3 +116,9 @@ class ReminderRecipientTests(SimpleTestCase):
             self.assertEqual(_subscription_invoice_admins(self.tenant), selected)
             self.assertEqual(get_tenant_admin_phone(self.tenant), ('+254706580196', 'Daniel'))
             self.assertEqual(resolver.call_count, 3)
+
+    def test_manual_send_rejects_unknown_channel_before_loading_a_tenant(self):
+        from .tasks import send_subscription_invoice_reminder_for_cycle
+
+        with self.assertRaisesMessage(ValueError, "Unsupported reminder channel: whatsapp."):
+            send_subscription_invoice_reminder_for_cycle(tenant_id="tenant-1", channels=["whatsapp"])

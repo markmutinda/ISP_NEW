@@ -5818,6 +5818,106 @@ class SubscriptionReminderLogListView(APIView):
         })
 
 
+class SubscriptionReminderRecipientListView(APIView):
+    """List tenant subscription contacts and the channels available for a manual reminder."""
+    permission_classes = SUPERADMIN_PERMS
+
+    def get(self, request):
+        _ensure_public()
+        from apps.subscriptions.models import CompanySubscription
+        from apps.subscriptions.reminder_recipients import tenant_billing_recipients
+
+        today = timezone.localdate()
+        search = str(request.query_params.get("search") or "").strip().lower()
+        status_filter = str(request.query_params.get("status") or "all").strip().lower()
+        subscriptions = CompanySubscription.objects.select_related(
+            "company",
+            "company__tenant",
+            "plan",
+        ).exclude(company__tenant__schema_name__in=PROTECTED_SCHEMAS)
+
+        results = []
+        for subscription in subscriptions:
+            tenant = getattr(subscription.company, "tenant", None)
+            if not tenant:
+                continue
+
+            expiry = (
+                subscription.trial_ends_at
+                if subscription.status == "trialing" and subscription.trial_ends_at
+                else subscription.current_period_end
+            )
+            days_left = (expiry.date() - today).days if expiry else None
+            if subscription.status == "cancelled" or tenant.status == "cancelled":
+                reminder_status = "cancelled"
+            elif subscription.status == "trialing":
+                reminder_status = "trial"
+            elif subscription.status in {"expired", "past_due"} or (days_left is not None and days_left < 0):
+                reminder_status = "expired"
+            elif days_left is not None and days_left <= 5:
+                reminder_status = "due_soon"
+            else:
+                reminder_status = "active"
+
+            recipient_error = ""
+            try:
+                recipients = tenant_billing_recipients(tenant)
+            except Exception as exc:
+                logger.warning("Could not resolve reminder contact for tenant=%s: %s", tenant.pk, exc)
+                recipients = []
+                recipient_error = "The tenant account contact could not be loaded."
+            recipient = recipients[0] if recipients else {}
+            recipient_name = " ".join(filter(None, [
+                str(recipient.get("first_name") or "").strip(),
+                str(recipient.get("last_name") or "").strip(),
+            ])).strip()
+            available_channels = {
+                "sms": bool(recipient.get("phone_number")),
+                "email": bool(recipient.get("email")),
+                "in_app": bool(recipient.get("id")),
+            }
+            if not recipient and not recipient_error:
+                recipient_error = "No active tenant account admin was found."
+
+            row = {
+                "tenant_id": str(tenant.pk),
+                "company_name": subscription.company.name,
+                "subdomain": tenant.subdomain,
+                "plan_name": subscription.plan.name if subscription.plan else "Subscription",
+                "subscription_status": subscription.status,
+                "reminder_status": reminder_status,
+                "expiry": expiry.isoformat() if expiry else None,
+                "days_left": days_left,
+                "recipient_name": recipient_name or recipient.get("email") or "Tenant account admin",
+                "recipient_email": recipient.get("email") or "",
+                "recipient_phone": recipient.get("phone_number") or "",
+                "available_channels": available_channels,
+                "recipient_error": recipient_error,
+                "can_send": reminder_status != "cancelled" and any(available_channels.values()),
+            }
+            haystack = " ".join([
+                row["company_name"], row["subdomain"], row["recipient_name"],
+                row["recipient_email"], row["recipient_phone"],
+            ]).lower()
+            if search and search not in haystack:
+                continue
+            if status_filter not in {"", "all"} and reminder_status != status_filter:
+                continue
+            results.append(row)
+
+        priority = {"expired": 0, "due_soon": 1, "active": 2, "trial": 3, "cancelled": 4}
+        results.sort(key=lambda row: (
+            priority.get(row["reminder_status"], 9),
+            row["days_left"] if row["days_left"] is not None else 999999,
+            row["company_name"].lower(),
+        ))
+        counts = {key: 0 for key in ["all", "expired", "due_soon", "active", "trial", "cancelled"]}
+        for row in results:
+            counts["all"] += 1
+            counts[row["reminder_status"]] = counts.get(row["reminder_status"], 0) + 1
+        return Response({"count": len(results), "counts": counts, "results": results})
+
+
 class SubscriptionReminderTestSendView(APIView):
     """Manually trigger the reminder sweep now."""
     permission_classes = SUPERADMIN_PERMS
