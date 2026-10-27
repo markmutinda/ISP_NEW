@@ -5947,8 +5947,20 @@ class SubscriptionReminderManualSendView(APIView):
         if isinstance(channels, str):
             channels = [channels]
 
+        message = str(request.data.get("message") or "").strip()
+        if len(message) > 1200:
+            return Response(
+                {"detail": "The one-off reminder message cannot exceed 1,200 characters."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
         try:
-            result = send_subscription_invoice_reminder_for_cycle(cycle_id, tenant_id=tenant_id, channels=channels)
+            result = send_subscription_invoice_reminder_for_cycle(
+                cycle_id,
+                tenant_id=tenant_id,
+                channels=channels,
+                message_override=message or None,
+            )
         except Exception as exc:
             logger.exception("Manual subscription reminder failed for cycle=%s tenant=%s: %s", cycle_id, tenant_id, exc)
             return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
@@ -5959,7 +5971,7 @@ class SubscriptionReminderManualSendView(APIView):
             "SubscriptionReminderManualSend",
             object_repr=f"Manual reminder for {result.get('tenant_name')} {result.get('invoice_number')}",
             object_id=cycle_id or tenant_id,
-            changes={"channels": channels, "result": result},
+            changes={"channels": channels, "custom_message": bool(message), "result": result},
             request=request,
         )
         return Response(result)

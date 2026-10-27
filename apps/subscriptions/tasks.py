@@ -201,24 +201,21 @@ def _invoice_reminder_copy(*, tenant_name, invoice, cycle, amount_due, milestone
     return subject, body, sms
 
 
-def _invoice_reminder_template_sms(*, tenant_name, invoice, cycle, amount_due, milestone, recipient):
-    from apps.subscriptions.models import SubscriptionReminderTemplate
-
+def _render_invoice_reminder_template(*, template, tenant_name, invoice, cycle, amount_due, milestone, recipient):
+    """Render approved reminder variables for saved or one-off copy."""
     admin_name = (recipient.get("first_name") or "").strip() or "there"
     plan_name = cycle.subscription.plan.name if cycle.subscription and cycle.subscription.plan else ""
+    target_date = invoice.due_date if invoice and invoice.due_date else cycle.end_date.date()
     if str(milestone).startswith("manual"):
-        target_date = invoice.due_date if invoice and invoice.due_date else cycle.end_date.date()
         days_left = str(max((target_date - timezone.localdate()).days, 0))
     else:
         days_left = "0" if milestone == "expired" else str(milestone)
-    with schema_context(get_public_schema_name()):
-        template = SubscriptionReminderTemplate.get_active().content
     context = {
         "company_name": tenant_name,
         "plan_name": plan_name,
         "days_left": days_left,
-        "expiry_date": (invoice.due_date if invoice and invoice.due_date else cycle.end_date.date()).strftime("%d %b %Y"),
-        "amount_due": "",
+        "expiry_date": target_date.strftime("%d %b %Y"),
+        "amount_due": f"{amount_due:,.0f}" if amount_due else "",
         "admin_name": admin_name,
         "invoice_number": invoice.invoice_number if invoice else "",
     }
@@ -228,6 +225,24 @@ def _invoice_reminder_template_sms(*, tenant_name, invoice, cycle, amount_due, m
     message = message.replace("Amount due: KES .", "Please review your invoice in Admin > Subscription.")
     message = message.replace("Amount due: KES.", "Please review your invoice in Admin > Subscription.")
     return message
+
+
+def _invoice_reminder_template_sms(*, tenant_name, invoice, cycle, amount_due, milestone, recipient, template_override=None):
+    from apps.subscriptions.models import SubscriptionReminderTemplate
+
+    template = template_override
+    if not template:
+        with schema_context(get_public_schema_name()):
+            template = SubscriptionReminderTemplate.get_active().content
+    return _render_invoice_reminder_template(
+        template=template,
+        tenant_name=tenant_name,
+        invoice=invoice,
+        cycle=cycle,
+        amount_due=amount_due,
+        milestone=milestone,
+        recipient=recipient,
+    )
 
 
 def _get_or_create_reminder_delivery(*, cycle, invoice, milestone, channel, recipient, destination):
@@ -376,7 +391,9 @@ def _get_reminder_cycle_for_tenant(tenant_id):
     )
 
 
-def send_subscription_invoice_reminder_for_cycle(cycle_id=None, *, tenant_id=None, channels=None, milestone=None):
+def send_subscription_invoice_reminder_for_cycle(
+    cycle_id=None, *, tenant_id=None, channels=None, milestone=None, message_override=None
+):
     """Send a manual subscription reminder for one tenant or billing cycle."""
     from apps.core.email_delivery import send_transactional_email
     from apps.messaging.services.platform_sms_sender import PlatformSMSSender
@@ -428,6 +445,7 @@ def send_subscription_invoice_reminder_for_cycle(cycle_id=None, *, tenant_id=Non
         amount_due=amount_due,
         milestone=manual_milestone,
     )
+    custom_message = str(message_override or "").strip()
     recipients = _tenant_invoice_admins(cycle.tenant)
     if not recipients:
         raise ValueError("No active tenant account admin was found. Update the tenant's account contact before sending.")
@@ -474,11 +492,20 @@ def send_subscription_invoice_reminder_for_cycle(cycle_id=None, *, tenant_id=Non
                     destination=email,
                 )
                 try:
+                    email_message = _render_invoice_reminder_template(
+                        template=custom_message,
+                        tenant_name=tenant_name,
+                        invoice=invoice,
+                        cycle=cycle,
+                        amount_due=amount_due,
+                        milestone=manual_milestone,
+                        recipient=recipient,
+                    ) if custom_message else message
                     result = send_transactional_email(
                         subject=subject,
                         recipient=email,
-                        plain_message=message,
-                        html_message=message.replace("\n", "<br>"),
+                        plain_message=email_message,
+                        html_message=email_message.replace("\n", "<br>"),
                     )
                 except Exception as exc:
                     logger.exception("Manual subscription reminder email failed for tenant=%s", cycle.tenant_id)
@@ -518,11 +545,20 @@ def send_subscription_invoice_reminder_for_cycle(cycle_id=None, *, tenant_id=Non
                 )
                 notification = None
                 try:
+                    in_app_message = _render_invoice_reminder_template(
+                        template=custom_message,
+                        tenant_name=tenant_name,
+                        invoice=invoice,
+                        cycle=cycle,
+                        amount_due=amount_due,
+                        milestone=manual_milestone,
+                        recipient=recipient,
+                    ) if custom_message else message
                     notification = Notification.objects.create(
                         user_id=user_id,
                         notification_type="in_app",
                         subject=subject,
-                        message=message,
+                        message=in_app_message,
                         priority=4,
                         metadata={
                             "source": "subscription_invoice_manual_reminder",
@@ -571,6 +607,7 @@ def send_subscription_invoice_reminder_for_cycle(cycle_id=None, *, tenant_id=Non
                     amount_due=amount_due,
                     milestone=manual_milestone,
                     recipient=recipient,
+                    template_override=custom_message or None,
                 )
                 try:
                     result = sms_sender.send_sms(
