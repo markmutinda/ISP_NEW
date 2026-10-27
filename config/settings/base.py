@@ -642,8 +642,10 @@ TELEGRAM_PAYMENTS_ADMIN_CHAT_IDS = (
 # ────────────────────────────────────────────────────────────────
 #  SHOP (public storefront)
 # ────────────────────────────────────────────────────────────────
-SHOP_USD_KES_RATE = os.getenv('SHOP_USD_KES_RATE', '129')       # catalog is priced in USD, M-Pesa charges KES
-SHOP_SHIPPING_FEE_USD = os.getenv('SHOP_SHIPPING_FEE_USD', '0')
+SHOP_CURRENCY = 'KES'
+SHOP_SHIPPING_FEE_KES = os.getenv('SHOP_SHIPPING_FEE_KES', '0')
+# Retained only for the one-time catalog migration and historical USD orders.
+SHOP_USD_KES_RATE = os.getenv('SHOP_USD_KES_RATE', '129')
 SHOP_ORDER_EXPIRY_MINUTES = int(os.getenv('SHOP_ORDER_EXPIRY_MINUTES', '60'))
 SHOP_PUBLIC_API_BASE = os.getenv('SHOP_PUBLIC_API_BASE', 'https://api.netily.co.ke')
 SHOP_MPESA_CALLBACK_URL = os.getenv('SHOP_MPESA_CALLBACK_URL', '')   # optional full override

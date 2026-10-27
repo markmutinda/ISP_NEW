@@ -297,9 +297,16 @@ class AdminOrderViewSet(viewsets.ReadOnlyModelViewSet):
             total=Count("id"),
             pending=Count("id", filter=Q(status=Order.PENDING_PAYMENT)),
             paid=Count("id", filter=paid),
+            failed=Count("id", filter=Q(payment_status=Order.PAY_FAILED)),
             to_fulfil=Count("id", filter=Q(status__in=[Order.PAID, Order.PROCESSING])),
-            revenue_usd=Sum("total", filter=paid),
+            shipped=Count("id", filter=Q(status=Order.SHIPPED)),
+            delivered=Count("id", filter=Q(status=Order.DELIVERED)),
             revenue_kes=Sum("amount_kes", filter=paid),
-            revenue_usd_30d=Sum("total", filter=paid & Q(paid_at__gte=since)),
+            revenue_kes_30d=Sum("amount_kes", filter=paid & Q(paid_at__gte=since)),
         )
-        return Response({k: (float(v) if v is not None and k.startswith("revenue") else (v or 0)) for k, v in agg.items()})
+        payload = {
+            key: (float(value) if value is not None and key.startswith("revenue") else (value or 0))
+            for key, value in agg.items()
+        }
+        payload["currency"] = "KES"
+        return Response(payload)

@@ -20,6 +20,7 @@ class ProductSerializer(serializers.ModelSerializer):
     category = serializers.CharField(source="category.name", read_only=True)
     categorySlug = serializers.CharField(source="category.slug", read_only=True)
     price = serializers.FloatField(read_only=True)
+    currency = serializers.CharField(read_only=True)
     compareAtPrice = serializers.FloatField(source="compare_at_price", read_only=True)
     hoverImage = serializers.SerializerMethodField()
     longDescription = serializers.CharField(source="long_description", read_only=True)
@@ -30,7 +31,7 @@ class ProductSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = Product
-        fields = ["id", "name", "category", "categorySlug", "price", "compareAtPrice", "image",
+        fields = ["id", "name", "category", "categorySlug", "price", "currency", "compareAtPrice", "image",
                   "hoverImage", "longDescription", "details", "materials", "care", "specsSheet",
                   "warranty", "madeIn", "sizes", "colors", "inStock", "isFeatured"]
         read_only_fields = fields

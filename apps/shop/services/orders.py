@@ -51,10 +51,13 @@ def create_order(data):
             needed[p.pk] += qty
         lines.append((p, qty, storage, color, line_total))
 
-    shipping = Decimal(str(settings.SHOP_SHIPPING_FEE_USD))
+    currencies = {p.currency for p, *_ in lines}
+    if currencies != {settings.SHOP_CURRENCY}:
+        raise ValidationError({"items": ["One or more products use an unsupported currency."]})
+
+    shipping = Decimal(str(settings.SHOP_SHIPPING_FEE_KES))
     total = subtotal + shipping
-    fx = Decimal(str(settings.SHOP_USD_KES_RATE))
-    amount_kes = max(int((total * fx).to_integral_value(rounding=ROUND_CEILING)), 1)
+    amount_kes = max(int(total.to_integral_value(rounding=ROUND_CEILING)), 1)
 
     with transaction.atomic():
         # Atomic reservation, ordered by pk to avoid deadlocks. Raising rolls everything back.
@@ -74,8 +77,9 @@ def create_order(data):
             address=data["address"], apartment=data.get("apartment", ""),
             city=data["city"], state=data.get("state", ""), zip_code=data.get("zip_code", ""),
             country=data.get("country") or "Kenya", notes=data.get("notes", ""),
+            currency=settings.SHOP_CURRENCY,
             subtotal=subtotal, shipping_fee=shipping, total=total,
-            fx_rate=fx, amount_kes=amount_kes,
+            fx_rate=Decimal("1"), amount_kes=amount_kes,
         )
         OrderItem.objects.bulk_create([
             OrderItem(

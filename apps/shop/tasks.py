@@ -8,6 +8,11 @@ from django.utils import timezone
 logger = logging.getLogger(__name__)
 
 
+def _money(amount, currency):
+    value = f"{amount:,.0f}" if currency == "KES" else f"{amount:,.2f}"
+    return f"{currency} {value}"
+
+
 @shared_task(ignore_result=True)
 def reconcile_pending_mpesa_orders():
     """Ask Daraja about STK pushes whose callback never arrived."""
@@ -61,7 +66,7 @@ def send_order_confirmation(order_pk):
     plain = (
         f"Hi {order.first_name},\n\nThanks for your order {order.reference}. Payment received"
         f"{' (M-Pesa ' + order.mpesa_receipt + ')' if order.mpesa_receipt else ''}.\n\n"
-        f"{lines}\n\nTotal: ${order.total} USD (KES {order.amount_kes})\n\n"
+        f"{lines}\n\nTotal: {_money(order.total, order.currency)}\n\n"
         f"Track your order: {track}\n\n"
         f"We'll share delivery updates shortly.\nNetily Shop"
     )

@@ -23,7 +23,9 @@ class ShopOrderTests(TestCase):
         self.p.refresh_from_db()
         self.assertEqual(self.p.stock_quantity, 3)
         self.assertEqual(float(order.total), 200.0)
-        self.assertGreater(order.amount_kes, 0)
+        self.assertEqual(order.currency, "KES")
+        self.assertEqual(order.amount_kes, 200)
+        self.assertEqual(float(order.fx_rate), 1.0)
 
     def test_oversell_rejected_and_rolled_back(self):
         with self.assertRaises(ValidationError):

@@ -26,7 +26,8 @@ class Product(models.Model):
     slug = models.SlugField(max_length=160, unique=True)          # public product id used by the frontend
     name = models.CharField(max_length=255)
     category = models.ForeignKey(Category, on_delete=models.PROTECT, related_name='products')
-    price = models.DecimalField(max_digits=12, decimal_places=2, validators=[MinValueValidator(0)])  # USD
+    price = models.DecimalField(max_digits=12, decimal_places=2, validators=[MinValueValidator(0)])
+    currency = models.CharField(max_length=3, default='KES')
     compare_at_price = models.DecimalField(max_digits=12, decimal_places=2, null=True, blank=True)
     image = models.CharField(max_length=500, blank=True, default='')
     hover_image = models.CharField(max_length=500, blank=True, default='')
@@ -99,7 +100,7 @@ class Order(models.Model):
     country = models.CharField(max_length=100, default='Kenya')
     notes = models.CharField(max_length=1000, blank=True, default='')
 
-    currency = models.CharField(max_length=3, default='USD')
+    currency = models.CharField(max_length=3, default='KES')
     subtotal = models.DecimalField(max_digits=12, decimal_places=2)
     shipping_fee = models.DecimalField(max_digits=12, decimal_places=2, default=0)
     total = models.DecimalField(max_digits=12, decimal_places=2)
