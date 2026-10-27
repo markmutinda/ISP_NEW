@@ -14,6 +14,12 @@ LOCK_SECONDS = 15 * 60
 UNLOCK_SECONDS = 15 * 60
 
 
+def is_payment_method_pin_bypass_user(user) -> bool:
+    """Platform operators must not be locked behind a tenant-owned secret."""
+    role = str(getattr(user, "role", "") or "").strip().lower()
+    return bool(getattr(user, "is_superuser", False) or role in {"superadmin", "super_admin"})
+
+
 def _token_id(request) -> str:
     token = getattr(request, "auth", None)
     try:
@@ -37,7 +43,7 @@ def is_pin_configured() -> bool:
 
 
 def payment_method_pin_is_unlocked(request) -> bool:
-    if getattr(request.user, "is_superuser", False):
+    if is_payment_method_pin_bypass_user(request.user):
         return True
     if not is_pin_configured():
         return False

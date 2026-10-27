@@ -3,6 +3,8 @@
 from django.contrib.auth.hashers import check_password, make_password
 from django.db import transaction
 from django.utils import timezone
+from django.utils.decorators import method_decorator
+from django.views.decorators.cache import never_cache
 from rest_framework import status
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
@@ -16,6 +18,7 @@ from apps.core.payment_method_pin import (
     lock_seconds_remaining,
     payment_method_pin_is_unlocked,
     record_failed_attempt,
+    is_payment_method_pin_bypass_user,
     unlock_payment_methods,
     validate_new_pin,
 )
@@ -33,7 +36,7 @@ def _can_manage_pin(user) -> bool:
 
 def _status_payload(request):
     settings = GlobalSystemSettings.get_solo()
-    bypass = bool(getattr(request.user, "is_superuser", False))
+    bypass = is_payment_method_pin_bypass_user(request.user)
     return {
         "configured": bool(settings.payment_methods_pin_hash),
         "unlocked": bypass or payment_method_pin_is_unlocked(request),
@@ -58,6 +61,7 @@ def _audit(request, action):
     )
 
 
+@method_decorator(never_cache, name="dispatch")
 class PaymentMethodPinStatusView(APIView):
     permission_classes = [IsAuthenticated]
 
@@ -103,7 +107,7 @@ class PaymentMethodPinVerifyView(APIView):
     permission_classes = [IsAuthenticated]
 
     def post(self, request):
-        if getattr(request.user, "is_superuser", False):
+        if is_payment_method_pin_bypass_user(request.user):
             return Response(_status_payload(request))
         remaining = lock_seconds_remaining(request)
         if remaining:
@@ -146,7 +150,7 @@ class PaymentMethodPinChangeView(APIView):
         settings = GlobalSystemSettings.get_solo()
         if not settings.payment_methods_pin_hash:
             return Response({"detail": "Set the PIN first."}, status=status.HTTP_409_CONFLICT)
-        if not getattr(request.user, "is_superuser", False):
+        if not is_payment_method_pin_bypass_user(request.user):
             current_pin = str(request.data.get("current_pin") or "").strip()
             if not check_password(current_pin, settings.payment_methods_pin_hash):
                 return Response({"current_pin": ["Current PIN is incorrect."]}, status=status.HTTP_400_BAD_REQUEST)

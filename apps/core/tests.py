@@ -96,6 +96,10 @@ class PaymentMethodPinTests(SimpleTestCase):
         request = SimpleNamespace(user=SimpleNamespace(is_superuser=True))
         self.assertTrue(payment_method_pin_is_unlocked(request))
 
+    def test_platform_role_bypasses_tenant_pin(self):
+        request = SimpleNamespace(user=SimpleNamespace(is_superuser=False, role="superadmin"))
+        self.assertTrue(payment_method_pin_is_unlocked(request))
+
 
 class LeadAlertMessageTests(SimpleTestCase):
     def test_message_escapes_user_input_and_includes_affiliate_context(self):
