@@ -798,6 +798,77 @@ class HotspotClientDetailView(APIView):
         return Response(status=204)
 
 
+class HotspotClientPaymentsView(APIView):
+    """
+    GET /api/v1/hotspot/admin/clients/{id}/payments/?page=1&page_size=15&status=COMPLETED
+    Full payment history for a hotspot client (via HotspotSession.hotspot_client).
+    """
+    permission_classes = [IsAuthenticated, IsAdminOrStaff, HasRoleAccessPolicy]
+    required_rbac_path = "/admin/users"
+
+    def get(self, request, id):
+        from apps.billing.models.payment_models import Payment
+
+        if not HotspotClient.objects.filter(id=id).exists():
+            return Response({'error': 'Client not found'}, status=404)
+
+        try:
+            page = max(1, int(request.query_params.get('page', 1)))
+            page_size = min(max(1, int(request.query_params.get('page_size', 15))), 100)
+        except (TypeError, ValueError):
+            page, page_size = 1, 15
+
+        base_qs = Payment.objects.filter(hotspot_session__hotspot_client_id=id)
+
+        # One aggregate query for overall summary (unaffected by status filter)
+        agg = base_qs.aggregate(
+            total=Count('id'),
+            completed_count=Count('id', filter=Q(status='COMPLETED')),
+            completed_total=Sum('amount', filter=Q(status='COMPLETED')),
+        )
+
+        status_filter = (request.query_params.get('status') or '').strip().upper()
+        qs = base_qs.filter(status=status_filter) if status_filter else base_qs
+        total = qs.count() if status_filter else agg['total']
+
+        start = (page - 1) * page_size
+        rows = (
+            qs.select_related('payment_method', 'hotspot_session__plan')
+            .order_by('-payment_date', '-id')[start:start + page_size]
+        )
+
+        results = []
+        for p in rows:
+            sess = p.hotspot_session
+            results.append({
+                'id': p.id,
+                'payment_number': p.payment_number,
+                'amount': float(p.amount),
+                'currency': p.currency or 'KES',
+                'status': p.status,
+                'mpesa_receipt': p.mpesa_receipt or p.transaction_id or '',
+                'payer_phone': p.payer_phone or p.mpesa_phone or '',
+                'payment_method': p.payment_method.name if p.payment_method else '',
+                'plan_name': sess.plan.name if (sess and sess.plan) else '',
+                'access_code': sess.access_code if sess else '',
+                'failure_reason': p.failure_reason or '',
+                'payment_date': p.payment_date.isoformat() if p.payment_date else None,
+            })
+
+        return Response({
+            'summary': {
+                'total_payments': agg['total'] or 0,
+                'completed_count': agg['completed_count'] or 0,
+                'completed_total': float(agg['completed_total'] or 0),
+            },
+            'results': results,
+            'count': total,
+            'page': page,
+            'page_size': page_size,
+            'total_pages': (total + page_size - 1) // page_size,
+        })
+
+
 class RouterIncomeView(APIView):
     """
     GET /api/v1/hotspot/admin/routers/{router_id}/income/

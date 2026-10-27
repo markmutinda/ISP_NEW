@@ -29,6 +29,7 @@ from .views.hotspot_admin_views import (
     RouterIncomeView,
     HotspotSessionExtendView,
     HotspotClientDetailView,
+    HotspotClientPaymentsView,   # ← ADD
     HotspotNetworkScanView,  # ADDED: New network scan view
 )
 from .views.hotspot_voucher_admin_views import (
@@ -189,6 +190,10 @@ hotspot_admin_urlpatterns = [
     path('admin/clients/<int:id>/sessions/',
          HotspotClientDetailView.as_view(),
          name='hotspot-client-sessions'),
+
+    path('admin/clients/<int:id>/payments/',
+         HotspotClientPaymentsView.as_view(),
+         name='hotspot-client-payments'),
     
     # ACTIVE SUBSCRIPTIONS
     path('admin/active-subscriptions/', 
