@@ -11,6 +11,7 @@ import string
 import time
 import hashlib
 import base64
+import functools
 from decimal import Decimal
 
 from django.conf import settings
@@ -1465,6 +1466,58 @@ class HotspotVoucherRedeemView(APIView):
 # NEW: Phone number based reconnect / multi‑device management
 # ============================================================
 
+def _schedule_tv_push_for_reconnect(request, response):
+    """
+    After a successful reconnect flagged target_device='tv', queue the
+    server-side MikroTik login (same task the purchase/voucher paths use).
+    Runs AFTER the view's transaction has committed.
+    """
+    if request.data.get('target_device') != 'tv' or response.status_code != 200:
+        return
+
+    data = getattr(response, 'data', None) or {}
+    access_code = data.get('access_code') or (data.get('credentials') or {}).get('username')
+    mac = _normalize_mac(request.data.get('mac_address', ''))
+    tenant_ref = request.data.get('tenant') or request.query_params.get('tenant')
+    if not (access_code and mac and tenant_ref) or mac == '00:00:00:00:00:00':
+        return
+
+    info = resolve_tenant_cached(tenant_ref)
+    if not info:
+        return
+    schema = info['schema_name']
+
+    with schema_context(schema):
+        sessions = HotspotSession.objects.filter(
+            access_code=access_code, status='active', expires_at__gt=timezone.now()
+        ).order_by('-activated_at')
+        # Prefer the session already bound to the TV MAC; otherwise bind this slot's
+        # session to it (RADIUS creds were already written with Calling-Station-Id=TV MAC).
+        session = sessions.filter(mac_address=mac).first()
+        if session is None:
+            session = sessions.first()
+            if session is None:
+                logger.warning("TV reconnect push: no active session for %s", access_code)
+                return
+            session.mac_address = mac
+            session.save(update_fields=['mac_address', 'updated_at'])
+
+        cache.set(f"hs_tv_push:{schema}:{session.session_id}", 1, timeout=3600)
+        schedule_tv_login_push(session, schema)
+
+
+def tv_push_after_reconnect(view_post):
+    @functools.wraps(view_post)
+    def wrapper(self, request, *args, **kwargs):
+        response = view_post(self, request, *args, **kwargs)
+        try:
+            _schedule_tv_push_for_reconnect(request, response)
+        except Exception:
+            logger.exception("TV push scheduling failed after reconnect")
+        return response
+    return wrapper
+
+
 class HotspotPhoneReconnectView(APIView):
     permission_classes = [AllowAny]
     authentication_classes = []
@@ -1484,6 +1537,7 @@ class HotspotPhoneReconnectView(APIView):
         from utils.phone import normalize_phone_number
         return normalize_phone_number(phone, country_code)
 
+    @tv_push_after_reconnect
     @transaction.atomic
     def post(self, request):
         tenant_subdomain = request.data.get('tenant') or request.query_params.get('tenant')
@@ -2085,6 +2139,7 @@ class HotspotCredentialReconnectView(APIView):
             hotspot_client=base.hotspot_client,
         )
 
+    @tv_push_after_reconnect
     def post(self, request):
         data = request.data
         tenant_subdomain = data.get('tenant') or request.query_params.get('tenant')
