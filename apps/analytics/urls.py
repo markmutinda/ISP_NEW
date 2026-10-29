@@ -28,6 +28,7 @@ from .frontend_contract_views import (
     DailyRevenueSplitView,  # ADD THIS - PPPoE vs Hotspot revenue split
 )
 from .views_ticker import RecentPaymentsTickerView  # NEW: Import ticker view
+from .views_pdf import AnalyticsReportPDFView
 
 app_name = 'analytics'
 
@@ -81,4 +82,5 @@ urlpatterns = [
     # NEW: Recent Payments Ticker for Dashboard Greeting Card
     # ============================================================
     path('payments-ticker/', RecentPaymentsTickerView.as_view(), name='payments-ticker'),
+    path('reports-pdf/', AnalyticsReportPDFView.as_view(), name='analytics-reports-pdf'),
 ]

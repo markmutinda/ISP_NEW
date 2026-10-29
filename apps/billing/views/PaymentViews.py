@@ -879,6 +879,68 @@ class PaymentViewSet(viewsets.ModelViewSet):
         )
         self._log_payment_action(payment, "create", {"event": "manual_payment_created"})
 
+    @action(detail=False, methods=['get'], url_path='report-pdf')
+    def report_pdf(self, request):
+        """Branded payments statement PDF for a date range."""
+        from datetime import datetime, time, timedelta
+        from apps.billing.services.billing_pdfs import build_payments_report_pdf
+        from apps.core.pdf_reports import pdf_response
+
+        def _parse(value, default):
+            try:
+                return datetime.strptime(value, '%Y-%m-%d').date()
+            except (TypeError, ValueError):
+                return default
+
+        today = timezone.localdate()
+        d_from = _parse(request.query_params.get('date_from'), today.replace(day=1))
+        d_to = _parse(request.query_params.get('date_to'), today)
+        if d_to < d_from:
+            d_from, d_to = d_to, d_from
+        if (d_to - d_from).days > 366:
+            return Response({'detail': 'Date range cannot exceed 12 months.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        tz = timezone.get_current_timezone()
+        start = timezone.make_aware(datetime.combine(d_from, time.min), tz)
+        end = timezone.make_aware(datetime.combine(d_to + timedelta(days=1), time.min), tz)
+
+        qs = self.get_queryset().filter(status='COMPLETED', payment_date__gte=start, payment_date__lt=end)
+
+        service = (request.query_params.get('service_type') or '').strip().upper()
+        if service in ('HOTSPOT', 'PPPOE', 'OTHER'):
+            qs = qs.filter(service_type=service)
+        else:
+            service = ''
+
+        search = (request.query_params.get('search') or '').strip()[:60]
+        if search:
+            qs = qs.filter(
+                Q(payment_number__icontains=search) |
+                Q(customer__customer_code__icontains=search) |
+                Q(transaction_id__icontains=search) |
+                Q(mpesa_receipt__icontains=search)
+            )
+
+        try:
+            pdf_bytes = build_payments_report_pdf(
+                request, qs, date_from=d_from, date_to=d_to,
+                service_type=service or None, search=search,
+            )
+        except Exception:
+            logger.exception("Payments report PDF failed")
+            return Response({'detail': 'Could not generate the report. Please try again.'},
+                            status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+        AuditLog.log_action(
+            user=request.user, action="export", model_name="Payment",
+            object_repr="Payments PDF report",
+            changes={"date_from": str(d_from), "date_to": str(d_to), "service_type": service or "all", "search": search},
+            ip_address=request.META.get("REMOTE_ADDR"),
+            user_agent=request.META.get("HTTP_USER_AGENT", ""),
+            tenant=getattr(request, "tenant", None),
+        )
+        return pdf_response(pdf_bytes, f"payments-report_{d_from}_{d_to}.pdf")
+
     # === Standard Actions ===
     @action(detail=True, methods=['post'])
     def mark_completed(self, request, pk=None):
