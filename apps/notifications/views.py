@@ -119,7 +119,10 @@ class NotificationViewSet(viewsets.ModelViewSet):
     
     def get_permissions(self):
         """Set permissions based on action"""
-        if self.action in ['list', 'retrieve']:
+        if self.action in ['mark_as_read', 'mark_all_as_read']:
+            # Only touches the caller's own notifications (see get_queryset)
+            permission_classes = [IsAuthenticated]
+        elif self.action in ['list', 'retrieve']:
             permission_classes = [IsAuthenticated, HasRoleAccessPolicy]
         elif self.action in ['create', 'update', 'partial_update', 'destroy']:
             permission_classes = [IsAuthenticated, CanManageNotifications, HasRoleAccessPolicy]

@@ -331,6 +331,10 @@ class AuditLogMiddleware(MiddlewareMixin):
         if any(request.path.startswith(path) for path in PUBLIC_ROUTER_PATHS):
             return response
 
+        # Don't audit-log housekeeping calls that just mark own notifications read
+        if request.path.endswith('/mark_all_read/') or request.path.endswith('/mark_as_read/'):
+            return response
+
         if (
             hasattr(request, 'audit_log_info')
             and hasattr(request, 'user')
