@@ -18,6 +18,7 @@ from .views import (
     RadiusTenantConfigViewSet,
     CustomerRadiusCredentialsViewSet,
 )
+from .usage_analytics_views import RadiusUsageAnalyticsView, RadiusUsageConsumersView
 
 router = DefaultRouter()
 router.register(r'accounting', RadAcctViewSet, basename='radius-accounting')
@@ -37,6 +38,8 @@ urlpatterns = [
     
     # NEW: Subscription-period usage for a set of usernames
     path('usage/', RadiusUsageBulkView.as_view(), name='radius-usage-bulk'),
+    path('usage/analytics/', RadiusUsageAnalyticsView.as_view(), name='radius-usage-analytics'),
+    path('usage/consumers/', RadiusUsageConsumersView.as_view(), name='radius-usage-consumers'),
     
     # User management
     path('users/', RadiusUserView.as_view(), name='radius-user-list'),
