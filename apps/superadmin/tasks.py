@@ -362,71 +362,52 @@ def deliver_changelog_notifications(self, changelog_id: int, channels: list[str]
                 recipients = list(
                     User.objects.filter(is_active=True)
                     .exclude(role="customer")
-                    .only("id", "email", "phone_number", "first_name", "role")
+                    .only("id", "email", "phone_number")
                 )
                 summary["users_targeted"] += len(recipients)
 
-                for user in recipients:
-                    subject = f"Netily update: {changelog.title}"
-                    message = (
-                        f"{changelog.title}\n\n"
-                        f"Version: {changelog.version or 'Latest release'}\n"
-                        f"Type: {changelog.get_update_type_display()}\n\n"
-                        f"{changelog.content}"
+                # (user_id, channel) pairs already delivered for this changelog
+                already = set(
+                    Notification.objects.filter(metadata__changelog_id=changelog.id)
+                    .values_list("user_id", "notification_type")
+                )
+
+                subject = f"Netily update: {changelog.title}"
+                message = (
+                    f"{changelog.title}\n\n"
+                    f"Version: {changelog.version or 'Latest release'}\n"
+                    f"Type: {changelog.get_update_type_display()}\n\n"
+                    f"{changelog.content}"
+                )
+                sms_message = f"Netily update: {changelog.title}. {changelog.version or ''}".strip()
+                metadata = {
+                    "changelog_id": changelog.id,
+                    "changelog_title": changelog.title,
+                    "tenant_subdomain": tenant.subdomain,
+                    "release_date": changelog.release_date.isoformat() if changelog.release_date else None,
+                }
+
+                def _deliver(user, channel, **fields):
+                    if (user.id, channel) in already:
+                        return
+                    notification = Notification.objects.create(
+                        user=user, notification_type=channel, subject=subject,
+                        metadata=metadata, **fields,
                     )
-                    metadata = {
-                        "changelog_id": changelog.id,
-                        "changelog_title": changelog.title,
-                        "tenant_subdomain": tenant.subdomain,
-                        "release_date": changelog.release_date.isoformat() if changelog.release_date else None,
-                    }
+                    already.add((user.id, channel))
+                    summary["notifications_created"] += 1
+                    if manager.send_notification(notification):
+                        summary["notifications_sent"] += 1
+                    else:
+                        summary["notifications_failed"] += 1
 
+                for user in recipients:
                     if "in_app" in channels:
-                        notification = Notification.objects.create(
-                            user=user,
-                            notification_type="in_app",
-                            subject=subject,
-                            message=message,
-                            priority=3,
-                            metadata=metadata,
-                        )
-                        summary["notifications_created"] += 1
-                        if manager.send_notification(notification):
-                            summary["notifications_sent"] += 1
-                        else:
-                            summary["notifications_failed"] += 1
-
+                        _deliver(user, "in_app", message=message, priority=3)
                     if "email" in channels and user.email:
-                        notification = Notification.objects.create(
-                            user=user,
-                            notification_type="email",
-                            subject=subject,
-                            message=message,
-                            recipient_email=user.email,
-                            priority=3,
-                            metadata=metadata,
-                        )
-                        summary["notifications_created"] += 1
-                        if manager.send_notification(notification):
-                            summary["notifications_sent"] += 1
-                        else:
-                            summary["notifications_failed"] += 1
-
+                        _deliver(user, "email", message=message, recipient_email=user.email, priority=3)
                     if "sms" in channels and user.phone_number:
-                        notification = Notification.objects.create(
-                            user=user,
-                            notification_type="sms",
-                            subject=subject,
-                            message=f"Netily update: {changelog.title}. {changelog.version or ''}".strip(),
-                            recipient_phone=user.phone_number,
-                            priority=2,
-                            metadata=metadata,
-                        )
-                        summary["notifications_created"] += 1
-                        if manager.send_notification(notification):
-                            summary["notifications_sent"] += 1
-                        else:
-                            summary["notifications_failed"] += 1
+                        _deliver(user, "sms", message=sms_message, recipient_phone=user.phone_number, priority=2)
         except Exception as exc:
             logger.exception("Failed changelog notification delivery for tenant %s", tenant.schema_name)
             summary["errors"].append(

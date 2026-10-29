@@ -129,35 +129,23 @@ class NotificationViewSet(viewsets.ModelViewSet):
     
     def get_queryset(self):
         user = self.request.user
-        
-        if user.is_superuser or user.is_staff:
-            # Admins and staff can see all notifications
-            queryset = Notification.objects.all()
-        else:
-            # Users can only see their own notifications
-            queryset = Notification.objects.filter(
-                Q(user=user) |
-                Q(recipient_email=user.email) |
-                Q(recipient_phone=user.phone)
-            )
-        
-        # Filter by date range if specified
+        # Every user only sees their own notifications (staff included).
+        own = Q(user=user)
+        if getattr(user, "email", None):
+            own |= Q(user__isnull=True, recipient_email=user.email)
+        queryset = Notification.objects.filter(own)
+
         start_date = self.request.query_params.get('start_date')
         end_date = self.request.query_params.get('end_date')
-        
         if start_date:
             queryset = queryset.filter(created_at__gte=start_date)
         if end_date:
             queryset = queryset.filter(created_at__lte=end_date)
-        
-        # Filter by read status
+
         read_status = self.request.query_params.get('read')
         if read_status is not None:
-            if read_status.lower() == 'true':
-                queryset = queryset.filter(read_at__isnull=False)
-            else:
-                queryset = queryset.filter(read_at__isnull=True)
-        
+            queryset = queryset.filter(read_at__isnull=read_status.lower() != 'true')
+
         return queryset
     
     def perform_create(self, serializer):
@@ -194,40 +182,19 @@ class NotificationViewSet(viewsets.ModelViewSet):
     
     @action(detail=True, methods=['post'])
     def mark_as_read(self, request, pk=None):
-        """Mark notification as read"""
-        notification = self.get_object()
-        
-        # Check permission
-        if not (notification.user == request.user or 
-                notification.recipient_email == request.user.email or
-                request.user.is_staff):
-            return Response(
-                {'error': 'Permission denied'},
-                status=status.HTTP_403_FORBIDDEN
-            )
-        
-        notification.mark_as_read()
+        notification = self.get_object()  # already scoped to the current user
+        if notification.read_at is None:
+            notification.mark_as_read()
         return Response({'status': 'Notification marked as read'})
     
-    @action(detail=False, methods=['post'])
+    @action(detail=False, methods=['post'], url_path='mark_all_read')
     def mark_all_as_read(self, request):
-        """Mark all user's notifications as read"""
-        user = request.user
-        
-        notifications = Notification.objects.filter(
-            Q(user=user) |
-            Q(recipient_email=user.email) |
-            Q(recipient_phone=user.phone),
-            read_at__isnull=True
+        updated = (
+            self.get_queryset()
+            .filter(read_at__isnull=True)
+            .update(status='read', read_at=timezone.now())
         )
-        
-        count = notifications.count()
-        notifications.update(
-            status='read',
-            read_at=timezone.now()
-        )
-        
-        return Response({'status': f'{count} notifications marked as read'})
+        return Response({'status': 'ok', 'updated': updated})
     
     @action(detail=False, methods=['get'])
     def stats(self, request):
