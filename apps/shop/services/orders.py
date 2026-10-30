@@ -9,7 +9,7 @@ from django.db.models.functions import Greatest
 from django.utils import timezone
 from rest_framework.exceptions import ValidationError
 
-from ..models import Order, OrderItem, Product
+from ..models import Order, OrderItem, Product, ShopSettings
 
 logger = logging.getLogger(__name__)
 
@@ -55,7 +55,12 @@ def create_order(data):
     if currencies != {settings.SHOP_CURRENCY}:
         raise ValidationError({"items": ["One or more products use an unsupported currency."]})
 
-    shipping = Decimal(str(settings.SHOP_SHIPPING_FEE_KES))
+    shop_settings = ShopSettings.get_active()
+    configured_shipping = shop_settings.default_shipping_fee
+    if configured_shipping == 0:
+        configured_shipping = Decimal(str(settings.SHOP_SHIPPING_FEE_KES))
+    free_threshold = shop_settings.free_shipping_threshold
+    shipping = Decimal("0") if free_threshold is not None and subtotal >= free_threshold else configured_shipping
     total = subtotal + shipping
     amount_kes = max(int(total.to_integral_value(rounding=ROUND_CEILING)), 1)
 

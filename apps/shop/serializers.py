@@ -1,10 +1,11 @@
+from django.conf import settings
 from django.utils.text import slugify
 from rest_framework import serializers
 from rest_framework.validators import UniqueValidator
 
 from utils.phone import is_valid_phone_number, normalize_phone_number
 
-from .models import Category, Order, OrderItem, Product
+from .models import Category, Order, OrderItem, Product, ShopSettings
 
 
 # ───────────── Public (read) ─────────────
@@ -12,6 +13,25 @@ class CategorySerializer(serializers.ModelSerializer):
     class Meta:
         model = Category
         fields = ["name", "slug"]
+
+
+class ShopSettingsSerializer(serializers.ModelSerializer):
+    default_shipping_fee = serializers.SerializerMethodField()
+    free_shipping_threshold = serializers.FloatField(read_only=True)
+
+    class Meta:
+        model = ShopSettings
+        fields = [
+            "store_name", "announcement_text", "hero_eyebrow", "hero_title",
+            "hero_description", "hero_image", "hero_primary_label", "hero_primary_href",
+            "hero_secondary_label", "hero_secondary_href", "support_email", "support_phone",
+            "whatsapp_number", "default_shipping_fee", "free_shipping_threshold",
+            "allow_checkout", "checkout_notice", "updated_at",
+        ]
+
+    def get_default_shipping_fee(self, obj):
+        configured = obj.default_shipping_fee
+        return float(configured if configured != 0 else settings.SHOP_SHIPPING_FEE_KES)
 
 
 class ProductSerializer(serializers.ModelSerializer):
@@ -149,6 +169,20 @@ class AdminCategorySerializer(serializers.ModelSerializer):
     def validate(self, attrs):
         if self.instance is None and not attrs.get("slug"):
             attrs["slug"] = slugify(attrs["name"])[:140] or "category"
+        return attrs
+
+
+class AdminShopSettingsSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = ShopSettings
+        exclude = ["id"]
+        read_only_fields = ["updated_at"]
+
+    def validate(self, attrs):
+        for field in ("hero_primary_href", "hero_secondary_href"):
+            value = str(attrs.get(field, getattr(self.instance, field, "")) or "").strip()
+            if value and not (value.startswith("/") or value.startswith("https://") or value.startswith("http://")):
+                raise serializers.ValidationError({field: "Use an internal path or a full http(s) URL."})
         return attrs
 
 

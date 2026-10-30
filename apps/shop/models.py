@@ -22,6 +22,51 @@ class Category(models.Model):
         return self.name
 
 
+class ShopSettings(models.Model):
+    """Singleton storefront configuration managed by platform superadmins."""
+
+    store_name = models.CharField(max_length=120, default='Netily Shop')
+    announcement_text = models.CharField(max_length=240, blank=True, default='')
+    hero_eyebrow = models.CharField(max_length=120, default='Netily Network Equipment')
+    hero_title = models.CharField(max_length=180, default='Build a network that is ready to grow')
+    hero_description = models.CharField(
+        max_length=500,
+        default='Carrier-grade routing, fibre, wireless, power, and installation equipment for modern ISPs.',
+    )
+    hero_image = models.CharField(max_length=500, default='/shop-assets/netily_hero_bg.jpg')
+    hero_primary_label = models.CharField(max_length=80, default='Browse equipment')
+    hero_primary_href = models.CharField(max_length=240, default='/shop/catalog')
+    hero_secondary_label = models.CharField(max_length=80, default='Ask before you buy')
+    hero_secondary_href = models.CharField(max_length=240, default='https://wa.me/254100034307')
+    support_email = models.EmailField(blank=True, default='')
+    support_phone = models.CharField(max_length=32, blank=True, default='')
+    whatsapp_number = models.CharField(max_length=32, blank=True, default='254100034307')
+    default_shipping_fee = models.DecimalField(
+        max_digits=12, decimal_places=2, default=0, validators=[MinValueValidator(0)]
+    )
+    free_shipping_threshold = models.DecimalField(
+        max_digits=12, decimal_places=2, null=True, blank=True, validators=[MinValueValidator(0)]
+    )
+    allow_checkout = models.BooleanField(default=True)
+    checkout_notice = models.CharField(max_length=300, blank=True, default='')
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name_plural = 'Shop settings'
+
+    def save(self, *args, **kwargs):
+        self.pk = 1
+        return super().save(*args, **kwargs)
+
+    @classmethod
+    def get_active(cls):
+        settings, _ = cls.objects.get_or_create(pk=1)
+        return settings
+
+    def __str__(self):
+        return self.store_name
+
+
 class Product(models.Model):
     slug = models.SlugField(max_length=160, unique=True)          # public product id used by the frontend
     name = models.CharField(max_length=255)

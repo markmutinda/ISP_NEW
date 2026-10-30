@@ -9,6 +9,8 @@ router.register("admin/products", views.AdminProductViewSet, basename="shop-admi
 router.register("admin/orders", views.AdminOrderViewSet, basename="shop-admin-order")
 
 urlpatterns = [
+    path("settings/", views.ShopSettingsView.as_view()),
+    path("admin/settings/", views.AdminShopSettingsView.as_view()),
     path("categories/", views.CategoryListView.as_view()),
     path("products/", views.ProductListView.as_view()),
     path("products/<slug:slug>/", views.ProductDetailView.as_view()),

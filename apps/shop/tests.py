@@ -3,7 +3,7 @@ from unittest.mock import patch
 from django.test import TestCase
 from rest_framework.exceptions import ValidationError
 
-from apps.shop.models import Category, Order, Product
+from apps.shop.models import Category, Order, Product, ShopSettings
 from apps.shop.services.orders import create_order
 from apps.shop.services.payments import apply_payment_result
 
@@ -33,6 +33,22 @@ class ShopOrderTests(TestCase):
         self.p.refresh_from_db()
         self.assertEqual(self.p.stock_quantity, 5)
         self.assertEqual(Order.objects.count(), 0)
+
+    def test_managed_shipping_fee_and_free_shipping_threshold(self):
+        settings = ShopSettings.get_active()
+        settings.default_shipping_fee = 300
+        settings.free_shipping_threshold = 500
+        settings.save()
+
+        charged = create_order(_payload("r1", 2))
+        self.assertEqual(float(charged.shipping_fee), 300.0)
+        self.assertEqual(float(charged.total), 500.0)
+
+        self.p.stock_quantity = 5
+        self.p.save(update_fields=["stock_quantity"])
+        free = create_order(_payload("r1", 5))
+        self.assertEqual(float(free.shipping_fee), 0.0)
+        self.assertEqual(float(free.total), 500.0)
 
     def test_callback_idempotent_and_amount_checked(self):
         order = create_order(_payload("r1", 1))

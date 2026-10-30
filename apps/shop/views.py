@@ -21,11 +21,12 @@ from apps.superadmin.permissions import IsSuperAdmin
 from utils.phone import is_valid_phone_number, normalize_phone_number
 
 from .cache import get_catalog_version
-from .models import Category, Order, Product
+from .models import Category, Order, Product, ShopSettings
 from .serializers import (
     AdminCategorySerializer, AdminOrderDetailSerializer, AdminOrderListSerializer,
+    AdminShopSettingsSerializer,
     AdminProductSerializer, CategorySerializer, CheckoutSerializer, OrderPublicSerializer,
-    ProductSerializer,
+    ProductSerializer, ShopSettingsSerializer,
 )
 from .services.orders import create_order, release_stock
 from .services.payments import apply_payment_result, initiate_mpesa_payment, mark_order_paid
@@ -58,6 +59,11 @@ class CategoryListView(PublicAPIView):
             qs = Category.objects.filter(is_active=True)
             return list(CategorySerializer(qs, many=True).data)
         return Response(_cached(f"shop:cats:{get_catalog_version()}", build))
+
+
+class ShopSettingsView(PublicAPIView):
+    def get(self, request):
+        return Response(ShopSettingsSerializer(ShopSettings.get_active()).data)
 
 
 class ProductListView(PublicAPIView):
@@ -126,6 +132,11 @@ class CheckoutView(PublicAPIView):
     throttle_scope = "shop_checkout"
 
     def post(self, request):
+        shop_settings = ShopSettings.get_active()
+        if not shop_settings.allow_checkout:
+            return Response({
+                "detail": shop_settings.checkout_notice or "Checkout is temporarily unavailable. Please contact shop support.",
+            }, status=status.HTTP_503_SERVICE_UNAVAILABLE)
         s = CheckoutSerializer(data=request.data)
         s.is_valid(raise_exception=True)
         data = s.validated_data
@@ -208,6 +219,20 @@ class ShopPagination(PageNumberPagination):
     page_size = 25
     page_size_query_param = "page_size"
     max_page_size = 200
+
+
+class AdminShopSettingsView(APIView):
+    permission_classes = [IsAuthenticated, IsSuperAdmin]
+
+    def get(self, request):
+        return Response(AdminShopSettingsSerializer(ShopSettings.get_active()).data)
+
+    def patch(self, request):
+        instance = ShopSettings.get_active()
+        serializer = AdminShopSettingsSerializer(instance, data=request.data, partial=True)
+        serializer.is_valid(raise_exception=True)
+        serializer.save()
+        return Response(serializer.data)
 
 
 ORDER_TRANSITIONS = {
@@ -309,4 +334,12 @@ class AdminOrderViewSet(viewsets.ReadOnlyModelViewSet):
             for key, value in agg.items()
         }
         payload["currency"] = "KES"
+        payload.update({
+            "products": Product.objects.count(),
+            "published_products": Product.objects.filter(is_active=True).count(),
+            "featured_products": Product.objects.filter(is_active=True, is_featured=True).count(),
+            "low_stock_products": Product.objects.filter(
+                is_active=True, track_stock=True, stock_quantity__lte=5,
+            ).count(),
+        })
         return Response(payload)

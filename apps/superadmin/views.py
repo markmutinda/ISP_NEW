@@ -5824,8 +5824,10 @@ class SubscriptionReminderRecipientListView(APIView):
 
     def get(self, request):
         _ensure_public()
-        from apps.subscriptions.models import CompanySubscription
+        from apps.billing.models import Invoice
+        from apps.subscriptions.models import BillingCycle, CompanySubscription
         from apps.subscriptions.reminder_recipients import tenant_billing_recipients
+        from apps.subscriptions.tasks import _cycle_is_settled_or_renewed, _decimal_money
 
         today = timezone.localdate()
         search = str(request.query_params.get("search") or "").strip().lower()
@@ -5842,12 +5844,37 @@ class SubscriptionReminderRecipientListView(APIView):
             if not tenant:
                 continue
 
-            expiry = (
+            subscription_expiry = (
                 subscription.trial_ends_at
                 if subscription.status == "trialing" and subscription.trial_ends_at
                 else subscription.current_period_end
             )
-            days_left = (expiry.date() - today).days if expiry else None
+            cycle = (
+                BillingCycle.objects.filter(
+                    tenant=tenant,
+                    subscription=subscription,
+                    status__in=["active", "invoiced"],
+                )
+                .order_by("-start_date", "-end_date", "-id")
+                .first()
+            )
+            invoice = None
+            if cycle and cycle.invoice_reference:
+                try:
+                    with schema_context(tenant.schema_name):
+                        invoice = Invoice.objects.filter(pk=cycle.invoice_reference).first()
+                except Exception as exc:
+                    logger.warning("Could not resolve subscription invoice for tenant=%s: %s", tenant.pk, exc)
+            due_date = (
+                invoice.due_date
+                if invoice and invoice.due_date
+                else cycle.end_date.date() if cycle and cycle.end_date
+                else subscription_expiry.date() if subscription_expiry
+                else None
+            )
+            days_left = (due_date - today).days if due_date else None
+            is_settled = bool(cycle and _cycle_is_settled_or_renewed(cycle, invoice))
+            amount_due = _decimal_money((invoice.balance or invoice.total_amount) if invoice else 0)
             if subscription.status == "cancelled" or tenant.status == "cancelled":
                 reminder_status = "cancelled"
             elif subscription.status == "trialing":
@@ -5881,20 +5908,27 @@ class SubscriptionReminderRecipientListView(APIView):
 
             row = {
                 "tenant_id": str(tenant.pk),
+                "cycle_id": str(cycle.pk) if cycle else "",
                 "company_name": subscription.company.name,
                 "subdomain": tenant.subdomain,
                 "plan_name": subscription.plan.name if subscription.plan else "Subscription",
                 "subscription_status": subscription.status,
                 "reminder_status": reminder_status,
-                "expiry": expiry.isoformat() if expiry else None,
+                "expiry": due_date.isoformat() if due_date else None,
+                "due_date": due_date.isoformat() if due_date else None,
                 "days_left": days_left,
+                "invoice_number": invoice.invoice_number if invoice else "",
+                "amount_due": str(amount_due),
+                "is_settled": is_settled,
                 "recipient_name": recipient_name or recipient.get("email") or "Tenant account admin",
                 "recipient_email": recipient.get("email") or "",
                 "recipient_phone": recipient.get("phone_number") or "",
                 "available_channels": available_channels,
                 "recipient_error": recipient_error,
-                "can_send": reminder_status != "cancelled" and any(available_channels.values()),
+                "can_send": reminder_status != "cancelled" and not is_settled and any(available_channels.values()),
             }
+            if is_settled:
+                row["recipient_error"] = "This billing cycle is already settled or renewed."
             haystack = " ".join([
                 row["company_name"], row["subdomain"], row["recipient_name"],
                 row["recipient_email"], row["recipient_phone"],
