@@ -16,6 +16,7 @@ logger = logging.getLogger(__name__)
 
 LOCK_CACHE_TTL = 60                      # seconds
 TRIAL_LAPSE_GRACE = timedelta(days=1)    # trial must be 1 day overdue
+ACTIVE_LAPSE_GRACE = timedelta(days=1)   # paid/active sub must be 1 day past period end
 _KEY = "hotspot_lock:v1:{}"
 
 
@@ -48,6 +49,12 @@ def _compute(schema_name):
     elif st == "trialing":
         t_end = row["trial_ends_at"]
         locked = bool(t_end and t_end + TRIAL_LAPSE_GRACE <= now)
+    elif st == "active":
+        # Safety net: status can stay 'active' if the daily grace task
+        # missed/failed. Period end + 1 day with no renewal => lock.
+        locked = bool(end and end + ACTIVE_LAPSE_GRACE <= now)
+    elif st == "cancelled":
+        locked = bool(end and end + ACTIVE_LAPSE_GRACE <= now)
 
     return {
         "locked": locked,
