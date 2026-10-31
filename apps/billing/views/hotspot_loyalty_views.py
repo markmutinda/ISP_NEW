@@ -13,6 +13,8 @@ from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+from apps.core.hotspot_lock import hotspot_subscription_guard
+
 logger = logging.getLogger(__name__)
 
 
@@ -109,6 +111,7 @@ class HotspotLoyaltyRedeemView(APIView):
     permission_classes = [AllowAny]
     authentication_classes = []
 
+    @hotspot_subscription_guard
     def post(self, request):
         canonical_username = request.data.get('canonical_username', '').strip()
         reward_id = request.data.get('reward_id')

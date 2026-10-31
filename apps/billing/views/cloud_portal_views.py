@@ -33,6 +33,7 @@ from rest_framework.views import APIView
 from apps.core.models import Tenant
 from apps.network.models.router_models import Router
 from apps.billing.models.hotspot_models import HotspotSession
+from apps.core.hotspot_lock import hotspot_subscription_guard
 
 logger = logging.getLogger(__name__)
 
@@ -202,6 +203,7 @@ class HotspotAutoLoginView(APIView):
     authentication_classes = []
     throttle_classes = [AutoLoginRateThrottle]
 
+    @hotspot_subscription_guard
     def post(self, request):
         tenant_subdomain = request.data.get("tenant") or request.query_params.get("tenant")
         router_id = request.data.get("router_id")
@@ -274,6 +276,7 @@ class HotspotReturnTripView(APIView):
     permission_classes = [AllowAny]
     authentication_classes = []
 
+    @hotspot_subscription_guard
     def get(self, request, session_id):
         tenant_subdomain = request.query_params.get("tenant")
         if not tenant_subdomain:

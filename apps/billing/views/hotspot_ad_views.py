@@ -35,6 +35,7 @@ from django_tenants.utils import schema_context, get_public_schema_name
 from apps.billing.models.ad_models import HotspotAd, HotspotAdGrant, HotspotAdView
 from apps.core.permissions import HasRoleAccessPolicy, IsAdminOrStaff
 from apps.network.models.router_models import Router
+from apps.core.hotspot_lock import hotspot_subscription_guard
 
 
 # ─── Helpers ────────────────────────────────────────────────────────────────
@@ -143,6 +144,7 @@ class HotspotAdGrantView(APIView):
     permission_classes = [AllowAny]
     authentication_classes = []
 
+    @hotspot_subscription_guard
     def post(self, request):
         ad_id = request.data.get('ad_id')
         mac_address = _normalize_mac(request.data.get('mac_address', ''))

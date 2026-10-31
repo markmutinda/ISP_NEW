@@ -47,6 +47,9 @@ from apps.core.models import TumaCallbackMap
 from apps.network.models.router_models import Router
 from apps.subscriptions.models import CommissionLedger
 from apps.radius.services.coa_service import CoAService
+from apps.core.hotspot_lock import (
+    hotspot_subscription_guard, get_hotspot_lock, locked_payload,
+)
 
 # ── NEW: Hotspot credential reconnect helpers ──
 import hmac
@@ -245,6 +248,10 @@ class CaptivePortalView(APIView):
             )
 
         schema_name = tenant_info['schema_name']
+        lock = get_hotspot_lock(schema_name)
+        if lock['locked']:
+            return Response(locked_payload(schema_name, lock, router_id))
+
         version = get_cache_version(schema_name)
         cache_key = f"hotspot:captive:v3:{schema_name}:{router_id}:{version}"
 
@@ -618,6 +625,7 @@ class HotspotPurchaseView(APIView):
             mpesa_cfg.callback_url = f"{base_url}/api/v1/billing/mpesa/callback/"
             mpesa_cfg.save(update_fields=['callback_url', 'updated_at'])
 
+    @hotspot_subscription_guard
     @transaction.atomic
     def post(self, request):
         tenant_subdomain = request.data.get('tenant') or request.query_params.get('tenant')
@@ -1258,6 +1266,7 @@ class HotspotVoucherRedeemView(APIView):
             if not HotspotSession.objects.filter(access_code=code).exists():
                 return code
 
+    @hotspot_subscription_guard
     @transaction.atomic
     def post(self, request):
         tenant_subdomain = request.data.get('tenant') or request.query_params.get('tenant')
@@ -1537,6 +1546,7 @@ class HotspotPhoneReconnectView(APIView):
         from utils.phone import normalize_phone_number
         return normalize_phone_number(phone, country_code)
 
+    @hotspot_subscription_guard
     @tv_push_after_reconnect
     @transaction.atomic
     def post(self, request):
@@ -2139,6 +2149,7 @@ class HotspotCredentialReconnectView(APIView):
             hotspot_client=base.hotspot_client,
         )
 
+    @hotspot_subscription_guard
     @tv_push_after_reconnect
     def post(self, request):
         data = request.data
@@ -2253,6 +2264,7 @@ class HotspotFreeTrialView(APIView):
     permission_classes = [AllowAny]
     authentication_classes = []
 
+    @hotspot_subscription_guard
     @transaction.atomic
     def post(self, request):
         tenant_subdomain = request.data.get('tenant') or request.query_params.get('tenant')

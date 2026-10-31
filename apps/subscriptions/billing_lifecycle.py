@@ -329,6 +329,10 @@ def complete_subscription_stk_payment(payment, mpesa_receipt=""):
                     subscription.extend_subscription()
                 locked.activation_applied_at = timezone.now()
                 locked.save(update_fields=['activation_applied_at'])
+                _t = get_tenant_for_subscription(subscription)
+                if _t:
+                    from apps.core.hotspot_lock import invalidate_hotspot_lock
+                    transaction.on_commit(lambda s=_t.schema_name: invalidate_hotspot_lock(s))
                 logger.info('Subscription payment activated: payment=%s subscription=%s period_end=%s',
                             locked.id, subscription.id, subscription.current_period_end)
                 transaction.on_commit(lambda: _queue_completed_subscription_notice(locked.id, invoice.pk))
