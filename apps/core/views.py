@@ -759,6 +759,35 @@ class UserViewSet(viewsets.ModelViewSet):
 
         serializer = ProfileSerializer(request.user)
         return Response(serializer.data)
+
+    @action(detail=False, methods=['post'], url_path='onboarding')
+    def onboarding(self, request):
+        """Record optional setup-guide milestones for the signed-in admin."""
+        event = str(request.data.get('event') or '').strip().lower()
+        field_by_event = {
+            'started': 'onboarding_tour_started_at',
+            'dismissed': 'onboarding_tour_dismissed_at',
+            'completed': 'onboarding_tour_completed_at',
+            'video_viewed': 'onboarding_video_viewed_at',
+        }
+        field = field_by_event.get(event)
+        if not field:
+            return Response(
+                {'event': ['Use started, dismissed, completed, or video_viewed.']},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        if request.user.role != 'admin' or request.user.is_superuser:
+            return Response(
+                {'detail': 'The setup guide is available to tenant administrators.'},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        if getattr(request.user, field) is None:
+            setattr(request.user, field, timezone.now())
+            request.user.save(update_fields=[field, 'updated_at'])
+
+        return Response(ProfileSerializer(request.user).data)
     
     @action(detail=False, methods=['put', 'patch'])
     def update_profile(self, request):
@@ -1861,6 +1890,7 @@ class CompanyRegisterView(generics.CreateAPIView):
             'username': user.email,
             'password': password,
             'expiry': tenant.subscription_expiry,
+            'setup_video_url': 'https://www.youtube.com/watch?v=cGfHPU1tJWM',
         }
         
         html_message = render_to_string('emails/welcome_email.html', context)

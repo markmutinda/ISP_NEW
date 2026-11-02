@@ -1574,6 +1574,7 @@ def send_trial_welcome_email(self, company_id):
             'trial_ends_at': sub.trial_ends_at,
             'trial_duration_days': trial_duration_days,
             'base_fee': str(sub.plan.base_license_fee) if sub.plan else '500',
+            'setup_video_url': 'https://www.youtube.com/watch?v=cGfHPU1tJWM',
         }
         _send_lifecycle_email(
             tenant,

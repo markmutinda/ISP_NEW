@@ -181,6 +181,13 @@ class User(AbstractUser, AuditMixin):
     is_verified = models.BooleanField(default=False)
     verification_token = models.UUIDField(default=uuid.uuid4, editable=False)
     verification_token_expiry = models.DateTimeField(null=True, blank=True)
+
+    # Persist onboarding state across browsers and devices. These timestamps
+    # keep the setup guide optional while giving support useful account context.
+    onboarding_tour_started_at = models.DateTimeField(null=True, blank=True)
+    onboarding_tour_dismissed_at = models.DateTimeField(null=True, blank=True)
+    onboarding_tour_completed_at = models.DateTimeField(null=True, blank=True)
+    onboarding_video_viewed_at = models.DateTimeField(null=True, blank=True)
     
     # Set email as the username field
     USERNAME_FIELD = 'email'

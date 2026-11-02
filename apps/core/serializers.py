@@ -412,6 +412,7 @@ class ProfileSerializer(serializers.ModelSerializer):
     role_display = serializers.CharField(source='get_role_display_name', read_only=True)
     company_name = serializers.CharField(read_only=True)
     tenant_subdomain = serializers.CharField(read_only=True)
+    account_created_at = serializers.SerializerMethodField()
     
     class Meta:
         model = User
@@ -421,12 +422,24 @@ class ProfileSerializer(serializers.ModelSerializer):
             'profile_picture', 'role', 'role_display', 'is_verified',
             'is_staff', 'is_superuser',
             'last_login', 'created_at', 'updated_at',
-            'company_name', 'tenant_subdomain', 'company', 'company_id'
+            'company_name', 'tenant_subdomain', 'company', 'company_id',
+            'account_created_at', 'onboarding_tour_started_at',
+            'onboarding_tour_dismissed_at', 'onboarding_tour_completed_at',
+            'onboarding_video_viewed_at'
         ]
-        read_only_fields = ['id', 'email', 'role', 'is_verified', 'is_staff', 'is_superuser', 'last_login', 'created_at', 'updated_at']
+        read_only_fields = [
+            'id', 'email', 'role', 'is_verified', 'is_staff', 'is_superuser',
+            'last_login', 'created_at', 'updated_at', 'account_created_at',
+            'onboarding_tour_started_at', 'onboarding_tour_dismissed_at',
+            'onboarding_tour_completed_at', 'onboarding_video_viewed_at',
+        ]
     
     def get_full_name(self, obj):
         return obj.get_full_name()
+
+    def get_account_created_at(self, obj):
+        tenant = getattr(obj, 'tenant', None)
+        return getattr(tenant, 'created_at', None) or obj.created_at
 
 class PasswordChangeSerializer(serializers.Serializer):
     current_password = serializers.CharField(required=True, write_only=True)
