@@ -22,6 +22,26 @@ from django_tenants.utils import schema_context, get_tenant_model
 logger = logging.getLogger(__name__)
 
 
+# Walled-garden markers — PPPoE expired users stay enabled and are served a
+# restricted session by FreeRADIUS (see sites-available/default authorize block).
+EXPIRED_MARK = 'Subscription expired'
+WALLED_TYPES = ('PPPOE', 'BOTH')
+
+
+def _send_expired_sms(cred):
+    from apps.messaging.services.notification_sender import SMSNotifier
+    try:
+        plan_name = ""
+        svc = cred.customer.services.filter(status='ACTIVE', plan__isnull=False).select_related('plan').first()
+        if svc and svc.plan:
+            plan_name = svc.plan.name or ""
+        elif cred.bandwidth_profile and not (cred.bandwidth_profile.name or "").startswith('plan_'):
+            plan_name = cred.bandwidth_profile.name
+        SMSNotifier.pppoe_expired_notice(customer=cred.customer, plan_name=plan_name)
+    except Exception as exc:
+        logger.warning(f"[EXPIRED CHECK] Expiry SMS failed for {cred.username}: {exc}")
+
+
 @shared_task(bind=True, max_retries=3, default_retry_delay=60)
 def disconnect_expired_users(self):
     """
@@ -67,6 +87,7 @@ def disconnect_expired_users(self):
                             AND rc.attribute = 'Expiration'
                         WHERE ra.acctstoptime IS NULL
                             AND rc.value IS NOT NULL
+                            AND ra.framedprotocol IS DISTINCT FROM 'PPP'
                     """)
                     active_sessions = cursor.fetchall()
                 
@@ -367,6 +388,7 @@ def force_close_expired_sessions(self):
                            AND rc.attribute = 'Expiration'
                         WHERE
                             ra.acctstoptime IS NULL
+                            AND ra.framedprotocol IS DISTINCT FROM 'PPP'
                             AND TO_TIMESTAMP(rc.value, 'Mon DD YYYY HH24:MI:SS') < NOW()
                         LIMIT 200
                     """)
@@ -696,86 +718,47 @@ def extend_user_validity(self, credentials_id: int, extend_by_plan: bool = True)
 @shared_task
 def process_expired_subscriptions():
     """
-    Disables expired RADIUS credentials and sends a ONE-TIME
-    'subscription expired' notice (pppoe_expiry_notification toggle).
-    
-    Each credential only crosses the expiry threshold once per renewal cycle
-    since expiration_date is moved forward on renewal.
+    PPPoE/BOTH: stay enabled, FreeRADIUS serves them a walled-garden session
+    (see sites-available/default). We mark once, kick once, notify once.
+    Other types: legacy hard-disable.
     """
     from apps.radius.models import CustomerRadiusCredentials
-    from apps.messaging.services.notification_sender import SMSNotifier
-    TenantModel = get_tenant_model()
+
     now = timezone.now()
-    stats = {'checked': 0, 'expired': 0, 'disabled': 0, 'errors': 0}
-    
-    tenants = TenantModel.objects.exclude(schema_name='public')
-    
-    for tenant in tenants:
-        tenant_start = time.perf_counter()
+    stats = {'checked': 0, 'walled': 0, 'disabled': 0, 'errors': 0}
+
+    for tenant in get_tenant_model().objects.exclude(schema_name='public'):
+        started = time.perf_counter()
         try:
             with schema_context(tenant.schema_name):
-                expired_credentials = CustomerRadiusCredentials.objects.filter(
-                    is_enabled=True, 
-                    expiration_date__isnull=False, 
-                    expiration_date__lt=now
-                ).select_related('customer__user', 'bandwidth_profile')
-                
-                stats['checked'] += expired_credentials.count()
-                
-                for credentials in expired_credentials:
-                    stats['expired'] += 1
-                    credentials.is_enabled = False
-                    credentials.disabled_reason = 'Subscription expired'
-                    credentials.save()
-                    stats['disabled'] += 1
-                    
-                    # Kick them off the router immediately
-                    disconnect_user_immediately.delay(username=credentials.username, connection_type='both')
-                    
-                    # ============================================================
-                    # ONE-TIME "subscription expired" SMS
-                    # Use human-readable plan name from the active service, not bandwidth_profile
-                    # ============================================================
-                    try:
-                        plan_name = ""
-                        # Try to get the real plan name from the customer's active service
-                        svc = credentials.customer.services.filter(
-                            status='ACTIVE', plan__isnull=False
-                        ).first()
-                        if svc and svc.plan:
-                            plan_name = svc.plan.name or ""
-                        if not plan_name and credentials.bandwidth_profile:
-                            # Fallback to bandwidth_profile but strip internal prefix if needed
-                            bp_name = credentials.bandwidth_profile.name or ""
-                            if not bp_name.startswith('plan_'):
-                                plan_name = bp_name
-                        
-                        SMSNotifier.pppoe_expired_notice(
-                            customer=credentials.customer,
-                            plan_name=plan_name,
-                        )
-                        logger.info(
-                            f"[EXPIRED CHECK] Sent expiry notice SMS to "
-                            f"{credentials.customer.customer_code} for plan {plan_name}"
-                        )
-                    except Exception as sms_err:
-                        logger.warning(
-                            f"[EXPIRED CHECK] Expiry notice SMS failed for "
-                            f"{credentials.username}: {sms_err}"
-                        )
+                expired = list(
+                    CustomerRadiusCredentials.objects
+                    .filter(is_enabled=True, expiration_date__isnull=False, expiration_date__lt=now)
+                    .exclude(disabled_reason=EXPIRED_MARK)
+                    .select_related('customer__user', 'bandwidth_profile')
+                )
+                stats['checked'] += len(expired)
 
-                    logger.info(f"[EXPIRED CHECK] Disabled expired user: {credentials.username} in tenant {tenant.schema_name}")
-                    
-        except Exception as e:
-            logger.error(f"Error in process_expired_subscriptions for {tenant.schema_name}: {e}")
+                for cred in expired:
+                    if cred.connection_type in WALLED_TYPES:
+                        # .update() skips the post_save sync; radcheck is already correct
+                        CustomerRadiusCredentials.objects.filter(pk=cred.pk).update(disabled_reason=EXPIRED_MARK)
+                        kick_pppoe_session.delay(tenant.schema_name, cred.username)
+                        stats['walled'] += 1
+                    else:
+                        cred.is_enabled = False
+                        cred.disabled_reason = EXPIRED_MARK
+                        cred.save()
+                        disconnect_user_immediately.delay(username=cred.username, connection_type='both')
+                        stats['disabled'] += 1
+                    _send_expired_sms(cred)
+        except Exception as exc:
             stats['errors'] += 1
+            logger.error(f"[EXPIRED CHECK] {tenant.schema_name}: {exc}")
         finally:
-            logger.info(
-                "[RADIUS TASK TIMING] task=process_expired_subscriptions tenant=%s duration_ms=%d",
-                tenant.schema_name,
-                int((time.perf_counter() - tenant_start) * 1000)
-            )
-    
+            logger.info("[RADIUS TASK TIMING] task=process_expired_subscriptions tenant=%s duration_ms=%d",
+                        tenant.schema_name, int((time.perf_counter() - started) * 1000))
+
     logger.info(f"[EXPIRED CHECK] Complete: {stats}")
     return stats
 

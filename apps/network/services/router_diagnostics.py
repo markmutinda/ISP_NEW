@@ -72,8 +72,11 @@ def gather_live_state(api) -> dict:
         'radius': safe('/radius'),
         'hotspot_profiles': safe('/ip/hotspot/profile'),
         'hotspot_servers': safe('/ip/hotspot'),
+        'firewall_filter': safe('/ip/firewall/filter'),      # NEW
         'firewall_mangle': safe('/ip/firewall/mangle'),
         'firewall_nat': safe('/ip/firewall/nat'),
+        'proxy': safe('/ip/proxy'),                          # NEW
+        'proxy_access': safe('/ip/proxy/access'),            # NEW
         'ip_services': safe('/ip/service'),
         'users': safe('/user'),
         'dhcp_servers': safe('/ip/dhcp-server'),
@@ -482,6 +485,116 @@ register_check(
     severity='critical',
     fix_fn=_fix_hotspot_no_phantom_dns,
 )(_check_hotspot_no_phantom_dns)
+
+
+# ────────────────────────────────────────────────────────────────
+# Expired-PPPoE captive portal (walled garden for 'netily-expired')
+# ────────────────────────────────────────────────────────────────
+EXPIRED_LIST = 'netily-expired'
+EXPIRED_PROXY_PORT = '8080'
+
+
+def _expired_redirect_url(router) -> str:
+    from apps.network.services.mikrotik_script_generator import MikrotikScriptGenerator
+    return MikrotikScriptGenerator(router).get_expired_redirect_url()
+
+
+def _is_yes(v) -> bool:
+    return str(v).strip().lower() in ('yes', 'true', '1')
+
+
+def _check_expired_portal(ctx: DiagnosticContext) -> bool:
+    if not getattr(ctx.router, 'enable_pppoe', False):
+        return True  # PPPoE disabled on this router: nothing to enforce
+
+    live = ctx.live
+    filter_comments = {r.get('comment') for r in live['firewall_filter']}
+    required_filters = {
+        'Netily-Expired-Drop', 'Netily-Expired-Reset', 'Netily-Expired-Portal',
+        'Netily-Expired-DNS-TCP', 'Netily-Expired-DNS-UDP', 'Netily-Expired-Input',
+    }
+    if not required_filters <= filter_comments:
+        return False
+
+    if not any(n.get('comment') == 'Netily-Expired-Redirect' for n in live['firewall_nat']):
+        return False
+
+    proxy = live['proxy'][0] if live['proxy'] else {}
+    if not (_is_yes(proxy.get('enabled')) and str(proxy.get('port')) == EXPIRED_PROXY_PORT):
+        return False
+
+    # Redirect target must match the CURRENT tenant portal (catches domain changes)
+    expected = _expired_redirect_url(ctx.router)
+    return any(
+        a.get('comment') == 'Netily-Expired-Redirect' and a.get('redirect-to') == expected
+        for a in live['proxy_access']
+    )
+
+
+def _fix_expired_portal(ctx: DiagnosticContext):
+    router, api = ctx.router, ctx.api
+    redirect = _expired_redirect_url(router)
+
+    # 1. Remove stale copies (idempotent re-apply)
+    for path, rows in (
+        ('/ip/firewall/filter', ctx.live['firewall_filter']),
+        ('/ip/firewall/nat', ctx.live['firewall_nat']),
+        ('/ip/proxy/access', ctx.live['proxy_access']),
+    ):
+        for row in rows:
+            if str(row.get('comment', '')).startswith('Netily-Expired'):
+                api._execute(path, remove={'.id': row['.id']})
+
+    # 2. Re-read ordering anchors AFTER removals so place-before ids are valid
+    filters = list(api._execute('/ip/firewall/filter'))
+    nats = list(api._execute('/ip/firewall/nat'))
+    f_anchor = {'place-before': filters[0]['.id']} if filters else {}
+    n_anchor = {'place-before': nats[0]['.id']} if nats else {}
+
+    # 3. Filter rules. Added in order, so all land ABOVE the old first rule:
+    #    accepts first, then reject, then drop (first match wins).
+    base = {'src-address-list': EXPIRED_LIST, **f_anchor}
+    rules = [
+        {'chain': 'input', 'action': 'accept', 'protocol': 'tcp', 'dst-port': EXPIRED_PROXY_PORT,
+         'comment': 'Netily-Expired-Input'},
+        {'chain': 'forward', 'action': 'accept', 'protocol': 'udp', 'dst-port': '53',
+         'comment': 'Netily-Expired-DNS-UDP'},
+        {'chain': 'forward', 'action': 'accept', 'protocol': 'tcp', 'dst-port': '53',
+         'comment': 'Netily-Expired-DNS-TCP'},
+        {'chain': 'forward', 'action': 'accept', 'protocol': 'tcp', 'dst-port': '80,443',
+         'dst-address-list': 'netily-portal-ips', 'comment': 'Netily-Expired-Portal'},
+        {'chain': 'forward', 'action': 'reject', 'reject-with': 'tcp-reset', 'protocol': 'tcp',
+         'comment': 'Netily-Expired-Reset'},
+        {'chain': 'forward', 'action': 'drop', 'comment': 'Netily-Expired-Drop'},
+    ]
+    for rule in rules:
+        api._execute('/ip/firewall/filter', add={**base, **rule})
+
+    # 4. NAT: redirect plain HTTP (OS captive probes + browsing) to the local proxy
+    api._execute('/ip/firewall/nat', add={
+        'chain': 'dstnat', 'action': 'redirect', 'to-ports': EXPIRED_PROXY_PORT,
+        'protocol': 'tcp', 'dst-port': '80', 'src-address-list': EXPIRED_LIST,
+        'dst-address-list': '!netily-portal-ips', 'comment': 'Netily-Expired-Redirect', **n_anchor,
+    })
+
+    # 5. Web proxy (single-item menu => command call, not add/update-by-id)
+    tuple(api.api.path('ip', 'proxy')('set', **{
+        'enabled': 'yes', 'port': EXPIRED_PROXY_PORT, 'anonymous': 'yes',
+        'cache-on-disk': 'no', 'max-cache-size': 'none',
+    }))
+    api._execute('/ip/proxy/access', add={
+        'action': 'deny', 'redirect-to': redirect, 'comment': 'Netily-Expired-Redirect',
+    })
+    logger.info(f"[DIAGNOSE] Applied expired-portal config on router {router.id} -> {redirect}")
+
+
+register_check(
+    id='expired_portal',
+    label='Expired PPPoE subscribers are redirected to the renewal portal',
+    category='Billing',
+    severity='warning',
+    fix_fn=_fix_expired_portal,
+)(_check_expired_portal)
 
 
 # ────────────────────────────────────────────────────────────────

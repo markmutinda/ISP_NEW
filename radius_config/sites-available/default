@@ -16,7 +16,7 @@ server default {
     authorize {
         filter_username
         preprocess
-        
+
         # --- THE BRAIN: DYNAMIC SCHEMA LOOKUP ---
         update control {
             Tmp-String-0 := "%{sql:SELECT t.schema_name FROM core_tenant t JOIN core_globalroutermap g ON t.id = g.tenant_id WHERE g.nas_ip = '%{NAS-IP-Address}' AND g.is_active = true LIMIT 1}"
@@ -27,10 +27,28 @@ server default {
             reject
         }
 
-        # --- FIXED: Added chap here so James can connect ---
         chap
         sql
-        expiration
+
+        if (&Framed-Protocol == PPP) {
+            # PPPoE: expired => restricted portal session, never reject.
+            # Fail-closed: any SQL failure yields a walled session, not free internet.
+            update control {
+                Tmp-String-1 := "%{sql:SELECT CASE WHEN COUNT(*) > 0 THEN 'y' ELSE 'n' END FROM %{control:Tmp-String-0}.radcheck WHERE username = '%{SQL-User-Name}' AND attribute = 'Expiration' AND TO_TIMESTAMP(value, 'Mon DD YYYY HH24:MI:SS') < NOW()}"
+            }
+            if (&control:Tmp-String-1 != "n") {
+                update reply {
+                    Mikrotik-Address-List := "netily-expired"
+                    Mikrotik-Rate-Limit := "512k/512k"
+                    Session-Timeout := 1800
+                    Mikrotik-Total-Limit !* ANY
+                }
+            }
+        }
+        else {
+            expiration
+        }
+
         logintime
         pap
     }

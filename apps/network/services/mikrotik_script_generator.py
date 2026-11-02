@@ -84,6 +84,11 @@ class MikrotikScriptGenerator:
             
         return f"{parsed.scheme}://{r.tenant_subdomain}.{netloc}"
 
+    def get_expired_redirect_url(self) -> str:
+        """Single source of truth for the expired-subscriber redirect (used by provisioning AND diagnostics)."""
+        portal = self.get_tenant_portal_url().split('://', 1)[-1].rstrip('/')
+        return f"{portal}/customer/login?expired=1"
+
     def _get_own_domains(self) -> list:
         """Helper to get all domains owned by Netily for DNS pre-warm and walled garden."""
         tenant_domain = urlparse(self.get_tenant_portal_url()).netloc
@@ -162,6 +167,7 @@ class MikrotikScriptGenerator:
             self._section_pppoe(r, pppoe_local) if r.enable_pppoe else "",
             self._section_anti_sharing(r, is_v6),
             self._section_nat(r),
+            self._section_expired_portal(r) if r.enable_pppoe else "",
             self._section_schedulers(r),
             self._section_footer(r),
         ]
@@ -304,20 +310,20 @@ class MikrotikScriptGenerator:
 # ─────────────────────────────────────────────────────────────
 :put "Configuring WireGuard VPN tunnel..."
 
-:do {{ /interface wireguard peers remove [find where interface="Netily-VPN"] }} on-error={{}}
-:do {{ /interface wireguard remove [find name="Netily-VPN"] }} on-error={{}}
-:do {{ /ip address remove [find comment="Netily-WG-IP"] }} on-error={{}}
+:do {{ /interface wireguard peers remove [find where interface="Netily-VPN"] }} on-error={{}} 
+:do {{ /interface wireguard remove [find name="Netily-VPN"] }} on-error={{}} 
+:do {{ /ip address remove [find comment="Netily-WG-IP"] }} on-error={{}} 
 
-:do {{ /interface wireguard add name="Netily-VPN" listen-port=51820 mtu=1320 comment="Netily Cloud Controller WireGuard" }} on-error={{ :put "Error: Could not add WireGuard interface" }}
-:do {{ /interface wireguard set [find name="Netily-VPN"] private-key="{self._escape_ros_string(wg_private_key)}" }} on-error={{ :put "Error: Could not set WireGuard private key" }}
-:do {{ /ip address add address="{vpn_ip}/{vpn_network_cidr.split('/')[1]}" interface="Netily-VPN" comment="Netily-WG-IP" }} on-error={{ :put "Warning: WireGuard IP may already exist" }}
+:do {{ /interface wireguard add name="Netily-VPN" listen-port=51820 mtu=1320 comment="Netily Cloud Controller WireGuard" }} on-error={{ :put "Error: Could not add WireGuard interface" }} 
+:do {{ /interface wireguard set [find name="Netily-VPN"] private-key="{self._escape_ros_string(wg_private_key)}" }} on-error={{ :put "Error: Could not set WireGuard private key" }} 
+:do {{ /ip address add address="{vpn_ip}/{vpn_network_cidr.split('/')[1]}" interface="Netily-VPN" comment="Netily-WG-IP" }} on-error={{ :put "Warning: WireGuard IP may already exist" }} 
 
-:do {{ /interface wireguard peers add interface="Netily-VPN" public-key="{self._escape_ros_string(wg_server_pubkey)}" endpoint-address="{wg_endpoint_host}" endpoint-port={wg_endpoint_port} allowed-address=0.0.0.0/0 persistent-keepalive=15s comment="Netily Cloud Server" }} on-error={{ :put "Error: Could not add WireGuard peer" }}
+:do {{ /interface wireguard peers add interface="Netily-VPN" public-key="{self._escape_ros_string(wg_server_pubkey)}" endpoint-address="{wg_endpoint_host}" endpoint-port={wg_endpoint_port} allowed-address=0.0.0.0/0 persistent-keepalive=15s comment="Netily Cloud Server" }} on-error={{ :put "Error: Could not add WireGuard peer" }} 
 
-:do {{ /ip firewall filter add chain=output action=accept protocol=udp dst-port=1812,1813,3799 out-interface="Netily-VPN" comment="Netily-RADIUS-Output" }} on-error={{}}
-:do {{ /ip firewall filter remove [find comment="Netily-WG-Input"] }} on-error={{}}
-:do {{ /ip firewall filter add chain=input action=accept protocol=udp dst-port=51820 in-interface=all-ethernet comment="Netily-WG-Input" }} on-error={{}}
-:do {{ /ip firewall filter add chain=input action=accept connection-state=established,related comment="Netily-Established" }} on-error={{}}
+:do {{ /ip firewall filter add chain=output action=accept protocol=udp dst-port=1812,1813,3799 out-interface="Netily-VPN" comment="Netily-RADIUS-Output" }} on-error={{}} 
+:do {{ /ip firewall filter remove [find comment="Netily-WG-Input"] }} on-error={{}} 
+:do {{ /ip firewall filter add chain=input action=accept protocol=udp dst-port=51820 in-interface=all-ethernet comment="Netily-WG-Input" }} on-error={{}} 
+:do {{ /ip firewall filter add chain=input action=accept connection-state=established,related comment="Netily-Established" }} on-error={{}} 
 
 :delay 5s
 :put "WireGuard VPN tunnel configured — IP: {vpn_ip} (MTU: 1320)"
@@ -336,7 +342,7 @@ class MikrotikScriptGenerator:
 # 3. OPENVPN TUNNEL (TCP, user/pass)
 # ─────────────────────────────────────────────────────────────
 :put "Configuring OpenVPN tunnel..."
-:do {{ /interface ovpn-client remove [find name="Netily-VPN"] }} on-error={{}}
+:do {{ /interface ovpn-client remove [find name="Netily-VPN"] }} on-error={{}} 
 /interface ovpn-client add name="Netily-VPN" connect-to="{self._escape_ros_string(host)}" port={port} mode=ip protocol=tcp user="{user}" password="{pwd}" auth=sha1 cipher={cipher} certificate=none verify-server-certificate=no add-default-route=no use-peer-dns=no comment="Netily Cloud Controller OpenVPN"
 :delay 10s
 :put "OpenVPN tunnel configured - IP: {user}"
@@ -362,8 +368,8 @@ class MikrotikScriptGenerator:
             if not safe_port: continue
             
             port_cmds.append(f"""
-:do {{ /interface bridge port remove [find interface="{safe_port}"] }} on-error={{}}
-:do {{ /interface bridge port add bridge="netily-bridge" interface="{safe_port}" }} on-error={{ :put "Error adding {safe_port}" }}
+:do {{ /interface bridge port remove [find interface="{safe_port}"] }} on-error={{}} 
+:do {{ /interface bridge port add bridge="netily-bridge" interface="{safe_port}" }} on-error={{ :put "Error adding {safe_port}" }} 
 """)
 
         ports_script = "\n".join(port_cmds)
@@ -373,10 +379,10 @@ class MikrotikScriptGenerator:
 # ─────────────────────────────────────────────────────────────
 :put "Configuring Bridge Topology..."
 
-:do {{ /interface bridge remove [find name="netily-bridge"] }} on-error={{}}
+:do {{ /interface bridge remove [find name="netily-bridge"] }} on-error={{}} 
 /interface bridge add name="netily-bridge" comment="Netily Hotspot & PPPoE"
 
-:do {{ /ip address remove [find interface="netily-bridge"] }} on-error={{}}
+:do {{ /ip address remove [find interface="netily-bridge"] }} on-error={{}} 
 /ip address add address="{gateway_cidr}" interface="netily-bridge" comment="Netily Gateway"
 
 {ports_script}
@@ -404,7 +410,7 @@ class MikrotikScriptGenerator:
 # ─────────────────────────────────────────────────────────────
 :put "Configuring DHCP..."
 
-:do {{ /ip dhcp-server network remove [find address="{dhcp_network}"] }} on-error={{}}
+:do {{ /ip dhcp-server network remove [find address="{dhcp_network}"] }} on-error={{}} 
 
 /ip pool add name="netily-pool" ranges="{pool_range}"
 /ip dhcp-server add name="netily-dhcp" interface="netily-bridge" address-pool="netily-pool" lease-time=1h disabled=no
@@ -422,7 +428,7 @@ class MikrotikScriptGenerator:
 # 7. RADIUS (Cloud RADIUS via VPN Tunnel)
 # ─────────────────────────────────────────────────────────────
 :put "Configuring Cloud RADIUS..."
-:do {{ /radius remove [find comment~"Netily"] }} on-error={{}}
+:do {{ /radius remove [find comment~"Netily"] }} on-error={{}} 
 {radius_cmd}
 /radius incoming set accept=yes port=3799
 """
@@ -441,7 +447,7 @@ class MikrotikScriptGenerator:
 # 8. HOTSPOT PROFILE & SERVER (Bridge Mode)
 # ─────────────────────────────────────────────────────────────
 :put "Configuring Hotspot..."
-:do {{ /file remove [find name="netily-hotspot" type="directory"] }} on-error={{}}
+:do {{ /file remove [find name="netily-hotspot" type="directory"] }} on-error={{}} 
 {profile_cmd}
 {server_cmd}
 
@@ -476,9 +482,9 @@ class MikrotikScriptGenerator:
 :put "Configuring hardened Walled Garden (address-list style)..."
 
 # Clean previous Netily rules
-:do {{ :foreach i in=[/ip hotspot walled-garden find comment~"Netily"] do={{ /ip hotspot walled-garden remove $i }} }} on-error={{}}
-:do {{ :foreach i in=[/ip hotspot walled-garden ip find comment~"Netily"] do={{ /ip hotspot walled-garden ip remove $i }} }} on-error={{}}
-:do {{ /ip firewall address-list remove [find list="netily-portal-ips"] }} on-error={{}}
+:do {{ :foreach i in=[/ip hotspot walled-garden find comment~"Netily"] do={{ /ip hotspot walled-garden remove $i }} }} on-error={{}} 
+:do {{ :foreach i in=[/ip hotspot walled-garden ip find comment~"Netily"] do={{ /ip hotspot walled-garden ip remove $i }} }} on-error={{}} 
+:do {{ /ip firewall address-list remove [find list="netily-portal-ips"] }} on-error={{}} 
 
 # 1. Put our domains into an address-list (RouterOS will resolve & keep IPs fresh)
 {addr_list_script}
@@ -520,7 +526,7 @@ class MikrotikScriptGenerator:
 }}
 :do {{ /system scheduler remove [find name="netily-dns-warm"] }} on-error={{}} 
 /system scheduler add name="netily-dns-warm" interval=30s comment="Netily-DNS-Prewarm" on-event="/system script run netily-dns-warm"
-:do {{ /system script run netily-dns-warm }} on-error={{ :put " + DNS pre-warm script ran successfully" }}
+:do {{ /system script run netily-dns-warm }} on-error={{ :put " + DNS pre-warm script ran successfully" }} 
 :put " + DNS pre-warm scheduler installed (runs every 30s)"
 """
 
@@ -540,14 +546,14 @@ class MikrotikScriptGenerator:
 # ─────────────────────────────────────────────────────────────
 :put "Downloading SSL certificates..."
 
-:do {{ /certificate remove [find name~"netily-ssl"] }} on-error={{}}
+:do {{ /certificate remove [find name~"netily-ssl"] }} on-error={{}} 
 
 /tool fetch url="{ssl_cert_url}" dst-path="netily-ssl.crt" check-certificate=no
 :delay 1s
-:do {{ /certificate import file-name="netily-ssl.crt" passphrase="{passphrase}" }} on-error={{ :put "SSL cert import warning" }}
+:do {{ /certificate import file-name="netily-ssl.crt" passphrase="{passphrase}" }} on-error={{ :put "SSL cert import warning" }} 
 /tool fetch url="{ssl_key_url}" dst-path="netily-ssl.key" check-certificate=no
 :delay 1s
-:do {{ /certificate import file-name="netily-ssl.key" passphrase="{passphrase}" }} on-error={{ :put "SSL key import warning" }}
+:do {{ /certificate import file-name="netily-ssl.key" passphrase="{passphrase}" }} on-error={{ :put "SSL key import warning" }} 
 :delay 2s
 """
 
@@ -609,8 +615,8 @@ class MikrotikScriptGenerator:
 # ─────────────────────────────────────────────────────────────
 :put "Configuring Anti-Sharing Rules..."
 
-:do {{ /ip firewall mangle remove [find comment~"Netily"] }} on-error={{}}
-:do {{ /ip firewall address-list remove [find list="allowed-ips"] }} on-error={{}}
+:do {{ /ip firewall mangle remove [find comment~"Netily"] }} on-error={{}} 
+:do {{ /ip firewall address-list remove [find list="allowed-ips"] }} on-error={{}} 
 
 /ip firewall address-list add list="allowed-ips" address={r.pppoe_pool} comment="Netily-PPPoE-VIPs"
 /ip firewall mangle add chain=prerouting src-address-list=allowed-ips action=mark-connection new-connection-mark=allowed-con passthrough=yes comment="Netily-VIP-Mark"
@@ -636,6 +642,36 @@ class MikrotikScriptGenerator:
     in-interface="netily-bridge" comment="Netily-Force-DNS"
 /ip firewall nat add chain=dstnat action=redirect to-ports=53 protocol=tcp dst-port=53 \\
     in-interface="netily-bridge" comment="Netily-Force-DNS-TCP"
+"""
+
+    def _section_expired_portal(self, r: Router) -> str:
+        """
+        Walled garden for expired PPPoE subscribers. RADIUS puts their address in
+        'netily-expired'; they can reach DNS + portal domains only, and plain-HTTP
+        browsing/OS captive probes are redirected to the customer portal.
+        """
+        redirect = self.get_expired_redirect_url()
+        lst = "netily-expired"
+        return f"""# ─────────────────────────────────────────────────────────────
+# 15. EXPIRED SUBSCRIBER PORTAL
+# ─────────────────────────────────────────────────────────────
+:put "Configuring expired-subscription portal..."
+:do {{ /ip firewall filter remove [find comment~"Netily-Expired"] }} on-error={{}} 
+:do {{ /ip firewall nat remove [find comment~"Netily-Expired"] }} on-error={{}} 
+:do {{ /ip proxy access remove [find comment~"Netily-Expired"] }} on-error={{}} 
+
+/ip firewall filter add chain=forward action=drop src-address-list={lst} place-before=0 comment="Netily-Expired-Drop"
+/ip firewall filter add chain=forward action=reject reject-with=tcp-reset protocol=tcp src-address-list={lst} place-before=0 comment="Netily-Expired-Reset"
+/ip firewall filter add chain=forward action=accept protocol=tcp dst-port=80,443 src-address-list={lst} dst-address-list=netily-portal-ips place-before=0 comment="Netily-Expired-Portal"
+/ip firewall filter add chain=forward action=accept protocol=tcp dst-port=53 src-address-list={lst} place-before=0 comment="Netily-Expired-DNS-TCP"
+/ip firewall filter add chain=forward action=accept protocol=udp dst-port=53 src-address-list={lst} place-before=0 comment="Netily-Expired-DNS-UDP"
+/ip firewall filter add chain=input action=accept protocol=tcp dst-port=8080 src-address-list={lst} place-before=0 comment="Netily-Expired-Input"
+
+/ip firewall nat add chain=dstnat action=redirect to-ports=8080 protocol=tcp dst-port=80 src-address-list={lst} dst-address-list=!netily-portal-ips place-before=0 comment="Netily-Expired-Redirect"
+
+:do {{ /ip proxy set enabled=yes port=8080 anonymous=yes cache-on-disk=no max-cache-size=none }} on-error={{ :put "Proxy settings warning" }} 
+/ip proxy access add action=deny redirect-to="{redirect}" comment="Netily-Expired-Redirect"
+:put " + Expired-subscriber portal active"
 """
 
     def _section_schedulers(self, r: Router) -> str:
