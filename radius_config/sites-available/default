@@ -34,7 +34,7 @@ server default {
             # PPPoE: expired => restricted portal session, never reject.
             # Fail-closed: any SQL failure yields a walled session, not free internet.
             update control {
-                Tmp-String-1 := "%{sql:SELECT CASE WHEN COUNT(*) > 0 THEN 'y' ELSE 'n' END FROM %{control:Tmp-String-0}.radcheck WHERE username = '%{SQL-User-Name}' AND attribute = 'Expiration' AND TO_TIMESTAMP(value, 'Mon DD YYYY HH24:MI:SS') < NOW()}"
+                Tmp-String-1 := "%{sql:SELECT CASE WHEN COUNT(*) > 0 THEN 'y' ELSE 'n' END FROM %{control:Tmp-String-0}.radcheck WHERE username = '%{User-Name}' AND attribute = 'Expiration' AND TO_TIMESTAMP(value, 'Mon DD YYYY HH24:MI:SS') < NOW()}"
             }
             if (&control:Tmp-String-1 != "n") {
                 update reply {

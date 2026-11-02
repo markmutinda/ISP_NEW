@@ -526,7 +526,7 @@ def _check_expired_portal(ctx: DiagnosticContext) -> bool:
     # Redirect target must match the CURRENT tenant portal (catches domain changes)
     expected = _expired_redirect_url(ctx.router)
     return any(
-        a.get('comment') == 'Netily-Expired-Redirect' and a.get('redirect-to') == expected
+        a.get('comment') == 'Netily-Expired-Redirect' and a.get('action-data') == expected
         for a in live['proxy_access']
     )
 
@@ -583,7 +583,7 @@ def _fix_expired_portal(ctx: DiagnosticContext):
         'cache-on-disk': 'no', 'max-cache-size': 'none',
     }))
     api._execute('/ip/proxy/access', add={
-        'action': 'deny', 'redirect-to': redirect, 'comment': 'Netily-Expired-Redirect',
+        'action': 'redirect', 'action-data': redirect, 'comment': 'Netily-Expired-Redirect',
     })
     logger.info(f"[DIAGNOSE] Applied expired-portal config on router {router.id} -> {redirect}")
 
