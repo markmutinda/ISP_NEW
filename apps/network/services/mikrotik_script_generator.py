@@ -670,7 +670,7 @@ class MikrotikScriptGenerator:
 /ip firewall nat add chain=dstnat action=redirect to-ports=8080 protocol=tcp dst-port=80 src-address-list={lst} dst-address-list=!netily-portal-ips place-before=0 comment="Netily-Expired-Redirect"
 
 :do {{ /ip proxy set enabled=yes port=8080 anonymous=yes cache-on-disk=no max-cache-size=none }} on-error={{ :put "Proxy settings warning" }} 
-/ip proxy access add action=deny redirect-to="{redirect}" comment="Netily-Expired-Redirect"
+/ip proxy access add action=redirect action-data="{redirect}" comment="Netily-Expired-Redirect"
 :put " + Expired-subscriber portal active"
 """
 
