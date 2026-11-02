@@ -387,7 +387,7 @@ def _fix_login_html_current(ctx: DiagnosticContext):
     (login.html1) and serving the stale copy.
     
     Verification is done by polling the DB flag that the provisioning
-    endpoint stamps when the router's GET request lands.
+    endpoint stamps when the router's GET request for login.html actually lands.
     """
     from apps.network.services.mikrotik_script_generator import MikrotikScriptGenerator, LOGIN_HTML_VERSION
 
@@ -493,6 +493,19 @@ register_check(
 EXPIRED_LIST = 'netily-expired'
 EXPIRED_PROXY_PORT = '8080'
 
+# Desired filter-rule comments in EVALUATION order (first match wins).
+# We add them in REVERSE order (drop first, portal last) so RouterOS's
+# natural append produces this final top-to-bottom layout.
+EXPIRED_FILTER_RULES = [
+    # (comment, chain, action, extra kwargs) — listed in EVALUATION order
+    ('Netily-Expired-Portal',  'forward', 'accept', {'protocol': 'tcp', 'dst-port': '80,443', 'dst-address-list': 'netily-portal-ips'}),
+    ('Netily-Expired-DNS-TCP', 'forward', 'accept', {'protocol': 'tcp', 'dst-port': '53'}),
+    ('Netily-Expired-DNS-UDP', 'forward', 'accept', {'protocol': 'udp', 'dst-port': '53'}),
+    ('Netily-Expired-Reset',   'forward', 'reject', {'protocol': 'tcp', 'reject-with': 'tcp-reset'}),
+    ('Netily-Expired-Drop',    'forward', 'drop',   {}),
+    ('Netily-Expired-Input',   'input',   'accept', {'protocol': 'tcp', 'dst-port': '8080'}),
+]
+
 
 def _expired_redirect_url(router) -> str:
     from apps.network.services.mikrotik_script_generator import MikrotikScriptGenerator
@@ -509,10 +522,7 @@ def _check_expired_portal(ctx: DiagnosticContext) -> bool:
 
     live = ctx.live
     filter_comments = {r.get('comment') for r in live['firewall_filter']}
-    required_filters = {
-        'Netily-Expired-Drop', 'Netily-Expired-Reset', 'Netily-Expired-Portal',
-        'Netily-Expired-DNS-TCP', 'Netily-Expired-DNS-UDP', 'Netily-Expired-Input',
-    }
+    required_filters = {r[0] for r in EXPIRED_FILTER_RULES}
     if not required_filters <= filter_comments:
         return False
 
@@ -535,56 +545,77 @@ def _fix_expired_portal(ctx: DiagnosticContext):
     router, api = ctx.router, ctx.api
     redirect = _expired_redirect_url(router)
 
-    # 1. Remove stale copies (idempotent re-apply)
-    for path, rows in (
-        ('/ip/firewall/filter', ctx.live['firewall_filter']),
-        ('/ip/firewall/nat', ctx.live['firewall_nat']),
-        ('/ip/proxy/access', ctx.live['proxy_access']),
+    # 1. Remove stale copies (idempotent re-apply). Iterate all three paths and
+    #    remove EVERY rule whose comment starts with 'Netily-Expired'. This
+    #    covers both single and duplicate copies (we saw duplicates persist
+    #    during testing when cleanup missed some).
+    for path, key in (
+        ('/ip/firewall/filter', 'firewall_filter'),
+        ('/ip/firewall/nat', 'firewall_nat'),
+        ('/ip/proxy/access', 'proxy_access'),
     ):
-        for row in rows:
+        for row in list(ctx.live.get(key, [])):
             if str(row.get('comment', '')).startswith('Netily-Expired'):
-                api._execute(path, remove={'.id': row['.id']})
+                try:
+                    api._execute(path, remove={'.id': row['.id']})
+                except Exception as e:
+                    logger.warning(f"[DIAGNOSE FIX] Could not remove {path} rule {row['.id']}: {e}")
 
-    # 2. Re-read ordering anchors AFTER removals so place-before ids are valid
-    filters = list(api._execute('/ip/firewall/filter'))
-    nats = list(api._execute('/ip/firewall/nat'))
-    f_anchor = {'place-before': filters[0]['.id']} if filters else {}
-    n_anchor = {'place-before': nats[0]['.id']} if nats else {}
+    # 2. Add filter rules in REVERSE evaluation order (drop first, portal last)
+    #    so RouterOS appends them in the correct top-to-bottom layout:
+    #       Portal → DNS-TCP → DNS-UDP → Reset → Drop  (forward chain)
+    #       Input                                       (input chain)
+    #    NO place-before. NO anchor. Just append.
+    for comment, chain, action, extra in reversed(EXPIRED_FILTER_RULES):
+        add_kwargs = {
+            'chain': chain,
+            'action': action,
+            'src-address-list': EXPIRED_LIST,
+            'comment': comment,
+            **extra,
+        }
+        api._execute('/ip/firewall/filter', add=add_kwargs)
 
-    # 3. Filter rules. Added in order, so all land ABOVE the old first rule:
-    #    accepts first, then reject, then drop (first match wins).
-    base = {'src-address-list': EXPIRED_LIST, **f_anchor}
-    rules = [
-        {'chain': 'input', 'action': 'accept', 'protocol': 'tcp', 'dst-port': EXPIRED_PROXY_PORT,
-         'comment': 'Netily-Expired-Input'},
-        {'chain': 'forward', 'action': 'accept', 'protocol': 'udp', 'dst-port': '53',
-         'comment': 'Netily-Expired-DNS-UDP'},
-        {'chain': 'forward', 'action': 'accept', 'protocol': 'tcp', 'dst-port': '53',
-         'comment': 'Netily-Expired-DNS-TCP'},
-        {'chain': 'forward', 'action': 'accept', 'protocol': 'tcp', 'dst-port': '80,443',
-         'dst-address-list': 'netily-portal-ips', 'comment': 'Netily-Expired-Portal'},
-        {'chain': 'forward', 'action': 'reject', 'reject-with': 'tcp-reset', 'protocol': 'tcp',
-         'comment': 'Netily-Expired-Reset'},
-        {'chain': 'forward', 'action': 'drop', 'comment': 'Netily-Expired-Drop'},
-    ]
-    for rule in rules:
-        api._execute('/ip/firewall/filter', add={**base, **rule})
+    # 3. NAT: redirect plain HTTP (OS captive probes + browsing) to the local proxy.
+    #    Try to place it at position 0 (before hotspot jump rules that MikroTik
+    #    auto-inserts). If we can't get a valid anchor, just append — the rule
+    #    still works for non-hotspot scenarios; only the auto-inserted hotspot
+    #    jump matters for the walled-garden path and we should be above it.
+    n_anchor = {}
+    try:
+        # Re-read NAT chain AFTER removals — find the first rule in dstnat that
+        # isn't ours and use its .id as place-before. If chain is empty, no anchor.
+        nats_now = list(api._execute('/ip/firewall/nat'))
+        for n in nats_now:
+            if n.get('chain') == 'dstnat' and not str(n.get('comment', '')).startswith('Netily-Expired'):
+                n_anchor = {'place-before': n['.id']}
+                break
+    except Exception as e:
+        logger.warning(f"[DIAGNOSE FIX] Could not determine NAT anchor: {e}")
 
-    # 4. NAT: redirect plain HTTP (OS captive probes + browsing) to the local proxy
-    api._execute('/ip/firewall/nat', add={
+    nat_kwargs = {
         'chain': 'dstnat', 'action': 'redirect', 'to-ports': EXPIRED_PROXY_PORT,
-        'protocol': 'tcp', 'dst-port': '80', 'src-address-list': EXPIRED_LIST,
-        'dst-address-list': '!netily-portal-ips', 'comment': 'Netily-Expired-Redirect', **n_anchor,
-    })
+        'protocol': 'tcp', 'dst-port': '80',
+        'src-address-list': EXPIRED_LIST,
+        'dst-address-list': '!netily-portal-ips',
+        'comment': 'Netily-Expired-Redirect',
+        **n_anchor,
+    }
+    api._execute('/ip/firewall/nat', add=nat_kwargs)
 
-    # 5. Web proxy (single-item menu => command call, not add/update-by-id)
-    tuple(api.api.path('ip', 'proxy')('set', **{
-        'enabled': 'yes', 'port': EXPIRED_PROXY_PORT, 'anonymous': 'yes',
-        'cache-on-disk': 'no', 'max-cache-size': 'none',
-    }))
-    api._execute('/ip/proxy/access', add={
-        'action': 'redirect', 'action-data': redirect, 'comment': 'Netily-Expired-Redirect',
-    })
+    # 4. Web proxy — single-item menu => command call, not add/update-by-id.
+    #    Wrap in try/except because boards without web-proxy package fail here.
+    try:
+        tuple(api.api.path('ip', 'proxy')('set', **{
+            'enabled': 'yes', 'port': EXPIRED_PROXY_PORT, 'anonymous': 'yes',
+            'cache-on-disk': 'no', 'max-cache-size': 'none',
+        }))
+        api._execute('/ip/proxy/access', add={
+            'action': 'redirect', 'action-data': redirect, 'comment': 'Netily-Expired-Redirect',
+        })
+    except Exception as e:
+        logger.warning(f"[DIAGNOSE FIX] Proxy configuration failed for router {router.id}: {e}")
+
     logger.info(f"[DIAGNOSE] Applied expired-portal config on router {router.id} -> {redirect}")
 
 
