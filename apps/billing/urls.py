@@ -307,6 +307,14 @@ tuma_webhook_urlpatterns = [
 # MAIN URL PATTERNS (must be at the bottom)
 # ==========================
 urlpatterns = [
+    # ==========================
+    # Customer payment routes MUST come before the router include,
+    # otherwise router's payments/<pk>/ swallows "initiate" and
+    # PaymentViewSet's staff-only permissions return 403 to customers.
+    # ==========================
+    path('payments/initiate/', InitiateCustomerPaymentView.as_view(), name='initiate-payment'),
+    path('payments/<int:payment_id>/status/', CustomerPaymentStatusView.as_view(), name='payment-status'),
+
     path('', include(router.urls)),
 
     # ==========================
@@ -397,10 +405,8 @@ urlpatterns = [
     path('vouchers/validate/', VoucherViewSet.as_view({'post': 'validate_code'}), name='voucher-validate'),
     
     # ==========================
-    # Customer Payment Initiation
+    # Customer Payment Methods
     # ==========================
-    path('payments/initiate/', InitiateCustomerPaymentView.as_view(), name='initiate-payment'),
-    path('payments/<int:payment_id>/status/', CustomerPaymentStatusView.as_view(), name='payment-status'),
     path('payment-methods/', CustomerPaymentMethodsView.as_view(), name='payment-methods'),
     path('payment-methods/<int:pk>/', PaymentMethodDetailView.as_view(), name='payment-method-detail'),
     path('payment-methods/<int:pk>/toggle_active/', PaymentMethodToggleActiveView.as_view(), name='payment-method-toggle-active'),
