@@ -650,19 +650,20 @@ class MikrotikScriptGenerator:
         'netily-expired'; they can reach DNS + portal domains only, and plain-HTTP
         browsing/OS captive probes are redirected to the customer portal.
 
-        ⚠️ Rule order matters on RouterOS (first-match-wins). Filter rules are
-        added in REVERSE evaluation order (Drop first, Portal last) so that
-        RouterOS's natural append results in the correct top-to-bottom layout:
+        ⚠️ Rule order matters on RouterOS (first-match-wins). RouterOS appends
+        newly-added rules to the BOTTOM of the chain, so the FIRST rule added
+        ends up at the TOP (evaluated first). We therefore add rules in
+        evaluation order (accepts first, then reject, then drop last):
 
-            Portal   (accept 80,443 to portal)
-            DNS-TCP  (accept tcp 53)
-            DNS-UDP  (accept udp 53)
-            Reset    (reject tcp with reset)
-            Drop     (drop everything else)
+            Portal    (accept 80,443 to portal)    ← added 1st → evaluated 1st
+            DNS-TCP   (accept tcp 53)
+            DNS-UDP   (accept udp 53)
+            Reset     (reject tcp with reset)
+            Drop      (drop everything else)       ← added 5th → evaluated last
+            Input     (accept proxy port 8080)     ← input chain, independent
 
-        Earlier we used 'place-before=0' on each add, which on RouterOS 7.25
-        landed the rules in the WRONG order (Drop at top → blocked everything).
-        Verified fix: append in reverse order, no place-before.
+        This matches the manual test that proved first-added lands at top
+        (Portal at position 0, Drop at position 4) — the wall works correctly.
         """
         redirect = self.get_expired_redirect_url()
         lst = "netily-expired"
@@ -674,18 +675,18 @@ class MikrotikScriptGenerator:
 :do {{ /ip firewall nat remove [find comment~"Netily-Expired"] }} on-error={{}} 
 :do {{ /ip proxy access remove [find comment~"Netily-Expired"] }} on-error={{}} 
 
-# Filter rules — added in REVERSE evaluation order so the final top-to-bottom
-# order is Portal → DNS-TCP → DNS-UDP → Reset → Drop (first-match-wins).
-/ip firewall filter add chain=forward action=drop src-address-list={lst} comment="Netily-Expired-Drop"
-/ip firewall filter add chain=forward action=reject reject-with=tcp-reset protocol=tcp src-address-list={lst} comment="Netily-Expired-Reset"
-/ip firewall filter add chain=forward action=accept protocol=udp dst-port=53 src-address-list={lst} comment="Netily-Expired-DNS-UDP"
-/ip firewall filter add chain=forward action=accept protocol=tcp dst-port=53 src-address-list={lst} comment="Netily-Expired-DNS-TCP"
+# Filter rules — added in EVALUATION order. RouterOS appends to bottom of
+# chain, so first-added ends up at top (evaluated first). Accepts first
+# (Portal, DNS), then reject, then drop last.
 /ip firewall filter add chain=forward action=accept protocol=tcp dst-port=80,443 src-address-list={lst} dst-address-list=netily-portal-ips comment="Netily-Expired-Portal"
+/ip firewall filter add chain=forward action=accept protocol=tcp dst-port=53 src-address-list={lst} comment="Netily-Expired-DNS-TCP"
+/ip firewall filter add chain=forward action=accept protocol=udp dst-port=53 src-address-list={lst} comment="Netily-Expired-DNS-UDP"
+/ip firewall filter add chain=forward action=reject reject-with=tcp-reset protocol=tcp src-address-list={lst} comment="Netily-Expired-Reset"
+/ip firewall filter add chain=forward action=drop src-address-list={lst} comment="Netily-Expired-Drop"
 /ip firewall filter add chain=input action=accept protocol=tcp dst-port=8080 src-address-list={lst} comment="Netily-Expired-Input"
 
 # NAT redirect — single rule, appended to dstnat (before the hotspot jump
-# rules which MikroTik auto-inserts). If a router ends up with the rule
-# AFTER the hotspot jump, HTTP won't redirect; diagnose Fix handles that.
+# rules which MikroTik auto-inserts).
 /ip firewall nat add chain=dstnat action=redirect to-ports=8080 protocol=tcp dst-port=80 src-address-list={lst} dst-address-list=!netily-portal-ips comment="Netily-Expired-Redirect"
 
 :do {{ /ip proxy set enabled=yes port=8080 anonymous=yes cache-on-disk=no max-cache-size=none }} on-error={{ :put "Proxy settings warning" }} 

@@ -493,9 +493,10 @@ register_check(
 EXPIRED_LIST = 'netily-expired'
 EXPIRED_PROXY_PORT = '8080'
 
-# Desired filter-rule comments in EVALUATION order (first match wins).
-# We add them in REVERSE order (drop first, portal last) so RouterOS's
-# natural append produces this final top-to-bottom layout.
+# Filter-rule definitions in EVALUATION order (first match wins).
+# The add loop iterates this list AS-IS. RouterOS appends new rules to the
+# bottom of the chain, so first-added ends up at the top (evaluated first).
+# Result: Portal → DNS-TCP → DNS-UDP → Reset → Drop (correct top-to-bottom).
 EXPIRED_FILTER_RULES = [
     # (comment, chain, action, extra kwargs) — listed in EVALUATION order
     ('Netily-Expired-Portal',  'forward', 'accept', {'protocol': 'tcp', 'dst-port': '80,443', 'dst-address-list': 'netily-portal-ips'}),
@@ -561,12 +562,14 @@ def _fix_expired_portal(ctx: DiagnosticContext):
                 except Exception as e:
                     logger.warning(f"[DIAGNOSE FIX] Could not remove {path} rule {row['.id']}: {e}")
 
-    # 2. Add filter rules in REVERSE evaluation order (drop first, portal last)
-    #    so RouterOS appends them in the correct top-to-bottom layout:
+    # 2. Add filter rules in EVALUATION order (Portal first, Drop last) so
+    #    RouterOS appends them in the correct top-to-bottom layout:
     #       Portal → DNS-TCP → DNS-UDP → Reset → Drop  (forward chain)
     #       Input                                       (input chain)
-    #    NO place-before. NO anchor. Just append.
-    for comment, chain, action, extra in reversed(EXPIRED_FILTER_RULES):
+    #    RouterOS appends new rules to the BOTTOM of the chain, so the first
+    #    rule added ends up at the TOP (evaluated first). This is the correct
+    #    first-match-wins layout, verified by manual test on RouterOS 7.25.
+    for comment, chain, action, extra in EXPIRED_FILTER_RULES:
         add_kwargs = {
             'chain': chain,
             'action': action,
