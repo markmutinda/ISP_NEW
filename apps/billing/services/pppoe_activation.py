@@ -30,8 +30,13 @@ def activate_pppoe_from_payment(payment):
         if marker in (fresh.notes or ""):
             return None  # already applied
 
-        creds = (CustomerRadiusCredentials.objects.select_for_update()
-                 .select_related("router").filter(customer_id=payment.customer_id).first())
+        # router is a nullable FK -> LEFT OUTER JOIN, which Postgres refuses to
+        # lock with a bare FOR UPDATE. Lock only the credentials row.
+        creds = (CustomerRadiusCredentials.objects
+                 .select_for_update(of=("self",))
+                 .select_related("router")
+                 .filter(customer_id=payment.customer_id)
+                 .first())
         service = (ServiceConnection.objects
                    .filter(customer_id=payment.customer_id,
                            status__in=["ACTIVE", "SUSPENDED"], plan__isnull=False)
