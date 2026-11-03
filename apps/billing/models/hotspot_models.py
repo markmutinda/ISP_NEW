@@ -698,7 +698,7 @@ class HotspotSession(models.Model):
     )
     
     # User Details (no auth required for hotspot)
-    phone_number = models.CharField(max_length=15)
+    phone_number = models.CharField(max_length=20)   # was 15 — matches HotspotClient.canonical_phone
     mac_address = models.CharField(
         max_length=17,
         help_text="Device MAC address (AA:BB:CC:DD:EE:FF)"

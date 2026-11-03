@@ -288,6 +288,8 @@ class HotspotRadiusService:
     def _get_active_fup_policy_for_plan(self, plan):
         """
         Resolve the active FUP policy linked to a hotspot plan, if any.
+        Synthetic plans (loyalty rewards, ad-sponsored access) are not DB rows
+        and can never have a linked FUP policy, so skip the lookup entirely.
 
         Uses FUPPolicyHotspotPlan (the link table for hotspot plans), which is
         the same table FUPUsageService.get_active_policy_for_hotspot_session
@@ -297,6 +299,10 @@ class HotspotRadiusService:
         need a HotspotSession instance (which may not exist yet at credential
         creation time — we only have the plan).
         """
+        from apps.billing.models.hotspot_models import HotspotPlan
+        if not isinstance(plan, HotspotPlan):
+            return None
+
         try:
             from apps.fup.models import FUPPolicyHotspotPlan
             link = (

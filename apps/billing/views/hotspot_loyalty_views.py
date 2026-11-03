@@ -215,12 +215,22 @@ class HotspotLoyaltyRedeemView(APIView):
                     ).first() if router_obj else None
 
                     if router_obj and display_plan:
+                        raw_phone = (
+                            member.hotspot_client.canonical_phone or ''
+                            if member.hotspot_client else ''
+                        )
+                        session_phone = (
+                            'LOYALTY'
+                            if (not raw_phone or raw_phone.startswith('MAC-'))
+                            else raw_phone[:15]
+                        )
+
                         session_id = HotspotSession.generate_session_id()
                         session = HotspotSession.objects.create(
                             session_id=session_id,
                             router=router_obj,
                             plan=display_plan,
-                            phone_number=member.hotspot_client.canonical_phone or 'LOYALTY',
+                            phone_number=session_phone,   # was: canonical_phone or 'LOYALTY'
                             mac_address=mac_address or '',
                             amount=0,  # Free reward
                             status='active',
