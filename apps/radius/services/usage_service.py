@@ -12,12 +12,35 @@ Anchors:
 from typing import Dict, Iterable, List, Optional
 
 from django.db import connection
-from django.db.models import Q
+from django.db.models import Exists, OuterRef, Q
 from django.utils import timezone
 
 from apps.radius.models import CustomerRadiusCredentials
 
 MAX_USERNAMES = 500
+
+
+def exclude_walled_sessions(qs):
+    """
+    Drop PPPoE sessions whose subscription has expired. They hold a live
+    (walled, 512k) session on the router but are not really 'online' — the
+    customer is stuck behind the captive portal until they renew.
+
+    A PPPoE session counts as walled when:
+      - radacct.framedprotocol = 'PPP'   (i.e. a PPPoE session, not hotspot)
+      - the matching CustomerRadiusCredentials.expiration_date is in the past
+
+    When the customer renews, expiration_date moves forward and the same
+    radacct row shows up as online again on the next request — no flag to
+    clear. The subquery uses the indexed unique username column, so it's
+    cheap even for large session tables.
+    """
+    walled = CustomerRadiusCredentials.objects.filter(
+        username=OuterRef('username'),
+        expiration_date__isnull=False,
+        expiration_date__lt=timezone.now(),
+    )
+    return qs.exclude(Exists(walled), framedprotocol='PPP')
 
 
 def format_bytes(total_bytes) -> str:

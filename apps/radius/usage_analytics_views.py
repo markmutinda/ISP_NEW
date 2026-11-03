@@ -22,6 +22,7 @@ from rest_framework.views import APIView
 
 from apps.core.permissions import HasCompanyAccess, HasRoleAccessPolicy
 from .models import CustomerRadiusCredentials, RadAcct
+from .services.usage_service import exclude_walled_sessions
 
 logger = logging.getLogger(__name__)
 
@@ -220,7 +221,9 @@ class RadiusUsageAnalyticsView(APIView):
                 'total': total,
                 'download': dl,
                 'upload': ul,
-                'active_sessions': RadAcct.objects.filter(acctstoptime__isnull=True).count(),
+                'active_sessions': exclude_walled_sessions(
+                    RadAcct.objects.filter(acctstoptime__isnull=True)
+                ).count(),
                 'unique_users': users,
                 'avg_per_user': int(total / users) if users else 0,
                 'peak_hour': peak_hour,

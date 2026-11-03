@@ -1864,7 +1864,11 @@ mute 20
     def users(self, request, pk=None):
         """
         Get active connected users from RADIUS radacct table.
-        
+
+        Walled PPPoE users (expired subscription, 512k captive-portal
+        session) hold a live radacct row but are not really online — they
+        are excluded via exclude_walled_sessions().
+
         Returns:
             {
                 "hotspot_users": int,  # non-PPP sessions
@@ -1876,11 +1880,13 @@ mute 20
         
         try:
             from apps.radius.models import RadAcct
+            from apps.radius.services.usage_service import exclude_walled_sessions
             
-            # Build the query for active sessions (acctstoptime IS NULL)
-            # Match by either VPN IP or WAN IP
-            active_qs = RadAcct.objects.filter(
-                acctstoptime__isnull=True
+            # Build the query for active sessions (acctstoptime IS NULL),
+            # excluding walled (expired) PPPoE users. Match by either VPN
+            # IP or WAN IP.
+            active_qs = exclude_walled_sessions(
+                RadAcct.objects.filter(acctstoptime__isnull=True)
             ).filter(
                 Q(nasipaddress=router.vpn_ip_address) | Q(nasipaddress=router.ip_address)
             )

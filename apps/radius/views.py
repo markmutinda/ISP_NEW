@@ -46,7 +46,7 @@ from .serializers import (
     CustomerRadiusCredentialsDetailSerializer,
 )
 from .services import RadiusSyncService
-from .services.usage_service import build_online_context, get_period_usage, format_bytes
+from .services.usage_service import build_online_context, get_period_usage, format_bytes, exclude_walled_sessions
 
 # Import pagination classes
 from utils.pagination import LargeResultsSetPagination
@@ -77,8 +77,11 @@ class RadiusDashboardView(APIView):
             attribute='Cleartext-Password'
         ).values('username').distinct().count()
         
-        # Active sessions
-        active_sessions = RadAcct.objects.filter(acctstoptime__isnull=True).count()
+        # Active sessions (exclude walled PPPoE users — they hold a live
+        # radacct row but are stuck behind the captive portal, not really online)
+        active_sessions = exclude_walled_sessions(
+            RadAcct.objects.filter(acctstoptime__isnull=True)
+        ).count()
         
         # NAS stats
         total_nas = Nas.objects.count()
@@ -163,9 +166,12 @@ class RadiusActiveSessionsView(APIView):
 
     def get(self, request):
         # ── Real RADIUS sessions only (users with open radacct rows = truly online) ──
+        # Walled PPPoE users (expired subscription, 512k captive-portal session)
+        # hold a live radacct row but are not really online. Exclude them.
         radacct_qs = (
-            RadAcct.objects
-            .filter(acctstoptime__isnull=True)
+            exclude_walled_sessions(
+                RadAcct.objects.filter(acctstoptime__isnull=True)
+            )
             .select_related('customer', 'customer__user', 'router')
             .order_by('-acctstarttime')
         )
@@ -283,8 +289,9 @@ class RadiusOnlineUsernamesView(APIView):
         from django.db.models import Sum
 
         sessions = (
-            RadAcct.objects
-            .filter(acctstoptime__isnull=True)
+            exclude_walled_sessions(
+                RadAcct.objects.filter(acctstoptime__isnull=True)
+            )
             .values('username', 'acctinputoctets', 'acctoutputoctets',
                     'framedipaddress', 'callingstationid', 'nasipaddress')
         )

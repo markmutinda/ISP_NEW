@@ -2549,7 +2549,10 @@ class UnifiedDashboardView(APIView):
                     maintenance=Count('id', filter=Q(status='maintenance')),
                 )
                 from apps.radius.models import RadAcct
-                stats['total_connected_users'] = RadAcct.objects.filter(acctstoptime__isnull=True).count()
+                from apps.radius.services.usage_service import exclude_walled_sessions
+                stats['total_connected_users'] = exclude_walled_sessions(
+                    RadAcct.objects.filter(acctstoptime__isnull=True)
+                ).count()
                 return stats
             except Exception:
                 return {'total': 0, 'online': 0, 'offline': 0, 'warning': 0, 'maintenance': 0, 'total_connected_users': 0}
@@ -2558,6 +2561,7 @@ class UnifiedDashboardView(APIView):
             try:
                 from apps.support.models import SupportTicket as Ticket
                 from apps.radius.models import CustomerRadiusCredentials, RadAcct
+                from apps.radius.services.usage_service import exclude_walled_sessions
 
                 tickets = Ticket.objects.aggregate(
                     total=Count('id'),
@@ -2568,7 +2572,9 @@ class UnifiedDashboardView(APIView):
                 expired = CustomerRadiusCredentials.objects.filter(
                     expiration_date__isnull=False, expiration_date__lte=local_now,
                 ).count()
-                online = RadAcct.objects.filter(acctstoptime__isnull=True).count()
+                online = exclude_walled_sessions(
+                    RadAcct.objects.filter(acctstoptime__isnull=True)
+                ).count()
 
                 hotspot_chats = {'total': 0, 'unread': 0}
                 try:

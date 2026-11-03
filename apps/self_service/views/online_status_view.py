@@ -3,6 +3,8 @@ from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
 from ..permissions import CustomerOnlyPermission
 from apps.radius.models import RadAcct
+from apps.radius.services.usage_service import exclude_walled_sessions
+
 
 class CustomerOnlineStatusView(APIView):
     permission_classes = [IsAuthenticated, CustomerOnlyPermission]
@@ -15,9 +17,15 @@ class CustomerOnlineStatusView(APIView):
 
         session = None
         if radius_username:
-            session = RadAcct.objects.filter(
-                username=radius_username,
-                acctstoptime__isnull=True
+            # Walled PPPoE users (expired subscription, 512k captive-portal
+            # session) hold a live radacct row but aren't really online —
+            # exclude_walled_sessions drops them so the dashboard badge
+            # correctly shows "Offline" until they renew.
+            session = exclude_walled_sessions(
+                RadAcct.objects.filter(
+                    username=radius_username,
+                    acctstoptime__isnull=True
+                )
             ).first()
 
         return Response({
