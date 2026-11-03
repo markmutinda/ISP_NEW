@@ -1,9 +1,11 @@
 from django.utils.text import slugify
 from rest_framework import serializers
 from django.contrib.auth import get_user_model
+from django.db import transaction
+from django.utils import timezone
 from .models import (
     Supplier, EquipmentType, EquipmentItem, Assignment,
-    PurchaseOrder, PurchaseOrderItem, MaintenanceRecord, StockAlert
+    PurchaseOrder, PurchaseOrderItem, MaintenanceRecord, StockAlert, Expense
 )
 
 User = get_user_model()
@@ -47,6 +49,9 @@ class EquipmentTypeSerializer(serializers.ModelSerializer):
 class EquipmentItemSerializer(serializers.ModelSerializer):
     equipment_type_name = serializers.CharField(source='equipment_type.name', read_only=True)
     equipment_type_text = serializers.CharField(write_only=True, required=False, allow_blank=True)
+    quantity = serializers.IntegerField(write_only=True, min_value=1, max_value=200, default=1)
+    record_expense = serializers.BooleanField(write_only=True, default=True)
+    vendor = serializers.CharField(write_only=True, required=False, allow_blank=True)
     supplier_name = serializers.CharField(source='supplier.name', read_only=True)
     assigned_to_name = serializers.SerializerMethodField()
     assigned_to_customer_name = serializers.SerializerMethodField()
@@ -57,6 +62,7 @@ class EquipmentItemSerializer(serializers.ModelSerializer):
         model = EquipmentItem
         fields = [
             'id', 'equipment_type', 'equipment_type_name', 'equipment_type_text',
+            'quantity', 'record_expense', 'vendor',
             'name', 'model', 'serial_number', 'asset_tag', 'mac_address',
             'supplier', 'supplier_name',
             'purchase_date', 'purchase_price', 'warranty_expiry',
@@ -81,6 +87,14 @@ class EquipmentItemSerializer(serializers.ModelSerializer):
             code = f"{base[: max(1, 12 - len(str(suffix)))]}{suffix}"
         return code
 
+    def _resolve_type(self, type_text):
+        equipment_type = EquipmentType.objects.filter(name__iexact=type_text, is_active=True).first()
+        if not equipment_type:
+            equipment_type = EquipmentType.objects.create(
+                name=type_text, code=self._next_type_code(type_text),
+            )
+        return equipment_type
+
     def validate(self, attrs):
         attrs = super().validate(attrs)
         if not attrs.get('equipment_type') and not attrs.get('equipment_type_text'):
@@ -91,26 +105,44 @@ class EquipmentItemSerializer(serializers.ModelSerializer):
 
     def create(self, validated_data):
         type_text = (validated_data.pop('equipment_type_text', '') or '').strip()
+        quantity = validated_data.pop('quantity', 1) or 1
+        record_expense = validated_data.pop('record_expense', True)
+        vendor = (validated_data.pop('vendor', '') or '').strip()
+
         if type_text and not validated_data.get('equipment_type'):
-            equipment_type = EquipmentType.objects.filter(name__iexact=type_text, is_active=True).first()
-            if not equipment_type:
-                equipment_type = EquipmentType.objects.create(
-                    name=type_text,
-                    code=self._next_type_code(type_text),
+            validated_data['equipment_type'] = self._resolve_type(type_text)
+        if quantity > 1:
+            validated_data.pop('serial_number', None)  # serials are unique
+
+        request = self.context.get('request')
+        user = getattr(request, 'user', None)
+        price = validated_data.get('purchase_price')
+
+        with transaction.atomic():
+            expense = None
+            if record_expense and price:
+                expense = Expense.objects.create(
+                    title=f"{validated_data['name']}" + (f" x{quantity}" if quantity > 1 else ""),
+                    amount=price * quantity,
+                    category='equipment',
+                    expense_date=validated_data.get('purchase_date') or timezone.localdate(),
+                    vendor=vendor,
+                    payment_status='paid',
+                    created_by=user if getattr(user, 'is_authenticated', False) else None,
                 )
-            validated_data['equipment_type'] = equipment_type
-        return super().create(validated_data)
+            first = None
+            for _ in range(quantity):
+                item = EquipmentItem.objects.create(expense=expense, **validated_data)
+                first = first or item
+        return first
 
     def update(self, instance, validated_data):
+        validated_data.pop('quantity', None)
+        validated_data.pop('record_expense', None)
+        validated_data.pop('vendor', None)
         type_text = (validated_data.pop('equipment_type_text', '') or '').strip()
         if type_text:
-            equipment_type = EquipmentType.objects.filter(name__iexact=type_text, is_active=True).first()
-            if not equipment_type:
-                equipment_type = EquipmentType.objects.create(
-                    name=type_text,
-                    code=self._next_type_code(type_text),
-                )
-            validated_data['equipment_type'] = equipment_type
+            validated_data['equipment_type'] = self._resolve_type(type_text)
         return super().update(instance, validated_data)
 
     def get_assigned_to_name(self, obj):
@@ -280,3 +312,26 @@ class MaintenanceRecordSerializer(serializers.ModelSerializer):
             'created_at', 'updated_at',
         ]
         read_only_fields = ['created_at', 'updated_at']
+
+
+class ExpenseSerializer(serializers.ModelSerializer):
+    reference = serializers.CharField(read_only=True)
+    created_by_name = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Expense
+        fields = [
+            'id', 'reference', 'title', 'amount', 'category', 'expense_date',
+            'vendor', 'payment_status', 'notes', 'created_by_name',
+            'created_at', 'updated_at',
+        ]
+        read_only_fields = ['created_at', 'updated_at']
+
+    def validate_amount(self, value):
+        if value <= 0:
+            raise serializers.ValidationError('Amount must be greater than zero.')
+        return value
+
+    def get_created_by_name(self, obj):
+        u = obj.created_by
+        return (u.get_full_name() or u.email) if u else None

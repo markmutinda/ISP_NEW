@@ -11,6 +11,7 @@ router.register(r'purchase-orders', views.PurchaseOrderViewSet)
 router.register(r'purchase-order-items', views.PurchaseOrderItemViewSet)
 router.register(r'maintenance', views.MaintenanceRecordViewSet)
 router.register(r'stock-alerts', views.StockAlertViewSet)
+router.register(r'expenses', views.ExpenseViewSet)
 
 urlpatterns = [
     path('', include(router.urls)),

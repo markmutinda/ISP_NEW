@@ -64,6 +64,58 @@ class EquipmentType(models.Model):
         super().save(*args, **kwargs)
 
 
+class Expense(models.Model):
+    CATEGORY_CHOICES = [
+        ('equipment', 'Equipment'),
+        ('operations', 'Operations'),
+        ('maintenance', 'Maintenance'),
+        ('transport', 'Transport'),
+        ('utilities', 'Utilities'),
+        ('salaries', 'Salaries'),
+        ('marketing', 'Marketing'),
+        ('other', 'Other'),
+    ]
+    STATUS_CHOICES = [('paid', 'Paid'), ('pending', 'Pending')]
+
+    title = models.CharField(max_length=255)
+    amount = models.DecimalField(max_digits=12, decimal_places=2, validators=[MinValueValidator(0)])
+    category = models.CharField(max_length=20, choices=CATEGORY_CHOICES, default='operations')
+    expense_date = models.DateField(default=timezone.localdate)
+    vendor = models.CharField(max_length=255, blank=True, default='')
+    payment_status = models.CharField(max_length=10, choices=STATUS_CHOICES, default='paid')
+    notes = models.TextField(blank=True, default='')
+    created_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='+')
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        app_label = 'inventory'
+        ordering = ['-expense_date', '-id']
+        indexes = [
+            models.Index(fields=['expense_date']),
+            models.Index(fields=['category', 'expense_date']),
+            models.Index(fields=['payment_status']),
+        ]
+
+    @property
+    def reference(self):
+        return f"EXP-{self.pk:05d}" if self.pk else ''
+
+    def __str__(self):
+        return f"{self.title} ({self.amount})"
+
+
+class ExpenseBudget(models.Model):
+    """Monthly budget. A month with no row inherits the latest earlier budget."""
+    month = models.DateField(unique=True)  # always the 1st of the month
+    amount = models.DecimalField(max_digits=12, decimal_places=2, validators=[MinValueValidator(0)])
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        app_label = 'inventory'
+        ordering = ['-month']
+
+
 class EquipmentItem(models.Model):
     STATUS_CHOICES = [
         ('in_stock', 'In Stock'),
@@ -121,6 +173,10 @@ class EquipmentItem(models.Model):
     )
 
     notes = models.TextField(blank=True, null=True)
+    expense = models.ForeignKey(
+        'inventory.Expense', on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='equipment_items'
+    )
     qr_code = models.ImageField(upload_to='inventory/qr_codes/', null=True, blank=True)
     ip_address = models.GenericIPAddressField(blank=True, null=True)
     firmware_version = models.CharField(max_length=50, blank=True, null=True)
@@ -167,8 +223,10 @@ class EquipmentItem(models.Model):
     def save(self, *args, **kwargs):
         if not self.asset_tag:
             prefix = self.equipment_type.code if self.equipment_type else 'EQP'
-            count = EquipmentItem.objects.filter(equipment_type=self.equipment_type).count() + 1
-            self.asset_tag = f"{prefix}-{count:06d}"
+            n = EquipmentItem.objects.filter(equipment_type=self.equipment_type).count() + 1
+            while EquipmentItem.objects.filter(asset_tag=f"{prefix}-{n:06d}").exists():
+                n += 1
+            self.asset_tag = f"{prefix}-{n:06d}"
         super().save(*args, **kwargs)
 
 

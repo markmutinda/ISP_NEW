@@ -1,4 +1,5 @@
 from django.db.models import Q, Sum, Count
+from django.db.models.functions import TruncMonth
 from django.utils import timezone
 from django_filters import rest_framework as filters
 from rest_framework import viewsets, generics, status
@@ -6,18 +7,20 @@ from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.filters import SearchFilter, OrderingFilter
-from datetime import timedelta
+from datetime import timedelta, date
+from decimal import Decimal, InvalidOperation
 
 from apps.core.permissions import HasRoleAccessPolicy, IsAdmin, IsAdminOrStaff
 
 from .models import (
     Supplier, EquipmentType, EquipmentItem, Assignment,
-    PurchaseOrder, PurchaseOrderItem, MaintenanceRecord, StockAlert
+    PurchaseOrder, PurchaseOrderItem, MaintenanceRecord, StockAlert,
+    Expense, ExpenseBudget
 )
 from .serializers import (
     SupplierSerializer, EquipmentTypeSerializer, EquipmentItemSerializer,
     AssignmentSerializer, PurchaseOrderSerializer, PurchaseOrderItemSerializer,
-    MaintenanceRecordSerializer, StockAlertSerializer,
+    MaintenanceRecordSerializer, StockAlertSerializer, ExpenseSerializer,
 )
 from .filters import EquipmentItemFilter, PurchaseOrderFilter
 
@@ -397,3 +400,146 @@ class StockReportView(generics.GenericAPIView):
             return response
 
         return Response(list(report_data))
+
+
+class ExpenseViewSet(viewsets.ModelViewSet):
+    queryset = Expense.objects.select_related('created_by')
+    serializer_class = ExpenseSerializer
+    permission_classes = [IsAuthenticated, IsAdminOrStaff, HasRoleAccessPolicy]
+    required_rbac_path = "/admin/inventory"
+    filter_backends = [SearchFilter, OrderingFilter]
+    search_fields = ['title', 'vendor', 'notes']
+    ordering_fields = ['expense_date', 'amount', 'created_at']
+    ordering = ['-expense_date', '-id']
+
+    def get_queryset(self):
+        qs = super().get_queryset()
+        p = self.request.query_params
+        category = p.get('category')
+        if category and category != 'all':
+            qs = qs.filter(category=category)
+        pay_status = p.get('payment_status')
+        if pay_status and pay_status != 'all':
+            qs = qs.filter(payment_status=pay_status)
+        month = p.get('month')
+        if month:
+            try:
+                y, m = (int(x) for x in month.split('-'))
+                qs = qs.filter(expense_date__year=y, expense_date__month=m)
+            except ValueError:
+                pass
+        return qs
+
+    def perform_create(self, serializer):
+        serializer.save(created_by=self.request.user)
+
+    @action(detail=False, methods=['get'])
+    def summary(self, request):
+        """Everything the Expenses & Inventory page needs in a single call."""
+        try:
+            months = min(max(int(request.query_params.get('months', 6)), 1), 12)
+        except ValueError:
+            months = 6
+
+        today = timezone.localdate()
+        first = today.replace(day=1)
+        y, m = first.year, first.month - (months - 1)
+        while m <= 0:
+            m += 12
+            y -= 1
+        window_start = date(y, m, 1)
+
+        spent_by_month = {
+            row['m']: row['total']
+            for row in Expense.objects.filter(expense_date__gte=window_start)
+            .annotate(m=TruncMonth('expense_date')).values('m')
+            .annotate(total=Sum('amount'))
+        }
+
+        budget_items = list(
+            ExpenseBudget.objects.filter(month__lte=first)
+            .order_by('month').values_list('month', 'amount')
+        )
+
+        def budget_for(d):
+            val = Decimal('0')
+            for bm, amt in budget_items:
+                if bm <= d:
+                    val = amt
+                else:
+                    break
+            return val
+
+        series = []
+        cy, cm = window_start.year, window_start.month
+        for _ in range(months):
+            d = date(cy, cm, 1)
+            series.append({
+                'month': d.strftime('%Y-%m'),
+                'label': d.strftime('%b'),
+                'spent': float(spent_by_month.get(d) or 0),
+                'budget': float(budget_for(d)),
+            })
+            cm += 1
+            if cm > 12:
+                cm, cy = 1, cy + 1
+
+        prev_first = (first - timedelta(days=1)).replace(day=1)
+        spent = spent_by_month.get(first) or Decimal('0')
+        prev_spent = spent_by_month.get(prev_first) or Decimal('0')
+        budget = budget_for(first)
+
+        categories = [
+            {'category': r['category'], 'total': float(r['total'] or 0)}
+            for r in Expense.objects.filter(expense_date__gte=first)
+            .values('category').annotate(total=Sum('amount')).order_by('-total')
+        ]
+
+        pending = Expense.objects.filter(payment_status='pending').aggregate(
+            total=Sum('amount'), n=Count('id')
+        )
+        assets = EquipmentItem.objects.exclude(
+            status__in=['disposed', 'lost', 'retired']
+        ).aggregate(
+            value=Sum('purchase_price'),
+            n=Count('id'),
+            added=Count('id', filter=Q(created_at__date__gte=first)),
+        )
+        inv = EquipmentItem.objects.aggregate(
+            total=Count('id'),
+            available=Count('id', filter=Q(status='in_stock', condition__in=['new', 'good', 'fair'])),
+            assigned=Count('id', filter=Q(status='assigned')),
+            in_use=Count('id', filter=Q(status='in_use')),
+            maintenance=Count('id', filter=Q(status='maintenance')),
+            faulty=Count('id', filter=Q(status='faulty') | Q(condition='faulty')),
+        )
+
+        return Response({
+            'month': first.strftime('%Y-%m'),
+            'spent': float(spent),
+            'prev_spent': float(prev_spent),
+            'budget': float(budget),
+            'remaining': float(budget - spent),
+            'budget_used_pct': round(float(spent / budget) * 100, 1) if budget else 0,
+            'pending_total': float(pending['total'] or 0),
+            'pending_count': pending['n'] or 0,
+            'equipment_value': float(assets['value'] or 0),
+            'equipment_count': assets['n'] or 0,
+            'equipment_added_this_month': assets['added'] or 0,
+            'series': series,
+            'categories': categories,
+            'inventory': inv,
+        })
+
+    @action(detail=False, methods=['post'])
+    def budget(self, request):
+        """Set the monthly budget from the current month onward."""
+        try:
+            amount = Decimal(str(request.data.get('amount')))
+            if not amount.is_finite() or amount < 0 or amount >= Decimal('10000000000'):
+                raise InvalidOperation
+        except (InvalidOperation, TypeError, ValueError):
+            return Response({'error': 'Enter a valid budget amount.'}, status=status.HTTP_400_BAD_REQUEST)
+        month = timezone.localdate().replace(day=1)
+        ExpenseBudget.objects.update_or_create(month=month, defaults={'amount': amount})
+        return Response({'month': month.strftime('%Y-%m'), 'amount': float(amount)})
