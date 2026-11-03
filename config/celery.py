@@ -438,8 +438,8 @@ app.conf.update(
     worker_prefetch_multiplier=1,
     task_ignore_result=True,
     result_expires=3600,
-    worker_max_tasks_per_child=200,
-    worker_max_memory_per_child=150_000,   # KB
+    worker_max_tasks_per_child=1000,
+    worker_max_memory_per_child=400_000,   # KB
 )
 
 
