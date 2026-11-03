@@ -388,7 +388,7 @@ class SMSCampaignViewSet(viewsets.ModelViewSet):
     def send_to_group(self, request):
         """
         Send a bulk SMS to all customers of a given type.
-        Body: { "name": "May Promo", "message": "...", "group": "pppoe|pppoe_active|pppoe_expired|hotspot|all" }
+        Body: { "name": "May Promo", "message": "...", "group": "pppoe|pppoe_active|pppoe_expired|hotspot|hotspot_active|all" }
         
         IMPROVED: Codex version with proper filtering for pppoe_active and pppoe_expired
         """
@@ -400,7 +400,7 @@ class SMSCampaignViewSet(viewsets.ModelViewSet):
             return Response({'error': 'message is required'}, status=status.HTTP_400_BAD_REQUEST)
         
         # UPDATED: Include new group types
-        VALID_GROUPS = ('pppoe', 'pppoe_active', 'pppoe_expired', 'hotspot', 'all')
+        VALID_GROUPS = ('pppoe', 'pppoe_active', 'pppoe_expired', 'hotspot', 'hotspot_active', 'all')
         if group not in VALID_GROUPS:
             return Response(
                 {'error': f'group must be one of: {", ".join(VALID_GROUPS)}'}, 
@@ -470,6 +470,26 @@ class SMSCampaignViewSet(viewsets.ModelViewSet):
             ).values_list('canonical_phone', flat=True):
                 if phone:
                     phones.add(phone)
+
+        # ── Hotspot ACTIVE only (subscription still valid right now) ─────────
+        if group == 'hotspot_active':
+            from apps.billing.models.hotspot_models import HotspotClient, HotspotSession
+
+            active_client_ids = HotspotSession.objects.filter(
+                status='active',
+                expires_at__gt=timezone.now(),
+                hotspot_client__isnull=False,
+            ).values('hotspot_client_id')
+
+            for phone in HotspotClient.objects.filter(
+                id__in=active_client_ids,
+                canonical_phone__isnull=False,
+            ).exclude(
+                canonical_phone=''
+            ).exclude(
+                canonical_phone__startswith='MAC-'   # anonymous TV/MAC-only clients have no real phone
+            ).values_list('canonical_phone', flat=True):
+                phones.add(phone)
 
         phones = list(phones)
         
