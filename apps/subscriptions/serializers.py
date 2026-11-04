@@ -46,6 +46,7 @@ class NetilyPlanSerializer(serializers.ModelSerializer):
             'features',
             'is_active',
             'is_popular',
+            'is_selfie_activation_plan',
             'sort_order',
             'yearly_savings',
             'yearly_discount_percent',

@@ -36,6 +36,7 @@ class NetilyPlan(models.Model):
     PLAN_CODES = (
         ('starter', 'Starter'),
         ('enterprise', 'Enterprise'),
+        ('test', 'Test'),
         # Legacy codes kept for backward-compatibility with existing DB rows;
         # no new plans with these codes should be created.
         ('metered', 'Metered (legacy)'),
@@ -89,6 +90,10 @@ class NetilyPlan(models.Model):
     # Display
     is_active = models.BooleanField(default=True)
     is_popular = models.BooleanField(default=False, help_text="Show 'Popular' badge")
+    is_selfie_activation_plan = models.BooleanField(
+        default=False,
+        help_text="Use this plan and its activation fee for Superadmin Selfie-2 tenant registrations.",
+    )
     sort_order = models.PositiveIntegerField(default=0)
     
     # Metadata

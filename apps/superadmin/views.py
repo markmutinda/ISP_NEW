@@ -1325,6 +1325,8 @@ class PlanDetailView(APIView):
         except Exception:
             return Response({"detail": "Plan not found"}, status=status.HTTP_404_NOT_FOUND)
 
+        if request.data.get("is_selfie_activation_plan") is True:
+            NetilyPlan.objects.exclude(pk=plan.pk).filter(is_selfie_activation_plan=True).update(is_selfie_activation_plan=False)
         for field, value in request.data.items():
             if hasattr(plan, field) and field not in ("id", "created_at"):
                 setattr(plan, field, value)

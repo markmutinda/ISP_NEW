@@ -13,14 +13,14 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from apps.billing.services.netily_paybill_service import NetilyPaybillError, query_stk_status, stk_push_own_paybill
-from apps.subscriptions.models import CompanySubscription, SubscriptionPayment
+from apps.subscriptions.models import CompanySubscription, NetilyPlan, SubscriptionPayment
 
 from .models import Company, TenantActivationPayment
 from .serializers import CompanyRegisterSerializer
 from .views import PlatformCompanyRegisterView
 
 logger = logging.getLogger(__name__)
-ACTIVATION_AMOUNT = Decimal("500.00")
+DEFAULT_ACTIVATION_AMOUNT = Decimal("500.00")
 TERMINAL_FAILURE_CODES = {"1", "1032", "1037", "2001"}
 
 
@@ -113,6 +113,14 @@ class TenantActivationStartView(APIView):
 
         reference = f"NETILY-ACT-{uuid.uuid4().hex[:10].upper()}"
         with schema_context(get_public_schema_name()):
+            activation_plan = (
+                NetilyPlan.objects.filter(is_active=True, is_selfie_activation_plan=True).first()
+                or NetilyPlan.objects.filter(code="starter", is_active=True).first()
+            )
+            if not activation_plan:
+                return Response({"detail": "No active Selfie-2 activation plan is configured."}, status=status.HTTP_409_CONFLICT)
+            activation_amount = activation_plan.activation_fee or DEFAULT_ACTIVATION_AMOUNT
+            registration_data["_selfie_activation_plan_code"] = activation_plan.code
             existing = TenantActivationPayment.objects.filter(
                 created_by=request.user,
                 registration_data__company_email=registration_data["company_email"],
@@ -123,7 +131,7 @@ class TenantActivationStartView(APIView):
                 return Response(_payload(existing), status=status.HTTP_200_OK)
             activation = TenantActivationPayment.objects.create(
                 status="pending",
-                amount=ACTIVATION_AMOUNT,
+                amount=activation_amount,
                 currency="KES",
                 phone_number=payment_phone,
                 registration_data=registration_data,
@@ -139,7 +147,7 @@ class TenantActivationStartView(APIView):
         )
         try:
             result = stk_push_own_paybill(
-                amount=ACTIVATION_AMOUNT,
+                amount=activation.amount,
                 phone_number=payment_phone,
                 account_reference=reference,
                 transaction_desc="Netily activate",
@@ -225,6 +233,7 @@ class TenantActivationFinishView(APIView):
             payment = TenantActivationPayment.objects.get(pk=payment_id)
 
         registration_data = {**payment.registration_data, "admin_password": password}
+        activation_plan_code = registration_data.pop("_selfie_activation_plan_code", "")
         serializer = CompanyRegisterSerializer(data=registration_data)
         serializer.is_valid(raise_exception=True)
         try:
@@ -237,6 +246,15 @@ class TenantActivationFinishView(APIView):
                     email__iexact=registration_data["company_email"],
                 )
                 subscription = CompanySubscription.objects.get(company=company)
+                if activation_plan_code:
+                    intended_activation_plan = NetilyPlan.objects.filter(
+                        code=activation_plan_code,
+                        is_active=True,
+                    ).first()
+                    if intended_activation_plan:
+                        subscription.plan = intended_activation_plan
+                        subscription.save(update_fields=["plan", "updated_at"])
+                        subscription.refresh_from_db()
                 SubscriptionPayment.objects.create(
                     subscription=subscription,
                     intended_plan=subscription.plan,
