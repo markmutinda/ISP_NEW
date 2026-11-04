@@ -594,6 +594,7 @@ class NetilyPlanSerializer(serializers.Serializer):
     # NEW: Metered Pricing Fields
     is_metered = serializers.BooleanField(default=False, required=False)
     base_license_fee = serializers.DecimalField(max_digits=10, decimal_places=2, required=False, allow_null=True)
+    activation_fee = serializers.DecimalField(max_digits=10, decimal_places=2, required=False, min_value=1)
     pppoe_unit_price = serializers.DecimalField(max_digits=10, decimal_places=2, required=False, allow_null=True)
     pppoe_min_clients = serializers.IntegerField(required=False, default=20)
     hotspot_revenue_share_pct = serializers.DecimalField(max_digits=5, decimal_places=2, required=False, allow_null=True)
@@ -605,6 +606,7 @@ class NetilyPlanSerializer(serializers.Serializer):
     features = serializers.JSONField(required=False, default=list)
     is_active = serializers.BooleanField(default=True)
     is_popular = serializers.BooleanField(default=False)
+    is_selfie_activation_plan = serializers.BooleanField(default=False, required=False)
     sort_order = serializers.IntegerField(default=0)
     created_at = serializers.DateTimeField(read_only=True)
     updated_at = serializers.DateTimeField(read_only=True)

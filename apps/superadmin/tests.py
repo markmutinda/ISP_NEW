@@ -8,7 +8,7 @@ from django.utils import timezone
 
 from apps.core.models import Company, Tenant
 from apps.subscriptions.models import CompanySubscription, NetilyPlan
-from apps.superadmin.serializers import PlatformExpenditureSerializer, TenantListSerializer
+from apps.superadmin.serializers import NetilyPlanSerializer, PlatformExpenditureSerializer, TenantListSerializer
 from apps.superadmin.views import (
     DashboardView,
     PlatformExpenditureView,
@@ -19,6 +19,26 @@ from apps.superadmin.management.commands.record_business_account_transfer import
 from apps.superadmin.financial_csv import FinancialCSVView, _amount, _csv_response, _paid_at, _safe_cell, _sms_reference
 from apps.superadmin.financial_reporting import snapshot_kind
 from django.core.files.uploadedfile import SimpleUploadedFile
+
+
+class SuperadminPlanSerializerTests(SimpleTestCase):
+    def test_selfie_activation_fields_round_trip_through_plan_contract(self):
+        serializer = NetilyPlanSerializer(data={
+            "name": "Selfie test",
+            "code": "testing",
+            "description": "KSh 1 registration flow",
+            "price_monthly": "0.00",
+            "price_yearly": "0.00",
+            "activation_fee": "1.00",
+            "max_subscribers": 100,
+            "max_routers": 5,
+            "max_staff": 5,
+            "is_active": True,
+            "is_selfie_activation_plan": True,
+        })
+        self.assertTrue(serializer.is_valid(), serializer.errors)
+        self.assertEqual(serializer.validated_data["activation_fee"], Decimal("1.00"))
+        self.assertTrue(serializer.validated_data["is_selfie_activation_plan"])
 
 
 class FinancialCSVTests(SimpleTestCase):
