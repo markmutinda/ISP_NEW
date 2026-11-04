@@ -576,39 +576,80 @@ class RadiusSyncService:
         return self.sync_service_connection(subscription.service_connection)
 
     # ═════════════════════════════════════════════════════════════════
-    # 🟢 FIXED METHOD WITH DEFENSIVE NETWORK BLOCKS
+    # 🔥 DRIFT REPAIR (hourly safety net — source of truth: CustomerRadiusCredentials)
     # ═════════════════════════════════════════════════════════════════
     def sync_all_customers(self) -> Dict[str, Any]:
         """
-        Loops through all ServiceConnections inside the active tenant schema
-        and ensures their check/reply profile configurations match the database state.
-        Implements guardrails: if is_enabled is False, user is disabled.
-        """
-        from apps.customers.models import ServiceConnection
-        
-        connections = ServiceConnection.objects.select_related('customer', 'plan').all()
-        total_synced = 0
-        
-        for conn in connections:
-            try:
-                # Fetch radius credentials safely to inspect active network allowance profiles
-                creds = getattr(conn.customer, 'radius_credentials', None) if conn.customer else None
-                is_network_enabled = getattr(creds, 'is_enabled', True) if creds else True
+        Drift repair (hourly safety net).
 
-                # Guardrail: Only sync as live if connection is active AND not flagged as disabled
-                if conn.status == 'ACTIVE' and conn.plan and is_network_enabled:
-                    self.sync_service_connection(conn)
+        CustomerRadiusCredentials is the single source of truth. We only call
+        creds.sync_to_radius() for users whose radcheck state differs from it,
+        instead of rebuilding every user from ServiceConnection.activation_date
+        (which ignored renewals and wiped Framed-IP / rate-limit / FUP attrs).
+
+        Why: the previous implementation rebuilt each user's radcheck from
+        service.activation_date + plan validity, which never moved on renewal.
+        A renewed customer's radcheck.Expiration was being silently overwritten
+        at the next :00 with the old activation-based value, and FreeRADIUS
+        walled them even though the dashboard showed the correct future expiry.
+
+        Returns:
+            {'total': <number of CustomerRadiusCredentials checked>,
+             'repaired': <number resynced>}
+        """
+        from apps.radius.models import CustomerRadiusCredentials
+
+        fmt = "%b %d %Y %H:%M:%S"
+
+        # One query each: current radcheck state for the whole tenant.
+        expiry_map = dict(
+            RadCheck.objects.filter(attribute=self.ATTR_EXPIRATION)
+            .values_list('username', 'value')
+        )
+        password_users = set(
+            RadCheck.objects.filter(attribute=self.ATTR_PASSWORD)
+            .values_list('username', flat=True)
+        )
+        rejected_users = set(
+            RadCheck.objects.filter(attribute=self.ATTR_AUTH_TYPE, value='Reject')
+            .values_list('username', flat=True)
+        )
+
+        checked = 0
+        repaired = 0
+
+        qs = CustomerRadiusCredentials.objects.select_related(
+            'customer', 'bandwidth_profile', 'assigned_ip_address__ip_pool'
+        )
+        for cred in qs.iterator(chunk_size=500):
+            checked += 1
+            try:
+                if cred.is_enabled:
+                    expected = (
+                        cred.expiration_date.astimezone(datetime.timezone.utc).strftime(fmt)
+                        if cred.expiration_date else None
+                    )
+                    drifted = (
+                        cred.username not in password_users
+                        or cred.username in rejected_users
+                        or expiry_map.get(cred.username) != expected
+                    )
                 else:
-                    # Resolve username definitions defensively matching core schemas
-                    base_user = getattr(creds, 'username', None) if creds else getattr(conn, 'billing_account_number', None)
-                    if not base_user and conn.customer:
-                        base_user = conn.customer.phone_number
-                        
-                    if base_user:
-                        radius_username = self._generate_unique_username(base_user)
-                        self.disable_radius_user(radius_username, f"Auto-disabled due to state: {conn.status} (Network Enabled: {is_network_enabled})")
-                total_synced += 1
+                    drifted = cred.username not in rejected_users
+
+                if not drifted:
+                    continue
+
+                cred._is_syncing = True  # suppress the post_save signal re-sync
+                try:
+                    cred.sync_to_radius()
+                finally:
+                    cred._is_syncing = False
+                repaired += 1
+                logger.warning(
+                    f"[RADIUS DRIFT REPAIR] {cred.username}: radcheck out of sync with credentials, resynced"
+                )
             except Exception as e:
-                logger.error(f"[BULK RADIUS SYNC ERROR] Failed on connection ID {conn.id}: {e}")
-                
-        return {'total': total_synced}
+                logger.error(f"[RADIUS DRIFT REPAIR] Failed for {cred.username}: {e}")
+
+        return {'total': checked, 'repaired': repaired}
