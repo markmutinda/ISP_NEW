@@ -17,19 +17,37 @@ UNLOCK_HEADER = "HTTP_X_PAYMENT_METHODS_UNLOCK"
 UNLOCK_SALT = "netily.payment-methods.unlock"
 
 
+IMPERSONATION_CLAIM = "impersonated_by"
+
+
 def is_payment_method_pin_bypass_user(user) -> bool:
     """Platform operators must not be locked behind a tenant-owned secret."""
     role = str(getattr(user, "role", "") or "").strip().lower()
     return bool(getattr(user, "is_superuser", False) or role in {"superadmin", "super_admin"})
 
 
-def _token_id(request) -> str:
+def _token_claim(request, claim: str):
     token = getattr(request, "auth", None)
     try:
-        value = token.get("jti", "")
+        return token.get(claim)
     except AttributeError:
-        value = ""
-    return str(value or "no-jti")
+        return None
+
+
+def is_payment_method_pin_bypass(request) -> bool:
+    """
+    Superadmins bypass the tenant PIN, including when they open a tenant panel
+    through impersonation (the token is issued for the tenant admin but carries
+    the operator's id in the impersonated_by claim).
+    """
+    return bool(
+        is_payment_method_pin_bypass_user(getattr(request, "user", None))
+        or _token_claim(request, IMPERSONATION_CLAIM)
+    )
+
+
+def _token_id(request) -> str:
+    return str(_token_claim(request, "jti") or "no-jti")
 
 
 def _scope(request) -> str:
@@ -37,8 +55,14 @@ def _scope(request) -> str:
     return sha256(raw.encode("utf-8")).hexdigest()
 
 
-def _unlock_identity(request) -> str:
-    raw = f"{connection.schema_name}:{request.user.pk}"
+def _pin_version(pin_hash: str) -> str:
+    # The salted hash changes on every set/change, so binding unlocks to it
+    # relocks every session the moment the PIN is replaced.
+    return sha256(str(pin_hash or "").encode("utf-8")).hexdigest()[:16]
+
+
+def _unlock_identity(request, pin_hash: str) -> str:
+    raw = f"{connection.schema_name}:{request.user.pk}:{_pin_version(pin_hash)}"
     return sha256(raw.encode("utf-8")).hexdigest()
 
 
@@ -46,31 +70,41 @@ def _cache_key(kind: str, request) -> str:
     return f"payment-method-pin:{kind}:{_scope(request)}"
 
 
+def _unlock_cache_key(request, pin_hash: str) -> str:
+    return f"{_cache_key('unlocked', request)}:{_pin_version(pin_hash)}"
+
+
+def _current_pin_hash() -> str:
+    return GlobalSystemSettings.get_solo().payment_methods_pin_hash or ""
+
+
 def is_pin_configured() -> bool:
-    return bool(GlobalSystemSettings.get_solo().payment_methods_pin_hash)
+    return bool(_current_pin_hash())
 
 
 def payment_method_pin_is_unlocked(request) -> bool:
-    if is_payment_method_pin_bypass_user(request.user):
+    if is_payment_method_pin_bypass(request):
         return True
-    if not is_pin_configured():
+    pin_hash = _current_pin_hash()
+    if not pin_hash:
         return False
     token = str(request.META.get(UNLOCK_HEADER) or "").strip()
     if token:
         try:
             payload = signing.loads(token, salt=UNLOCK_SALT, max_age=UNLOCK_SECONDS)
-            if payload == _unlock_identity(request):
+            if payload == _unlock_identity(request, pin_hash):
                 return True
         except (signing.BadSignature, signing.SignatureExpired):
             pass
-    return bool(cache.get(_cache_key("unlocked", request)))
+    return bool(cache.get(_unlock_cache_key(request, pin_hash)))
 
 
 def unlock_payment_methods(request) -> str:
-    cache.set(_cache_key("unlocked", request), True, timeout=UNLOCK_SECONDS)
+    pin_hash = _current_pin_hash()
+    cache.set(_unlock_cache_key(request, pin_hash), True, timeout=UNLOCK_SECONDS)
     cache.delete(_cache_key("failures", request))
     cache.delete(_cache_key("locked", request))
-    return signing.dumps(_unlock_identity(request), salt=UNLOCK_SALT, compress=True)
+    return signing.dumps(_unlock_identity(request, pin_hash), salt=UNLOCK_SALT, compress=True)
 
 
 def lock_seconds_remaining(request) -> int:

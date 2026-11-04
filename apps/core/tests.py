@@ -100,7 +100,26 @@ class PaymentMethodPinTests(SimpleTestCase):
         request = SimpleNamespace(user=SimpleNamespace(is_superuser=False, role="superadmin"))
         self.assertTrue(payment_method_pin_is_unlocked(request))
 
-    @patch("apps.core.payment_method_pin.is_pin_configured", return_value=True)
+    def test_impersonating_superadmin_bypasses_tenant_pin(self):
+        request = SimpleNamespace(
+            user=SimpleNamespace(is_superuser=False, role="admin"),
+            auth={"impersonated_by": "7"},
+        )
+        self.assertTrue(payment_method_pin_is_unlocked(request))
+
+    @patch("apps.core.payment_method_pin._current_pin_hash")
+    def test_changing_pin_invalidates_existing_unlock(self, current_hash):
+        current_hash.return_value = "pbkdf2$old"
+        user = SimpleNamespace(pk=92, is_superuser=False, role="admin")
+        auth = {"jti": "session-456"}
+        token = unlock_payment_methods(SimpleNamespace(user=user, auth=auth, META={}))
+
+        current_hash.return_value = "pbkdf2$new"
+        cache.clear()
+        request = SimpleNamespace(user=user, auth=auth, META={"HTTP_X_PAYMENT_METHODS_UNLOCK": token})
+        self.assertFalse(payment_method_pin_is_unlocked(request))
+
+    @patch("apps.core.payment_method_pin._current_pin_hash", return_value="pbkdf2$hash")
     def test_signed_unlock_propagates_without_relying_on_worker_cache(self, _configured):
         user = SimpleNamespace(pk=91, is_superuser=False, role="admin")
         auth = {"jti": "session-123"}

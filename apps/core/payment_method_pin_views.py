@@ -18,7 +18,7 @@ from apps.core.payment_method_pin import (
     lock_seconds_remaining,
     payment_method_pin_is_unlocked,
     record_failed_attempt,
-    is_payment_method_pin_bypass_user,
+    is_payment_method_pin_bypass,
     unlock_payment_methods,
     validate_new_pin,
 )
@@ -36,7 +36,7 @@ def _can_manage_pin(user) -> bool:
 
 def _status_payload(request, unlock_token=""):
     settings = GlobalSystemSettings.get_solo()
-    bypass = is_payment_method_pin_bypass_user(request.user)
+    bypass = is_payment_method_pin_bypass(request)
     return {
         "configured": bool(settings.payment_methods_pin_hash),
         "unlocked": bypass or payment_method_pin_is_unlocked(request),
@@ -99,16 +99,18 @@ class PaymentMethodPinSetupView(APIView):
             settings.payment_methods_pin_updated_at = timezone.now()
             settings.save(update_fields=["payment_methods_pin_hash", "payment_methods_pin_updated_at"])
 
-        unlock_token = unlock_payment_methods(request)
+        # Saving the PIN does not unlock Payment Methods: the page must be
+        # opened with the PIN like any other session. The guard on the page
+        # itself verifies straight after first-time setup.
         _audit(request, "create")
-        return Response(_status_payload(request, unlock_token), status=status.HTTP_201_CREATED)
+        return Response(_status_payload(request), status=status.HTTP_201_CREATED)
 
 
 class PaymentMethodPinVerifyView(APIView):
     permission_classes = [IsAuthenticated]
 
     def post(self, request):
-        if is_payment_method_pin_bypass_user(request.user):
+        if is_payment_method_pin_bypass(request):
             return Response(_status_payload(request))
         remaining = lock_seconds_remaining(request)
         if remaining:
@@ -151,7 +153,7 @@ class PaymentMethodPinChangeView(APIView):
         settings = GlobalSystemSettings.get_solo()
         if not settings.payment_methods_pin_hash:
             return Response({"detail": "Set the PIN first."}, status=status.HTTP_409_CONFLICT)
-        if not is_payment_method_pin_bypass_user(request.user):
+        if not is_payment_method_pin_bypass(request):
             current_pin = str(request.data.get("current_pin") or "").strip()
             if not check_password(current_pin, settings.payment_methods_pin_hash):
                 return Response({"current_pin": ["Current PIN is incorrect."]}, status=status.HTTP_400_BAD_REQUEST)
@@ -166,6 +168,6 @@ class PaymentMethodPinChangeView(APIView):
         settings.payment_methods_pin_hash = make_password(pin)
         settings.payment_methods_pin_updated_at = timezone.now()
         settings.save(update_fields=["payment_methods_pin_hash", "payment_methods_pin_updated_at"])
-        unlock_token = unlock_payment_methods(request)
+        # The new hash invalidates every existing unlock, including this one.
         _audit(request, "update")
-        return Response(_status_payload(request, unlock_token))
+        return Response(_status_payload(request))

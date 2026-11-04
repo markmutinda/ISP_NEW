@@ -2703,6 +2703,9 @@ class TenantImpersonateView(APIView):
         try:
             from apps.core.session_tokens import issue_refresh_token
             refresh = issue_refresh_token(target_user)
+            # Marks this session as a platform operator so tenant-owned locks
+            # (Payment Methods PIN) do not apply. Copied into access tokens.
+            refresh["impersonated_by"] = str(request.user.id)
             tokens = {
                 "access": str(refresh.access_token),
                 "refresh": str(refresh),
