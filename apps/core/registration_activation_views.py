@@ -199,6 +199,22 @@ class TenantActivationStatusView(APIView):
                     pass
             return Response(_payload(payment))
 
+    def delete(self, request, payment_id):
+        _operator_allowed(request)
+        with schema_context(get_public_schema_name()):
+            payment = TenantActivationPayment.objects.filter(pk=payment_id).first()
+            if not payment:
+                return Response({"detail": "Activation payment not found."}, status=404)
+            if payment.status not in ["pending", "processing", "failed", "expired"]:
+                return Response(
+                    {"detail": "A confirmed or provisioning payment cannot be cancelled."},
+                    status=status.HTTP_409_CONFLICT,
+                )
+            payment.status = "expired"
+            payment.failure_reason = "Cancelled by the platform operator before creating a replacement request."
+            payment.save(update_fields=["status", "failure_reason", "updated_at"])
+            return Response(_payload(payment))
+
 
 class TenantActivationFinishView(APIView):
     permission_classes = [IsAuthenticated]
