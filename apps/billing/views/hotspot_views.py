@@ -1141,34 +1141,15 @@ class HotspotPurchaseStatusView(APIView):
                 })
 
             elif session.status == 'paid':
-                session.activate(session.access_code)
-
-                closed_count = _close_prior_radacct_rows_for_renewal(session, session.access_code)
-                if closed_count > 0:
-                    logger.info(
-                        f"Closed {closed_count} old RADIUS sessions for {session.access_code} before renewal activation"
-                    )
-
-                try:
-                    from apps.billing.services.hotspot_radius_service import HotspotRadiusService
-
-                    radius_service = HotspotRadiusService()
-                    radius_service.create_hotspot_credentials(
-                        username=session.access_code,
-                        password=session.access_code,
-                        router=session.router,
-                        plan=session.plan,
-                        expires_at=session.expires_at,
-                        mac_address=session.mac_address or '',
-                    )
-
-                    schedule_tv_login_push(session, tenant.schema_name)
-                except Exception as e:
-                    logger.error(f"RADIUS activation failed for paid session {session.session_id}: {e}")
-
-                from apps.messaging.tasks import send_hotspot_welcome_sms
-                send_hotspot_welcome_sms.delay(session.session_id, tenant.schema_name)
-
+                from apps.billing.services.hotspot_activation import settle_hotspot_session
+                settle_hotspot_session(session)
+                session.refresh_from_db()
+                if session.status != 'active':
+                    return Response({
+                        'status': 'pending',
+                        'message': 'Payment received, activating your connection...',
+                        'session_id': session.session_id,
+                    })
                 return Response({
                     'status': 'success',
                     'message': 'Payment received! You are now connected.',
@@ -1193,37 +1174,9 @@ class HotspotPurchaseStatusView(APIView):
                         session.payment = payment
                         session.save(update_fields=['tuma_checkout_request_id', 'tuma_merchant_request_id', 'payment'])
 
-                    session.activate(session.access_code)
-
-                    closed_count = _close_prior_radacct_rows_for_renewal(session, session.access_code)
-                    if closed_count > 0:
-                        logger.info(
-                            f"Closed {closed_count} old RADIUS sessions for {session.access_code} before renewal activation"
-                        )
-
-                    try:
-                        from apps.billing.services.hotspot_radius_service import HotspotRadiusService
-
-                        radius_service = HotspotRadiusService()
-                        radius_service.create_hotspot_credentials(
-                            username=session.access_code,
-                            password=session.access_code,
-                            router=session.router,
-                            plan=session.plan,
-                            expires_at=session.expires_at,
-                            mac_address=session.mac_address or '',
-                        )
-
-                        schedule_tv_login_push(session, tenant.schema_name)
-                    except Exception as e:
-                        logger.error(
-                            f"Failed to create RADIUS credentials for session "
-                            f"{session.session_id}: {e}",
-                            exc_info=True
-                        )
-
-                    from apps.messaging.tasks import send_hotspot_welcome_sms
-                    send_hotspot_welcome_sms.delay(session.session_id, tenant.schema_name)
+                    from apps.billing.services.hotspot_activation import settle_hotspot_session
+                    settle_hotspot_session(session, mpesa_receipt)
+                    session.refresh_from_db()
 
                     return Response({
                         'status': 'success',

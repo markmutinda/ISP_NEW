@@ -115,11 +115,13 @@ def cleanup_expired_hotspot_sessions():
     """
     def _cleanup(tenant):
         from apps.billing.services.hotspot_radius_service import HotspotRadiusService
+        from apps.billing.services.hotspot_activation import recover_stuck_hotspot_sessions
         service = HotspotRadiusService()
         count = service.cleanup_expired_sessions()
-        if count:
-            logger.info(f"[{tenant.schema_name}] Cleaned up {count} expired hotspot sessions")
-        return {'cleaned': count}
+        recovered = recover_stuck_hotspot_sessions()
+        if count or recovered:
+            logger.info(f"[{tenant.schema_name}] cleaned={count} recovered_stuck={recovered}")
+        return {'cleaned': count, 'recovered': recovered}
 
     try:
         return _for_each_tenant(_cleanup)
@@ -144,8 +146,8 @@ def expire_stale_pending_payments():
         cutoff = timezone.now() - timedelta(minutes=10)
         stale_sessions = HotspotSession.objects.filter(
             status='pending',
-            created_at__lt=cutoff
-        )
+            created_at__lt=cutoff,
+        ).exclude(payment__status='COMPLETED')
         count = stale_sessions.count()
         for session in stale_sessions:
             session.mark_failed('Payment timeout — STK push not confirmed')

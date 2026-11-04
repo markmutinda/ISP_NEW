@@ -1272,25 +1272,17 @@ class PaymentViewSet(viewsets.ModelViewSet):
                             except Exception as pppoe_err:
                                 logger.exception("PPPoE renewal failed for %s: %s", payment.payment_number, pppoe_err)
 
-                        # ============================================================
-                        # FIX: Propagate completion to linked HotspotSession (Daraja hotspot flow)
-                        # ============================================================
+                        # Hotspot (Daraja): confirm -> activate -> RADIUS, server-side
                         try:
                             from apps.billing.models.hotspot_models import HotspotSession
-                            hotspot_session = (
-                                HotspotSession.objects
-                                .filter(payment=payment, status='pending')
-                                .select_related('plan', 'router')
-                                .first()
-                            )
-                            if hotspot_session:
-                                hotspot_session.mark_paid(payment.mpesa_receipt or '')
-                                logger.info(
-                                    f"HotspotSession {hotspot_session.session_id} marked paid "
-                                    f"via Daraja callback (receipt={payment.mpesa_receipt})"
-                                )
+                            from apps.billing.services.hotspot_activation import settle_hotspot_session
+                            hs = (HotspotSession.objects
+                                  .filter(payment=payment, status__in=('pending', 'paid'))
+                                  .first())
+                            if hs:
+                                settle_hotspot_session(hs, payment.mpesa_receipt or '')
                         except Exception as hs_err:
-                            logger.warning(f"Could not update hotspot session from Daraja callback: {hs_err}")
+                            logger.warning(f"Hotspot settle from Daraja callback failed (sweep will retry): {hs_err}")
                         
                         # ============================================================
                         # FIX: Update MpesaTransaction with idempotency check

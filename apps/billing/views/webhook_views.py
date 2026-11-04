@@ -408,7 +408,8 @@ class MpesaC2BWebhookView(APIView):
                                 )
                                 mpesa_txn.payment = payment
                                 mpesa_txn.save(update_fields=['payment'])
-                                hotspot_session.mark_paid(trans_id)
+                                from apps.billing.services.hotspot_activation import settle_hotspot_session
+                                settle_hotspot_session(hotspot_session, trans_id)
                                 return Response({"ResultCode": 0, "ResultDesc": "Success"}, status=status.HTTP_200_OK)
 
                         # ── Customer-portal STK payment confirmed via C2B (ref = "PP<payment_id>") ──
