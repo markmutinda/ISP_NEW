@@ -23,7 +23,7 @@ class PaymentUnlockTests(SimpleTestCase):
         self.payment = MagicMock(
             id='payment', pk='payment', subscription_id='sub',
             status='pending', activation_applied_at=None, mpesa_receipt='',
-            completed_at=None, period_end=None, subscription=self.subscription,
+            completed_at=None, period_start=None, period_end=None, subscription=self.subscription,
         )
 
     def complete(self, invoice):
@@ -59,6 +59,38 @@ class PaymentUnlockTests(SimpleTestCase):
         sync.assert_not_called()
         on_commit.assert_not_called()
         self.subscription.extend_subscription.assert_not_called()
+
+    def test_second_payment_for_same_window_does_not_extend_again(self):
+        # Two STK pushes initiated before either settled share period_start.
+        self.subscription.status = 'active'
+        self.payment.period_start = timezone.now() + timedelta(days=20)
+        first = SimpleNamespace(id='first', mpesa_receipt='FIRST')
+        with (
+            patch('apps.subscriptions.billing_lifecycle.schema_context', return_value=nullcontext()),
+            patch('django.db.transaction.atomic', return_value=nullcontext()),
+            patch('django.db.transaction.on_commit') as on_commit,
+            patch('apps.subscriptions.models.SubscriptionPayment.objects') as payments,
+            patch('apps.subscriptions.models.CompanySubscription.objects') as subscriptions,
+            patch('apps.subscriptions.billing_lifecycle.sync_subscription_invoice_payment') as sync,
+        ):
+            payments.select_for_update.return_value.get.return_value = self.payment
+            subscriptions.select_for_update.return_value.get.return_value = self.subscription
+            payments.filter.return_value.exclude.return_value.order_by.return_value.first.return_value = first
+            complete_subscription_stk_payment(self.payment, 'SECOND')
+
+        payments.filter.assert_called_once_with(
+            subscription_id='sub',
+            period_start=self.payment.period_start,
+            status='completed',
+            activation_applied_at__isnull=False,
+        )
+        self.subscription.extend_subscription.assert_not_called()
+        self.subscription.convert_from_trial.assert_not_called()
+        self.payment.apply_intended_plan.assert_not_called()
+        sync.assert_not_called()
+        self.assertIsNotNone(self.payment.activation_applied_at)
+        self.assertIn('Duplicate payment', self.payment.failure_reason)
+        on_commit.assert_called_once()
 
     def test_completed_but_unactivated_payment_is_repaired(self):
         self.payment.status = 'completed'

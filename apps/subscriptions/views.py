@@ -55,6 +55,10 @@ from .serializers import (
 
 logger = logging.getLogger(__name__)
 
+# Daraja STK prompts time out on the handset after ~60-90s; while one is still
+# live, a repeat "Pay" tap must reuse it rather than send a second prompt.
+STK_IN_FLIGHT_WINDOW_SECONDS = 120
+
 
 class FreshBillingResponseMixin:
     def finalize_response(self, request, response, *args, **kwargs):
@@ -902,7 +906,35 @@ class InitiateSubscriptionPaymentView(APIView):
                 # NOTE: Do NOT update subscription.plan here.
                 # The plan switch is deferred to payment success (webhook/polling)
                 # to prevent phantom plan changes from unpaid STK pushes.
-                
+
+                # Lock the subscription so concurrent taps serialize, then hand
+                # back an STK that is still awaiting the PIN instead of sending a
+                # second prompt the tenant can also approve.
+                if payment_method == 'mpesa_stk' and not created:
+                    CompanySubscription.objects.select_for_update().filter(pk=subscription.pk).first()
+                    in_flight = (
+                        SubscriptionPayment.objects.filter(
+                            subscription=subscription,
+                            payment_method='mpesa_stk',
+                            status__in=['pending', 'processing'],
+                            created_at__gte=timezone.now() - timedelta(seconds=STK_IN_FLIGHT_WINDOW_SECONDS),
+                        )
+                        .order_by('-created_at')
+                        .first()
+                    )
+                    if in_flight:
+                        logger.info(
+                            "Reusing in-flight subscription STK payment %s for %s",
+                            in_flight.id, tenant.schema_name,
+                        )
+                        return Response({
+                            'status': 'pending',
+                            'payment_id': str(in_flight.id),
+                            'checkout_request_id': in_flight.payhero_checkout_id or '',
+                            'merchant_request_id': '',
+                            'message': 'A payment prompt was already sent. Check your phone and enter your M-Pesa PIN.',
+                        })
+
                 # Create payment record with intended plan
                 period_start = subscription.current_period_end or timezone.now()
                 payment = SubscriptionPayment.objects.create(

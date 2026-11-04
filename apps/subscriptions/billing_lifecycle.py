@@ -312,6 +312,13 @@ def complete_subscription_stk_payment(payment, mpesa_receipt=""):
             newly_received = locked.status != 'completed'
             if newly_received:
                 locked.mark_completed(mpesa_receipt=mpesa_receipt)
+            # Two STK pushes started before either settled share the same
+            # period_start (both are computed from the same current_period_end).
+            # Once one has renewed that window, the other must not add another
+            # month — record the money and flag it for refund/credit instead.
+            duplicate_of = _payment_already_applied_for_window(locked)
+            if duplicate_of:
+                return _record_duplicate_window_payment(locked, duplicate_of, mpesa_receipt)
             invoice = sync_subscription_invoice_payment(locked, notify=False)
             if mpesa_receipt and not locked.mpesa_receipt:
                 locked.mpesa_receipt = mpesa_receipt
@@ -342,6 +349,61 @@ def complete_subscription_stk_payment(payment, mpesa_receipt=""):
                 if newly_received and invoice:
                     transaction.on_commit(lambda: _queue_completed_subscription_notice(locked.id, invoice.pk, activated=False))
             return locked, invoice
+
+
+def _payment_already_applied_for_window(payment):
+    """Return another payment that already renewed this payment's billing window."""
+    from .models import SubscriptionPayment
+
+    if not payment.period_start:
+        return None
+    return (
+        SubscriptionPayment.objects.filter(
+            subscription_id=payment.subscription_id,
+            period_start=payment.period_start,
+            status='completed',
+            activation_applied_at__isnull=False,
+        )
+        .exclude(pk=payment.pk)
+        .order_by('activation_applied_at')
+        .first()
+    )
+
+
+def _record_duplicate_window_payment(payment, duplicate_of, mpesa_receipt=""):
+    """Keep the duplicate's money on record without extending the subscription."""
+    if mpesa_receipt and not payment.mpesa_receipt:
+        payment.mpesa_receipt = mpesa_receipt
+    payment.activation_applied_at = timezone.now()
+    payment.failure_reason = (
+        f"Duplicate payment: billing period starting {payment.period_start:%Y-%m-%d %H:%M} "
+        f"was already renewed by payment {duplicate_of.id} "
+        f"({duplicate_of.mpesa_receipt or 'no receipt'}). Not applied — refund or credit."
+    )
+    payment.save(update_fields=['mpesa_receipt', 'activation_applied_at', 'failure_reason'])
+    logger.warning(
+        'Duplicate subscription payment not applied: payment=%s duplicate_of=%s subscription=%s',
+        payment.id, duplicate_of.id, payment.subscription_id,
+    )
+    transaction.on_commit(lambda: _alert_duplicate_subscription_payment(payment, duplicate_of))
+    return payment, None
+
+
+def _alert_duplicate_subscription_payment(payment, duplicate_of):
+    try:
+        from apps.notifications.tasks import send_telegram_payment_alert_task
+
+        message = (
+            "⚠️ <b>DUPLICATE SUBSCRIPTION PAYMENT</b>\n\n"
+            f"🏢 Tenant: <b>{payment.subscription.company.name}</b>\n"
+            f"💵 Amount: <b>KES {money(payment.amount):,.2f}</b>\n"
+            f"🧾 Receipt: {payment.mpesa_receipt or 'N/A'}\n"
+            f"🔁 Same period already paid by: {duplicate_of.mpesa_receipt or duplicate_of.id}\n"
+            "No extra days were added. Refund or credit this payment."
+        )
+        send_telegram_payment_alert_task.apply_async(args=[message], retry=False)
+    except Exception as exc:
+        logger.warning("Duplicate subscription payment alert failed: %s", exc)
 
 
 def _notify_completed_subscription(payment, invoice):
