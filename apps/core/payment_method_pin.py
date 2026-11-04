@@ -3,6 +3,7 @@
 from hashlib import sha256
 
 from django.core.cache import cache
+from django.core import signing
 from django.db import connection
 
 from apps.core.models import GlobalSystemSettings
@@ -12,6 +13,8 @@ PIN_LENGTH = 6
 MAX_FAILED_ATTEMPTS = 5
 LOCK_SECONDS = 15 * 60
 UNLOCK_SECONDS = 15 * 60
+UNLOCK_HEADER = "HTTP_X_PAYMENT_METHODS_UNLOCK"
+UNLOCK_SALT = "netily.payment-methods.unlock"
 
 
 def is_payment_method_pin_bypass_user(user) -> bool:
@@ -34,6 +37,11 @@ def _scope(request) -> str:
     return sha256(raw.encode("utf-8")).hexdigest()
 
 
+def _unlock_identity(request) -> str:
+    raw = f"{connection.schema_name}:{request.user.pk}"
+    return sha256(raw.encode("utf-8")).hexdigest()
+
+
 def _cache_key(kind: str, request) -> str:
     return f"payment-method-pin:{kind}:{_scope(request)}"
 
@@ -47,13 +55,22 @@ def payment_method_pin_is_unlocked(request) -> bool:
         return True
     if not is_pin_configured():
         return False
+    token = str(request.META.get(UNLOCK_HEADER) or "").strip()
+    if token:
+        try:
+            payload = signing.loads(token, salt=UNLOCK_SALT, max_age=UNLOCK_SECONDS)
+            if payload == _unlock_identity(request):
+                return True
+        except (signing.BadSignature, signing.SignatureExpired):
+            pass
     return bool(cache.get(_cache_key("unlocked", request)))
 
 
-def unlock_payment_methods(request) -> None:
+def unlock_payment_methods(request) -> str:
     cache.set(_cache_key("unlocked", request), True, timeout=UNLOCK_SECONDS)
     cache.delete(_cache_key("failures", request))
     cache.delete(_cache_key("locked", request))
+    return signing.dumps(_unlock_identity(request), salt=UNLOCK_SALT, compress=True)
 
 
 def lock_seconds_remaining(request) -> int:

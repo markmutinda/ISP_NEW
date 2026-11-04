@@ -5827,7 +5827,7 @@ class SubscriptionReminderRecipientListView(APIView):
         from apps.billing.models import Invoice
         from apps.subscriptions.models import BillingCycle, CompanySubscription
         from apps.subscriptions.reminder_recipients import tenant_billing_recipients
-        from apps.subscriptions.tasks import _cycle_is_settled_or_renewed, _decimal_money
+        from apps.subscriptions.tasks import _cycle_is_settled_or_renewed, _decimal_money, _invoice_reminder_target_date
 
         today = timezone.localdate()
         search = str(request.query_params.get("search") or "").strip().lower()
@@ -5865,12 +5865,8 @@ class SubscriptionReminderRecipientListView(APIView):
                         invoice = Invoice.objects.filter(pk=cycle.invoice_reference).first()
                 except Exception as exc:
                     logger.warning("Could not resolve subscription invoice for tenant=%s: %s", tenant.pk, exc)
-            due_date = (
-                invoice.due_date
-                if invoice and invoice.due_date
-                else cycle.end_date.date() if cycle and cycle.end_date
-                else subscription_expiry.date() if subscription_expiry
-                else None
+            due_date = _invoice_reminder_target_date(invoice, cycle) if cycle else (
+                subscription_expiry.date() if subscription_expiry else tenant.subscription_expiry
             )
             days_left = (due_date - today).days if due_date else None
             is_settled = bool(cycle and _cycle_is_settled_or_renewed(cycle, invoice))

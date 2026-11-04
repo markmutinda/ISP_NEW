@@ -34,7 +34,7 @@ def _can_manage_pin(user) -> bool:
     )
 
 
-def _status_payload(request):
+def _status_payload(request, unlock_token=""):
     settings = GlobalSystemSettings.get_solo()
     bypass = is_payment_method_pin_bypass_user(request.user)
     return {
@@ -45,6 +45,7 @@ def _status_payload(request):
         "locked_seconds": lock_seconds_remaining(request),
         "unlock_seconds": UNLOCK_SECONDS,
         "updated_at": settings.payment_methods_pin_updated_at,
+        "unlock_token": unlock_token or None,
     }
 
 
@@ -98,9 +99,9 @@ class PaymentMethodPinSetupView(APIView):
             settings.payment_methods_pin_updated_at = timezone.now()
             settings.save(update_fields=["payment_methods_pin_hash", "payment_methods_pin_updated_at"])
 
-        unlock_payment_methods(request)
+        unlock_token = unlock_payment_methods(request)
         _audit(request, "create")
-        return Response(_status_payload(request), status=status.HTTP_201_CREATED)
+        return Response(_status_payload(request, unlock_token), status=status.HTTP_201_CREATED)
 
 
 class PaymentMethodPinVerifyView(APIView):
@@ -134,8 +135,8 @@ class PaymentMethodPinVerifyView(APIView):
                 {"detail": detail, "attempts_left": attempts_left, "locked_seconds": LOCK_SECONDS if not attempts_left else 0},
                 status=status.HTTP_423_LOCKED if not attempts_left else status.HTTP_400_BAD_REQUEST,
             )
-        unlock_payment_methods(request)
-        return Response(_status_payload(request))
+        unlock_token = unlock_payment_methods(request)
+        return Response(_status_payload(request, unlock_token))
 
 
 class PaymentMethodPinChangeView(APIView):
@@ -165,6 +166,6 @@ class PaymentMethodPinChangeView(APIView):
         settings.payment_methods_pin_hash = make_password(pin)
         settings.payment_methods_pin_updated_at = timezone.now()
         settings.save(update_fields=["payment_methods_pin_hash", "payment_methods_pin_updated_at"])
-        unlock_payment_methods(request)
+        unlock_token = unlock_payment_methods(request)
         _audit(request, "update")
-        return Response(_status_payload(request))
+        return Response(_status_payload(request, unlock_token))

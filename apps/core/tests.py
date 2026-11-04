@@ -17,7 +17,7 @@ from apps.core.authentication import SessionBoundJWTAuthentication
 from apps.core.email_delivery import send_transactional_email
 from apps.core.otp_service import OTPService, OTPRateLimitedError, OTPError
 from apps.core.permissions import HasCompanyAccess, HasRoleAccessPolicy, IsAdmin, IsAdminOrStaff
-from apps.core.payment_method_pin import payment_method_pin_is_unlocked, validate_new_pin
+from apps.core.payment_method_pin import payment_method_pin_is_unlocked, unlock_payment_methods, validate_new_pin
 from apps.core.rbac_defaults import DEFAULT_ROLE_ACCESS_POLICIES
 from apps.core.serializers import CompanyBrandingSerializer, UserCreateSerializer
 from apps.core.session_tokens import (
@@ -99,6 +99,20 @@ class PaymentMethodPinTests(SimpleTestCase):
     def test_platform_role_bypasses_tenant_pin(self):
         request = SimpleNamespace(user=SimpleNamespace(is_superuser=False, role="superadmin"))
         self.assertTrue(payment_method_pin_is_unlocked(request))
+
+    @patch("apps.core.payment_method_pin.is_pin_configured", return_value=True)
+    def test_signed_unlock_propagates_without_relying_on_worker_cache(self, _configured):
+        user = SimpleNamespace(pk=91, is_superuser=False, role="admin")
+        auth = {"jti": "session-123"}
+        first_request = SimpleNamespace(user=user, auth=auth, META={})
+        token = unlock_payment_methods(first_request)
+        cache.clear()
+        next_request = SimpleNamespace(
+            user=user,
+            auth=auth,
+            META={"HTTP_X_PAYMENT_METHODS_UNLOCK": token},
+        )
+        self.assertTrue(payment_method_pin_is_unlocked(next_request))
 
 
 class LeadAlertMessageTests(SimpleTestCase):

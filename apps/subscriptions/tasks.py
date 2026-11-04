@@ -116,8 +116,22 @@ def _recipient_name(recipient):
     return name or recipient.get("email") or recipient.get("phone_number") or "Tenant admin"
 
 
+def _invoice_reminder_target_date(invoice, cycle):
+    """Return the latest authoritative service/due date; never expire active access early."""
+    candidates = []
+    for value in (
+        getattr(invoice, "due_date", None),
+        getattr(cycle, "end_date", None),
+        getattr(getattr(cycle, "subscription", None), "current_period_end", None),
+        getattr(getattr(cycle, "tenant", None), "subscription_expiry", None),
+    ):
+        if value:
+            candidates.append(value.date() if hasattr(value, "date") else value)
+    return max(candidates) if candidates else None
+
+
 def _invoice_reminder_milestone(invoice, cycle, today, target_days, send_expired_notice):
-    target_date = invoice.due_date if invoice and invoice.due_date else (cycle.end_date.date() if cycle and cycle.end_date else None)
+    target_date = _invoice_reminder_target_date(invoice, cycle)
     if not target_date:
         return None
 
@@ -134,7 +148,7 @@ def _invoice_reminder_milestone(invoice, cycle, today, target_days, send_expired
 
 def _invoice_reminder_copy(*, tenant_name, invoice, cycle, amount_due, milestone):
     invoice_number = invoice.invoice_number if invoice else ""
-    due_date = invoice.due_date if invoice and invoice.due_date else cycle.end_date.date()
+    due_date = _invoice_reminder_target_date(invoice, cycle)
     period = f"{cycle.start_date.date()} to {cycle.end_date.date()}"
     invoice_label = f" invoice {invoice_number}" if invoice_number else ""
 
@@ -205,7 +219,7 @@ def _render_invoice_reminder_template(*, template, tenant_name, invoice, cycle, 
     """Render approved reminder variables for saved or one-off copy."""
     admin_name = (recipient.get("first_name") or "").strip() or "there"
     plan_name = cycle.subscription.plan.name if cycle.subscription and cycle.subscription.plan else ""
-    target_date = invoice.due_date if invoice and invoice.due_date else cycle.end_date.date()
+    target_date = _invoice_reminder_target_date(invoice, cycle)
     if str(milestone).startswith("manual"):
         days_left = str(max((target_date - timezone.localdate()).days, 0))
     else:
