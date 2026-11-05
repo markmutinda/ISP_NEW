@@ -5,7 +5,7 @@ from datetime import timedelta
 from django.conf import settings
 from django.core.cache import cache
 from django.db import transaction
-from django.db.models import Count, Q, Sum
+from django.db.models import Count, F, Q, Sum
 from django.http import Http404
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
@@ -56,7 +56,9 @@ def _public_products():
 class CategoryListView(PublicAPIView):
     def get(self, request):
         def build():
-            qs = Category.objects.filter(is_active=True)
+            qs = Category.objects.filter(is_active=True).annotate(
+                product_count=Count("products", filter=Q(products__is_active=True)),
+            )
             return list(CategorySerializer(qs, many=True).data)
         return Response(_cached(f"shop:cats:{get_catalog_version()}", build))
 
@@ -85,9 +87,21 @@ class ProductListView(PublicAPIView):
                 qs = qs.filter(Q(category__slug=cat) | Q(category__name__iexact=cat))
             search = (qp.get("search") or "").strip()[:80]
             if search:
-                qs = qs.filter(Q(name__icontains=search) | Q(category__name__icontains=search) | Q(slug__icontains=search))
+                qs = qs.filter(
+                    Q(name__icontains=search) | Q(brand__icontains=search)
+                    | Q(category__name__icontains=search) | Q(slug__icontains=search)
+                )
+            brand = (qp.get("brand") or "").strip()[:120]
+            if brand:
+                qs = qs.filter(brand__iexact=brand)
             if qp.get("featured") in ("1", "true"):
                 qs = qs.filter(is_featured=True)
+            if qp.get("trending") in ("1", "true"):
+                qs = qs.filter(is_trending=True)
+            if qp.get("on_sale") in ("1", "true"):
+                qs = qs.filter(compare_at_price__gt=F("price"))
+            if qp.get("in_stock") in ("1", "true"):
+                qs = qs.filter(Q(track_stock=False) | Q(stock_quantity__gt=0))
             order = self.ORDERING.get(qp.get("ordering"))
             qs = qs.order_by(order, "pk") if order else qs.order_by("sort_order", "name", "pk")
             total = qs.count()

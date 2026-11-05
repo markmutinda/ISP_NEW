@@ -10,9 +10,11 @@ from .models import Category, Order, OrderItem, Product, ShopSettings
 
 # ───────────── Public (read) ─────────────
 class CategorySerializer(serializers.ModelSerializer):
+    product_count = serializers.IntegerField(read_only=True)
+
     class Meta:
         model = Category
-        fields = ["name", "slug"]
+        fields = ["name", "slug", "description", "image", "featured_brands", "product_count"]
 
 
 class ShopSettingsSerializer(serializers.ModelSerializer):
@@ -48,12 +50,14 @@ class ProductSerializer(serializers.ModelSerializer):
     madeIn = serializers.CharField(source="made_in", read_only=True)
     inStock = serializers.SerializerMethodField()
     isFeatured = serializers.BooleanField(source="is_featured", read_only=True)
+    isTrending = serializers.BooleanField(source="is_trending", read_only=True)
+    createdAt = serializers.DateTimeField(source="created_at", read_only=True)
 
     class Meta:
         model = Product
-        fields = ["id", "name", "category", "categorySlug", "price", "currency", "compareAtPrice", "image",
+        fields = ["id", "name", "brand", "category", "categorySlug", "price", "currency", "compareAtPrice", "image",
                   "hoverImage", "longDescription", "details", "materials", "care", "specsSheet",
-                  "warranty", "madeIn", "sizes", "colors", "inStock", "isFeatured"]
+                  "warranty", "madeIn", "sizes", "colors", "inStock", "isFeatured", "isTrending", "createdAt"]
         read_only_fields = fields
 
     def get_hoverImage(self, obj):
@@ -164,7 +168,12 @@ class AdminCategorySerializer(serializers.ModelSerializer):
 
     class Meta:
         model = Category
-        fields = ["id", "name", "slug", "sort_order", "is_active"]
+        fields = ["id", "name", "slug", "description", "image", "featured_brands", "sort_order", "is_active"]
+
+    def validate_featured_brands(self, value):
+        if not isinstance(value, list) or len(value) > 12:
+            raise serializers.ValidationError("Provide a list of up to 12 brands.")
+        return list(dict.fromkeys(str(item).strip()[:120] for item in value if str(item).strip()))
 
     def validate(self, attrs):
         if self.instance is None and not attrs.get("slug"):

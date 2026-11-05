@@ -2,10 +2,12 @@ from unittest.mock import patch
 
 from django.test import TestCase
 from rest_framework.exceptions import ValidationError
+from rest_framework.test import APIRequestFactory
 
 from apps.shop.models import Category, Order, Product, ShopSettings
 from apps.shop.services.orders import create_order
 from apps.shop.services.payments import apply_payment_result
+from apps.shop.views import CategoryListView, ProductListView
 
 
 def _payload(slug, qty):
@@ -61,3 +63,47 @@ class ShopOrderTests(TestCase):
             apply_payment_result("ws_CO_1", success=True, receipt="ABC123", amount=order.amount_kes)
         order.refresh_from_db()
         self.assertEqual((order.status, order.payment_status), ("paid", "paid"))
+
+
+class ShopDiscoveryTests(TestCase):
+    def setUp(self):
+        self.category = Category.objects.create(
+            name="Routers & Gateways",
+            slug="routers-gateways",
+            description="Core and edge routing.",
+            featured_brands=["MikroTik", "Ubiquiti"],
+        )
+        Product.objects.create(
+            slug="router-sale",
+            name="Router Sale",
+            brand="MikroTik",
+            category=self.category,
+            price=100,
+            compare_at_price=120,
+            stock_quantity=2,
+            is_trending=True,
+        )
+        Product.objects.create(
+            slug="router-hidden",
+            name="Hidden Router",
+            brand="Ubiquiti",
+            category=self.category,
+            price=200,
+            stock_quantity=0,
+            is_active=False,
+        )
+        self.factory = APIRequestFactory()
+
+    def test_categories_include_merchandising_and_live_count(self):
+        response = CategoryListView.as_view()(self.factory.get("/shop/categories/"))
+        self.assertEqual(response.data[0]["product_count"], 1)
+        self.assertEqual(response.data[0]["featured_brands"], ["MikroTik", "Ubiquiti"])
+
+    def test_catalog_filters_brand_sale_trending_and_stock(self):
+        request = self.factory.get(
+            "/shop/products/",
+            {"brand": "MikroTik", "on_sale": "true", "trending": "true", "in_stock": "true"},
+        )
+        response = ProductListView.as_view()(request)
+        self.assertEqual(response.data["count"], 1)
+        self.assertEqual(response.data["results"][0]["id"], "router-sale")
