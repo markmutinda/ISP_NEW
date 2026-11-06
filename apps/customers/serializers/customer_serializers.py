@@ -4,6 +4,7 @@ Serializers for Customer model
 from rest_framework import serializers
 from django.contrib.auth import get_user_model
 from django.utils import timezone
+from django.db import transaction
 from decimal import Decimal
 
 from apps.customers.models import Customer
@@ -83,6 +84,7 @@ class CustomerCreateSerializer(serializers.ModelSerializer):
         
         return data
     
+    @transaction.atomic
     def create(self, validated_data):
         # Extract user data
         email = validated_data.pop('email', '')
