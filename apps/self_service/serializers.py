@@ -83,9 +83,9 @@ class CustomerSelfRegisterSerializer(serializers.Serializer):
                 "Phone number must be in format 254XXXXXXXXX (e.g., 254712345678)"
             )
         
-        # Check uniqueness
-        if User.objects.filter(phone_number=phone).exists():
-            raise serializers.ValidationError("A user with this phone number already exists.")
+        # Check uniqueness (customers only)
+        if User.objects.filter(phone_number=phone, role='customer').exists():
+            raise serializers.ValidationError("A customer with this phone number already exists.")
         
         return phone
     

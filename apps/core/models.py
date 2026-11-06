@@ -116,7 +116,6 @@ class User(AbstractUser, AuditMixin):
     phone_number = models.CharField(
         validators=[phone_regex],
         max_length=17,
-        unique=True,
         verbose_name='Phone Number'
     )
     id_number = models.CharField(
@@ -200,6 +199,20 @@ class User(AbstractUser, AuditMixin):
         ordering = ['-created_at']
         verbose_name = 'User'
         verbose_name_plural = 'Users'
+        constraints = [
+            # One customer account per phone
+            models.UniqueConstraint(
+                fields=['phone_number'],
+                condition=models.Q(role='customer'),
+                name='uniq_customer_phone',
+            ),
+            # One dashboard (admin/staff/tech/etc.) account per phone
+            models.UniqueConstraint(
+                fields=['phone_number'],
+                condition=~models.Q(role='customer'),
+                name='uniq_staff_phone',
+            ),
+        ]
 
     def __str__(self):
         return f"{self.get_full_name()} ({self.email or 'No Email'})"

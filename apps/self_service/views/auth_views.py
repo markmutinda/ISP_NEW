@@ -211,7 +211,10 @@ class CustomerLoginView(APIView):
                 'message': 'Use a 10-digit phone number starting with 07 or 01.'
             }, status=status.HTTP_400_BAD_REQUEST)
         
-        user = User.objects.filter(phone_number__in=self._phone_lookup_values(local_phone)).first()
+        user = User.objects.filter(
+            phone_number__in=self._phone_lookup_values(local_phone),
+            role='customer',
+        ).first()
         
         if not user:
             return Response({
@@ -326,7 +329,7 @@ class VerifyPhoneView(APIView):
         # For now, accept any 6-digit code in development
         if settings.DEBUG and len(otp_code) == 6:
             try:
-                user = User.objects.get(phone_number=phone_number)
+                user = User.objects.get(phone_number=phone_number, role='customer')
                 user.is_verified = True
                 user.save(update_fields=['is_verified'])
                 

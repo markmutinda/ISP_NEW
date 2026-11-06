@@ -206,6 +206,12 @@ class UserCreateSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError('A user with this email already exists.')
         return normalized
 
+    def validate_phone_number(self, value):
+        value = (value or '').strip()
+        if User.objects.filter(phone_number=value).exclude(role='customer').exists():
+            raise serializers.ValidationError('A staff account with this phone number already exists.')
+        return value
+
     def validate_custom_allowed_paths(self, value):
         return validate_dashboard_access_tokens(value)
     

@@ -75,8 +75,8 @@ class TechnicianCreateSerializer(serializers.ModelSerializer):
 
         if email and User.objects.filter(email__iexact=email).exists():
             raise serializers.ValidationError({'email': 'A user with this email already exists.'})
-        if phone and User.objects.filter(phone_number=phone).exists():
-            raise serializers.ValidationError({'phone': 'A user with this phone number already exists.'})
+        if phone and User.objects.filter(phone_number=phone).exclude(role='customer').exists():
+            raise serializers.ValidationError({'phone': 'A staff account with this phone number already exists.'})
         return attrs
 
     def create(self, validated_data):

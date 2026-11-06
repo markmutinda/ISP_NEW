@@ -69,10 +69,11 @@ class CustomerCreateSerializer(serializers.ModelSerializer):
         except Exception as e:
             raise serializers.ValidationError({"phone_number": str(e)})
         
-        # Check if phone number already exists (User.phone_number is unique)
-        if User.objects.filter(phone_number=data['phone_number']).exists():
+        # Check if phone number already exists among CUSTOMERS only
+        # (admins/staff may also hold a PPPoE account with the same number)
+        if User.objects.filter(phone_number=data['phone_number'], role='customer').exists():
             raise serializers.ValidationError(
-                {"phone_number": "A user with this phone number already exists."}
+                {"phone_number": "A customer with this phone number already exists."}
             )
         
         # Check if ID number exists (only if provided)
