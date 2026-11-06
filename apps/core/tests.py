@@ -92,9 +92,22 @@ class PaymentMethodPinTests(SimpleTestCase):
             with self.subTest(pin=pin), self.assertRaises(ValueError):
                 validate_new_pin(pin)
 
-    def test_superadmin_bypasses_tenant_pin(self):
-        request = SimpleNamespace(user=SimpleNamespace(is_superuser=True))
-        self.assertTrue(payment_method_pin_is_unlocked(request))
+    @patch("apps.core.payment_method_pin.connection", SimpleNamespace(schema_name="tenant_acme"))
+    @patch("apps.core.payment_method_pin._is_public_platform_superuser", return_value=True)
+    def test_mirrored_platform_superuser_bypasses_tenant_pin(self, _public):
+        user = SimpleNamespace(pk=1, is_superuser=True, role="admin", email="ops@netily.co.ke", first_name="", last_name="")
+        self.assertTrue(payment_method_pin_is_unlocked(SimpleNamespace(user=user, META={})))
+
+    @patch("apps.core.payment_method_pin.connection", SimpleNamespace(schema_name="tenant_acme"))
+    @patch("apps.core.payment_method_pin._current_pin_hash", return_value="pbkdf2$hash")
+    @patch("apps.core.payment_method_pin._is_public_platform_superuser", return_value=False)
+    def test_tenant_owner_superuser_flag_does_not_bypass_pin(self, _public, _hash):
+        # Signup gives tenant owners is_superuser=True inside their schema;
+        # that must not skip their own Payment Methods PIN.
+        cache.clear()
+        owner = SimpleNamespace(pk=5, is_superuser=True, role="admin", email="owner@isp.co.ke", first_name="Mark", last_name="Owner")
+        request = SimpleNamespace(user=owner, auth={"jti": "owner-session"}, META={})
+        self.assertFalse(payment_method_pin_is_unlocked(request))
 
     def test_platform_role_bypasses_tenant_pin(self):
         request = SimpleNamespace(user=SimpleNamespace(is_superuser=False, role="superadmin"))

@@ -5,6 +5,7 @@ from hashlib import sha256
 from django.core.cache import cache
 from django.core import signing
 from django.db import connection
+from django_tenants.utils import get_public_schema_name, schema_context
 
 from apps.core.models import GlobalSystemSettings
 
@@ -20,10 +21,54 @@ UNLOCK_SALT = "netily.payment-methods.unlock"
 IMPERSONATION_CLAIM = "impersonated_by"
 
 
+PLATFORM_OPERATOR_CACHE_SECONDS = 5 * 60
+
+
+def _is_public_platform_superuser(email: str) -> bool:
+    """True when this email belongs to an active platform superuser in the public schema."""
+    cache_key = f"payment-method-pin:platform-operator:{sha256(email.encode('utf-8')).hexdigest()}"
+    cached = cache.get(cache_key)
+    if cached is not None:
+        return bool(cached)
+    from apps.core.models import User
+
+    try:
+        with schema_context(get_public_schema_name()):
+            result = User.objects.filter(email__iexact=email, is_superuser=True, is_active=True).exists()
+    except Exception:
+        # Fail closed: an unreachable lookup must not unlock tenant payment settings.
+        return False
+    cache.set(cache_key, result, timeout=PLATFORM_OPERATOR_CACHE_SECONDS)
+    return result
+
+
 def is_payment_method_pin_bypass_user(user) -> bool:
-    """Platform operators must not be locked behind a tenant-owned secret."""
+    """
+    Platform operators must not be locked behind a tenant-owned secret.
+
+    `is_superuser` alone is NOT a platform signal: tenant signup grants the
+    owning admin is_superuser=True inside their own schema, so treating it as
+    platform access let every tenant owner skip their own PIN. A user is a
+    platform operator only when their role or configured identity says so, or
+    when the same email is an active superuser in the public (platform) schema
+    — which is how platform admins are mirrored into tenant schemas.
+    """
+    if user is None:
+        return False
     role = str(getattr(user, "role", "") or "").strip().lower()
-    return bool(getattr(user, "is_superuser", False) or role in {"superadmin", "super_admin"})
+    if role in {"superadmin", "super_admin"}:
+        return True
+
+    from apps.core.models import AuditLog
+
+    if AuditLog._is_platform_superadmin_actor(user):
+        return True
+    if not getattr(user, "is_superuser", False):
+        return False
+    if connection.schema_name == get_public_schema_name():
+        return True
+    email = str(getattr(user, "email", "") or "").strip().lower()
+    return bool(email) and _is_public_platform_superuser(email)
 
 
 def _token_claim(request, claim: str):
