@@ -760,15 +760,23 @@ class HotspotClientDetailView(APIView):
         })
 
     # ============================================================
-    # BUG 3 FIX: DELETE method - full revoke + CoA-disconnect
+    # BUG 3 FIX: DELETE method - revoke + bulk kick, no revenue touch
     # ============================================================
     def delete(self, request, id):
         """
-        Delete a hotspot client: cancel every session they hold (so
-        auto-login/phone-reconnect can never treat them as subscribed again),
-        then fully revoke + CoA-disconnect every access code they've ever
-        used — including multi-device slot codes like MXA-BKCS-2.
+        Delete a hotspot client: revoke credentials for every access code
+        they've ever used (including multi-device slot codes like MXA-BKCS-2),
+        close open radacct rows, and kick live hotspot sessions on the
+        MikroTik(s).
+
+        Revenue is NOT touched: sessions are bulk-marked 'expired' instead of
+        calling refund_or_cancel, so BillingCycle.hotspot_revenue_accumulated
+        is never debited. Completed Payment rows (service_type='HOTSPOT')
+        survive because Payment.hotspot_session is SET_NULL, so revenue is
+        preserved and the reconcile tasks have nothing to correct.
         """
+        from django.utils import timezone
+
         try:
             client = HotspotClient.objects.get(id=id)
         except HotspotClient.DoesNotExist:
@@ -776,23 +784,40 @@ class HotspotClientDetailView(APIView):
 
         from apps.billing.models.hotspot_models import HotspotSession
 
-        sessions = HotspotSession.objects.filter(hotspot_client=client).select_related('router')
+        sessions = list(
+            HotspotSession.objects.filter(hotspot_client=client).select_related('router')
+        )
 
         access_codes = set()
+        routers = {}
+        live_session_ids = []
         for session in sessions:
             if session.access_code:
-                access_codes.add((session.access_code, session.router))
+                access_codes.add(session.access_code)
+            if session.router_id:
+                routers[session.router_id] = session.router
             if session.status in ('active', 'paid'):
-                session.refund_or_cancel(reason="Client deleted by admin")
+                live_session_ids.append(session.pk)
 
         if client.canonical_username:
-            access_codes.add((client.canonical_username, None))
+            access_codes.add(client.canonical_username)
+
+        # End access WITHOUT touching revenue: no accumulator reversal, no
+        # client spend change. Status 'expired' keeps the session counted by the
+        # legacy revenue fallback; completed Payment rows are untouched.
+        if live_session_ids:
+            now = timezone.now()
+            HotspotSession.objects.filter(pk__in=live_session_ids).update(
+                status='expired',
+                expires_at=now,
+                failure_reason='Client deleted by admin',
+                updated_at=now,
+            )
 
         from apps.billing.services.hotspot_radius_service import HotspotRadiusService
-        radius_service = HotspotRadiusService()
-        for access_code, router in access_codes:
-            if access_code:
-                radius_service.revoke_and_disconnect(access_code, router=router)
+        HotspotRadiusService().revoke_and_kick_many(
+            access_codes, routers=list(routers.values())
+        )
 
         client.delete()
         return Response(status=204)

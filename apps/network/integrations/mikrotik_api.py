@@ -498,6 +498,36 @@ class MikrotikAPI:
             return -1
         finally:
             self.disconnect()
+
+    def kick_hotspot_users(self, usernames) -> int:
+        """
+        Remove ALL given users from /ip/hotspot/active using a single API
+        connection and a single table read. Returns number removed, -1 on error.
+        """
+        names = {u for u in (usernames or []) if u}
+        if not names:
+            return 0
+        try:
+            if not self.connect():
+                return -1
+            active = self.api.path('ip', 'hotspot', 'active')
+            rows = list(active.select(Key('.id'), Key('user')))
+            removed = 0
+            for r in rows:
+                if r.get('user') in names:
+                    try:
+                        active.remove(r['.id'])
+                        removed += 1
+                    except Exception as e:
+                        logger.warning(f"Could not remove hotspot active {r.get('user')}: {e}")
+            if removed:
+                logger.info(f"Kicked {removed} hotspot session(s) on {self.device.name}")
+            return removed
+        except Exception as e:
+            logger.warning(f"kick_hotspot_users failed on {self.device.name}: {e}")
+            return -1
+        finally:
+            self.disconnect()
     
     def remove_pppoe_active_user(self, username: str) -> bool:
         """

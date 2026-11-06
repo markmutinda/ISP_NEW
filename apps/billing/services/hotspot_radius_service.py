@@ -426,6 +426,66 @@ class HotspotRadiusService:
         except Exception as e:
             logger.warning(f"kick_active_session failed for {username}: {e}")
             return -1
+
+    # ============================================================
+    # NEW: Bulk revoke + radacct close + router-side kick
+    # ============================================================
+    def revoke_and_kick_many(self, usernames, routers=()) -> int:
+        """
+        Full teardown for several hotspot identities (main code + device slots):
+          1. snapshot which NAS each live session is on (before closing radacct)
+          2. delete RADIUS credentials so re-auth is impossible
+          3. close open radacct rows
+          4. kick live sessions from /ip/hotspot/active (one API connection per router)
+        Never raises. Returns number of router-side sessions removed.
+        """
+        from django.db.models import Q
+        from apps.network.models.router_models import Router
+        from apps.network.integrations.mikrotik_api import MikrotikAPI
+
+        names = sorted({u for u in (usernames or []) if u})
+        if not names:
+            return 0
+
+        # 1. Which routers are these users actually on right now?
+        router_map = {r.id: r for r in routers if r}
+        try:
+            nas_ips = {
+                str(ip) for ip in RadAcct.objects
+                .filter(username__in=names, acctstoptime__isnull=True)
+                .values_list('nasipaddress', flat=True) if ip
+            }
+            if nas_ips:
+                for r in Router.objects.filter(
+                    Q(vpn_ip_address__in=nas_ips) | Q(ip_address__in=nas_ips),
+                    is_active=True,
+                ):
+                    router_map.setdefault(r.id, r)
+        except Exception as e:
+            logger.warning(f"NAS lookup failed during hotspot teardown: {e}")
+
+        # 2 + 3. RADIUS credentials + radacct
+        for name in names:
+            try:
+                self.sync_service.delete_radius_user(name)
+            except Exception as e:
+                logger.warning(f"RADIUS delete failed for {name}: {e}")
+        try:
+            RadAcct.objects.filter(
+                username__in=names, acctstoptime__isnull=True
+            ).update(acctstoptime=timezone.now(), acctterminatecause='Admin-Reset')
+        except Exception as e:
+            logger.warning(f"radacct close failed during hotspot teardown: {e}")
+
+        # 4. Kick off the MikroTik(s)
+        kicked = 0
+        for router in router_map.values():
+            n = MikrotikAPI(router).kick_hotspot_users(names)
+            if n > 0:
+                kicked += n
+
+        logger.info(f"Hotspot teardown {names}: kicked {kicked} live session(s)")
+        return kicked
     
     def extend_session(
         self,
