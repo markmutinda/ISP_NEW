@@ -2,7 +2,7 @@
 Loyalty Signals — auto-award points on payment, auto-enroll customers, and hotspot sessions.
 """
 import logging
-from django.db.models.signals import post_save, pre_save
+from django.db.models.signals import post_save, pre_save, pre_delete
 from django.dispatch import receiver
 from django.db import transaction
 from django.db.models import F
@@ -219,3 +219,13 @@ def award_hotspot_loyalty_points(sender, instance, created, **kwargs):
                 logger.error(f'Hotspot loyalty award error: {e}', exc_info=True)
 
     transaction.on_commit(_do_award)
+
+
+@receiver(pre_delete, sender='billing.HotspotClient')
+def purge_loyalty_on_hotspot_client_delete(sender, instance, **kwargs):
+    """
+    Whenever a HotspotClient is deleted (prune task, admin delete, cascade),
+    remove its loyalty profile and points history (PointsTransaction cascades).
+    """
+    from .models import LoyaltyMember
+    LoyaltyMember.objects.filter(hotspot_client=instance).delete()

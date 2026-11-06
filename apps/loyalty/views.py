@@ -74,7 +74,7 @@ class LoyaltyMemberViewSet(viewsets.ReadOnlyModelViewSet):
         # 1. ADD 'hotspot_client' to select_related
         qs = LoyaltyMember.objects.select_related(
             'customer__user', 'tier', 'hotspot_client'
-        ).all()
+        ).exclude(customer__isnull=True, hotspot_client__isnull=True)
         
         params = self.request.query_params
         search = params.get('search')
@@ -308,7 +308,9 @@ class LoyaltyRewardViewSet(viewsets.ModelViewSet):
 class PointsTransactionViewSet(viewsets.ReadOnlyModelViewSet):
     permission_classes = [IsAuthenticated]
     serializer_class = PointsTransactionSerializer
-    queryset = PointsTransaction.objects.select_related('member__customer__user', 'reward').all()
+    queryset = PointsTransaction.objects.select_related(
+        'member__customer__user', 'reward'
+    ).exclude(member__customer__isnull=True, member__hotspot_client__isnull=True)
 
     def get_queryset(self):
         qs = super().get_queryset()
@@ -380,5 +382,9 @@ def loyalty_leaderboard(request):
     }
     order = allowed.get(sort_by, '-lifetime_points')
     limit = min(int(request.query_params.get('limit', 20)), 100)
-    top = LoyaltyMember.objects.select_related('customer__user', 'tier').order_by(order)[:limit]
+    top = (
+        LoyaltyMember.objects.select_related('customer__user', 'tier')
+        .exclude(customer__isnull=True, hotspot_client__isnull=True)
+        .order_by(order)[:limit]
+    )
     return Response(LoyaltyMemberSerializer(top, many=True).data)

@@ -102,3 +102,27 @@ def _enroll_missing_for_tenant():
                 description='Welcome bonus (retroactive)',
                 transaction_type='bonus',
             )
+
+
+@shared_task(name='apps.loyalty.tasks.purge_orphan_loyalty_members')
+def purge_orphan_loyalty_members():
+    """Delete loyalty members that no longer belong to any customer or hotspot client."""
+    TenantModel = get_tenant_model()
+    total = 0
+    for tenant in TenantModel.objects.exclude(schema_name='public'):
+        with tenant_context(tenant):
+            try:
+                total += _purge_orphans_for_tenant()
+            except Exception as e:
+                logger.error(f'[{tenant.schema_name}] orphan loyalty purge error: {e}')
+    return {'purged': total}
+
+
+def _purge_orphans_for_tenant() -> int:
+    from .models import LoyaltyMember
+    deleted, _ = LoyaltyMember.objects.filter(
+        customer__isnull=True, hotspot_client__isnull=True
+    ).delete()
+    if deleted:
+        logger.info(f'Purged orphan loyalty rows: {deleted}')
+    return deleted

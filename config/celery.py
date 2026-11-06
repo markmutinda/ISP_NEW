@@ -343,6 +343,11 @@ app.conf.beat_schedule = {
         'schedule': crontab(minute=45),  # Every hour at :45
         'options': {'queue': 'default'}
     },
+    'loyalty-purge-orphan-members-daily': {
+        'task': 'apps.loyalty.tasks.purge_orphan_loyalty_members',
+        'schedule': crontab(hour=4, minute=15),
+        'options': {'queue': 'default'}
+    },
 
     # ════════════════════════════════════════════════════════════════
     # BILLING EMAIL REMINDERS — Daily at 10 AM
