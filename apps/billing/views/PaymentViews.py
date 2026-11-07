@@ -1161,6 +1161,55 @@ class PaymentViewSet(viewsets.ModelViewSet):
                             mpesa_txn.payment.status = 'FAILED'
                             mpesa_txn.payment.failure_reason = result.get('result_desc', 'STK Push failed or cancelled')
                             mpesa_txn.payment.save(update_fields=['status', 'failure_reason'])
+
+                        # ── FIX 2: Record STK cancellation for anti-abuse tracking ──
+                        # Safaricom sends no phone in failed callbacks, so use the
+                        # phone we captured at initiation (MpesaTransaction.phone_number).
+                        try:
+                            from ..models.payment_models import StkCancellationTracker
+                            result_code_int = result.get('result_code')
+                            if mpesa_txn.phone_number:
+                                tracker = StkCancellationTracker.get_or_create_tracker(
+                                    mpesa_txn.schema_name, mpesa_txn.phone_number
+                                )
+                                tracker.record_result_code(
+                                    int(result_code_int) if result_code_int is not None else 1,
+                                    checkout_request_id=checkout_request_id,
+                                )
+                                logger.info(
+                                    f"STK cancellation recorded: schema={mpesa_txn.schema_name} "
+                                    f"phone=****{mpesa_txn.phone_number[-4:]} rc={result_code_int} "
+                                    f"count={tracker.consecutive_1032_count} blocked={tracker.is_blocked}"
+                                )
+                        except Exception as track_err:
+                            logger.warning(f"StkCancellationTracker write failed (non-fatal): {track_err}")
+
+                        # ── FIX 2b: Time out a pending HotspotSession on cancel/expiry ──
+                        # Matches inbuilt-Paybill behaviour: user cancels → session fails
+                        # (not stuck 'pending'). Only for 1032 (cancel) / 1037 (timeout).
+                        try:
+                            rc_int = int(result.get('result_code') or 0)
+                            if rc_int in (1032, 1037) and mpesa_txn.payment:
+                                from ..models.hotspot_models import HotspotSession
+                                hs = HotspotSession.objects.filter(
+                                    payment=mpesa_txn.payment,
+                                    status='pending',
+                                ).first()
+                                if hs:
+                                    reason = (
+                                        'Payment prompt was cancelled.'
+                                        if rc_int == 1032
+                                        else 'Payment timed out.'
+                                    )
+                                    hs.mark_failed(reason)
+                                    logger.info(
+                                        f"HotspotSession {hs.session_id} marked failed after STK "
+                                        f"result_code={rc_int}"
+                                    )
+                        except Exception as hs_err:
+                            logger.warning(f"Hotspot timeout on STK failure failed (non-fatal): {hs_err}")
+
+                        if mpesa_txn.payment:
                             AuditLog.log_action(
                                 user=mpesa_txn.payment.created_by,
                                 action="update",

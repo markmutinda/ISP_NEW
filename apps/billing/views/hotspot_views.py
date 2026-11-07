@@ -875,7 +875,7 @@ class HotspotPurchaseView(APIView):
                     mpesa_result = mpesa_service.initiate_stk_push(
                         phone_number=phone_canonical,
                         amount=plan.price,
-                        account_reference=session.session_id[:12],
+                        account_reference=f"HP{payment.pk}",
                         transaction_desc="Hotspot Access",
                         payment=payment,
                     )

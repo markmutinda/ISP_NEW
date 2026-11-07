@@ -371,9 +371,23 @@ class MpesaC2BWebhookView(APIView):
                             from apps.billing.models.hotspot_models import HotspotSession
                             # FIX: Match on session_id regardless of status, so C2B confirmations
                             # arriving after STK already activated the session still link the FK
-                            hotspot_session = HotspotSession.objects.filter(
-                                session_id__icontains=bill_ref
-                            ).select_related('plan', 'router').first()
+                            # FIX C: never guess between sessions on an ambiguous / underpaid match
+                            _hs_matches = list(
+                                HotspotSession.objects.filter(session_id__icontains=bill_ref)
+                                .select_related('plan', 'router').order_by('-created_at')[:2]
+                            )
+                            hotspot_session = _hs_matches[0] if len(_hs_matches) == 1 else None
+                            if len(_hs_matches) > 1:
+                                logger.warning(
+                                    f"C2B {trans_id}: ref '{bill_ref}' matches multiple hotspot sessions — "
+                                    "recording as unmatched instead of guessing"
+                                )
+                            elif hotspot_session and hotspot_session.plan and amount < hotspot_session.plan.price:
+                                logger.warning(
+                                    f"C2B {trans_id}: amount {amount} < plan price {hotspot_session.plan.price} "
+                                    f"for {hotspot_session.session_id} — recording as unmatched"
+                                )
+                                hotspot_session = None
                             
                             if hotspot_session:
                                 # ============================================================
@@ -385,12 +399,34 @@ class MpesaC2BWebhookView(APIView):
                                         f"HotspotSession {hotspot_session.session_id} already processed via STK, "
                                         "skipping C2B"
                                     )
-                                    # Link the existing payment if found
+                                    # FIX D: never reuse an already-owned Payment; if a different
+                                    # receipt landed on an already-settled session, record it as
+                                    # its own visible Payment (extra money) so it can be reviewed.
                                     existing_payment = Payment.objects.filter(
-                                        hotspot_session=hotspot_session,
-                                        status='COMPLETED'
-                                    ).first()
-                                    if existing_payment:
+                                        hotspot_session=hotspot_session, status='COMPLETED'
+                                    ).order_by('id').first()
+                                    if existing_payment and existing_payment.mpesa_receipt != trans_id:
+                                        # Different receipt hit an already-settled session = real extra money.
+                                        # Record it as its own payment so it is visible (never reuse the owned one).
+                                        _m, _ = InvoiceItemPayment.objects.get_or_create(
+                                            method_type='MPESA_PAYBILL', schema_name=target_tenant_schema,
+                                            defaults={'name': 'M-Pesa Paybill', 'code': f'MPESA_PAYBILL_{target_tenant_schema[:10]}', 'is_active': True}
+                                        )
+                                        extra = Payment.objects.create(
+                                            customer=None, amount=amount, payment_method=_m, status='COMPLETED',
+                                            transaction_id=trans_id, mpesa_receipt=trans_id, mpesa_phone=msisdn,
+                                            payer_name=f"{data.get('FirstName', '')} {data.get('LastName', '')}".strip() or "M-Pesa User",
+                                            mpesa_transaction=mpesa_txn, payment_date=timezone.now(),
+                                            schema_name=target_tenant_schema, service_type='OTHER',
+                                            notes=(f"EXTRA PAYMENT: receipt {trans_id} (ref {bill_ref}) hit session "
+                                                   f"{hotspot_session.session_id} already settled by {existing_payment.mpesa_receipt}. "
+                                                   "Manual review/refund required."),
+                                        )
+                                        mpesa_txn.payment = extra
+                                        mpesa_txn.save(update_fields=['payment'])
+                                    elif existing_payment and not MpesaTransaction.objects.filter(
+                                        payment=existing_payment
+                                    ).exclude(pk=mpesa_txn.pk).exists():
                                         mpesa_txn.payment = existing_payment
                                         mpesa_txn.save(update_fields=['payment'])
                                     return Response(
@@ -446,6 +482,45 @@ class MpesaC2BWebhookView(APIView):
                                 from apps.billing.services.pppoe_activation import activate_pppoe_from_payment
                                 activate_pppoe_from_payment(portal_payment)
                                 return Response({"ResultCode": 0, "ResultDesc": "Success"}, status=status.HTTP_200_OK)
+
+                        # ── Daraja hotspot STK confirmed via C2B (ref = "HP<payment_id>") ──
+                        if not service and re.fullmatch(r"HP\d{1,12}", bill_ref):
+                            hs_payment = (
+                                Payment.objects.select_for_update(of=("self",))
+                                .select_related("hotspot_session")
+                                .filter(pk=int(bill_ref[2:]), hotspot_session__isnull=False)
+                                .first()
+                            )
+                            if (
+                                hs_payment
+                                and hs_payment.status in ("PROCESSING", "PENDING", "FAILED")
+                                and hs_payment.amount == amount
+                            ):
+                                now_ts = timezone.now()
+                                hs_payment.status = "COMPLETED"
+                                hs_payment.mpesa_receipt = trans_id
+                                hs_payment.transaction_id = trans_id
+                                hs_payment.mpesa_phone = msisdn
+                                hs_payment.processed_at = now_ts
+                                hs_payment.payment_date = now_ts
+                                hs_payment.failure_reason = ""
+                                hs_payment.save()
+                                # Close the STK-side row. Do NOT set transaction_id (unique, C2B row owns it).
+                                MpesaTransaction.objects.filter(payment=hs_payment).update(
+                                    status="COMPLETED", result_code=0, result_desc="Success (C2B)"
+                                )
+                                from apps.billing.models.hotspot_models import HotspotSession
+                                from apps.billing.services.hotspot_activation import settle_hotspot_session
+                                hs = hs_payment.hotspot_session
+                                if hs.status == "failed":  # late confirmation after our timeout
+                                    HotspotSession.objects.filter(pk=hs.pk, status="failed").update(
+                                        status="pending", failure_reason=None
+                                    )
+                                    hs.refresh_from_db()
+                                settle_hotspot_session(hs, trans_id)
+                                return Response({"ResultCode": 0, "ResultDesc": "Success"}, status=status.HTTP_200_OK)
+                            # not found / amount mismatch / already settled by a different receipt
+                            # -> fall through to the "Unmatched account" block below (money is recorded)
 
                         # Unmatched account tracking
                         if not service:
