@@ -881,13 +881,18 @@ class HotspotPurchaseView(APIView):
                     )
 
                     if not mpesa_result.get('success'):
-                        payment.status = 'FAILED'
-                        payment.failure_reason = humanize_payment_failure(
+                        reason = humanize_payment_failure(
                             mpesa_result.get('message', 'M-Pesa STK initiation failed')
                         )
+                        payment.status = 'FAILED'
+                        payment.failure_reason = reason
                         payment.save(update_fields=['status', 'failure_reason'])
-                        session.mark_failed(payment.failure_reason)
-                        return Response({'error': payment.failure_reason}, status=status.HTTP_400_BAD_REQUEST)
+                        session.mark_failed(reason)
+                        return Response(
+                            {'error': reason, 'retriable': bool(mpesa_result.get('retriable'))},
+                            status=(status.HTTP_503_SERVICE_UNAVAILABLE
+                                    if mpesa_result.get('retriable') else status.HTTP_400_BAD_REQUEST),
+                        )
 
                     d = mpesa_result.get('data', {})
                     session.tuma_merchant_request_id = d.get('merchant_request_id', '')
@@ -1102,7 +1107,7 @@ class HotspotPurchaseStatusView(APIView):
                 session = HotspotSession.objects.get(session_id=session_id)
             except HotspotSession.DoesNotExist:
                 return Response(
-                    {'error': 'Session not found'},
+                    {'status': 'failed', 'message': 'Session not found. Please try again.'},
                     status=status.HTTP_404_NOT_FOUND
                 )
 
@@ -1162,9 +1167,11 @@ class HotspotPurchaseStatusView(APIView):
                 })
 
             if session.phone_number:
-                status, message, payment = self._check_tuma_payment_status(session, tenant.schema_name)
+                pay_state, message, payment = self._check_tuma_payment_status(
+                    session, tenant.schema_name
+                )
 
-                if status == 'completed':
+                if pay_state == 'completed':
                     mpesa_receipt = payment.mpesa_receipt if payment else ''
                     session.mark_paid(mpesa_receipt)
 
@@ -1188,7 +1195,7 @@ class HotspotPurchaseStatusView(APIView):
                         'speed': f"{session.plan.speed_limit_mbps}Mbps",
                     })
 
-                elif status == 'failed':
+                elif pay_state == 'failed':
                     session.mark_failed(message)
 
                     return Response({
@@ -1196,7 +1203,7 @@ class HotspotPurchaseStatusView(APIView):
                         'message': message or 'Payment failed. Please try again.',
                     })
 
-                elif status == 'pending':
+                elif pay_state == 'pending':
                     logger.debug(f"Hotspot payment pending for session {session_id}: {message}")
 
             return Response({

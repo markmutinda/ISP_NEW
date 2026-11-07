@@ -1,9 +1,13 @@
 import requests
 import json
 import base64
+import hashlib
 from datetime import datetime
 from django.utils import timezone
 from django.conf import settings
+from django.core.cache import cache
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 from rest_framework import status
 from rest_framework.response import Response
 import logging
@@ -11,6 +15,51 @@ from cryptography.fernet import Fernet
 from decimal import Decimal
 
 logger = logging.getLogger(__name__)
+
+
+# ── Hardened HTTP session for all Safaricom calls ───────────────────────────
+# - Short connect timeout so a Safaricom blip doesn't pin a worker for 30s
+#   (measured 3.44s TLS handshake from production container; 5s is a safe cap).
+# - Read timeout 20s: Safaricom can be slow on response, but not infinitely.
+# - Retries: only GET. POSTs (STK push, register URL) must NEVER be retried
+#   by the transport layer — the request may have reached Safaricom even if
+#   the response was lost, and resending would create a duplicate charge or
+#   a duplicate URL registration.
+# - Circuit breaker: set a short TTL key on connect failure so subsequent
+#   calls within the window fail fast without waiting for a timeout.
+_TIMEOUT = (5, 20)
+
+_http_session = requests.Session()
+_http_adapter = HTTPAdapter(
+    pool_connections=20,
+    pool_maxsize=20,
+    max_retries=Retry(
+        total=2,
+        connect=2,
+        read=0,
+        status=2,
+        backoff_factor=0.5,
+        status_forcelist=(502, 503, 504),
+        allowed_methods=frozenset(["GET"]),
+        raise_on_status=False,
+    ),
+)
+_http_session.mount("https://", _http_adapter)
+
+
+def _token_cache_key(env, consumer_key, consumer_secret):
+    """
+    Stable cache key for a token. Deliberately based on the credential pair,
+    not the shortcode: the same consumer_key/secret yields one OAuth token
+    across all shortcodes under that Daraja app. Hashing the secret means
+    we don't store plaintext credentials in the cache key.
+    """
+    raw = f"{consumer_key}|{consumer_secret}"
+    return f"mpesa_token:{env}:{hashlib.sha256(raw.encode()).hexdigest()[:16]}"
+
+
+def _breaker_key(env, consumer_key, consumer_secret):
+    return _token_cache_key(env, consumer_key, consumer_secret) + ":down"
 
 
 class MpesaSTKPush:
@@ -47,33 +96,65 @@ class MpesaSTKPush:
         }
     
     def _get_access_token(self):
-        """Get OAuth access token from Safaricom API"""
+        """Get OAuth access token from Safaricom API (cached, circuit-broken)."""
         try:
             # Handle both dict config and model object config
             if hasattr(self.config, 'is_sandbox'):
-                # It's a model instance
                 env = 'sandbox' if self.config.is_sandbox else 'production'
                 consumer_key = self.config.consumer_key
                 consumer_secret = self.config.consumer_secret
             else:
-                # It's a dict
                 env = self.config.get('environment', 'sandbox')
                 consumer_key = self.config.get('consumer_key')
                 consumer_secret = self.config.get('consumer_secret')
-            
+
+            if not consumer_key or not consumer_secret:
+                logger.error("M-Pesa credentials missing from configuration")
+                return None
+
+            cache_key = _token_cache_key(env, consumer_key, consumer_secret)
+            cached = cache.get(cache_key)
+            if cached:
+                return cached
+
+            # Circuit breaker: if we failed to reach Safaricom in the last
+            # 20 seconds, skip the doomed request instead of re-paying the
+            # connect timeout.
+            if cache.get(_breaker_key(env, consumer_key, consumer_secret)):
+                logger.warning("M-Pesa circuit open, skipping token request")
+                return None
+
             if env == 'sandbox':
                 url = 'https://sandbox.safaricom.co.ke/oauth/v1/generate?grant_type=client_credentials'
             else:
                 url = 'https://api.safaricom.co.ke/oauth/v1/generate?grant_type=client_credentials'
-            
-            auth = (consumer_key, consumer_secret)
-            response = requests.get(url, auth=auth, timeout=30)
-            
-            if response.status_code == 200:
-                return response.json()['access_token']
-            else:
-                logger.error(f"Failed to get access token: {response.text}")
+
+            try:
+                response = _http_session.get(
+                    url, auth=(consumer_key, consumer_secret), timeout=_TIMEOUT,
+                )
+            except (requests.exceptions.ConnectTimeout,
+                    requests.exceptions.ConnectionError) as exc:
+                cache.set(
+                    _breaker_key(env, consumer_key, consumer_secret),
+                    1, timeout=20,
+                )
+                logger.error(f"M-Pesa unreachable (token): {exc}")
                 return None
+
+            if response.status_code == 200:
+                data = response.json()
+                token = data['access_token']
+                # Cache for expires_in - 120s safety margin, minimum 60s
+                ttl = max(60, int(data.get('expires_in', 3599)) - 120)
+                cache.set(cache_key, token, timeout=ttl)
+                return token
+
+            logger.error(
+                f"Failed to get access token ({response.status_code}): "
+                f"{response.text[:200]}"
+            )
+            return None
         except Exception as e:
             logger.error(f"Error getting access token: {str(e)}")
             return None
@@ -201,8 +282,34 @@ class MpesaSTKPush:
             logger.info(f"STK Push request to {url} for amount {amount}")
             logger.info(f"Using callback URL: {callback_url}")
             
-            # Send request
-            response = requests.post(url, json=payload, headers=headers, timeout=30)
+            # Send request — use hardened session, do NOT retry POST.
+            # A connect failure means Safaricom never received it; a read
+            # failure means we don't know if they received it. Either way
+            # resending risks a duplicate charge. Surface as retriable: True
+            # so the caller can try the *whole flow* again.
+            try:
+                response = _http_session.post(
+                    url, json=payload, headers=headers, timeout=_TIMEOUT,
+                )
+            except (requests.exceptions.ConnectTimeout,
+                    requests.exceptions.ConnectionError) as exc:
+                if hasattr(self.config, 'is_sandbox'):
+                    env_label = 'sandbox' if self.config.is_sandbox else 'production'
+                    ck = getattr(self.config, 'consumer_key', '')
+                    cs = getattr(self.config, 'consumer_secret', '')
+                else:
+                    env_label = self.config.get('environment', 'sandbox')
+                    ck = self.config.get('consumer_key', '')
+                    cs = self.config.get('consumer_secret', '')
+                if ck and cs:
+                    cache.set(_breaker_key(env_label, ck, cs), 1, timeout=20)
+                logger.error(f"STK Push transport failure: {exc}")
+                return {
+                    'success': False,
+                    'retriable': True,
+                    'message': 'Payment gateway is temporarily unreachable. Please retry in a few seconds.',
+                }
+
             response_data = response.json()
             
             # 🧠 Safe Move: Only create the record if Safaricom accepts the payload and issues valid IDs
@@ -238,11 +345,13 @@ class MpesaSTKPush:
                     }
                 }
             else:
-                # Handle failure gracefully without dropping database rows
+                # Handle failure gracefully without dropping database rows.
+                # NOTE: this is NOT retriable — Safaricom understood and refused.
                 error_message = response_data.get('ResponseDescription', response_data.get('errorMessage', 'Unknown error'))
                 logger.error(f"STK Push initiation rejected by Safaricom: {error_message}")
                 return {
                     'success': False,
+                    'retriable': False,
                     'message': f"M-Pesa Error: {error_message}",
                     'error_code': response_data.get('ResponseCode', response.status_code)
                 }
@@ -251,6 +360,7 @@ class MpesaSTKPush:
             logger.error(f"Error in STK Push: {str(e)}")
             return {
                 'success': False,
+                'retriable': False,
                 'message': f'Internal server error: {str(e)}'
             }
     
@@ -299,7 +409,19 @@ class MpesaSTKPush:
                 'Content-Type': 'application/json'
             }
             
-            response = requests.post(url, json=payload, headers=headers, timeout=30)
+            try:
+                response = _http_session.post(
+                    url, json=payload, headers=headers, timeout=_TIMEOUT,
+                )
+            except (requests.exceptions.ConnectTimeout,
+                    requests.exceptions.ConnectionError) as exc:
+                logger.error(f"STK status query transport failure: {exc}")
+                return {
+                    'success': False,
+                    'retriable': True,
+                    'message': 'Payment gateway is temporarily unreachable. Please retry in a few seconds.',
+                }
+
             response_data = response.json()
             
             if response.status_code == 200:
@@ -399,7 +521,18 @@ class MpesaSTKPush:
             logger.info(f"Confirmation URL: {confirmation_url}")
             logger.info(f"Validation URL: {validation_url}")
             
-            response = requests.post(api_url, json=payload, headers=headers, timeout=30)
+            try:
+                response = _http_session.post(
+                    api_url, json=payload, headers=headers, timeout=_TIMEOUT,
+                )
+            except (requests.exceptions.ConnectTimeout,
+                    requests.exceptions.ConnectionError) as exc:
+                logger.error(f"C2B URL registration transport failure: {exc}")
+                return {
+                    'success': False,
+                    'message': 'Could not reach Safaricom to register URLs. Please retry in a few seconds.',
+                }
+
             response_data = response.json()
             
             # Log the response
@@ -489,8 +622,18 @@ class MpesaSTKPush:
             
             logger.info(f"Deregistering C2B URLs for shortcode {business_shortcode}")
             
-            response = requests.post(api_url, json=payload, headers=headers, timeout=30)
-            
+            try:
+                response = _http_session.post(
+                    api_url, json=payload, headers=headers, timeout=_TIMEOUT,
+                )
+            except (requests.exceptions.ConnectTimeout,
+                    requests.exceptions.ConnectionError) as exc:
+                logger.error(f"C2B URL deregistration transport failure: {exc}")
+                return {
+                    'success': False,
+                    'message': 'Could not reach Safaricom to deregister URLs. Please retry in a few seconds.',
+                }
+
             if response.status_code == 200:
                 response_data = response.json()
                 return {
@@ -499,10 +642,15 @@ class MpesaSTKPush:
                     'data': response_data
                 }
             else:
+                # Body might not be JSON if Safaricom returned an error page
+                try:
+                    data = response.json() if response.text else {}
+                except ValueError:
+                    data = {'raw_body': response.text[:500] if response.text else ''}
                 return {
                     'success': False,
                     'message': 'Deregistration failed',
-                    'data': response.json() if response.text else {}
+                    'data': data
                 }
             
         except Exception as e:
