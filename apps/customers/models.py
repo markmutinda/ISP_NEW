@@ -915,7 +915,7 @@ class ServiceConnection(AuditMixin):
         else:
             # Ensure uniqueness for manually-set or signal-set values
             while ServiceConnection.objects.exclude(pk=self.pk).filter(
-                billing_account_number=self.billing_account_number
+                billing_account_number__iexact=self.billing_account_number   # was exact
             ).exists():
                 self.billing_account_number = self._generate_unique_account_number()
             

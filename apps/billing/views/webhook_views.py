@@ -206,6 +206,7 @@ class MpesaC2BWebhookView(APIView):
         trans_id = data.get('TransID')
         shortcode = data.get('BusinessShortCode')
         bill_ref = data.get('BillRefNumber', '').strip().upper()
+        raw_bill_ref = (data.get('BillRefNumber', '') or '').strip()   # ← ADD
         amount = Decimal(str(data.get('TransAmount', 0)))
         msisdn = data.get('MSISDN', '')
 
@@ -348,12 +349,22 @@ class MpesaC2BWebhookView(APIView):
                 try:
                     with transaction.atomic():
                         # ═══════════════════════════════════════════════════════════════
-                        # FIND SERVICE CONNECTION — EXACT MATCH (no __iexact overhead)
+                        # FIND SERVICE CONNECTION — case-insensitive matching
                         # ═══════════════════════════════════════════════════════════════
-                        service = ServiceConnection.objects.filter(
-                            models.Q(billing_account_number=bill_ref) |
-                            models.Q(mpesa_account_number=bill_ref)
-                        ).select_related('customer', 'plan', 'pppoe_user', 'hotspot_user').first()
+                        _svc_qs = ServiceConnection.objects.select_related(
+                            'customer', 'plan', 'pppoe_user', 'hotspot_user'
+                        )
+                        # Fast path: exact match (uses the existing indexes) on upper OR as-typed
+                        service = _svc_qs.filter(
+                            models.Q(billing_account_number__in=[bill_ref, raw_bill_ref]) |
+                            models.Q(mpesa_account_number__in=[bill_ref, raw_bill_ref])
+                        ).first()
+                        # Slow path only on a miss: case-insensitive (covers stored "qywyw" vs paid "QYWYW" and mixed case)
+                        if not service:
+                            service = _svc_qs.filter(
+                                models.Q(billing_account_number__iexact=bill_ref) |
+                                models.Q(mpesa_account_number__iexact=bill_ref)
+                            ).first()
 
                         hotspot_session = None
                         if not service:

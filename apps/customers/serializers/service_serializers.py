@@ -61,6 +61,33 @@ class ServiceConnectionSerializer(serializers.ModelSerializer):
             'paybill_account_number',
         ]
 
+    def validate_billing_account_number(self, value):
+        value = (value or '').strip()
+        if not value:
+            return value  # blank allowed -> model/signal generates one
+        if not value.isalnum():
+            raise serializers.ValidationError(
+                "Billing account number can only contain letters and numbers (no spaces or symbols)."
+            )
+        if len(value) < 4:
+            raise serializers.ValidationError(
+                "Billing account number must be at least 4 characters."
+            )
+        if len(value) > 20:
+            raise serializers.ValidationError(
+                "Billing account number cannot exceed 20 characters."
+            )
+        # Case-insensitive uniqueness so "abc123" and "ABC123" can't both exist
+        # (otherwise a paybill payment could match the wrong customer)
+        qs = ServiceConnection.objects.filter(billing_account_number__iexact=value)
+        if self.instance is not None:
+            qs = qs.exclude(pk=self.instance.pk)
+        if qs.exists():
+            raise serializers.ValidationError(
+                "This billing account number is already used by another customer."
+            )
+        return value
+
 
 class ServiceCreateSerializer(serializers.ModelSerializer):
     """Serializer for creating service connections"""
