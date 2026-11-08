@@ -243,7 +243,8 @@ class CustomerListSerializer(serializers.ModelSerializer):
             'full_name', 'email', 'phone', 'phone_number',
             'customer_type', 'status', 'category', 'activation_date',
             'outstanding_balance', 'balance', 'services', 'radius_credentials',
-            'location', 'created_at', 'updated_at'
+            'location', 'created_at', 'updated_at',
+            'parent', 'account_suffix', 'account_label',
         ]
     
     def get_services(self, obj):
@@ -324,7 +325,8 @@ class CustomerDetailSerializer(serializers.ModelSerializer):
             'credit_limit', 'outstanding_balance', 'receive_sms',
             'receive_email', 'receive_promotions', 'notes',
             'location', 'addresses_count', 'documents_count', 'services_count',
-            'active_services_count', 'created_at', 'updated_at'
+            'active_services_count', 'created_at', 'updated_at',
+            'parent', 'account_suffix', 'account_label',
         ]
     
     def get_addresses_count(self, obj):

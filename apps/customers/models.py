@@ -180,6 +180,14 @@ class Customer(models.Model):
         blank=True,
         help_text="Customer's physical location or area (e.g., Westlands, Nairobi)"
     )
+
+    # ── Child accounts (same phone, separate PPPoE account) ──
+    parent = models.ForeignKey(
+        'self', null=True, blank=True,
+        on_delete=models.SET_NULL, related_name='child_accounts',
+    )
+    account_suffix = models.CharField(max_length=2, blank=True, default='')
+    account_label = models.CharField(max_length=60, blank=True, default='')
     
     # Prepaid Credit (for partial/overpayments)
     prepaid_credit = models.DecimalField(
@@ -279,6 +287,13 @@ class Customer(models.Model):
             models.Index(fields=['status']),
             models.Index(fields=['customer_type']),
             models.Index(fields=['location']),  # Added index for location field
+        ]
+        constraints = [
+            models.UniqueConstraint(
+                fields=['parent', 'account_suffix'],
+                condition=~models.Q(account_suffix=''),
+                name='uniq_customer_child_suffix',
+            ),
         ]
     
     def __str__(self):

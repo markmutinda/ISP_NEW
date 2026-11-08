@@ -231,17 +231,17 @@ def auto_generate_billing_account_number(sender, instance, **kwargs):
                 phone = digits[-10:] if len(digits) >= 10 else digits
 
         if phone:
-            # Check uniqueness — if taken, append a suffix
-            candidate = phone
+            preferred = getattr(customer, 'account_suffix', '') or ''
+            candidate = f"{phone}{preferred}"          # '' for normal customers -> unchanged behaviour
             if not ServiceConnection.objects.exclude(pk=instance.pk).filter(
                 billing_account_number=candidate
             ).exists():
                 instance.billing_account_number = candidate
-                logger.info(f"Billing account set to phone {candidate} for customer {instance.customer_id}")
+                logger.info(f"Billing account set to {candidate} for customer {instance.customer_id}")
                 return
-            
-            # Phone already taken (e.g. same customer, second service) — append 'B', 'C', etc.
-            for suffix in ['B', 'C', 'D', 'E']:
+
+            # Taken (e.g. second service on same customer) — try B, C, D ... Z
+            for suffix in 'BCDEFGHIJKLMNOPQRSTUVWXYZ':
                 candidate = phone + suffix
                 if not ServiceConnection.objects.exclude(pk=instance.pk).filter(
                     billing_account_number=candidate

@@ -178,6 +178,7 @@ class User(AbstractUser, AuditMixin):
     company_name = models.CharField(max_length=255, blank=True, null=True)
     tenant_subdomain = models.CharField(max_length=100, blank=True, null=True)
     is_verified = models.BooleanField(default=False)
+    is_child_account = models.BooleanField(default=False)
     verification_token = models.UUIDField(default=uuid.uuid4, editable=False)
     verification_token_expiry = models.DateTimeField(null=True, blank=True)
 
@@ -203,7 +204,7 @@ class User(AbstractUser, AuditMixin):
             # One customer account per phone
             models.UniqueConstraint(
                 fields=['phone_number'],
-                condition=models.Q(role='customer'),
+                condition=models.Q(role='customer', is_child_account=False),
                 name='uniq_customer_phone',
             ),
             # One dashboard (admin/staff/tech/etc.) account per phone

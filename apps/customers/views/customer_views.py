@@ -6,6 +6,8 @@ from django_filters.rest_framework import DjangoFilterBackend
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
 from django.db.models import Q, Prefetch
+from django.db import IntegrityError, transaction
+from django.contrib.auth import get_user_model
 from apps.billing.models import Plan
 
 from apps.customers.models import (
@@ -29,6 +31,8 @@ from utils.pagination import StandardResultsSetPagination, LargeResultsSetPagina
 
 import logging
 logger = logging.getLogger(__name__)
+
+User = get_user_model()
 
 
 def _sync_service_to_plan(service, plan):
@@ -105,7 +109,8 @@ class CustomerViewSet(viewsets.ModelViewSet):
         # FIX: Added 'retrieve', 'list', 'dashboard' to admin-accessible actions
         if self.action in ['create', 'update', 'partial_update', 'destroy',
                            'toggle_radius', 'change_status', 'available_plans',
-                           'change_plan', 'retrieve', 'list', 'dashboard', 'renew']:
+                           'change_plan', 'retrieve', 'list', 'dashboard', 'renew',
+                           'add_child_account']:
             permission_classes = [IsAuthenticated, IsAdminOrStaff, HasRoleAccessPolicy]
         else:
             permission_classes = [IsAuthenticated, CustomerAccessPermission]
@@ -310,6 +315,13 @@ class CustomerViewSet(viewsets.ModelViewSet):
         - User cleanup (post_delete removes the orphaned Django User)
         """
         customer = self.get_object()
+
+        if customer.child_accounts.exists():
+            return Response(
+                {'error': 'This customer has child accounts. Delete the child accounts first.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
         customer_code = customer.customer_code
         customer_name = customer.full_name
 
@@ -494,6 +506,90 @@ class CustomerViewSet(viewsets.ModelViewSet):
             'is_enabled': credentials.is_enabled,
             'username': credentials.username,
         })
+
+    @action(detail=True, methods=['post'])
+    def add_child_account(self, request, pk=None):
+        """
+        Create a child Customer (own User/RADIUS/service) that shares the parent's phone.
+        The caller then creates the service for the returned id, passing radius_username.
+        POST /customers/{id}/add_child_account/   Body: { "label": "Shop" }
+        """
+        from utils.helpers import generate_customer_code_legacy
+        from apps.customers.child_accounts import (
+            local_phone, radius_base_username, next_child_suffix,
+        )
+
+        target = self.get_object()
+        root = target.parent if target.parent_id else target   # always attach to the root
+        root_user = root.user
+        label = (request.data.get('label') or '').strip()[:60]
+
+        base_local = local_phone(root_user.phone_number)
+        base_username = radius_base_username(root_user.phone_number)
+        if len(base_local) < 9:
+            return Response({'error': 'Parent has no valid phone number.'},
+                            status=status.HTTP_400_BAD_REQUEST)
+
+        child = None
+        suffix = None
+        for _ in range(3):  # retry only on a suffix/code race
+            suffix = next_child_suffix(root, base_local, base_username)
+            if not suffix:
+                return Response({'error': 'Maximum child accounts reached for this phone number.'},
+                                status=status.HTTP_400_BAD_REQUEST)
+            try:
+                with transaction.atomic():
+                    child_user = User.objects.create_user(
+                        email=None,
+                        password=base_local,
+                        first_name=root_user.first_name,
+                        last_name=root_user.last_name,
+                        phone_number=root_user.phone_number,
+                        role='customer',
+                        is_child_account=True,
+                    )
+                    child = Customer.objects.create(
+                        user=child_user,
+                        customer_code=generate_customer_code_legacy(),
+                        parent=root,
+                        account_suffix=suffix,
+                        account_label=label,
+                        gender=root.gender,
+                        customer_type=root.customer_type,
+                        category=root.category,
+                        location=root.location,
+                        billing_cycle=root.billing_cycle,
+                        alternative_phone=root.alternative_phone,
+                        created_by=request.user,
+                    )
+                break
+            except IntegrityError:
+                child = None
+                continue
+
+        if child is None:
+            return Response({'error': 'Could not allocate a child account. Please retry.'},
+                            status=status.HTTP_409_CONFLICT)
+
+        AuditLog.log_action(
+            user=request.user, action="create", model_name="Customer",
+            object_id=str(child.id), object_repr=f"{child.customer_code} (child of {root.customer_code})",
+            changes={"event": "child_account_created", "parent": root.customer_code, "suffix": suffix},
+            ip_address=request.META.get("REMOTE_ADDR"),
+            user_agent=request.META.get("HTTP_USER_AGENT", ""),
+            tenant=getattr(request, "tenant", None),
+        )
+
+        return Response({
+            'id': child.id,
+            'customer_code': child.customer_code,
+            'parent_id': root.id,
+            'account_suffix': suffix,
+            'account_label': label,
+            'radius_username': f"{base_username}{suffix}",
+            'radius_password': base_local,
+            'billing_account_number': f"{base_local}{suffix}",
+        }, status=status.HTTP_201_CREATED)
 
     @action(detail=True, methods=['post'])
     def renew(self, request, pk=None):

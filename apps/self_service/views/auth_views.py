@@ -21,6 +21,7 @@ from rest_framework.views import APIView
 from rest_framework_simplejwt.tokens import RefreshToken
 
 from apps.customers.models import Customer
+from apps.customers.child_accounts import CHILD_SUFFIXES
 from apps.core.models import AuditLog, GlobalSystemSettings
 
 from ..serializers import (
@@ -189,33 +190,48 @@ class CustomerLoginView(APIView):
                 'message': 'Login must be done on an ISP subdomain or custom domain'
             }, status=status.HTTP_400_BAD_REQUEST)
         
-        phone_number = request.data.get('phone_number') or request.data.get('username')
+        identifier = str(request.data.get('phone_number') or request.data.get('username') or '').strip()
         password = request.data.get('password')
-        
-        if not phone_number:
+
+        if not identifier:
             return Response({
                 'error': 'Phone number is required',
                 'message': 'Enter your 10-digit PPPoE phone number, for example 0712345678.'
             }, status=status.HTTP_400_BAD_REQUEST)
-        
+
         if not password:
             return Response({
                 'error': 'Password is required',
                 'message': 'Enter the same phone number in the password field.'
             }, status=status.HTTP_400_BAD_REQUEST)
-        
-        local_phone = self._normalise_local_phone(phone_number)
+
+        # "0712345678" -> parent account, "0712345678B" -> child account B
+        compact = ''.join(identifier.split()).replace('-', '')
+        suffix = ''
+        if len(compact) > 1 and compact[-1].isalpha():
+            suffix, compact = compact[-1].upper(), compact[:-1]
+            if suffix not in CHILD_SUFFIXES:
+                return Response({
+                    'error': 'Invalid account number',
+                    'message': 'Check your account number and try again.'
+                }, status=status.HTTP_400_BAD_REQUEST)
+
+        local_phone = self._normalise_local_phone(compact)
         if len(local_phone) != 10 or not local_phone.startswith(('07', '01')):
             return Response({
                 'error': 'Invalid phone number',
                 'message': 'Use a 10-digit phone number starting with 07 or 01.'
             }, status=status.HTTP_400_BAD_REQUEST)
-        
-        user = User.objects.filter(
+
+        users = User.objects.filter(
             phone_number__in=self._phone_lookup_values(local_phone),
             role='customer',
-        ).first()
-        
+        )
+        if suffix:
+            user = users.filter(customer_profile__account_suffix=suffix).first()
+        else:
+            user = users.filter(is_child_account=False).first()   # deterministic: always the parent
+
         if not user:
             return Response({
                 'error': 'Invalid credentials',
