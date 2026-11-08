@@ -19,6 +19,7 @@ from apps.core.registration_activation_views import (
 from . import views
 from .financial_csv import FinancialCSVView
 from . import support_views
+from .tenant_insights import TenantInsightsView
 from apps.core.views_support import SuperadminSupportChatConversationDetailView, SuperadminSupportChatConversationListView
 
 app_name = "superadmin"
@@ -57,6 +58,7 @@ urlpatterns = [
     path("tenants/<uuid:pk>/support-email/", views.TenantSupportEmailView.as_view(), name="tenant-support-email"),
     path("tenants/<uuid:pk>/company/", views.CompanyUpdateView.as_view(), name="company-update"),
     path("tenants/<uuid:pk>/stats/", views.TenantStatsView.as_view(), name="tenant-stats"),
+    path("tenants/<uuid:pk>/insights/", TenantInsightsView.as_view(), name="tenant-insights"),
     path("tenants/<uuid:pk>/audit-log/", views.TenantAuditLogView.as_view(), name="tenant-audit-log"),
     path("tenants/<uuid:pk>/routers/", views.TenantRoutersView.as_view(), name="tenant-routers"),
     path("tenants/<uuid:pk>/pppoe-users/", views.TenantPPPoEUsersView.as_view(), name="tenant-pppoe"),

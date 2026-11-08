@@ -2043,7 +2043,7 @@ class TenantStatsView(APIView):
         try:
             with connection.cursor() as cur:
                 cur.execute(
-                    f"SELECT COALESCE(SUM(amount), 0) FROM \"{schema}\".\"billing_payment\" WHERE status = 'completed'"
+                    f"SELECT COALESCE(SUM(amount), 0) FROM \"{schema}\".\"billing_payment\" WHERE status = 'COMPLETED'"
                 )
                 result["tenant_revenue"] = float(cur.fetchone()[0])
         except Exception:
