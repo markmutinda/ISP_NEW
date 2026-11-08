@@ -424,7 +424,20 @@ class RouterViewSet(viewsets.ModelViewSet):
 
     def perform_update(self, serializer):
         old_protocol = serializer.instance.vpn_protocol
+        old_logo = serializer.instance.logo
+        old_logo_name = old_logo.name if old_logo else None
+        old_logo_storage = old_logo.storage if old_logo else None
+
         router = serializer.save()
+
+        # Remove the stale logo file when it was cleared or replaced
+        new_logo_name = router.logo.name if router.logo else None
+        if old_logo_name and old_logo_name != new_logo_name:
+            try:
+                old_logo_storage.delete(old_logo_name)
+            except Exception as e:
+                logger.warning(f"Could not delete old logo {old_logo_name}: {e}")
+
         if router.vpn_protocol != old_protocol and router.vpn_provisioned:
             try:
                 from apps.vpn.services.vpn_provisioning_service import VPNProvisioningService
