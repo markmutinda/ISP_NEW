@@ -25,6 +25,11 @@ app_name = "superadmin"
 
 urlpatterns = [
     path("financial-csv/<str:kind>/", FinancialCSVView.as_view(), name="financial-csv"),
+
+    # Lightweight auth ping (used by frontend auth context so a page load
+    # doesn't trigger the heavy dashboard aggregation on every request)
+    path("ping/", views.SuperadminPingView.as_view(), name="ping"),
+
     # Dashboard KPIs
     path("dashboard/", views.DashboardView.as_view(), name="dashboard"),
 

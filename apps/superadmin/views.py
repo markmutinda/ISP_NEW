@@ -6,6 +6,7 @@ Cross-schema reads use raw SQL to peek into tenant schemas.
 """
 
 import csv
+import hashlib
 import io
 import json
 import logging
@@ -23,6 +24,7 @@ from django.core.management import call_command
 from django.core.validators import validate_email
 from django.db import connection, transaction
 from django.db.models import Sum, Count, Q, F
+from django.db.models.functions import TruncMonth
 from django.http import HttpResponse
 from django.utils import timezone
 from django.utils.dateparse import parse_date, parse_datetime
@@ -67,6 +69,9 @@ from django_tenants.utils import schema_context, get_public_schema_name
 from django.shortcuts import get_object_or_404
 from .tasks import queue_changelog_notifications, queue_tenant_deletion
 
+# ── Performance helpers ──
+from .perf import build_tenant_maps, cycle_metrics, run_across_schemas
+
 # ── NEW: SMS models for cross-schema overview ──
 from apps.messaging.models import SMSGatewayConfig, TenantSMSWallet, SMSUnitTopup
 
@@ -79,10 +84,29 @@ PAGE_SIZE = 20  # Match DRF global setting
 # ── CRITICAL SAFETY GUARD: Protected schemas that must never be deleted ──
 PROTECTED_SCHEMAS = {'public', 'information_schema', 'pg_catalog', 'pg_toast'}
 
+# ── Cache keys (dashboard and aggregate endpoints) ──
+DASHBOARD_CACHE_KEY = "sa:dashboard:v2"
+DASHBOARD_TOTALS_KEY = "sa:dashboard:totals:v1"
+PAYMENT_SUMMARY_CACHE_KEY = "sa:payment_summary:v2"
+LEAD_STATS_CACHE_KEY = "sa:lead_stats:v2"
+REV_TREND_CACHE_KEY_TMPL = "sa:rev_trend:{months}"
+
 
 def _ensure_public():
     """Ensure we are on the public schema."""
     connection.set_schema_to_public()
+
+
+def _invalidate_dashboard_caches():
+    """Drop dashboard-level caches after any tenant status change."""
+    try:
+        cache.delete_many([
+            DASHBOARD_CACHE_KEY,
+            DASHBOARD_TOTALS_KEY,
+            PAYMENT_SUMMARY_CACHE_KEY,
+        ])
+    except Exception as exc:
+        logger.warning("Dashboard cache invalidation failed: %s", exc)
 
 
 def _log_action(user, action, model_name, object_repr=None, object_id=None, changes=None, request=None):
@@ -129,6 +153,23 @@ def _serialize_deletion_job(job: TenantDeletionJob) -> dict:
         "started_at": job.started_at.isoformat() if job.started_at else None,
         "finished_at": job.finished_at.isoformat() if job.finished_at else None,
     }
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  SUPERADMIN AUTH PING
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+
+class SuperadminPingView(APIView):
+    """
+    Lightweight token-validation endpoint. Returns 200 with {"ok": true}
+    if the caller is an authenticated superadmin. Used by the frontend
+    auth context so every page load does not trigger the heavy dashboard.
+    """
+    permission_classes = SUPERADMIN_PERMS
+
+    def get(self, request):
+        return Response({"ok": True})
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -275,6 +316,7 @@ class ServerStatsView(APIView):
 class DashboardView(APIView):
     permission_classes = SUPERADMIN_PERMS
 
+    # ── Existing helpers, kept so external callers / tests still work ──
     def _get_subscription(self, tenant):
         try:
             return tenant.company.subscription
@@ -323,77 +365,133 @@ class DashboardView(APIView):
 
         return health, expiry.date() if hasattr(expiry, "date") else expiry, mrr
 
+    # ── NEW: fast helpers for the rewritten get() ──
+    def _health(self, tenant, sub, cycle, now):
+        """Same rules as _tenant_subscription_health, with no per-tenant queries."""
+        if tenant.status in {"suspended", "cancelled"}:
+            return tenant.status, tenant.subscription_expiry, Decimal("0.00")
+        if not sub:
+            return tenant.status, tenant.subscription_expiry, tenant.monthly_rate or Decimal("0.00")
+
+        if sub.status == "trialing":
+            expiry = sub.trial_ends_at
+            health = "trial" if expiry and expiry > now else "trial_expired"
+        elif sub.status == "active":
+            expiry = sub.current_period_end
+            health = "active" if expiry and expiry > now else "expired"
+        elif sub.status in {"past_due", "expired", "cancelled"}:
+            expiry = sub.current_period_end or sub.trial_ends_at
+            health = sub.status
+        else:
+            expiry = sub.current_period_end or sub.trial_ends_at
+            health = sub.status or tenant.status
+
+        mrr = sub.current_price
+        if health == "active" and cycle:
+            try:
+                mrr = cycle_metrics(cycle)["total"]
+            except Exception:
+                pass
+        return health, expiry.date() if hasattr(expiry, "date") else expiry, mrr
+
+    def _tenant_totals(self, schemas):
+        cached = cache.get(DASHBOARD_TOTALS_KEY)
+        if cached is not None:
+            return cached
+        if not schemas:
+            totals = {
+                "total_pppoe_users": 0,
+                "total_hotspot_users": 0,
+                "total_customers": 0,
+                "total_tenant_revenue": 0.0,
+            }
+            cache.set(DASHBOARD_TOTALS_KEY, totals, 300)
+            return totals
+        rows = run_across_schemas(
+            'SELECT '
+            '(SELECT COUNT(*) FROM "{schema}".network_pppoeuser), '
+            '(SELECT COUNT(*) FROM "{schema}".network_hotspotuser), '
+            '(SELECT COUNT(*) FROM "{schema}".customers_customer), '
+            "(SELECT COALESCE(SUM(amount),0) FROM \"{schema}\".billing_payment WHERE status='COMPLETED')",
+            schemas,
+        )
+        totals = {
+            "total_pppoe_users": sum(r[0] for r in rows),
+            "total_hotspot_users": sum(r[1] for r in rows),
+            "total_customers": sum(r[2] for r in rows),
+            "total_tenant_revenue": float(sum(Decimal(str(r[3])) for r in rows)),
+        }
+        cache.set(DASHBOARD_TOTALS_KEY, totals, 300)
+        return totals
+
     def get(self, request):
         _ensure_public()
+        if request.query_params.get("refresh") != "1":
+            cached = cache.get(DASHBOARD_CACHE_KEY)
+            if cached is not None:
+                return Response(cached)
+
         now = timezone.now()
         thirty_days_ago = now - timedelta(days=30)
 
-        tenants = Tenant.objects.select_related("company", "company__subscription", "company__subscription__plan").exclude(schema_name__in=PROTECTED_SCHEMAS)
-        total_tenants = tenants.count()
-        tenant_health_rows = []
-        health_counts = {
-            "active": 0,
-            "trial": 0,
-            "trial_expired": 0,
-            "past_due": 0,
-            "expired": 0,
-            "suspended": 0,
-            "cancelled": 0,
-            "inactive": 0,
-        }
+        tenants = list(
+            Tenant.objects.select_related("company")
+            .exclude(schema_name__in=PROTECTED_SCHEMAS)
+        )
+        sub_map, cycle_map = build_tenant_maps()
+
+        health_counts = {k: 0 for k in (
+            "active", "trial", "trial_expired", "past_due",
+            "expired", "suspended", "cancelled", "inactive")}
         mrr = Decimal("0.00")
+        rows = []
 
         for tenant in tenants:
-            health, expiry, tenant_mrr = self._tenant_subscription_health(tenant, now)
-            if health in {"active", "trial"}:
-                pass
-            elif health not in {"suspended", "cancelled", "past_due", "expired", "trial_expired"}:
+            sub = sub_map.get(tenant.company_id)
+            cycle = cycle_map.get(tenant.pk)
+            health, expiry, tenant_mrr = self._health(tenant, sub, cycle, now)
+            if health not in {"active", "trial", "suspended", "cancelled",
+                              "past_due", "expired", "trial_expired"}:
                 health = "inactive"
-
-            health_counts[health] = health_counts.get(health, 0) + 1
+            health_counts[health] += 1
             if health == "active":
                 mrr += tenant_mrr or Decimal("0.00")
 
-            days_left = None
-            if expiry:
-                days_left = (expiry - now.date()).days
-            tenant_health_rows.append({
+            company = tenant.company
+            rows.append({
                 "id": str(tenant.id),
-                "company_name": getattr(getattr(tenant, "company", None), "name", "") or tenant.schema_name,
+                "company_name": getattr(company, "name", "") or tenant.schema_name,
                 "subdomain": tenant.subdomain,
                 "status": health,
-                "subscription_plan": self._tenant_subscription_plan_name(tenant),
+                "subscription_plan": (sub.plan.name if sub and sub.plan
+                                      else getattr(company, "subscription_plan", "")),
                 "subscription_expiry": expiry.isoformat() if expiry else None,
-                "days_left": days_left,
+                "days_left": (expiry - now.date()).days if expiry else None,
                 "mrr": str(tenant_mrr or Decimal("0.00")),
-                "company_email": getattr(getattr(tenant, "company", None), "email", ""),
+                "company_email": getattr(company, "email", ""),
             })
 
-        active_tenants = health_counts["active"]
-        trial_tenants = health_counts["trial"]
-        suspended_tenants = health_counts["suspended"]
-
         total_users = User.objects.count()
-        recent_signups = tenants.filter(created_at__gte=thirty_days_ago).count()
+        recent_signups = sum(1 for t in tenants if t.created_at >= thirty_days_ago)
 
-        # Revenue from subscriptions (public schema)
         total_revenue = Decimal("0.00")
         try:
             from apps.subscriptions.models import SubscriptionPayment
             total_revenue = (
-                SubscriptionPayment.objects
-                .filter(status="completed")
+                SubscriptionPayment.objects.filter(status="completed")
                 .aggregate(total=Sum("amount"))["total"]
                 or Decimal("0.00")
             )
         except Exception:
             pass
 
+        live_schemas = [t.schema_name for t in tenants if t.status in ("active", "trial")]
+
         data = {
-            "total_tenants": total_tenants,
-            "active_tenants": active_tenants,
-            "trial_tenants": trial_tenants,
-            "suspended_tenants": suspended_tenants,
+            "total_tenants": len(tenants),
+            "active_tenants": health_counts["active"],
+            "trial_tenants": health_counts["trial"],
+            "suspended_tenants": health_counts["suspended"],
             "expired_tenants": health_counts["expired"] + health_counts["past_due"] + health_counts["trial_expired"],
             "past_due_tenants": health_counts["past_due"],
             "trial_expired_tenants": health_counts["trial_expired"],
@@ -404,44 +502,13 @@ class DashboardView(APIView):
             "recent_signups": recent_signups,
             "subscription_health": health_counts,
             "tenant_subscription_health": sorted(
-                tenant_health_rows,
-                key=lambda row: (row["status"] not in {"expired", "past_due", "trial_expired"}, row["days_left"] if row["days_left"] is not None else 99999),
+                rows,
+                key=lambda r: (r["status"] not in {"expired", "past_due", "trial_expired"},
+                               r["days_left"] if r["days_left"] is not None else 99999),
             )[:12],
+            **self._tenant_totals(live_schemas),
         }
-
-        # ── Cross-tenant aggregates ──
-        total_pppoe = 0
-        total_hotspot = 0
-        total_customers = 0
-        total_tenant_revenue = Decimal("0.00")
-        for tenant in tenants.filter(status__in=["active", "trial"]):
-            schema = tenant.schema_name
-            try:
-                with connection.cursor() as cur:
-                    cur.execute(f'SET search_path TO "{schema}"')
-                    cur.execute('SELECT COUNT(*) FROM network_pppoeuser')
-                    total_pppoe += cur.fetchone()[0]
-                    cur.execute('SELECT COUNT(*) FROM network_hotspotuser')
-                    total_hotspot += cur.fetchone()[0]
-                    cur.execute('SELECT COUNT(*) FROM customers_customer')
-                    total_customers += cur.fetchone()[0]
-                    cur.execute(
-                        "SELECT COALESCE(SUM(amount), 0) FROM billing_payment "
-                        "WHERE status = 'COMPLETED'"
-                    )
-                    total_tenant_revenue += Decimal(str(cur.fetchone()[0]))
-            except Exception as exc:
-                logger.warning("Dashboard cross-tenant error for %s: %s", schema, exc)
-
-        # Reset to public schema after cross-tenant loop
-        with connection.cursor() as cur:
-            cur.execute('SET search_path TO "public"')
-
-        data["total_pppoe_users"] = total_pppoe
-        data["total_hotspot_users"] = total_hotspot
-        data["total_customers"] = total_customers
-        data["total_tenant_revenue"] = float(total_tenant_revenue)
-
+        cache.set(DASHBOARD_CACHE_KEY, data, 60)
         return Response(data)
 
 
@@ -455,14 +522,21 @@ class TenantListView(ListAPIView):
     serializer_class = TenantListSerializer
     pagination_class = None  # Return flat array — frontend expects Tenant[]
 
+    def get_serializer_context(self):
+        ctx = super().get_serializer_context()
+        try:
+            ctx["sub_map"], ctx["cycle_map"] = build_tenant_maps()
+        except Exception as exc:
+            logger.warning("TenantListView: build_tenant_maps failed: %s", exc)
+            ctx["sub_map"], ctx["cycle_map"] = {}, {}
+        return ctx
+
     def get_queryset(self):
         _ensure_public()
-        # Exclude protected schemas from the list
         qs = Tenant.objects.select_related("company").prefetch_related("domains").exclude(
             schema_name__in=PROTECTED_SCHEMAS
         ).all()
 
-        # Search
         search = self.request.query_params.get("search")
         if search:
             qs = qs.filter(
@@ -471,7 +545,6 @@ class TenantListView(ListAPIView):
                 | Q(company__email__icontains=search)
             )
 
-        # Filter by status
         tenant_status = self.request.query_params.get("status")
         if tenant_status:
             now = timezone.now()
@@ -495,7 +568,6 @@ class TenantListView(ListAPIView):
             else:
                 qs = qs.filter(status=tenant_status)
 
-        # Ordering
         ordering = self.request.query_params.get("ordering", "-created_at")
         allowed = {
             "created_at", "-created_at",
@@ -508,6 +580,10 @@ class TenantListView(ListAPIView):
             qs = qs.order_by(ordering)
         else:
             qs = qs.order_by("-created_at")
+
+        limit = self.request.query_params.get("limit")
+        if limit and str(limit).isdigit():
+            qs = qs[: min(int(limit), 200)]
 
         return qs
 
@@ -522,7 +598,6 @@ class TenantCreateView(APIView):
         ser.is_valid(raise_exception=True)
         d = ser.validated_data
 
-        # 1. Create Company
         company = Company.objects.create(
             name=d["company_name"],
             slug=slugify(d["company_name"]),
@@ -538,7 +613,6 @@ class TenantCreateView(APIView):
         if Tenant.objects.filter(schema_name=schema_name).exists():
             return Response({"detail": f"Schema {schema_name} already exists."}, status=400)
 
-        # 2. Create Tenant
         tenant = Tenant(
             company=company,
             subdomain=d["subdomain"],
@@ -569,7 +643,6 @@ class TenantCreateView(APIView):
             company.delete()
             raise
 
-        # 3. Create Domain (use TENANT_BASE_DOMAIN from settings)
         from django.conf import settings as conf
         base_domain = getattr(conf, 'TENANT_BASE_DOMAIN', 'localhost')
         Domain.objects.create(
@@ -578,7 +651,6 @@ class TenantCreateView(APIView):
             is_primary=True,
         )
 
-        # 4. Create admin user in public schema
         admin_user = User.objects.create_user(
             email=d["admin_email"],
             password=d["admin_password"],
@@ -594,12 +666,9 @@ class TenantCreateView(APIView):
             tenant_subdomain=tenant.subdomain,
         )
 
-        # 5. Create trial subscription if subscriptions app exists
         try:
             from apps.subscriptions.models import CompanySubscription
             CompanySubscription.create_trial_subscription(company)
-
-            # Fire trial welcome email in background
             try:
                 from apps.subscriptions.tasks import send_trial_welcome_email
                 send_trial_welcome_email.delay(company.id)
@@ -615,6 +684,7 @@ class TenantCreateView(APIView):
             changes={"company": company.name, "admin": d["admin_email"]},
             request=request,
         )
+        _invalidate_dashboard_caches()
 
         return Response(
             TenantDetailSerializer(tenant).data,
@@ -628,7 +698,6 @@ class TenantDetailView(RetrieveUpdateDestroyAPIView):
 
     def get_queryset(self):
         _ensure_public()
-        # Exclude protected schemas from being accessed/deleted
         return Tenant.objects.select_related("company").prefetch_related("domains").exclude(
             schema_name__in=PROTECTED_SCHEMAS
         ).all()
@@ -642,7 +711,6 @@ class TenantDetailView(RetrieveUpdateDestroyAPIView):
         old_status = serializer.instance.status
         instance = serializer.save()
         changes = serializer.validated_data.copy()
-        # Convert Decimal to str for JSON
         for k, v in changes.items():
             if isinstance(v, Decimal):
                 changes[k] = str(v)
@@ -653,22 +721,20 @@ class TenantDetailView(RetrieveUpdateDestroyAPIView):
             changes=changes,
             request=self.request,
         )
+        _invalidate_dashboard_caches()
 
     def perform_destroy(self, instance):
-        """Hard-delete: drop the schema, then delete Company + Tenant rows."""
         from django.db import connection as db_conn, transaction
         from rest_framework.exceptions import PermissionDenied
 
         schema = instance.schema_name
         company = instance.company
 
-        # ── CRITICAL SAFETY GUARD ──────────────────────────────────────────
         if schema in PROTECTED_SCHEMAS:
             raise PermissionDenied(
                 f"Schema '{schema}' is protected and cannot be deleted. "
                 f"This is a critical system schema."
             )
-        # ──────────────────────────────────────────────────────────────────
 
         logger.warning(
             "SUPERADMIN %s is deleting tenant %s (schema=%s)",
@@ -682,21 +748,16 @@ class TenantDetailView(RetrieveUpdateDestroyAPIView):
             request=self.request,
         )
 
-        # Step 1: Make sure we're on public schema before any ORM work
         connection.set_schema_to_public()
 
-        # Step 2: Drop the tenant schema using raw SQL with autocommit isolation
         try:
             with connection.cursor() as cur:
-                # Ensure we're on public first
                 cur.execute('SET search_path TO "public"')
                 cur.execute(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE')
                 logger.info("Dropped schema: %s", schema)
         except Exception as e:
             logger.error("Failed to drop schema %s: %s", schema, e)
-            # Don't re-raise — continue cleanup
 
-        # Step 3: Delete ORM records (domains → tenant → company) in public schema
         connection.set_schema_to_public()
         with transaction.atomic():
             try:
@@ -704,7 +765,6 @@ class TenantDetailView(RetrieveUpdateDestroyAPIView):
             except Exception as e:
                 logger.warning("Could not delete domains for %s: %s", schema, e)
             try:
-                # Delete the tenant by PK directly to avoid any schema confusion
                 from apps.core.models import Tenant as TenantModel
                 TenantModel.objects.filter(pk=instance.pk).delete()
             except Exception as e:
@@ -715,6 +775,7 @@ class TenantDetailView(RetrieveUpdateDestroyAPIView):
             except Exception as e:
                 logger.warning("Could not delete company for %s: %s", schema, e)
 
+        _invalidate_dashboard_caches()
 
     def destroy(self, request, *args, **kwargs):
         return Response(
@@ -788,6 +849,7 @@ class TenantDeletionRequestView(APIView):
             },
             request=request,
         )
+        _invalidate_dashboard_caches()
         queue_tenant_deletion(str(job.id))
         return Response(_serialize_deletion_job(job), status=status.HTTP_202_ACCEPTED)
 
@@ -807,14 +869,6 @@ class HardDeleteTenantView(APIView):
 
     DELETE /api/v1/superadmin/tenants/<pk>/hard-delete/
     Body: { "confirmation_name": "<company name or subdomain>" }
-
-    Bypasses Celery and calls purge_tenant_completely() directly.
-    Use when the async deletion job failed and left ghost records,
-    or when you need a guaranteed, immediate, zero-ghost-record deletion.
-
-    Deletion order (FK-safe):
-      SubscriptionPayment -> CompanySubscription -> User -> Domain
-      -> Tenant -> Company -> DROP SCHEMA CASCADE (outside transaction)
     """
     permission_classes = SUPERADMIN_PERMS
 
@@ -825,7 +879,6 @@ class HardDeleteTenantView(APIView):
             pk=pk,
         )
 
-        # Confirmation gate
         confirmation_name = str(request.data.get("confirmation_name", "")).strip()
         company_name_val = tenant.company.name if tenant.company else ""
         expected = {tenant.subdomain.strip().lower(), company_name_val.strip().lower()}
@@ -838,14 +891,12 @@ class HardDeleteTenantView(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        # Only superusers may hard-delete
         if not request.user.is_superuser:
             return Response(
                 {"detail": "Only superusers may perform a hard delete."},
                 status=status.HTTP_403_FORBIDDEN,
             )
 
-        # Snapshot identifiers before the purge removes the rows
         tenant_id = str(tenant.pk)
         subdomain = tenant.subdomain
         schema_name = tenant.schema_name
@@ -855,7 +906,6 @@ class HardDeleteTenantView(APIView):
             request.user.email, subdomain, schema_name,
         )
 
-        # Execute purge
         try:
             from apps.core.tenant_purge import purge_tenant_completely
             result = purge_tenant_completely(pk)
@@ -868,7 +918,6 @@ class HardDeleteTenantView(APIView):
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR,
             )
 
-        # Cancel any queued/running deletion jobs for this tenant
         TenantDeletionJob.objects.filter(
             schema_name=schema_name,
             status__in=[TenantDeletionJob.STATUS_QUEUED, TenantDeletionJob.STATUS_RUNNING],
@@ -877,7 +926,6 @@ class HardDeleteTenantView(APIView):
             status_message="Superseded by synchronous hard-delete.",
         )
 
-        # Audit log
         _log_action(
             request.user, "delete", "Tenant",
             object_repr=subdomain,
@@ -890,6 +938,7 @@ class HardDeleteTenantView(APIView):
             },
             request=request,
         )
+        _invalidate_dashboard_caches()
 
         return Response(
             {
@@ -901,7 +950,6 @@ class HardDeleteTenantView(APIView):
             status=status.HTTP_200_OK,
         )
 
-    # Backwards-compatible for any older frontend bundle that still posts here.
     def post(self, request, pk):
         return self.delete(request, pk)
 
@@ -928,22 +976,11 @@ class CompanyUpdateView(APIView):
             changes=ser.validated_data,
             request=request,
         )
+        _invalidate_dashboard_caches()
         return Response(TenantDetailSerializer(tenant).data)
 
 
 class TenantSuspendView(APIView):
-    """
-    POST /api/v1/superadmin/tenants/<pk>/suspend/
-
-    Suspends the tenant and syncs CompanySubscription.status → 'suspended'
-    so the serializer (which derives the frontend status from CompanySubscription)
-    returns the correct value immediately without a stale cache.
-
-    Side-effects (best-effort, never fail the request):
-      - CompanySubscription.status set to 'suspended'
-      - All public-schema users for this tenant deactivated (is_active=False)
-      - Live Django sessions for those users deleted
-    """
     permission_classes = SUPERADMIN_PERMS
 
     def post(self, request, pk):
@@ -962,11 +999,9 @@ class TenantSuspendView(APIView):
         reason = request.data.get("reason", "")
 
         with transaction.atomic():
-            # 1. Suspend the Tenant record
             tenant.status = "suspended"
             tenant.save(update_fields=["status", "updated_at"])
 
-            # 2. Suspend CompanySubscription (authoritative source for get_status() in serializer)
             try:
                 from apps.subscriptions.models import CompanySubscription
                 company = tenant.company
@@ -981,7 +1016,6 @@ class TenantSuspendView(APIView):
                     tenant.subdomain, sync_err,
                 )
 
-            # 3. Deactivate public-schema users belonging to this tenant
             try:
                 User.objects.filter(
                     Q(tenant=tenant) | Q(company=tenant.company)
@@ -992,7 +1026,6 @@ class TenantSuspendView(APIView):
                     tenant.subdomain, user_err,
                 )
 
-        # 4. Best-effort: delete live sessions for those users
         try:
             from django.contrib.sessions.models import Session
             deactivated_ids = set(
@@ -1021,6 +1054,7 @@ class TenantSuspendView(APIView):
             changes={"action": "suspend", "reason": reason},
             request=request,
         )
+        _invalidate_dashboard_caches()
 
         tenant.refresh_from_db()
         serialized = TenantListSerializer(tenant).data
@@ -1031,13 +1065,6 @@ class TenantSuspendView(APIView):
 
 
 class TenantActivateView(APIView):
-    """
-    POST /api/v1/superadmin/tenants/<pk>/activate/
-
-    Reactivates a suspended/expired tenant. Syncs CompanySubscription.status
-    back to "active", optionally extends or overrides the subscription expiry,
-    and re-enables all public-schema users for this tenant.
-    """
     permission_classes = SUPERADMIN_PERMS
 
     def post(self, request, pk):
@@ -1073,7 +1100,6 @@ class TenantActivateView(APIView):
 
         tenant.save(update_fields=["status", "subscription_expiry", "updated_at"])
 
-        # Sync CompanySubscription
         try:
             from apps.subscriptions.models import CompanySubscription
             from django.utils import timezone as tz
@@ -1101,7 +1127,6 @@ class TenantActivateView(APIView):
                 tenant.subdomain, sync_err,
             )
 
-        # Re-activate tenant users
         try:
             User.objects.filter(
                 Q(tenant=tenant) | Q(company=tenant.company)
@@ -1123,18 +1148,13 @@ class TenantActivateView(APIView):
             },
             request=request,
         )
+        _invalidate_dashboard_caches()
 
         tenant.refresh_from_db()
         return Response(TenantListSerializer(tenant).data)
 
 
 class TenantSupportEmailView(APIView):
-    """
-    Superadmin support endpoint for repairing tenant contact/login emails.
-
-    GET returns the public company email and tenant-schema admin users.
-    PATCH updates company_email and/or one tenant admin login email.
-    """
     permission_classes = SUPERADMIN_PERMS
     admin_roles = ["admin", "super_admin", "superadmin"]
 
@@ -1268,6 +1288,7 @@ class TenantSupportEmailView(APIView):
                 changes=changes,
                 request=request,
             )
+            _invalidate_dashboard_caches()
 
         tenant.refresh_from_db()
         data = TenantDetailSerializer(tenant).data
@@ -1359,7 +1380,6 @@ class UserListView(ListAPIView):
 
     def get_queryset(self):
         _ensure_public()
-        # Exclude the requesting superadmin from the list
         qs = User.objects.exclude(pk=self.request.user.pk)
 
         search = self.request.query_params.get("search")
@@ -1429,13 +1449,11 @@ class UserDeactivateView(APIView):
         except User.DoesNotExist:
             return Response({"detail": "User not found"}, status=status.HTTP_404_NOT_FOUND)
 
-        # Prevent self-deactivation
         if user.pk == request.user.pk:
             return Response(
                 {"detail": "You cannot deactivate your own account."},
                 status=status.HTTP_403_FORBIDDEN,
             )
-        # Prevent deactivating other superadmins
         if user.is_superuser:
             return Response(
                 {"detail": "Cannot deactivate a superadmin account."},
@@ -1473,7 +1491,7 @@ class UserActivateView(APIView):
 
 class PaymentListView(APIView):
     """List payments across the platform.
-    
+
     Query params:
         source: 'platform' | 'tenant' | 'all' (default: 'all')
         status: filter by payment status
@@ -1492,15 +1510,12 @@ class PaymentListView(APIView):
 
         results = []
 
-        # ── Platform (subscription) payments ──
         if source in ("all", "platform"):
             results.extend(self._get_platform_payments(status_filter, search))
 
-        # ── Tenant-level payments (from each tenant schema) ──
         if source in ("all", "tenant"):
             results.extend(self._get_tenant_payments(status_filter, search))
 
-        # Sort combined by date desc
         results.sort(key=lambda x: x["created_at"], reverse=True)
 
         total = len(results)
@@ -1515,7 +1530,6 @@ class PaymentListView(APIView):
         })
 
     def _get_platform_payments(self, status_filter, search):
-        """Fetch SubscriptionPayment records from the public schema."""
         data = []
         try:
             from apps.subscriptions.models import SubscriptionPayment
@@ -1562,7 +1576,6 @@ class PaymentListView(APIView):
         return data
 
     def _get_tenant_payments(self, status_filter, search):
-        """Fetch billing.Payment records across all tenant schemas via raw SQL."""
         data = []
         try:
             tenants = (
@@ -1635,66 +1648,55 @@ class PaymentSummaryView(APIView):
 
     def get(self, request):
         _ensure_public()
-        now = timezone.now()
-        last_month_start = (now.replace(day=1) - timedelta(days=1)).replace(day=1)
+        cached = cache.get(PAYMENT_SUMMARY_CACHE_KEY)
+        if cached is not None:
+            return Response(cached)
 
-        # ── Platform subscription revenue ──
+        now = timezone.now()
+        month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        last_month_start = (month_start - timedelta(days=1)).replace(day=1)
+
         platform_total = Decimal("0.00")
         platform_this_month = Decimal("0.00")
         platform_last_month = Decimal("0.00")
         try:
             from apps.subscriptions.models import SubscriptionPayment
-            completed = SubscriptionPayment.objects.filter(status="completed")
-            platform_total = completed.aggregate(t=Sum("amount"))["t"] or Decimal("0.00")
-            platform_this_month = completed.filter(
-                created_at__year=now.year, created_at__month=now.month
-            ).aggregate(t=Sum("amount"))["t"] or Decimal("0.00")
-            last_month_end = now.replace(day=1) - timedelta(days=1)
-            platform_last_month = completed.filter(
-                created_at__date__gte=last_month_start, created_at__date__lte=last_month_end
-            ).aggregate(t=Sum("amount"))["t"] or Decimal("0.00")
+            agg = SubscriptionPayment.objects.filter(status="completed").aggregate(
+                total=Sum("amount"),
+                this_month=Sum("amount", filter=Q(created_at__gte=month_start)),
+                last_month=Sum("amount", filter=Q(created_at__gte=last_month_start,
+                                                  created_at__lt=month_start)),
+            )
+            platform_total = agg["total"] or Decimal("0.00")
+            platform_this_month = agg["this_month"] or Decimal("0.00")
+            platform_last_month = agg["last_month"] or Decimal("0.00")
         except Exception:
-            pass
+            logger.exception("PaymentSummary platform aggregate failed")
 
-        # ── Aggregate tenant-level revenue ──
+        schemas = list(
+            Tenant.objects.filter(status__in=["active", "trial"])
+            .exclude(schema_name__in=PROTECTED_SCHEMAS)
+            .values_list("schema_name", flat=True)
+        )
+
         tenant_total = Decimal("0.00")
         tenant_this_month = Decimal("0.00")
         tenant_last_month = Decimal("0.00")
-        try:
-            tenants = Tenant.objects.filter(status__in=["active", "trial"]).exclude(
-                schema_name__in=PROTECTED_SCHEMAS
-            )
-            for tenant in tenants:
-                schema = tenant.schema_name
-                try:
-                    with connection.cursor() as cur:
-                        cur.execute(f'SET search_path TO "{schema}"')
-                        cur.execute(
-                            "SELECT COALESCE(SUM(amount), 0) FROM billing_payment "
-                            "WHERE status = 'COMPLETED'"
-                        )
-                        tenant_total += Decimal(str(cur.fetchone()[0]))
-
-                        cur.execute(
-                            "SELECT COALESCE(SUM(amount), 0) FROM billing_payment "
-                            "WHERE status = 'COMPLETED' "
-                            "AND EXTRACT(YEAR FROM payment_date) = %s "
-                            "AND EXTRACT(MONTH FROM payment_date) = %s",
-                            [now.year, now.month],
-                        )
-                        tenant_this_month += Decimal(str(cur.fetchone()[0]))
-
-                        cur.execute(
-                            "SELECT COALESCE(SUM(amount), 0) FROM billing_payment "
-                            "WHERE status = 'COMPLETED' "
-                            "AND payment_date >= %s AND payment_date < %s",
-                            [last_month_start, now.replace(day=1)],
-                        )
-                        tenant_last_month += Decimal(str(cur.fetchone()[0]))
-                except Exception as exc:
-                    logger.warning("PaymentSummary tenant error for %s: %s", schema, exc)
-        except Exception:
-            pass
+        if schemas:
+            try:
+                rows = run_across_schemas(
+                    'SELECT COALESCE(SUM(amount),0), '
+                    'COALESCE(SUM(amount) FILTER (WHERE payment_date >= %s),0), '
+                    'COALESCE(SUM(amount) FILTER (WHERE payment_date >= %s AND payment_date < %s),0) '
+                    "FROM \"{schema}\".billing_payment WHERE status = 'COMPLETED'",
+                    schemas,
+                    params=(month_start, last_month_start, month_start),
+                )
+                tenant_total = sum((Decimal(str(r[0])) for r in rows), Decimal("0.00"))
+                tenant_this_month = sum((Decimal(str(r[1])) for r in rows), Decimal("0.00"))
+                tenant_last_month = sum((Decimal(str(r[2])) for r in rows), Decimal("0.00"))
+            except Exception:
+                logger.exception("PaymentSummary tenant aggregate failed")
 
         combined_last = platform_last_month + tenant_last_month
         combined_this = platform_this_month + tenant_this_month
@@ -1702,7 +1704,7 @@ class PaymentSummaryView(APIView):
         if combined_last > 0:
             pct_change = round(float((combined_this - combined_last) / combined_last * 100), 1)
 
-        return Response({
+        data = {
             "total_revenue": float(platform_total + tenant_total),
             "this_month": float(combined_this),
             "last_month": float(combined_last),
@@ -1712,7 +1714,9 @@ class PaymentSummaryView(APIView):
             "combined_total": float(platform_total + tenant_total),
             "combined_this_month": float(combined_this),
             "currency": "KES",
-        })
+        }
+        cache.set(PAYMENT_SUMMARY_CACHE_KEY, data, 300)
+        return Response(data)
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -1721,39 +1725,49 @@ class PaymentSummaryView(APIView):
 
 
 class RevenueTrendView(APIView):
-    """Monthly revenue for last 12 months."""
+    """Monthly revenue for last N months."""
     permission_classes = SUPERADMIN_PERMS
 
     def get(self, request):
         _ensure_public()
-        now = timezone.now()
-        months = int(request.query_params.get("months", 12))
-        data = []
+        try:
+            months = max(1, min(int(request.query_params.get("months", 12)), 36))
+        except (TypeError, ValueError):
+            months = 12
+        key = REV_TREND_CACHE_KEY_TMPL.format(months=months)
+        cached = cache.get(key)
+        if cached is not None:
+            return Response(cached)
 
+        today = timezone.localdate()
+        keys = []
+        y, m = today.year, today.month
+        for i in range(months - 1, -1, -1):
+            mm, yy = m - i, y
+            while mm <= 0:
+                mm += 12
+                yy -= 1
+            keys.append((yy, mm))
+
+        start = timezone.make_aware(datetime(keys[0][0], keys[0][1], 1))
+        data_map = {}
         try:
             from apps.subscriptions.models import SubscriptionPayment
-            for i in range(months - 1, -1, -1):
-                dt = now - timedelta(days=30 * i)
-                year, month = dt.year, dt.month
-                rev = (
-                    SubscriptionPayment.objects
-                    .filter(status="completed", created_at__year=year, created_at__month=month)
-                    .aggregate(t=Sum("amount"))["t"]
-                    or Decimal("0.00")
-                )
-                count = (
-                    SubscriptionPayment.objects
-                    .filter(status="completed", created_at__year=year, created_at__month=month)
-                    .count()
-                )
-                data.append({
-                    "month": f"{year}-{month:02d}",
-                    "revenue": float(rev),
-                    "count": count,
-                })
+            for r in (SubscriptionPayment.objects
+                      .filter(status="completed", created_at__gte=start)
+                      .annotate(mo=TruncMonth("created_at"))
+                      .values("mo")
+                      .annotate(revenue=Sum("amount"), count=Count("id"))):
+                data_map[(r["mo"].year, r["mo"].month)] = r
         except Exception:
-            pass
+            logger.exception("RevenueTrend failed")
 
+        data = [{
+            "month": f"{yy}-{mm:02d}",
+            "revenue": float(data_map.get((yy, mm), {}).get("revenue") or 0),
+            "count": data_map.get((yy, mm), {}).get("count") or 0,
+        } for yy, mm in keys]
+        cache.set(key, data, 300)
         return Response(data)
 
 
@@ -1781,7 +1795,7 @@ class TenantGrowthView(APIView):
                 "month": f"{year}-{month:02d}",
                 "new_tenants": new,
                 "cumulative": Tenant.objects.filter(
-                    created_at__lte=dt.replace(day=28)  # safe end-of-month approx
+                    created_at__lte=dt.replace(day=28)
                 ).count(),
             })
 
@@ -1801,14 +1815,12 @@ class ChurnView(APIView):
         cancelled = Tenant.objects.filter(status="cancelled").count()
         churn_rate = round(((suspended + cancelled) / total * 100), 2) if total > 0 else 0
 
-        # Trial conversion
         try:
             from apps.subscriptions.models import CompanySubscription
             total_trials = CompanySubscription.objects.filter(is_trial=True).count()
             converted = CompanySubscription.objects.filter(
                 converted_from_trial_at__isnull=False
             ).count()
-            # Include currently active non-trial as converted
             converted += CompanySubscription.objects.filter(
                 is_trial=False, status="active"
             ).count()
@@ -1889,7 +1901,6 @@ class TopTenantsView(APIView):
                 for t in tenants
             ]
         else:
-            # Customers — peek into each schema
             tenants = Tenant.objects.select_related("company").filter(
                 status__in=["active", "trial"]
             )
@@ -1940,9 +1951,8 @@ class TenantStatsView(APIView):
             "company_name": tenant.company.name,
         }
 
-        # ── NEW: LIVE METERED BILLING STATS ──
         from apps.subscriptions.models import BillingCycle
-        
+
         metered_stats = {
             "is_metered": False,
             "pppoe_clients": 0,
@@ -1952,9 +1962,8 @@ class TenantStatsView(APIView):
         }
 
         try:
-            # Get active billing cycle for this tenant
             active_cycle = BillingCycle.objects.filter(tenant=tenant, status='active').first()
-            
+
             if active_cycle and active_cycle.subscription and active_cycle.subscription.plan:
                 metered_stats.update({
                     "is_metered": active_cycle.subscription.plan.is_metered,
@@ -1965,10 +1974,9 @@ class TenantStatsView(APIView):
                 })
         except Exception as e:
             logger.warning(f"Could not fetch metered billing stats for tenant {tenant.subdomain}: {e}")
-        
+
         result["metered_usage"] = metered_stats
 
-        # ── Simple counts ──
         count_tables = {
             "customers": "customers_customer",
             "routers": "network_router",
@@ -1984,7 +1992,7 @@ class TenantStatsView(APIView):
             "plans": "billing_plan",
             "bandwidth_profiles": "bandwidth_bandwidthprofile",
             "olt_devices": "network_oltdevice",
-            "support_tickets_open": None,  # handled separately
+            "support_tickets_open": None,
         }
         for label, table in count_tables.items():
             if table is None:
@@ -1996,7 +2004,6 @@ class TenantStatsView(APIView):
             except Exception:
                 result[label] = 0
 
-        # ── Open tickets ──
         try:
             with connection.cursor() as cur:
                 cur.execute(
@@ -2007,7 +2014,6 @@ class TenantStatsView(APIView):
         except Exception:
             result["support_tickets_open"] = 0
 
-        # ── Online / offline routers ──
         try:
             with connection.cursor() as cur:
                 cur.execute(f"SELECT status, COUNT(*) FROM \"{schema}\".\"network_router\" GROUP BY status")
@@ -2020,7 +2026,6 @@ class TenantStatsView(APIView):
             result["routers_online"] = 0
             result["routers_offline"] = 0
 
-        # ── PPPoE / Hotspot active users ──
         try:
             with connection.cursor() as cur:
                 cur.execute(f"SELECT COUNT(*) FROM \"{schema}\".\"network_pppoeuser\" WHERE status = 'active'")
@@ -2035,7 +2040,6 @@ class TenantStatsView(APIView):
         except Exception:
             result["hotspot_active"] = 0
 
-        # ── Revenue summary (tenant-side payments) ──
         try:
             with connection.cursor() as cur:
                 cur.execute(
@@ -2045,7 +2049,6 @@ class TenantStatsView(APIView):
         except Exception:
             result["tenant_revenue"] = 0
 
-        # ── Customer status breakdown ──
         try:
             with connection.cursor() as cur:
                 cur.execute(f"SELECT status, COUNT(*) FROM \"{schema}\".\"customers_customer\" GROUP BY status")
@@ -2060,7 +2063,6 @@ class TenantStatsView(APIView):
             result["customers_suspended"] = 0
             result["customers_pending"] = 0
 
-        # ── Equipment status breakdown ──
         try:
             with connection.cursor() as cur:
                 cur.execute(f"SELECT status, COUNT(*) FROM \"{schema}\".\"inventory_equipmentitem\" GROUP BY status")
@@ -2094,7 +2096,6 @@ class AuditLogView(APIView):
 
         qs = AuditLog.objects.select_related("user").order_by("-timestamp")
 
-        # Filters
         action = request.query_params.get("action")
         if action:
             qs = qs.filter(action=action)
@@ -2148,7 +2149,6 @@ class ActivityView(APIView):
         _ensure_public()
         limit = int(request.query_params.get("limit", 30))
 
-        # Recent logins
         recent_logins = (
             User.objects
             .filter(last_login__isnull=False)
@@ -2156,7 +2156,6 @@ class ActivityView(APIView):
             .values("email", "last_login", "role", "tenant_subdomain")
         )
 
-        # Recent tenants
         recent_tenants = (
             Tenant.objects
             .select_related("company")
@@ -2193,20 +2192,16 @@ class ActivityView(APIView):
 
 
 class SettingsView(APIView):
-    """Platform-level settings (automation, notifications, billing).
-    RADIUS config is tenant-level and not exposed here."""
+    """Platform-level settings (automation, notifications, billing)."""
     permission_classes = SUPERADMIN_PERMS
 
     def get(self, request):
         _ensure_public()
         settings_obj = GlobalSystemSettings.get_solo()
-        # Platform-relevant fields only (no RADIUS — that's per-tenant)
         fields = [
-            # Automation
             "auto_renew", "auto_expiry", "auto_notifications",
             "auto_backup", "auto_reports", "grace_period",
             "backup_frequency", "report_frequency",
-            # Notifications
             "email_enabled", "sms_enabled", "payment_notifications",
             "expiry_notifications", "system_alerts", "marketing_emails",
             "admin_email", "sms_gateway",
@@ -2219,7 +2214,6 @@ class SettingsView(APIView):
     def patch(self, request):
         _ensure_public()
         settings_obj = GlobalSystemSettings.get_solo()
-        # Only allow platform-relevant fields (block RADIUS fields)
         blocked = {
             "id", "primary_server", "primary_port", "primary_secret",
             "secondary_server", "secondary_port", "secondary_secret",
@@ -2379,7 +2373,6 @@ class TenantAuditLogView(APIView):
 
         try:
             with connection.cursor() as cur:
-                # Count
                 cur.execute(
                     f'SELECT COUNT(*) FROM "{schema}"."core_auditlog" al '
                     f'LEFT JOIN "{schema}"."core_user" u ON al.user_id = u.id '
@@ -2388,7 +2381,6 @@ class TenantAuditLogView(APIView):
                 )
                 total = cur.fetchone()[0]
 
-                # Data
                 cur.execute(
                     f'SELECT al.id, al.timestamp, u.email, al.action, al.model_name, '
                     f'al.object_repr, al.ip_address, al.changes '
@@ -2661,16 +2653,7 @@ class TenantInventoryView(APIView):
 
 
 class TenantImpersonateView(APIView):
-    """Generate a JWT so the superadmin can access a tenant's panel.
-
-    POST /api/v1/superadmin/tenants/<pk>/impersonate/
-    Body (optional): { "use_own_account": true }
-
-    - Default: generates a JWT for the tenant's admin user.
-    - use_own_account=true: generates a JWT for the *superadmin* user so they
-      keep their own identity (the CompanyContextMiddleware patches
-      request.user.company on the fly for superadmin users on tenant subdomains).
-    """
+    """Generate a JWT so the superadmin can access a tenant's panel."""
     permission_classes = SUPERADMIN_PERMS
 
     def post(self, request, pk):
@@ -2683,10 +2666,8 @@ class TenantImpersonateView(APIView):
         use_own = request.data.get("use_own_account", False)
 
         if use_own:
-            # Issue tokens for the superadmin themselves
             target_user = request.user
         else:
-            # Find the tenant's admin user
             target_user = (
                 User.objects
                 .filter(tenant=tenant, role="admin", is_active=True)
@@ -2699,12 +2680,9 @@ class TenantImpersonateView(APIView):
                     status=status.HTTP_404_NOT_FOUND,
                 )
 
-        # Generate JWT for the target user
         try:
             from apps.core.session_tokens import issue_refresh_token
             refresh = issue_refresh_token(target_user)
-            # Marks this session as a platform operator so tenant-owned locks
-            # (Payment Methods PIN) do not apply. Copied into access tokens.
             refresh["impersonated_by"] = str(request.user.id)
             tokens = {
                 "access": str(refresh.access_token),
@@ -2713,11 +2691,9 @@ class TenantImpersonateView(APIView):
         except Exception as e:
             return Response({"detail": f"Token generation failed: {e}"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
-        # Determine the tenant panel URL
         from django.conf import settings as conf
         frontend_url = getattr(conf, 'FRONTEND_URL', 'http://localhost:3000')
         base_domain = getattr(conf, 'TENANT_BASE_DOMAIN', 'localhost')
-        # Parse protocol from FRONTEND_URL
         protocol = 'https' if 'https' in frontend_url else 'http'
         panel_url = f"{protocol}://{tenant.subdomain}.{base_domain}/admin"
 
@@ -2876,7 +2852,7 @@ class SuperadminChangelogDetailView(APIView):
             changelog = Changelog.objects.get(pk=pk)
         except Changelog.DoesNotExist:
             return Response({"detail": "Not found"}, status=status.HTTP_404_NOT_FOUND)
-            
+
         serializer = ChangelogSerializer(changelog, data=request.data, partial=True)
         if serializer.is_valid():
             serializer.save()
@@ -2922,18 +2898,17 @@ class SuperadminFeatureDetailView(APIView):
             serializer = FeatureRequestSerializer(feature, data=request.data, partial=True)
             if serializer.is_valid():
                 serializer.save()
-                
-                # Log the action
+
                 _log_action(
-                    request.user, 
-                    "update", 
+                    request.user,
+                    "update",
                     "FeatureRequest",
                     object_repr=feature.title,
                     object_id=feature.id,
                     changes=serializer.validated_data,
                     request=request,
                 )
-                
+
                 return Response(serializer.data)
             return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
@@ -2988,19 +2963,7 @@ class BillingCycleListView(APIView):
 
 
 class TenantUserLedgerListView(APIView):
-    """
-    List immutable tenant user ledger entries across all tenants.
-    Supports filtering by tenant, event type, user type, and date range.
-
-    GET /api/v1/superadmin/user-ledger/
-    Query params:
-      - tenant_id: UUID filter
-      - event: customer_created, service_created, etc.
-      - user_type: pppoe, hotspot, static, etc.
-      - search: free-text search on customer_name, username, customer_code
-      - date_from, date_to: ISO date range filters
-      - page, page_size: pagination
-    """
+    """List immutable tenant user ledger entries across all tenants."""
     permission_classes = SUPERADMIN_PERMS
 
     def get(self, request):
@@ -3768,7 +3731,6 @@ class SubscriptionInvoiceListView(APIView):
         })
 
 
-
 class SubscriptionInvoiceReminderSettingsView(APIView):
     permission_classes = SUPERADMIN_PERMS
 
@@ -4381,11 +4343,7 @@ class SubscriptionInvoiceSendView(APIView):
 
 
 class SubscriptionStkPushView(APIView):
-    """Initiate an STK push to the ISP's phone via Tuma MASTER account.
-
-    POST /api/v1/superadmin/subscriptions/pay/
-    Body: { "subscription_id": "<uuid>", "phone": "2547XXXXXXXX", "amount": 5000 }
-    """
+    """Initiate an STK push to the ISP's phone via Tuma MASTER account."""
     permission_classes = SUPERADMIN_PERMS
 
     def post(self, request):
@@ -4408,7 +4366,6 @@ class SubscriptionStkPushView(APIView):
         except CompanySubscription.DoesNotExist:
             return Response({"detail": "Subscription not found."}, status=status.HTTP_404_NOT_FOUND)
 
-        # Create a pending payment
         payment = SubscriptionPayment.objects.create(
             subscription=subscription,
             amount=amount,
@@ -4421,10 +4378,8 @@ class SubscriptionStkPushView(APIView):
         try:
             client = TumaClient()
             token = client.get_master_token()
-            # Use the dedicated subscription callback URL (not derived from TUMA_CALLBACK_URL)
             callback_url = getattr(settings, "TUMA_SUBSCRIPTION_CALLBACK", "")
             if not callback_url:
-                # Fallback: derive from TUMA_CALLBACK_URL
                 callback_url = getattr(settings, "TUMA_CALLBACK_URL", "").replace(
                     "/callback/", "/subscription-callback/"
                 )
@@ -4655,8 +4610,6 @@ class SubscriptionPaymentListView(APIView):
             "results": results,
         })
 
-
-
     def post(self, request):
         _ensure_public()
         from apps.subscriptions.models import CompanySubscription, NetilyPlan, SubscriptionPayment
@@ -4705,8 +4658,6 @@ class SubscriptionPaymentListView(APIView):
             return Response({"detail": "Payment date is invalid."}, status=status.HTTP_400_BAD_REQUEST)
 
         with schema_context(get_public_schema_name()):
-            # The cutover is a fallback only. Verified receipts can still land
-            # in either account after that date.
             business_account = business_account or self._account_for_paid_at(paid_at)
             subscription_qs = CompanySubscription.objects.select_related("company", "plan")
             try:
@@ -4815,6 +4766,7 @@ class SubscriptionPaymentListView(APIView):
                 },
                 request=request,
             )
+            _invalidate_dashboard_caches()
 
             row = self._payment_row(
                 SubscriptionPayment.objects.select_related(
@@ -4841,6 +4793,8 @@ class SubscriptionPaymentListView(APIView):
             },
             status=status.HTTP_201_CREATED,
         )
+
+
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 #  LEADS
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -4969,6 +4923,7 @@ class SubscriptionPaymentDetailView(SubscriptionPaymentListView):
                 },
                 request=request,
             )
+            _invalidate_dashboard_caches()
 
             return Response({
                 "detail": "Payment updated.",
@@ -5393,7 +5348,6 @@ class LeadListView(APIView):
                 Q(phone__icontains=search)
             ).distinct()
 
-        # Filter by contacted status
         contacted = request.query_params.get("contacted")
         if contacted == "true":
             qs = qs.filter(is_contacted=True)
@@ -5444,45 +5398,61 @@ class LeadStatsView(APIView):
 
     def get(self, request):
         _ensure_public()
+        cached = cache.get(LEAD_STATS_CACHE_KEY)
+        if cached is not None:
+            return Response(cached)
+
         from apps.core.models import Lead
 
         now = timezone.now()
-        total = Lead.objects.count()
-        this_month = Lead.objects.filter(created_at__gte=now.replace(day=1, hour=0, minute=0, second=0)).count()
-        last_30 = Lead.objects.filter(created_at__gte=now - timedelta(days=30)).count()
-        last_7 = Lead.objects.filter(created_at__gte=now - timedelta(days=7)).count()
-        source_breakdown = list(
-            Lead.objects.exclude(lead_source="")
-            .values("lead_source")
-            .annotate(count=Count("id"))
-            .order_by("-count", "lead_source")[:6]
+        month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+
+        agg = Lead.objects.aggregate(
+            total=Count("id"),
+            this_month=Count("id", filter=Q(created_at__gte=month_start)),
+            last_30=Count("id", filter=Q(created_at__gte=now - timedelta(days=30))),
+            last_7=Count("id", filter=Q(created_at__gte=now - timedelta(days=7))),
+            contacted=Count("id", filter=Q(is_contacted=True)),
+            affiliate=Count("id", filter=Q(affiliatereferral__isnull=False), distinct=True),
+        )
+        total = agg["total"]
+        contacted = agg["contacted"]
+        affiliate = agg["affiliate"]
+
+        sources = list(
+            Lead.objects.exclude(lead_source="").values("lead_source")
+            .annotate(count=Count("id")).order_by("-count", "lead_source")[:6]
         )
 
-        # Monthly trend for last 6 months
-        trend = []
+        y, m = month_start.year, month_start.month
+        keys = []
         for i in range(5, -1, -1):
-            month_start = (now.replace(day=1) - timedelta(days=30 * i)).replace(day=1, hour=0, minute=0, second=0, microsecond=0)
-            if i > 0:
-                month_end = (month_start.replace(day=28) + timedelta(days=4)).replace(day=1)
-            else:
-                month_end = now
-            count = Lead.objects.filter(created_at__gte=month_start, created_at__lt=month_end).count()
-            trend.append({
-                "month": month_start.strftime("%b %Y"),
-                "count": count,
-            })
+            mm, yy = m - i, y
+            while mm <= 0:
+                mm += 12
+                yy -= 1
+            keys.append((yy, mm))
+        trend_start = timezone.make_aware(datetime(keys[0][0], keys[0][1], 1))
+        counts = {
+            (r["mo"].year, r["mo"].month): r["c"]
+            for r in Lead.objects.filter(created_at__gte=trend_start)
+            .annotate(mo=TruncMonth("created_at")).values("mo").annotate(c=Count("id"))
+        }
 
-        return Response({
+        data = {
             "total": total,
-            "this_month": this_month,
-            "last_30_days": last_30,
-            "last_7_days": last_7,
-            "contacted": Lead.objects.filter(is_contacted=True).count(),
-            "not_contacted": Lead.objects.filter(is_contacted=False).count(),
-            "affiliate_referrals": Lead.objects.filter(affiliatereferral__isnull=False).distinct().count(),
-            "source_breakdown": source_breakdown,
-            "trend": trend,
-        })
+            "this_month": agg["this_month"],
+            "last_30_days": agg["last_30"],
+            "last_7_days": agg["last_7"],
+            "contacted": contacted,
+            "not_contacted": total - contacted,
+            "affiliate_referrals": affiliate,
+            "source_breakdown": sources,
+            "trend": [{"month": datetime(yy, mm, 1).strftime("%b %Y"),
+                       "count": counts.get((yy, mm), 0)} for yy, mm in keys],
+        }
+        cache.set(LEAD_STATS_CACHE_KEY, data, 120)
+        return Response(data)
 
 
 class LeadDetailView(APIView):
@@ -5558,13 +5528,12 @@ class SuperadminSMSOverviewView(APIView):
                     ).first()
 
                     if not gateway:
-                        continue  # skip tenants not using inbuilt
+                        continue
 
                     wallet = TenantSMSWallet.objects.filter(is_active=True).first()
                     units = wallet.sms_units if wallet else Decimal("0.00")
                     total_inbuilt_units += units
 
-                    # Recent topups
                     topups = list(
                         SMSUnitTopup.objects.order_by("-created_at")[:5].values(
                             "id", "units_purchased", "amount_paid",
@@ -5586,10 +5555,7 @@ class SuperadminSMSOverviewView(APIView):
             except Exception as exc:
                 logger.warning("SMS overview error for %s: %s", tenant.schema_name, exc)
 
-        # Fetch master Bytewave balance
         provider_balance = self._get_bytewave_balance()
-
-        # All topup history across tenants (for the payments tab)
         all_topups = self._get_all_topup_history(tenants)
 
         return Response({

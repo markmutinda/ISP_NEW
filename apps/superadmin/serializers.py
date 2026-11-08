@@ -21,6 +21,9 @@ from apps.superadmin.models import (
     SupportExecutiveProfile,
 )
 
+# ── Performance helpers ──
+from .perf import cycle_metrics
+
 
 # ──────────────────────────────────────────
 # TENANT USER LEDGER (IMMUTABLE AUDIT TRAIL)
@@ -283,16 +286,40 @@ class TenantListSerializer(serializers.ModelSerializer):
         ]
 
     def _get_subscription(self, obj):
-        try:
-            return CompanySubscription.objects.select_related('plan').filter(company=obj.company).first()
-        except Exception:
-            return None
+        # Fast path: prefetched map provided by TenantListView.
+        sub_map = self.context.get("sub_map")
+        if sub_map is not None:
+            return sub_map.get(obj.company_id)
+        # Fallback: memoized per-object query (used by detail endpoints).
+        if not hasattr(obj, "_sa_sub"):
+            try:
+                obj._sa_sub = (
+                    CompanySubscription.objects.select_related("plan")
+                    .filter(company=obj.company)
+                    .first()
+                )
+            except Exception:
+                obj._sa_sub = None
+        return obj._sa_sub
 
     def _get_latest_cycle(self, obj):
-        try:
-            return BillingCycle.objects.filter(tenant=obj).select_related('subscription__plan').order_by('-start_date', '-end_date').first()
-        except Exception:
-            return None
+        # Fast path: prefetched map provided by TenantListView.
+        cycle_map = self.context.get("cycle_map")
+        if cycle_map is not None:
+            return cycle_map.get(obj.pk)
+        # Fallback: memoized per-object query (used by detail endpoints).
+        if not hasattr(obj, "_sa_cycle"):
+            try:
+                obj._sa_cycle = (
+                    BillingCycle.objects
+                    .filter(tenant=obj)
+                    .select_related("subscription__plan")
+                    .order_by("-start_date", "-end_date")
+                    .first()
+                )
+            except Exception:
+                obj._sa_cycle = None
+        return obj._sa_cycle
 
     def _get_effective_expiry(self, obj):
         sub = self._get_subscription(obj)
@@ -333,10 +360,10 @@ class TenantListSerializer(serializers.ModelSerializer):
     def get_monthly_rate(self, obj):
         sub = self._get_subscription(obj)
         if sub and sub.plan:
-            latest_cycle = self._get_latest_cycle(obj)
-            if latest_cycle:
+            cycle = self._get_latest_cycle(obj)
+            if cycle:
                 try:
-                    return latest_cycle.calculate_total_charge()
+                    return cycle_metrics(cycle)["total"]
                 except Exception:
                     pass
             return sub.current_price
@@ -382,9 +409,19 @@ class TenantListSerializer(serializers.ModelSerializer):
         }
         code = obj.status
         return labels.get(code, code.replace('_', ' ').title())
-    
+
     def get_active_cycle(self, obj):
-        """Helper to get the active billing cycle for a tenant."""
+        """
+        Return the currently active billing cycle for a tenant.
+
+        List view: reuse the prefetched latest cycle (no writes, no queries).
+        Detail view / one-off: prefer get_current_active_cycle(create=False),
+        falling back to the latest cycle.
+        """
+        # Fast path — list view passes cycle_map in context.
+        if self.context.get("cycle_map") is not None:
+            return self._get_latest_cycle(obj)
+        # Fallback — same behaviour as before this change.
         try:
             sub = self._get_subscription(obj)
             if sub:
@@ -394,41 +431,41 @@ class TenantListSerializer(serializers.ModelSerializer):
             return self._get_latest_cycle(obj)
         except Exception:
             return None
-    
+
     def get_raw_active_pppoe_count(self, obj):
         """Return the actual number of unique physical PPPoE users."""
-        active_cycle = self.get_active_cycle(obj)
-        if active_cycle:
+        cycle = self.get_active_cycle(obj)
+        if cycle:
             try:
-                return active_cycle.get_raw_pppoe_count()
+                return cycle_metrics(cycle)["raw"]
             except Exception:
                 return 0
         return 0
-    
+
     def get_billed_pppoe_count(self, obj):
         """Return the billed count (all active users with no minimum floor)."""
-        active_cycle = self.get_active_cycle(obj)
-        if active_cycle:
+        cycle = self.get_active_cycle(obj)
+        if cycle:
             try:
-                return active_cycle.calculate_total_pppoe()
+                return cycle_metrics(cycle)["billed"]
             except Exception:
                 return 0
         return 0
-    
+
     def get_current_cycle_status(self, obj):
         """Return the status of the current billing cycle."""
         active_cycle = self.get_active_cycle(obj)
         if active_cycle:
             return active_cycle.status
         return None
-    
+
     def get_current_cycle_start(self, obj):
         """Return the start date of the current billing cycle."""
         active_cycle = self.get_active_cycle(obj)
         if active_cycle:
             return active_cycle.start_date
         return None
-    
+
     def get_current_cycle_end(self, obj):
         """Return the end date of the current billing cycle."""
         active_cycle = self.get_active_cycle(obj)
