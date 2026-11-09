@@ -12,7 +12,7 @@ from rest_framework.permissions import IsAuthenticated, AllowAny
 from rest_framework.views import APIView
 from django_filters.rest_framework import DjangoFilterBackend
 from django.shortcuts import get_object_or_404
-from django.db.models import Sum, Count, Q
+from django.db.models import Sum, Count, Q, Max
 from django.utils import timezone
 from datetime import timedelta
 
@@ -598,8 +598,18 @@ class ActiveSubscriptionsView(APIView):
             RadAcct.objects.filter(acctstoptime__isnull=True).values_list('username', flat=True)
         )
 
+        # "Never connected" detection: latest radacct start per access code (1 grouped query)
+        sessions_list = list(paginated_sessions)
+        _codes = [s.access_code for s in sessions_list if s.access_code]
+        last_start_by_user = dict(
+            RadAcct.objects.filter(username__in=_codes)
+            .values('username')
+            .annotate(last_start=Max('acctstarttime'))
+            .values_list('username', 'last_start')
+        ) if _codes else {}
+
         hotspot_results = []
-        for session in paginated_sessions:
+        for session in sessions_list:
             # Determine online status for display purposes only — don't use it to filter
             has_open_radacct = bool(session.access_code and session.access_code in open_radacct_usernames)
             is_within_startup_grace = (
@@ -632,6 +642,14 @@ class ActiveSubscriptionsView(APIView):
             subscription_status = session.status  # 'active', 'expired', etc.
             is_active_sub = session.status == 'active' and (session.expires_at and session.expires_at > now)
 
+            _last_start = last_start_by_user.get(session.access_code)
+            ever_connected = bool(
+                has_open_radacct or (
+                    _last_start and session.activated_at
+                    and _last_start >= session.activated_at - timedelta(minutes=2)
+                )
+            )
+
             hotspot_results.append({
                 "type": "hotspot",
                 "username": session.access_code,           # e.g. "MXA-BKCS"
@@ -661,6 +679,7 @@ class ActiveSubscriptionsView(APIView):
                 # ADDED: Subscription status fields
                 "subscription_status": subscription_status,  # 'active', 'expired', etc.
                 "is_active_sub": is_active_sub,
+                "ever_connected": ever_connected,
                 "client_id": session.hotspot_client_id,  # ADD THIS LINE for client detail fetch
             })
 
