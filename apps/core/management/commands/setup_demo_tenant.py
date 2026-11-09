@@ -40,7 +40,7 @@ class Command(BaseCommand):
                 'address': 'Nairobi CBD',
                 'city': 'Nairobi',
                 'subscription_plan': 'enterprise',
-                'subscription_expiry': date.today() + timedelta(days=365),
+                'subscription_expiry': None,
             },
         )
         self.stdout.write(f'  Company: {"CREATED" if created else "exists"} — {company.name}')
@@ -48,6 +48,11 @@ class Command(BaseCommand):
         # ── 2. Tenant ───────────────────────────────────────────────────
         try:
             tenant = Tenant.objects.get(schema_name='demo')
+            tenant.status = 'active'
+            tenant.is_billing_exempt = True
+            tenant.subscription_expiry = None
+            tenant.next_billing_date = None
+            tenant.save(update_fields=['status', 'is_billing_exempt', 'subscription_expiry', 'next_billing_date', 'updated_at'])
             self.stdout.write(f'  Tenant: exists — schema={tenant.schema_name}')
         except Tenant.DoesNotExist:
             tenant = Tenant(
@@ -59,9 +64,10 @@ class Command(BaseCommand):
                 trial_start=date.today(),
                 trial_days=365,
                 subscription_expiry=date.today() + timedelta(days=365),
+                is_billing_exempt=True,
                 max_users=100,
                 max_customers=1000,
-                next_billing_date=date.today() + timedelta(days=30),
+                next_billing_date=None,
             )
             tenant.save()
             with connection.cursor() as cursor:

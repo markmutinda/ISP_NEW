@@ -432,6 +432,11 @@ class Tenant(BaseModel, TenantMixin):
     trial_start = models.DateField(default=timezone.now)
     trial_days = models.PositiveIntegerField(default=2)
     subscription_expiry = models.DateField(null=True, blank=True)
+    is_billing_exempt = models.BooleanField(
+        default=False,
+        db_index=True,
+        help_text="Keep this tenant active without subscription expiry, invoices, or renewal reminders.",
+    )
 
     # Limits & Features
     max_users = models.PositiveIntegerField(default=10)

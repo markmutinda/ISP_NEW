@@ -218,6 +218,8 @@ class CompanySubscription(models.Model):
     @property
     def is_active(self) -> bool:
         """Check if subscription is currently active (including trial)"""
+        if getattr(getattr(self.company, 'tenant', None), 'is_billing_exempt', False):
+            return True
         now = timezone.now()
         
         # Active paid subscription
@@ -251,6 +253,8 @@ class CompanySubscription(models.Model):
     @property
     def trial_expired(self) -> bool:
         """Check if trial has expired without conversion"""
+        if getattr(getattr(self.company, 'tenant', None), 'is_billing_exempt', False):
+            return False
         return (
             self.is_trial and
             self.status == 'trialing' and
@@ -261,6 +265,8 @@ class CompanySubscription(models.Model):
     @property
     def days_remaining(self) -> int:
         """Days remaining in current period"""
+        if getattr(getattr(self.company, 'tenant', None), 'is_billing_exempt', False):
+            return 0
         if self.current_period_end < timezone.now():
             return 0
         delta = self.current_period_end - timezone.now()
