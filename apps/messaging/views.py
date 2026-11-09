@@ -116,44 +116,29 @@ class SMSMessageViewSet(viewsets.ModelViewSet):
         return SMSMessageSerializer
 
     def perform_create(self, serializer):
-        """Send single SMS via the active gateway provider with wallet debit"""
+        """Send single SMS. Wallet debit/refund is handled by GatewayDispatcher only."""
         with transaction.atomic():
             sms_message = serializer.save(status='pending', type='single')
-
-            # debit internal tenant wallet first
-            debited_units = CreditBillingService.debit_for_sms(
-                message_text=sms_message.message,
-                sms_message=sms_message
-            )
 
             try:
                 dispatcher = GatewayDispatcher()
             except ValueError as e:
-                CreditBillingService.refund_units(debited_units, sms_message=sms_message, notes=str(e))
                 sms_message.mark_failed(str(e))
                 raise serializers.ValidationError({"send_error": str(e), "status": "failed"})
 
             try:
-                result = dispatcher.send_sms(
-                    to=sms_message.recipient,
-                    message=sms_message.message,
-                )
+                result = dispatcher.send_sms(to=sms_message.recipient, message=sms_message.message)
             except Exception as e:
-                CreditBillingService.refund_units(debited_units, sms_message=sms_message, notes=str(e))
                 sms_message.mark_failed(str(e))
                 raise serializers.ValidationError({"send_error": str(e), "status": "failed"})
 
-            if not result['success']:
-                CreditBillingService.refund_units(
-                    debited_units, sms_message=sms_message, notes=result.get('error', 'Send failed')
-                )
-                sms_message.mark_failed(result.get('error', 'Send failed'))
+            if not result.get('success'):
+                sms_message.mark_failed(str(result.get('error', 'Send failed'))[:500])
                 raise serializers.ValidationError({
                     "send_error": result.get('error', 'Failed to queue SMS'),
                     "status": "failed"
                 })
 
-            # Update model with real data from provider
             sms_message.provider_message_id = result.get('provider_id')
             sms_message.cost = Decimal(str(result.get('cost', '0.00')))
             sms_message.status = result['status']
@@ -163,7 +148,7 @@ class SMSMessageViewSet(viewsets.ModelViewSet):
 
     @action(detail=False, methods=['post'], url_path='bulk')
     def bulk_send(self, request):
-        """Bulk SMS sending with wallet debit for each message"""
+        """Bulk SMS. Wallet debit/refund is handled by GatewayDispatcher only."""
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
 
@@ -181,58 +166,28 @@ class SMSMessageViewSet(viewsets.ModelViewSet):
         total_cost = Decimal('0.00')
 
         for phone in recipients:
-            with transaction.atomic():
-                sms_msg = SMSMessage.objects.create(
-                    recipient=phone,
-                    message=message,
-                    status='pending',
-                    type='bulk',
-                )
+            sms_msg = SMSMessage.objects.create(
+                recipient=phone, message=message, status='pending', type='bulk',
+            )
+            try:
+                r = dispatcher.send_sms(to=phone, message=message)
+            except Exception as e:
+                r = {'success': False, 'error': str(e)}
 
-                # debit internal tenant wallet first
-                debited_units = CreditBillingService.debit_for_sms(
-                    message_text=sms_msg.message,
-                    sms_message=sms_msg
-                )
+            if not r.get('success'):
+                err = str(r.get('error', 'Send failed'))[:500]
+                sms_msg.mark_failed(err)
+                results.append({'id': sms_msg.id, 'recipient': phone, 'status': 'failed', 'error': err})
+                continue
 
-                try:
-                    r = dispatcher.send_sms(to=phone, message=message)
-                except Exception as e:
-                    CreditBillingService.refund_units(debited_units, sms_message=sms_msg, notes=str(e))
-                    sms_msg.mark_failed(str(e))
-                    results.append({
-                        'id': sms_msg.id,
-                        'recipient': phone,
-                        'status': 'failed',
-                        'error': str(e)
-                    })
-                    continue
-
-                if not r.get('success'):
-                    CreditBillingService.refund_units(
-                        debited_units, sms_message=sms_msg, notes=r.get('error', 'Send failed')
-                    )
-                    sms_msg.mark_failed(r.get('error', 'Send failed'))
-                    results.append({
-                        'id': sms_msg.id,
-                        'recipient': phone,
-                        'status': 'failed',
-                        'error': r.get('error', 'Send failed')
-                    })
-                else:
-                    sms_msg.provider_message_id = r.get('provider_id', '')
-                    sms_msg.cost = Decimal(str(r.get('cost', '0.00')))
-                    sms_msg.status = 'sent'
-                    sms_msg.sent_at = timezone.now()
-                    sms_msg.provider = dispatcher.config.provider
-                    sms_msg.save(update_fields=['provider_message_id', 'cost', 'status', 'sent_at', 'provider'])
-                    total_cost += sms_msg.cost
-                    results.append({
-                        'id': sms_msg.id,
-                        'recipient': phone,
-                        'status': 'sent',
-                        'cost': str(sms_msg.cost)
-                    })
+            sms_msg.provider_message_id = r.get('provider_id', '')
+            sms_msg.cost = Decimal(str(r.get('cost', '0.00')))
+            sms_msg.status = 'sent'
+            sms_msg.sent_at = timezone.now()
+            sms_msg.provider = dispatcher.config.provider
+            sms_msg.save(update_fields=['provider_message_id', 'cost', 'status', 'sent_at', 'provider'])
+            total_cost += sms_msg.cost
+            results.append({'id': sms_msg.id, 'recipient': phone, 'status': 'sent', 'cost': str(sms_msg.cost)})
 
         return Response({
             "detail": f"Processed {len(recipients)} messages",
@@ -242,7 +197,7 @@ class SMSMessageViewSet(viewsets.ModelViewSet):
 
     @action(detail=True, methods=['post'], url_path='retry')
     def retry(self, request, pk=None):
-        """Retry a failed message with wallet debit"""
+        """Retry a failed message. Wallet debit/refund is handled by GatewayDispatcher only."""
         sms_message = self.get_object()
 
         if sms_message.status != 'failed':
@@ -251,57 +206,35 @@ class SMSMessageViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_400_BAD_REQUEST
             )
 
-        with transaction.atomic():
-            # debit internal tenant wallet first
-            debited_units = CreditBillingService.debit_for_sms(
-                message_text=sms_message.message,
-                sms_message=sms_message
-            )
+        try:
+            dispatcher = GatewayDispatcher()
+        except ValueError as e:
+            return Response({"detail": str(e)}, status=status.HTTP_400_BAD_REQUEST)
 
-            try:
-                dispatcher = GatewayDispatcher()
-            except ValueError as e:
-                CreditBillingService.refund_units(debited_units, sms_message=sms_message, notes=str(e))
-                return Response({"detail": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            result = dispatcher.send_sms(to=sms_message.recipient, message=sms_message.message)
+        except Exception as e:
+            sms_message.mark_failed(str(e)[:500])
+            return Response({"detail": "Retry failed", "error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
 
-            try:
-                result = dispatcher.send_sms(
-                    to=sms_message.recipient,
-                    message=sms_message.message,
-                )
-            except Exception as e:
-                CreditBillingService.refund_units(debited_units, sms_message=sms_message, notes=str(e))
-                sms_message.mark_failed(str(e))
-                return Response({
-                    "detail": "Retry failed",
-                    "error": str(e)
-                }, status=status.HTTP_400_BAD_REQUEST)
+        if result.get('success'):
+            sms_message.provider_message_id = result.get('provider_id')
+            sms_message.cost = Decimal(str(result.get('cost', '0.00')))
+            sms_message.status = 'sent'
+            sms_message.sent_at = timezone.now()
+            sms_message.error_message = None
+            sms_message.provider = dispatcher.config.provider
+            sms_message.save(update_fields=[
+                'provider_message_id', 'cost', 'status', 'sent_at', 'error_message', 'provider'
+            ])
+            return Response({
+                "detail": "Retry successful", "new_status": "sent",
+                "message_id": sms_message.id, "cost": sms_message.cost,
+            }, status=status.HTTP_200_OK)
 
-            if result['success']:
-                sms_message.provider_message_id = result.get('provider_id')
-                sms_message.cost = Decimal(str(result.get('cost', '0.00')))
-                sms_message.status = 'sent'
-                sms_message.sent_at = timezone.now()
-                sms_message.error_message = None
-                sms_message.provider = dispatcher.config.provider
-                sms_message.save(update_fields=[
-                    'provider_message_id', 'cost', 'status', 'sent_at', 'error_message', 'provider'
-                ])
-                return Response({
-                    "detail": "Retry successful",
-                    "new_status": "sent",
-                    "message_id": sms_message.id,
-                    "cost": sms_message.cost
-                }, status=status.HTTP_200_OK)
-            else:
-                CreditBillingService.refund_units(
-                    debited_units, sms_message=sms_message, notes=result.get('error', 'Send failed')
-                )
-                sms_message.mark_failed(result.get('error', 'Retry failed'))
-                return Response({
-                    "detail": "Retry failed",
-                    "error": result.get('error')
-                }, status=status.HTTP_400_BAD_REQUEST)
+        sms_message.mark_failed(str(result.get('error', 'Retry failed'))[:500])
+        return Response({"detail": "Retry failed", "error": result.get('error')},
+                        status=status.HTTP_400_BAD_REQUEST)
 
 
 class SMSTemplateViewSet(viewsets.ModelViewSet):
@@ -762,6 +695,27 @@ class SMSNotificationSettingsView(APIView):
         )
         serializer.is_valid(raise_exception=True)
         serializer.save()
+
+        # ── FIX 2: A reminder with no interval has no schedule. Give it the
+        # same default the UI shows, so the interval row appears immediately
+        # and the scheduler has a bucket to work with.
+        if request.data.get('pppoe_expiry_reminder') is True and not settings_obj.pppoe_expiry_intervals:
+            settings_obj.pppoe_expiry_intervals = [{'value': 4, 'unit': 'days'}]
+            settings_obj.save(update_fields=['pppoe_expiry_intervals', 'updated_at'])
+
+        # ── Toggle seeding: ensure the 5 automation template rows exist
+        # the moment any toggle is switched on, so the message that gets sent
+        # always matches what the Templates tab shows.
+        _TEMPLATE_TOGGLES = (
+            'hotspot_welcome', 'pppoe_welcome', 'pppoe_payment_confirmation',
+            'pppoe_expiry_reminder', 'pppoe_expiry_notification',
+        )
+        if any(request.data.get(k) is True for k in _TEMPLATE_TOGGLES):
+            try:
+                from .event_views import _load_event_rows, EVENT_KEYS
+                _load_event_rows(EVENT_KEYS)
+            except Exception:
+                logger.exception("Could not seed automation templates")
 
         # ── KEY FIX: keep SMSGatewayConfig in sync ────────────────────────
         if 'use_inbuilt_system' in request.data:

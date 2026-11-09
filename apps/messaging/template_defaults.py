@@ -35,6 +35,22 @@ DEFAULTS = [
      ['{customer_name}', '{plan_name}', '{customer_account}', '{amount_due}']),
 ]
 
+EVENT_SLOTS = [
+    ('hotspot_welcome', 'Hotspot — Welcome / Session Active',
+     'Sent when a hotspot session becomes active.'),
+    ('pppoe_welcome', 'PPPoE — New Customer Welcome',
+     'Sent when a new PPPoE / Static service is activated.'),
+    ('pppoe_payment', 'PPPoE — Payment / Renewal Confirmation',
+     'Sent when a payment or renewal is received.'),
+    ('pppoe_expiry_reminder', 'PPPoE — Expiry Reminder',
+     'Sent before a subscription expires.'),
+    ('pppoe_expiry_notification', 'PPPoE — Subscription Expired',
+     'Sent once when a subscription has expired.'),
+]
+
+# event_type -> (name, default content, variables)
+DEFAULT_BY_EVENT = {ev: (name, content, variables) for ev, name, content, variables in DEFAULTS}
+
 
 def seed_default_templates():
     """Idempotent: create system templates if they don't exist yet."""

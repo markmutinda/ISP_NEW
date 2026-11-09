@@ -855,3 +855,23 @@ def cleanup_sms_dedup_log():
 
     logger.info(f"Cleaned up {total_deleted} old SMS dedup log entries across all tenants")
     return {'deleted': total_deleted}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PERSONALISED COMPOSE SEND (large recipient lists)
+# acks_late=False on purpose: if a worker dies mid-send we must NOT redeliver
+# the task, otherwise already-charged recipients would get duplicate SMS.
+# ─────────────────────────────────────────────────────────────────────────────
+@shared_task(name='apps.messaging.tasks.send_personalized_sms', acks_late=False, ignore_result=True)
+def send_personalized_sms(schema_name, recipients, message, company_name=''):
+    from apps.messaging.services.compose_service import send_personalized
+
+    if not schema_name or schema_name == 'public':
+        logger.error("send_personalized_sms: refusing to run without a tenant schema")
+        return
+    try:
+        results = send_personalized(schema_name, recipients, message, company_name)
+        ok = sum(1 for r in results if r['success'])
+        logger.warning("[COMPOSE] %s: sent=%s failed=%s", schema_name, ok, len(results) - ok)
+    except Exception:
+        logger.exception("[COMPOSE] send failed for schema %s", schema_name)

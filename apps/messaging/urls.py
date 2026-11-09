@@ -16,6 +16,7 @@ from .views import (
     CustomerSearchView,
     # CampaignSendToGroupView removed — use SMSCampaignViewSet.send_to_group instead
 )
+from .event_views import SMSEventTemplatesView, SMSComposeView
 
 router = DefaultRouter()
 router.register(r'sms', SMSMessageViewSet, basename='sms-message')
@@ -38,6 +39,14 @@ urlpatterns = [
     # Single / bulk send
     path('sms/bulk/', SMSMessageViewSet.as_view({'post': 'bulk_send'}), name='sms-bulk-send'),
     path('sms/<int:pk>/retry/', SMSMessageViewSet.as_view({'post': 'retry'}), name='sms-retry'),
+
+    # Personalised compose (new — must go before router)
+    path('sms/compose/', SMSComposeView.as_view(), name='sms-compose'),
+
+    # Automation event templates (new — must go before router, otherwise
+    # the 'templates/' basename from SMSTemplateViewSet swallows 'events' as a pk)
+    path('templates/events/', SMSEventTemplatesView.as_view(), name='sms-event-templates'),
+    path('templates/events/<str:event_type>/', SMSEventTemplatesView.as_view(), name='sms-event-template-detail'),
 
     # ============================================================
     # Router URLs (must come after the explicit paths above)
