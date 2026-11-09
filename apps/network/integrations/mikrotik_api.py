@@ -570,6 +570,35 @@ class MikrotikAPI:
             return False
         finally:
             self.disconnect()
+
+    def get_pppoe_live_traffic(self, username: str) -> Optional[Dict[str, int]]:
+        """
+        Instant bits/sec for a PPPoE user's dynamic interface (<pppoe-USERNAME>).
+        Returns {'rx_bps', 'tx_bps'} or None if the router/interface is unavailable.
+        rx = from client (client upload), tx = to client (client download).
+        """
+        try:
+            if not self.connect():
+                return None
+            rows = tuple(self.api.path('interface')('monitor-traffic', **{
+                'interface': f'<pppoe-{username}>',
+                'once': '',
+            }))
+            if not rows:
+                return None
+            row = rows[0]
+            return {
+                'rx_bps': int(row.get('rx-bits-per-second', 0) or 0),
+                'tx_bps': int(row.get('tx-bits-per-second', 0) or 0),
+            }
+        except TrapError as e:
+            logger.debug(f"monitor-traffic trap for {username} on {self.device.name}: {e}")
+            return None
+        except Exception as e:
+            logger.warning(f"monitor-traffic failed for {username} on {self.device.name}: {e}")
+            return None
+        finally:
+            self.disconnect()
     
     def disconnect_user(self, username: str, connection_type: str = 'both') -> Dict[str, bool]:
         """

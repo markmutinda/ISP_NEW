@@ -1315,6 +1315,73 @@ class CustomerRadiusCredentialsViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
 
+    @action(detail=True, methods=['get'], url_path='live_traffic')
+    def live_traffic(self, request, pk=None):
+        """
+        GET /api/v1/radius/credentials/{id}/live_traffic/
+        Real-time bandwidth for a PPPoE customer, polled by the user detail page.
+        Cached 2s per user so many viewers = one router call.
+        """
+        from django.core.cache import cache
+        from django.db import connection
+        from apps.network.models import Router
+        from apps.network.integrations.mikrotik_api import MikrotikAPI
+
+        credentials = self.get_object()
+        username = credentials.username
+        schema = connection.schema_name
+
+        cache_key = f"livebw:{schema}:{username}"
+        cached = cache.get(cache_key)
+        if cached is not None:
+            return Response(cached)
+
+        def respond(payload, ttl=2):
+            cache.set(cache_key, payload, ttl)
+            return Response(payload)
+
+        base = {'online': False, 'supported': True, 'download_mbps': 0.0, 'upload_mbps': 0.0}
+
+        if credentials.connection_type not in ('PPPOE', 'BOTH'):
+            return respond({**base, 'supported': False}, ttl=30)
+
+        # Newest open session tells us which router the customer is on right now
+        nas_ip = (
+            RadAcct.objects
+            .filter(username=username, acctstoptime__isnull=True)
+            .order_by('-acctstarttime')
+            .values_list('nasipaddress', flat=True)
+            .first()
+        )
+        if not nas_ip:
+            return respond(base, ttl=3)
+
+        nas_ip = str(nas_ip)
+        router_key = f"livebw_router:{schema}:{nas_ip}"
+        router_id = cache.get(router_key)
+        router = None
+        if router_id:
+            router = Router.objects.filter(pk=router_id, is_active=True).first()
+        if router is None:
+            router = Router.objects.filter(
+                Q(vpn_ip_address=nas_ip) | Q(ip_address=nas_ip), is_active=True
+            ).first()
+            if router:
+                cache.set(router_key, router.pk, 120)
+        if router is None:
+            return respond({**base, 'online': True, 'error': 'router_not_found'}, ttl=10)
+
+        traffic = MikrotikAPI(router).get_pppoe_live_traffic(username)
+        if traffic is None:
+            return respond({**base, 'online': True, 'error': 'router_unreachable'}, ttl=5)
+
+        return respond({
+            'online': True,
+            'supported': True,
+            'download_mbps': round(traffic['tx_bps'] / 1_000_000, 2),
+            'upload_mbps': round(traffic['rx_bps'] / 1_000_000, 2),
+        })
+
     def _resolve_router_for_credentials(self, credentials):
         """
         Best-effort resolution of which physical router (NAS) a customer
