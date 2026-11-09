@@ -20,6 +20,7 @@ from . import views
 from .financial_csv import FinancialCSVView
 from . import support_views
 from .tenant_insights import TenantInsightsView
+from .tenant_staff import TenantStaffView, TenantStaffPasswordResetView
 from apps.core.views_support import SuperadminSupportChatConversationDetailView, SuperadminSupportChatConversationListView
 
 app_name = "superadmin"
@@ -65,6 +66,9 @@ urlpatterns = [
     path("tenants/<uuid:pk>/hotspot-users/", views.TenantHotspotUsersView.as_view(), name="tenant-hotspot"),
     path("tenants/<uuid:pk>/inventory/", views.TenantInventoryView.as_view(), name="tenant-inventory"),
     path("tenants/<uuid:pk>/impersonate/", views.TenantImpersonateView.as_view(), name="tenant-impersonate"),
+    path("tenants/<uuid:pk>/staff/", TenantStaffView.as_view(), name="tenant-staff"),
+    path("tenants/<uuid:pk>/staff/<int:user_id>/reset-password/",
+         TenantStaffPasswordResetView.as_view(), name="tenant-staff-reset-password"),
 
     # Plans
     path("plans/", views.PlanListView.as_view(), name="plan-list"),
