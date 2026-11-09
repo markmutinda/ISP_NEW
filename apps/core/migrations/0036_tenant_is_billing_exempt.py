@@ -12,7 +12,7 @@ def exempt_demo_tenant(apps, schema_editor):
 
 
 class Migration(migrations.Migration):
-    dependencies = [("core", "0033_user_onboarding_metadata")]
+    dependencies = [("core", "0035_remove_user_uniq_customer_phone_and_more")]
 
     operations = [
         migrations.AddField(
