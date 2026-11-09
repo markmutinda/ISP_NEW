@@ -1051,8 +1051,6 @@ def send_subscription_invoice_reminders():
     channels = set(settings_payload["channels"])
     send_expired_notice = settings_payload.get("send_expired_notice", True)
     cycles = BillingCycle.objects.filter(status__in=["active", "invoiced"]).exclude(
-        tenant__is_billing_exempt=True,
-    ).exclude(
         subscription__status="trialing",
     ).select_related(
         "tenant",
@@ -1366,7 +1364,7 @@ def check_trial_lifecycle():
         status='trialing',
         is_trial=True,
         trial_ends_at__lt=now,
-    ).exclude(company__tenant__is_billing_exempt=True).select_related('company')
+    ).select_related('company')
 
     locked = 0
     for sub in expired_trials:
@@ -1442,7 +1440,7 @@ def enforce_billing_grace_period():
     expired_cycles = BillingCycle.objects.filter(
         status='invoiced',
         grace_ends_at__lt=now,
-    ).exclude(tenant__is_billing_exempt=True).select_related('tenant', 'subscription', 'subscription__company')
+    ).select_related('tenant', 'subscription', 'subscription__company')
 
     locked = 0
     for cycle in expired_cycles:

@@ -95,7 +95,6 @@ def send_subscription_expiry_reminders():
         subs = (
             CompanySubscription.objects
             .filter(status='active', is_trial=False)
-            .exclude(company__tenant__is_billing_exempt=True)
             .select_related('company', 'plan', 'company__tenant')
         )
 

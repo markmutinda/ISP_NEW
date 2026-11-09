@@ -507,11 +507,6 @@ class SubscriptionEnforcementMiddleware(MiddlewareMixin):
                 'status': 'suspended',
             }, status=403)
 
-        # Billing-exempt workspaces remain subject to manual suspension, but
-        # never enter subscription expiry/payment enforcement.
-        if tenant and getattr(tenant, 'is_billing_exempt', False):
-            return None
-
         # 6. Check subscription state
         
         # Only enforce if we have a tenant and company

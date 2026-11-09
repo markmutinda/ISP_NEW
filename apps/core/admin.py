@@ -147,7 +147,7 @@ class CompanyAdmin(admin.ModelAdmin):
 
 @admin.register(Tenant)
 class TenantAdmin(admin.ModelAdmin):
-    list_display = ('subdomain', 'company', 'status', 'is_billing_exempt', 'is_active',
+    list_display = ('subdomain', 'company', 'status', 'is_active', 
                     'billing_cycle', 'next_billing_date', 'created_at', 'total_users')
     list_filter = ('status', 'is_active', 'billing_cycle')
     search_fields = ('subdomain', 'domain', 'company__name', 'database_name')
@@ -156,7 +156,7 @@ class TenantAdmin(admin.ModelAdmin):
     
     fieldsets = (
         (_('Tenant Info'), {'fields': ('company', 'subdomain', 'domain', 'database_name')}),
-        (_('Status'), {'fields': ('is_active', 'status', 'is_billing_exempt')}),
+        (_('Status'), {'fields': ('is_active', 'status')}),
         (_('Subscription'), {'fields': ('max_users', 'max_customers', 'features', 
                                         'billing_cycle', 'monthly_rate', 'next_billing_date')}),
         (_('Statistics'), {'fields': ('total_users',), 'classes': ('collapse',)}),

@@ -71,7 +71,6 @@ class CompanySubscriptionSerializer(serializers.ModelSerializer):
     is_on_trial = serializers.BooleanField(read_only=True)
     trial_days_remaining = serializers.IntegerField(read_only=True)
     trial_expired = serializers.BooleanField(read_only=True)
-    billing_exempt = serializers.BooleanField(source='company.tenant.is_billing_exempt', read_only=True)
     
     class Meta:
         model = CompanySubscription
@@ -96,7 +95,6 @@ class CompanySubscriptionSerializer(serializers.ModelSerializer):
             'trial_ends_at',
             'trial_days_remaining',
             'trial_expired',
-            'billing_exempt',
             'converted_from_trial_at',
             'created_at',
         ]

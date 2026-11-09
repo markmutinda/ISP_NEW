@@ -174,12 +174,6 @@ class CurrentSubscriptionView(FreshBillingResponseMixin, APIView):
                 
                 # Build response with trial warnings
                 data = CompanySubscriptionSerializer(subscription).data
-                if getattr(getattr(subscription.company, 'tenant', None), 'is_billing_exempt', False):
-                    data['status'] = 'active'
-                    data['is_active'] = True
-                    data['trial_expired'] = False
-                    data['is_on_trial'] = False
-                    data['billing_exempt'] = True
 
                 # Normalize status from the authoritative subscription state.
                 # A paid/converted subscription may retain historical trial dates, so

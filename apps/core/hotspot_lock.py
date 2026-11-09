@@ -34,14 +34,11 @@ def _compute(schema_name):
             .values(
                 "status", "current_period_end", "trial_ends_at",
                 "company__phone_number", "company__name",
-                "company__tenant__is_billing_exempt",
             )
             .first()
         )
     if not row:
         return {"locked": False}
-    if row["company__tenant__is_billing_exempt"]:
-        return {"locked": False, "billing_exempt": True}
 
     now = timezone.now()
     st = row["status"]
