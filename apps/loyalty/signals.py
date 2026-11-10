@@ -56,18 +56,6 @@ def award_loyalty_points_on_payment(sender, instance, created, **kwargs):
                     transaction_type='earned',
                 )
 
-                if settings_obj.notify_points_earned:
-                    try:
-                        from apps.messaging.tasks import send_loyalty_notification_sms
-                        send_loyalty_notification_sms.delay(
-                            customer_id=inst.customer.id,
-                            message_type='points_earned',
-                            points=base_points,
-                            reason=f'Payment KES {amount:,.2f}',
-                        )
-                    except Exception:
-                        pass
-
         except Exception as e:
             logger.error(f'Loyalty points on payment (deferred) failed: {e}')
 

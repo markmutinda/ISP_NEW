@@ -263,7 +263,21 @@ class InitiateCustomerPaymentView(APIView):
             )
         
         party_b, account_reference, transaction_type, _desc = destination
-        
+
+        # ── Optional loyalty discount coupon ──
+        loyalty_discount = None
+        original_amount = None
+        if str(request.data.get('use_loyalty_discount', '')).lower() in ('1', 'true', 'yes'):
+            from apps.loyalty.services import pick_discount, discounted_amount
+            loyalty_discount = pick_discount(customer)
+            if not loyalty_discount:
+                return Response(
+                    {'error': 'No loyalty discount available.', 'detail': 'No loyalty discount available.'},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            original_amount = Decimal(str(amount))
+            amount = discounted_amount(original_amount, loyalty_discount.percent)
+
         # Generate internal reference - ensure no spaces
         reference = f"PAY-{customer.customer_code}-{int(time.time())}".replace(" ", "-")
         
@@ -282,6 +296,13 @@ class InitiateCustomerPaymentView(APIView):
             service_type='PPPOE',   # Permanent classification for analytics
             tuma_status='pending',
         )
+
+        if loyalty_discount:
+            from apps.loyalty.services import reserve_discount
+            reserve_discount(loyalty_discount, payment.id)
+            payment.notes = (f"Customer payment with {loyalty_discount.percent}% loyalty discount "
+                             f"(original KES {original_amount})")
+            payment.save(update_fields=['notes'])
         
         # ============================================================
         # 🚨 Initiate STK Push via Netily Paybill (replaces Tuma)
@@ -323,6 +344,9 @@ class InitiateCustomerPaymentView(APIView):
                 'status': 'pending',
                 'payment_id': payment.id,
                 'payment_number': payment.payment_number,
+                **({'loyalty_discount': {'percent': str(loyalty_discount.percent),
+                                         'original_amount': str(original_amount),
+                                         'amount': str(amount)}} if loyalty_discount else {}),
                 'tuma_response': {
                     'status': 'pending',
                     'merchant_request_id': payment.tuma_merchant_request_id,

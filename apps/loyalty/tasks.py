@@ -126,3 +126,15 @@ def _purge_orphans_for_tenant() -> int:
     if deleted:
         logger.info(f'Purged orphan loyalty rows: {deleted}')
     return deleted
+
+
+@shared_task(name='apps.loyalty.tasks.send_loyalty_sms', ignore_result=True)
+def send_loyalty_sms(schema_name, phone, message):
+    """Async SMS for manual point / voucher awards (runs in tenant schema)."""
+    from django_tenants.utils import schema_context
+    try:
+        from apps.messaging.services.gateway_dispatcher import GatewayDispatcher
+        with schema_context(schema_name):
+            GatewayDispatcher().send_sms(to=phone, message=message)
+    except Exception as e:
+        logger.warning(f'[{schema_name}] loyalty SMS to {phone} failed: {e}')

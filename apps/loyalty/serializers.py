@@ -127,6 +127,7 @@ class LoyaltyRewardSerializer(serializers.ModelSerializer):
             'status', 'stock_quantity', 'redemption_count', 'valid_until',
             'image', 'voucher_batch_id', 'credit_amount', 'is_available',
             'hotspot_reward_minutes', 'hotspot_reward_speed_mbps',
+            'discount_percent',
         ]
 
 
@@ -144,11 +145,27 @@ class LoyaltyRewardWriteSerializer(serializers.ModelSerializer):
             'status', 'stock_quantity', 'valid_until', 'image',
             'voucher_batch_id', 'credit_amount',
             'hotspot_reward_minutes', 'hotspot_reward_speed_mbps',
+            'discount_percent',
         ]
     
     # Add this method to ensure empty strings are converted to the default '5'
     def validate_hotspot_reward_speed_mbps(self, value):
         return value if value else '5'
+
+    def validate(self, attrs):
+        inst = self.instance
+        category = attrs.get('category', getattr(inst, 'category', None))
+        if category == 'hotspot':
+            minutes = attrs.get('hotspot_reward_minutes', getattr(inst, 'hotspot_reward_minutes', None))
+            if not minutes or minutes <= 0:
+                raise serializers.ValidationError({'hotspot_reward_minutes': 'Free minutes are required for hotspot rewards.'})
+            attrs['discount_percent'] = None
+        elif category == 'pppoe':
+            pct = attrs.get('discount_percent', getattr(inst, 'discount_percent', None))
+            if pct is None or not (0 < pct <= 100):
+                raise serializers.ValidationError({'discount_percent': 'Enter a discount between 1 and 100.'})
+            attrs['hotspot_reward_minutes'] = None
+        return attrs
 
 
 class PointsRuleSerializer(serializers.ModelSerializer):
@@ -161,14 +178,17 @@ class PointsRuleSerializer(serializers.ModelSerializer):
 
 
 class AwardPointsSerializer(serializers.Serializer):
-    member_id = serializers.IntegerField()
-    points = serializers.IntegerField(min_value=1)
-    reason = serializers.CharField(max_length=200, required=False, default='Manual award')
+    member_id = serializers.IntegerField(required=False)
+    category = serializers.ChoiceField(choices=['pppoe', 'hotspot'], required=False)
+    target_id = serializers.IntegerField(required=False)
+    points = serializers.IntegerField(min_value=1, max_value=1000000)
+    reason = serializers.CharField(max_length=200, required=False, allow_blank=True, default='Manual award')
+    send_sms = serializers.BooleanField(default=True)
 
-    def validate_member_id(self, value):
-        if not LoyaltyMember.objects.filter(id=value).exists():
-            raise serializers.ValidationError('Member not found')
-        return value
+    def validate(self, attrs):
+        if not attrs.get('member_id') and not (attrs.get('category') and attrs.get('target_id')):
+            raise serializers.ValidationError('Select a member to award.')
+        return attrs
 
 
 class BulkAwardPointsSerializer(serializers.Serializer):
@@ -203,7 +223,13 @@ class RedeemRewardSerializer(serializers.Serializer):
 
 
 class AwardVoucherSerializer(serializers.Serializer):
-    """Award a hotspot voucher to a loyalty member and send via SMS."""
-    member_id = serializers.IntegerField()
-    voucher_batch_id = serializers.IntegerField(required=False, help_text='Optional batch to pick voucher from')
+    """Award a hotspot voucher (for a chosen hotspot plan) and SMS the code."""
+    member_id = serializers.IntegerField(required=False)
+    target_id = serializers.IntegerField(required=False, help_text='HotspotClient id')
+    plan_id = serializers.UUIDField()
     send_sms = serializers.BooleanField(default=True)
+
+    def validate(self, attrs):
+        if not attrs.get('member_id') and not attrs.get('target_id'):
+            raise serializers.ValidationError('Select a hotspot user.')
+        return attrs

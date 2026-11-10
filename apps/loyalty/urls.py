@@ -13,5 +13,7 @@ urlpatterns = [
     path('settings/', views.LoyaltySettingsView.as_view(), name='loyalty-settings'),
     path('stats/', views.loyalty_stats, name='loyalty-stats'),
     path('leaderboard/', views.loyalty_leaderboard, name='loyalty-leaderboard'),
+    path('me/', views.MyLoyaltyView.as_view(), name='loyalty-me'),
+    path('me/redeem/', views.MyLoyaltyRedeemView.as_view(), name='loyalty-me-redeem'),
     path('', include(router.urls)),
 ]

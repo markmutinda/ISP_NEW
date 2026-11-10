@@ -32,6 +32,8 @@ REWARD_STATUS_CHOICES = (
 )
 
 REWARD_CATEGORY_CHOICES = (
+    ('hotspot', 'Hotspot (Free WiFi time)'),
+    ('pppoe', 'PPPoE (Plan discount)'),
     ('internet', 'Internet / Data'),
     ('credit', 'Account Credit'),
     ('voucher', 'Hotspot Voucher'),
@@ -340,6 +342,10 @@ class LoyaltyReward(models.Model):
         default='5',
         help_text='Speed (Mbps) during the reward session, e.g. "5"'
     )
+    discount_percent = models.DecimalField(
+        max_digits=5, decimal_places=2, null=True, blank=True,
+        help_text='PPPoE rewards: % discount applied to the next renewal payment'
+    )
 
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -423,3 +429,25 @@ class PointsRule(models.Model):
 
     def __str__(self):
         return f'{self.name} ({self.trigger}: {self.points} pts)'
+
+
+class LoyaltyDiscount(models.Model):
+    """Coupon created when a customer redeems a PPPoE reward. Consumed by one payment."""
+    STATUS_CHOICES = (('available', 'Available'), ('reserved', 'Reserved'), ('used', 'Used'))
+
+    member = models.ForeignKey(LoyaltyMember, on_delete=models.CASCADE, related_name='discounts')
+    reward = models.ForeignKey(LoyaltyReward, on_delete=models.SET_NULL, null=True, blank=True, related_name='discounts')
+    percent = models.DecimalField(max_digits=5, decimal_places=2)
+    status = models.CharField(max_length=10, choices=STATUS_CHOICES, default='available', db_index=True)
+    reserved_payment_id = models.BigIntegerField(null=True, blank=True)
+    reserved_at = models.DateTimeField(null=True, blank=True)
+    used_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        app_label = 'loyalty'
+        ordering = ['created_at']
+        indexes = [models.Index(fields=['member', 'status'], name='loy_disc_member_status_idx')]
+
+    def __str__(self):
+        return f'{self.member_id} {self.percent}% ({self.status})'
