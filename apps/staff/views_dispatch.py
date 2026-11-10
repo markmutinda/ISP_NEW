@@ -8,6 +8,10 @@ from rest_framework.permissions import IsAuthenticated
 from django.utils import timezone
 from django.core.mail import send_mail
 from apps.core.permissions import HasRoleAccessPolicy
+from apps.core.event_sms import request_company_name
+from apps.support.models import SupportTicketMessage
+from apps.support.notifications import notify_ticket_resolved
+from .notifications import notify_technician_assignment
 
 from .models import Technician, DispatchJob
 from .serializers_dispatch import (
@@ -31,6 +35,11 @@ class TechnicianViewSet(viewsets.ModelViewSet):
     serializer_class = TechnicianSerializer
     permission_classes = [IsAuthenticated, HasRoleAccessPolicy]
     required_rbac_path = "/admin/staff"
+
+    def get_required_rbac_paths(self, request):
+        if self.action in ('list', 'retrieve'):
+            return ('/admin/dispatch', '/admin/staff')
+        return ('/admin/staff',)
 
     def get_serializer_class(self):
         if self.action == 'create':
@@ -64,7 +73,7 @@ class DispatchJobViewSet(viewsets.ModelViewSet):
     """
     queryset = DispatchJob.objects.select_related(
         'customer', 'customer__user', 'assigned_to', 'assigned_to__user', 'ticket'
-    ).all()
+    ).prefetch_related('customer__addresses').all()
     serializer_class = DispatchJobSerializer
     permission_classes = [IsAuthenticated, HasRoleAccessPolicy]
     required_rbac_path = "/admin/dispatch"
@@ -72,6 +81,10 @@ class DispatchJobViewSet(viewsets.ModelViewSet):
     def get_queryset(self):
         qs = super().get_queryset()
         params = self.request.query_params
+
+        user = self.request.user
+        if getattr(user, 'role', None) == 'technician' and not user.is_superuser:
+            qs = qs.filter(assigned_to__user=user)
 
         status_filter = params.get('status')
         if status_filter:
@@ -101,6 +114,12 @@ class DispatchJobViewSet(viewsets.ModelViewSet):
 
         return qs
 
+    def perform_create(self, serializer):
+        has_tech = bool(serializer.validated_data.get('assigned_to'))
+        job = serializer.save(status='assigned') if has_tech else serializer.save()
+        if job.assigned_to_id:
+            notify_technician_assignment(job, request_company_name(self.request))
+
     @action(detail=True, methods=['post'])
     def assign(self, request, pk=None):
         """Assign a technician to a job."""
@@ -120,6 +139,8 @@ class DispatchJobViewSet(viewsets.ModelViewSet):
         job.assigned_to = technician
         job.status = 'assigned'
         job.save(update_fields=['assigned_to', 'status', 'updated_at'])
+
+        notify_technician_assignment(job, request_company_name(request))
 
         return Response(DispatchJobSerializer(job).data)
 
@@ -148,10 +169,18 @@ class DispatchJobViewSet(viewsets.ModelViewSet):
                 job.assigned_to.save(update_fields=['total_jobs_completed'])
             # If linked to a ticket, resolve it
             if job.ticket and job.ticket.status not in ('resolved', 'closed'):
-                job.ticket.status = 'resolved'
-                job.ticket.resolved_at = timezone.now()
-                job.ticket.resolution = f"Resolved via dispatch job {job.job_number}"
-                job.ticket.save(update_fields=['status', 'resolved_at', 'resolution', 'updated_at'])
+                ticket = job.ticket
+                ticket.status = 'resolved'
+                ticket.resolved_at = timezone.now()
+                ticket.save(update_fields=['status', 'resolved_at', 'updated_at'])
+                SupportTicketMessage.objects.create(
+                    ticket=ticket,
+                    sender_type='system',
+                    sender=request.user,
+                    message=f"Resolved via dispatch job {job.job_number}",
+                    is_internal=False,
+                )
+                notify_ticket_resolved(ticket, request_company_name(request))
         elif new_status == 'cancelled':
             job.status = 'cancelled'
 

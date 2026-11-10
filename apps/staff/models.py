@@ -800,12 +800,21 @@ class DispatchJob(models.Model):
 
     @property
     def customer_phone(self):
-        phone = getattr(self.customer, 'phone_number', None) or getattr(self.customer, 'phone', '')
-        return phone or ''
+        user = getattr(self.customer, 'user', None)
+        return (getattr(user, 'phone_number', '') or '') if user else ''
 
     @property
     def customer_address(self):
-        return getattr(self.customer, 'address', '') or ''
+        c = self.customer
+        if not c:
+            return ''
+        addrs = list(c.addresses.all())  # prefetched in the viewset
+        if addrs:
+            a = next((x for x in addrs if x.is_primary), addrs[0])
+            text = ', '.join(p for p in [a.building_name, a.street_address, a.estate, a.ward, a.sub_county, a.county] if p)
+            if text:
+                return text
+        return c.location or ''
 
     @property
     def technician_name(self):

@@ -111,3 +111,13 @@ def delayed_service_activation(self, service_id):
 #             logger.error(f"[EXPIRY] Fatal loop error in schema context {schema_name}: {tenant_err}")
 #             
 #     return stats
+
+
+@shared_task(ignore_result=True)
+def send_event_sms_task(schema_name, phone, message, recipient_name="", msg_type="notification"):
+    """Generic tenant-scoped event SMS (tickets, dispatch, staff credentials)."""
+    from django_tenants.utils import schema_context
+    from apps.core.event_sms import deliver_event_sms
+
+    with schema_context(schema_name):
+        deliver_event_sms(phone, message, recipient_name, msg_type)

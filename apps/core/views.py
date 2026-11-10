@@ -57,6 +57,7 @@ from .serializers import (
     FeatureRequestSerializer, CompanyBrandingSerializer, RoleAccessPolicySerializer
 )
 from .permissions import HasRoleAccessPolicy, IsAdmin, IsAdminOrStaff, IsCustomer, IsTechnician
+from .event_sms import truthy, request_company_name, build_staff_credentials_sms, queue_event_sms
 from apps.superadmin.permissions import IsSuperAdmin
 from .session_tokens import issue_refresh_token
 
@@ -617,6 +618,28 @@ class UserViewSet(viewsets.ModelViewSet):
             user_agent=self.request.META.get("HTTP_USER_AGENT", ""),
             tenant=getattr(self.request, "tenant", None),
         )
+
+        if user.role == 'technician' and current_schema != get_public_schema_name():
+            try:
+                from apps.staff.services import ensure_technician_profile
+                ensure_technician_profile(user)
+            except Exception:
+                logger.exception("Technician profile creation failed for user %s", user.pk)
+
+        if truthy(self.request.data.get('send_sms')) and user.phone_number:
+            queue_event_sms(
+                user.phone_number,
+                build_staff_credentials_sms(
+                    user,
+                    serializer.validated_data.get('password'),
+                    company_name=getattr(company, 'name', None) or request_company_name(self.request),
+                    subdomain=getattr(tenant, 'subdomain', None)
+                    or getattr(self.request.user, 'tenant_subdomain', None) or '',
+                ),
+                recipient_name=user.get_full_name(),
+                msg_type='staff',
+            )
+
         logger.info("UserViewSet: Created %s user %s in schema %s", role, user.email, current_schema)
 
     def perform_update(self, serializer):
@@ -648,6 +671,32 @@ class UserViewSet(viewsets.ModelViewSet):
             user_agent=self.request.META.get("HTTP_USER_AGENT", ""),
             tenant=getattr(self.request, "tenant", None),
         )
+
+        if getattr(connection, "schema_name", "") != get_public_schema_name():
+            try:
+                from apps.staff.services import ensure_technician_profile, deactivate_technician_profile
+                if user.role == 'technician' and user.is_active:
+                    ensure_technician_profile(user)
+                elif before["role"] == 'technician':
+                    deactivate_technician_profile(user)
+            except Exception:
+                logger.exception("Technician profile sync failed for user %s", user.pk)
+
+        new_password = serializer.validated_data.get('new_password')
+        if new_password and truthy(self.request.data.get('send_sms')) and user.phone_number:
+            company, tenant = get_current_public_company_and_tenant(self.request)
+            queue_event_sms(
+                user.phone_number,
+                build_staff_credentials_sms(
+                    user, new_password,
+                    company_name=getattr(company, 'name', None) or request_company_name(self.request),
+                    subdomain=getattr(tenant, 'subdomain', None)
+                    or getattr(self.request.user, 'tenant_subdomain', None) or '',
+                    password_reset=True,
+                ),
+                recipient_name=user.get_full_name(),
+                msg_type='staff',
+            )
 
     @transaction.atomic
     def destroy(self, request, *args, **kwargs):

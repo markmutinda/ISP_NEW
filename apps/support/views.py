@@ -22,6 +22,8 @@ from .serializers import (
 )
 
 from apps.core.permissions import HasRoleAccessPolicy, IsAdminOrStaff, IsCustomer
+from apps.core.event_sms import request_company_name
+from .notifications import notify_ticket_created, notify_ticket_resolved
 
 logger = logging.getLogger(__name__)
 
@@ -162,10 +164,18 @@ class SupportTicketViewSet(viewsets.ModelViewSet):
             is_internal=False,
         )
 
+        notify_ticket_created(ticket, request_company_name(request))
+
         return Response(
             SupportTicketDetailSerializer(ticket, context={'request': request}).data,
             status=status.HTTP_201_CREATED,
         )
+
+    def perform_update(self, serializer):
+        old_status = serializer.instance.status
+        ticket = serializer.save()
+        if ticket.status == 'resolved' and old_status not in ('resolved', 'closed'):
+            notify_ticket_resolved(ticket, request_company_name(self.request))
 
     @action(detail=True, methods=['post'], url_path='assign')
     def assign(self, request, pk=None):
@@ -223,6 +233,9 @@ class SupportTicketViewSet(viewsets.ModelViewSet):
             ticket.resolved_at = timezone.now()
 
         ticket.save(update_fields=['status', 'resolved_at'])
+
+        if new_status == 'resolved' and old_status not in ('resolved', 'closed'):
+            notify_ticket_resolved(ticket, request_company_name(request))
 
         SupportTicketMessage.objects.create(
             ticket=ticket,
