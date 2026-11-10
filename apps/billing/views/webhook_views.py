@@ -366,6 +366,27 @@ class MpesaC2BWebhookView(APIView):
                                 models.Q(mpesa_account_number__iexact=bill_ref)
                             ).first()
 
+                        # ── Fallback: customer typed their RADIUS (PPPoE) username as the paybill account ──
+                        # Billing account number always wins (checked above). Only runs on a miss.
+                        # Skip refs that are portal/hotspot STK markers (PP123 / HP123), handled further down.
+                        if not service and not re.fullmatch(r"(PP|HP)\d+", bill_ref):
+                            _uname_variants = list({bill_ref, raw_bill_ref, raw_bill_ref.lower()})
+                            _uname_qs = _svc_qs.filter(
+                                customer__radius_credentials__username__in=_uname_variants
+                            ).exclude(status='TERMINATED')
+                            # Fast path: exact match on the unique-indexed username column
+                            service = _uname_qs.order_by('-created_at').first()
+                            # Slow path only on a miss: case-insensitive (mixed-case usernames)
+                            if not service:
+                                service = _svc_qs.filter(
+                                    customer__radius_credentials__username__iexact=bill_ref
+                                ).exclude(status='TERMINATED').order_by('-created_at').first()
+                            if service:
+                                logger.info(
+                                    f"C2B {trans_id}: matched via RADIUS username '{bill_ref}' "
+                                    f"-> customer {service.customer_id}"
+                                )
+
                         hotspot_session = None
                         if not service:
                             from apps.billing.models.hotspot_models import HotspotSession
