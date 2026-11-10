@@ -276,6 +276,9 @@ hotspot_admin_urlpatterns = [
     path('admin/ads/<int:pk>/toggle-active/',
          HotspotAdAdminViewSet.as_view({'post': 'toggle_active'}),
          name='hotspot-admin-ad-toggle'),
+    path('admin/ads/<int:pk>/report-pdf/',
+         HotspotAdAdminViewSet.as_view({'get': 'report_pdf'}),
+         name='hotspot-admin-ad-report'),
 
     # ============================================================
     # HOTSPOT CHAT ADMIN ROUTES (NEW)

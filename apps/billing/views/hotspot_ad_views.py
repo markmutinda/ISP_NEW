@@ -465,3 +465,18 @@ class HotspotAdAdminViewSet(viewsets.ModelViewSet):
         ad.is_active = not ad.is_active
         ad.save(update_fields=['is_active', 'updated_at'])
         return Response({'id': ad.id, 'is_active': ad.is_active})
+
+    @action(detail=True, methods=['get'], url_path='report-pdf')
+    def report_pdf(self, request, pk=None):
+        import logging
+        from apps.billing.services.ad_report_pdf import build_ad_report_pdf
+        from apps.core.pdf_reports import pdf_response, safe_filename
+
+        ad = self.get_object()  # already tenant-scoped via get_queryset()
+        try:
+            pdf_bytes = build_ad_report_pdf(ad, request)
+        except Exception:
+            logging.getLogger(__name__).exception("Ad report PDF failed for ad %s", pk)
+            return Response({'error': 'Could not generate the report. Please try again.'},
+                            status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        return pdf_response(pdf_bytes, f"ad-report-{safe_filename(ad.name)}.pdf")
