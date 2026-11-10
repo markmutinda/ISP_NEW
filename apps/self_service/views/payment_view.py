@@ -167,6 +167,14 @@ class PaymentView(APIView):
                 'error': 'No active payment method configured. The ISP must set up a payment method in the admin dashboard.'
             }, status=status.HTTP_400_BAD_REQUEST)
 
+        reward = None
+        if request.data.get('reward_id'):
+            from apps.loyalty.services import preview_reward, RewardError
+            try:
+                reward, amount = preview_reward(customer, request.data['reward_id'], amount)
+            except RewardError as e:
+                return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
         # 6. Generate Reference & Create Payment
         reference = f"PAY-{customer.customer_code}-{int(time.time())}"
         full_name = getattr(customer, 'full_name', None) or f"{user.first_name} {user.last_name}".strip()
@@ -192,6 +200,15 @@ class PaymentView(APIView):
             service_type='PPPOE',  # Self-service payments are for PPPoE services
             tuma_status='pending',
         )
+
+        if reward:
+            from apps.loyalty.services import reserve_reward, RewardError
+            try:
+                reserve_reward(customer, reward.id, payment.id)
+            except RewardError as e:
+                payment.status, payment.failure_reason = 'FAILED', str(e)
+                payment.save(update_fields=['status', 'failure_reason'])
+                return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
 
         # ==========================================
         # ROUTE 1: DIRECT DARAJA (M-PESA CONFIG)

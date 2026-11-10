@@ -309,6 +309,10 @@ class LoyaltyRewardViewSet(viewsets.ModelViewSet):
         member = ser.validated_data['member']
         reward = ser.validated_data['reward']
 
+        # PPPoE rewards are redeemed by customers at checkout, not from admin.
+        if reward.category == 'pppoe':
+            return Response({'error': 'PPPoE rewards are redeemed by customers at checkout.'}, status=400)
+
         # Deduct points
         txn = member.deduct_points(
             points=reward.points_cost,
@@ -333,9 +337,6 @@ class LoyaltyRewardViewSet(viewsets.ModelViewSet):
         # Handle credit rewards
         if reward.category == 'credit' and reward.credit_amount:
             self._apply_credit(member, reward)
-
-        if reward.category == 'pppoe' and reward.discount_percent:
-            LoyaltyDiscount.objects.create(member=member, reward=reward, percent=reward.discount_percent)
 
         return Response({
             'transaction': PointsTransactionSerializer(txn).data,
@@ -452,7 +453,7 @@ class PointsTransactionViewSet(viewsets.ReadOnlyModelViewSet):
 class PointsRuleViewSet(viewsets.ModelViewSet):
     permission_classes = ADMIN_PERMS
     serializer_class = PointsRuleSerializer
-    queryset = PointsRule.objects.all()
+    queryset = PointsRule.objects.order_by('id')
 
 
 # ─── Stats ───────────────────────────────────────────────────────
@@ -520,7 +521,7 @@ def _customer_of(request):
 
 
 class MyLoyaltyView(APIView):
-    """GET /loyalty/me/ - customer's points, redeemable PPPoE rewards, available coupons."""
+    """GET /loyalty/me/ - points + PPPoE rewards redeemable at checkout."""
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
@@ -531,15 +532,11 @@ class MyLoyaltyView(APIView):
             return Response({'program_active': False})
 
         member = LoyaltyMember.objects.select_related('tier').filter(customer=customer).first()
-        points = member.current_points if member else 0
-        discounts = []
         if member:
             settle_reservations(member)
-            discounts = [
-                {'id': d.id, 'percent': str(d.percent), 'reward_name': d.reward.name if d.reward else 'Discount'}
-                for d in LoyaltyDiscount.objects.select_related('reward')
-                .filter(member=member, status='available').order_by('created_at')
-            ]
+            member.refresh_from_db()
+        points = member.current_points if member else 0
+
         rewards = [
             {'id': r.id, 'name': r.name, 'description': r.description, 'points_cost': r.points_cost,
              'discount_percent': str(r.discount_percent), 'affordable': points >= r.points_cost}
@@ -552,43 +549,4 @@ class MyLoyaltyView(APIView):
             'lifetime_points': member.lifetime_points if member else 0,
             'tier_name': member.tier.name if member and member.tier else 'Bronze',
             'rewards': rewards,
-            'discounts': discounts,
         })
-
-
-class MyLoyaltyRedeemView(APIView):
-    """POST /loyalty/me/redeem/ {reward_id} - spend points, get a discount coupon."""
-    permission_classes = [IsAuthenticated]
-
-    def post(self, request):
-        customer = _customer_of(request)
-        if not customer:
-            return Response({'detail': 'Customer account required'}, status=status.HTTP_403_FORBIDDEN)
-        if not LoyaltySettings.load().program_active:
-            return Response({'detail': 'Loyalty program is not active'}, status=400)
-        try:
-            reward_id = int(request.data.get('reward_id'))
-        except (TypeError, ValueError):
-            return Response({'detail': 'reward_id is required'}, status=400)
-
-        with transaction.atomic():
-            member = LoyaltyMember.objects.select_for_update().filter(customer=customer).first()
-            if not member:
-                return Response({'detail': 'You have no points yet'}, status=400)
-            reward = LoyaltyReward.objects.select_for_update().filter(pk=reward_id, category='pppoe').first()
-            if not reward or not reward.is_available or not reward.discount_percent:
-                return Response({'detail': 'Reward is not available'}, status=400)
-            if member.current_points < reward.points_cost:
-                return Response({'detail': f'You need {reward.points_cost} points (you have {member.current_points}).'}, status=400)
-
-            txn = member.deduct_points(points=reward.points_cost, description=f'Redeemed: {reward.name}')
-            txn.reward = reward
-            txn.save(update_fields=['reward'])
-            reward.redemption_count += 1
-            if reward.stock_quantity is not None:
-                reward.stock_quantity -= 1
-            reward.save(update_fields=['redemption_count', 'stock_quantity', 'updated_at'])
-            LoyaltyDiscount.objects.create(member=member, reward=reward, percent=reward.discount_percent)
-
-        return Response({'status': 'success', 'points_remaining': member.current_points,
-                         'discount_percent': str(reward.discount_percent)}, status=201)

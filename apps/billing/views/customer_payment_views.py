@@ -264,19 +264,15 @@ class InitiateCustomerPaymentView(APIView):
         
         party_b, account_reference, transaction_type, _desc = destination
 
-        # ── Optional loyalty discount coupon ──
-        loyalty_discount = None
-        original_amount = None
-        if str(request.data.get('use_loyalty_discount', '')).lower() in ('1', 'true', 'yes'):
-            from apps.loyalty.services import pick_discount, discounted_amount
-            loyalty_discount = pick_discount(customer)
-            if not loyalty_discount:
-                return Response(
-                    {'error': 'No loyalty discount available.', 'detail': 'No loyalty discount available.'},
-                    status=status.HTTP_400_BAD_REQUEST,
-                )
-            original_amount = Decimal(str(amount))
-            amount = discounted_amount(original_amount, loyalty_discount.percent)
+        # ── Optional loyalty reward redeemed at checkout ──
+        reward, original_amount = None, None
+        if request.data.get('reward_id'):
+            from apps.loyalty.services import preview_reward, RewardError
+            try:
+                reward, new_amount = preview_reward(customer, request.data['reward_id'], amount)
+            except RewardError as e:
+                return Response({'error': str(e), 'detail': str(e)}, status=status.HTTP_400_BAD_REQUEST)
+            original_amount, amount = Decimal(str(amount)), new_amount
 
         # Generate internal reference - ensure no spaces
         reference = f"PAY-{customer.customer_code}-{int(time.time())}".replace(" ", "-")
@@ -297,12 +293,18 @@ class InitiateCustomerPaymentView(APIView):
             tuma_status='pending',
         )
 
-        if loyalty_discount:
-            from apps.loyalty.services import reserve_discount
-            reserve_discount(loyalty_discount, payment.id)
-            payment.notes = (f"Customer payment with {loyalty_discount.percent}% loyalty discount "
-                             f"(original KES {original_amount})")
-            payment.save(update_fields=['notes'])
+        loyalty_discount = None
+        if reward:
+            from apps.loyalty.services import reserve_reward, RewardError
+            try:
+                loyalty_discount = reserve_reward(customer, reward.id, payment.id)
+            except RewardError as e:
+                payment.status, payment.failure_reason = 'FAILED', str(e)
+                payment.save(update_fields=['status', 'failure_reason', 'updated_at'])
+                return Response({'error': str(e), 'detail': str(e)}, status=status.HTTP_400_BAD_REQUEST)
+            payment.notes = (f"Customer payment with {loyalty_discount.percent}% loyalty reward "
+                             f"(original {original_amount})")
+            payment.save(update_fields=['notes', 'updated_at'])
         
         # ============================================================
         # 🚨 Initiate STK Push via Netily Paybill (replaces Tuma)
@@ -432,6 +434,9 @@ class CustomerPaymentStatusView(APIView):
                 payment.refresh_from_db()
 
         is_finalized = payment.status in ['COMPLETED', 'FAILED', 'CANCELLED']
+        if is_finalized:
+            from apps.loyalty.services import settle_payment_reservation
+            settle_payment_reservation(payment)
         
         return Response({
             'payment_id': payment.id,
