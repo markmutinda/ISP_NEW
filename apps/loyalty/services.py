@@ -98,7 +98,10 @@ def _settle(d, pay_status, now):
 def settle_payment_reservation(payment):
     """Call as soon as a payment reaches a final state."""
     with transaction.atomic():
-        for d in LoyaltyDiscount.objects.select_for_update().select_related('reward').filter(
+        # NOTE: no select_related('reward') here — LoyaltyDiscount.reward is
+        # nullable (SET_NULL), so the JOIN is an OUTER JOIN and PostgreSQL
+        # rejects FOR UPDATE on the nullable side. Load reward lazily per row.
+        for d in LoyaltyDiscount.objects.select_for_update().filter(
             reserved_payment_id=payment.pk, status='reserved'
         ):
             _settle(d, payment.status, timezone.now())
@@ -110,7 +113,9 @@ def settle_reservations(member):
 
     now = timezone.now()
     with transaction.atomic():
-        for d in LoyaltyDiscount.objects.select_for_update().select_related('reward').filter(
+        # NOTE: see settle_payment_reservation — no select_related on the
+        # nullable reward FK, or PostgreSQL rejects FOR UPDATE.
+        for d in LoyaltyDiscount.objects.select_for_update().filter(
             member=member, status='reserved'
         ):
             pay_status = Payment.objects.filter(pk=d.reserved_payment_id).values_list('status', flat=True).first()
