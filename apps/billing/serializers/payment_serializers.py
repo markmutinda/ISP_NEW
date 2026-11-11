@@ -349,6 +349,12 @@ class PaymentMethodSerializer(serializers.ModelSerializer):
 # Payment Serializers - FIXED VERSION WITH CUSTOMER_NAME, SERVICE_TYPE, PAYMENT_METHOD_NAME
 # ==========================
 
+PORTAL_NOTE_PREFIXES = (
+    "Customer portal STK payment",
+    "Customer initiated payment via dashboard",
+    "Customer payment with",  # loyalty-reward variant (overwrites notes)
+)
+
 class PaymentSerializer(serializers.ModelSerializer):
     """
     Serializer for Payment model - Returns strings instead of IDs for frontend compatibility.
@@ -358,6 +364,7 @@ class PaymentSerializer(serializers.ModelSerializer):
     # Custom fields for better frontend display
     customer_name = serializers.SerializerMethodField()
     service_type = serializers.SerializerMethodField()
+    is_portal = serializers.SerializerMethodField()
     payment_method_name = serializers.SerializerMethodField()
     
     # Keep backward compatibility fields
@@ -385,7 +392,7 @@ class PaymentSerializer(serializers.ModelSerializer):
             'invoice', 'amount', 'currency', 'payment_method', 'payment_method_name',
             'status', 'transaction_id', 'mpesa_receipt', 'service_type',
             'payment_date', 'created_by_name', 'created_at', 'reference',
-            'payer_name', 'payer_phone'
+            'payer_name', 'payer_phone', 'is_portal'
         ]
 
     def get_customer_name(self, obj):
@@ -476,6 +483,10 @@ class PaymentSerializer(serializers.ModelSerializer):
             return "Hotspot"
         
         return 'Other'
+
+    def get_is_portal(self, obj):
+        """True when the payment was initiated from the customer portal."""
+        return (obj.notes or '').startswith(PORTAL_NOTE_PREFIXES)
 
     def get_payment_method_name(self, obj):
         """
@@ -629,7 +640,7 @@ class MpesaSTKPushSerializer(serializers.Serializer):
     )
     transaction_desc = serializers.CharField(
         max_length=200, 
-        required=False,
+        required=False, 
         default="Payment for Internet Services"
     )
 
