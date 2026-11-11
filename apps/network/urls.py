@@ -29,7 +29,12 @@ from apps.network.views.provision_views import (
     ProvisionCertView,
     ProvisionHotspotHTMLView,
     LegacyScriptDownloadView,
+    ProvisionLoadBalanceView,          # NEW
+    ProvisionLoadBalanceAckView,       # NEW
 )
+
+# ===== LOAD BALANCING (Authenticated admin API) =====
+from apps.network.views.load_balance_views import RouterLoadBalanceView
 
 # ===== IPAM =====
 from apps.network.views.ipam_views import (
@@ -115,6 +120,9 @@ urlpatterns = [
 
     # Router Port Manager
     path('routers/<int:pk>/port-manager/', RouterPortManagerView.as_view(), name='router-port-manager'),
+
+    # Load Balancing (authenticated admin API) — NEW
+    path('routers/<int:pk>/load-balance/', RouterLoadBalanceView.as_view(), name='router-load-balance'),
     
     # Hotspot IPAM (IP Address + Subnet Configuration)
     path('routers/<int:pk>/hotspot/ipam/', RouterHotspotIPAMView.as_view(), name='router-hotspot-ipam'),
@@ -135,6 +143,12 @@ urlpatterns = [
     # Stage 2: Version-specific config download
     path('provision/<str:auth_key>/<slug:slug>/config',
          ProvisionConfigView.as_view(), name='provision-config'),
+
+    # Load balancing: script + ack (called by /tool fetch) — NEW
+    path('provision/<str:auth_key>/<slug:slug>/lb.rsc',
+         ProvisionLoadBalanceView.as_view(), name='provision-lb'),
+    path('provision/<str:auth_key>/<slug:slug>/lb-ack',
+         ProvisionLoadBalanceAckView.as_view(), name='provision-lb-ack'),
     
     # Certificate downloads
     path('provision/<str:auth_key>/certs/<str:cert_type>',

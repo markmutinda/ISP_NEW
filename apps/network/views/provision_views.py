@@ -419,3 +419,81 @@ class LegacyScriptDownloadView(APIView):
         )
 
         return _plain_text_response(script, filename='netily_setup.rsc')
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# LOAD BALANCING — script download + apply acknowledgement
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+class ProvisionLoadBalanceView(APIView):
+    """
+    GET /api/v1/network/provision/{auth_key}/{slug}/lb.rsc
+
+    Returns the load-balancing script (when enabled) OR the removal
+    script (when disabled). Called by the router's /tool fetch.
+    """
+    permission_classes = [AllowAny]
+    throttle_classes = [ProvisionRateThrottle]
+    authentication_classes = []
+
+    def get(self, request, auth_key, slug):
+        from apps.network.models.load_balance_models import RouterLoadBalance
+        from apps.network.services import load_balancer as lb
+
+        router = _get_router_by_auth_key(auth_key)
+        if router.provision_slug and router.provision_slug != slug:
+            raise Http404("Invalid provisioning link")
+
+        cfg = RouterLoadBalance.objects.filter(router=router).first()
+        if not cfg:
+            raise Http404("No load-balancing configuration")
+
+        base = MikrotikScriptGenerator(router, request=request).provision_base
+        script, _ = lb.script_for(router, cfg, base)
+
+        logger.info(
+            f"Provision LB: router '{router.name}' fetched lb.rsc "
+            f"from {request.META.get('REMOTE_ADDR', '?')}"
+        )
+        return _plain_text_response(script, filename='netily_lb.rsc')
+
+
+class ProvisionLoadBalanceAckView(APIView):
+    """
+    GET /api/v1/network/provision/{auth_key}/{slug}/lb-ack?h=<hash>
+
+    Called by the router as the LAST line of the LB script. If the
+    hash matches the current script for this config, mark the config
+    as applied (so the UI shows "Applied on router").
+    """
+    permission_classes = [AllowAny]
+    throttle_classes = [ProvisionRateThrottle]
+    authentication_classes = []
+
+    def get(self, request, auth_key, slug):
+        from apps.network.models.load_balance_models import RouterLoadBalance
+        from apps.network.services import load_balancer as lb
+
+        router = _get_router_by_auth_key(auth_key)
+        if router.provision_slug and router.provision_slug != slug:
+            raise Http404("Invalid provisioning link")
+
+        cfg = RouterLoadBalance.objects.filter(router=router).first()
+        if not cfg:
+            raise Http404("No load-balancing configuration")
+
+        base = MikrotikScriptGenerator(router, request=request).provision_base
+        _, current = lb.script_for(router, cfg, base)
+
+        if request.query_params.get('h') == current:
+            RouterLoadBalance.objects.filter(pk=cfg.pk).update(
+                applied_hash=current,
+                last_applied_at=timezone.now(),
+            )
+            logger.info(f"Provision LB-ACK: router '{router.name}' applied hash {current[:8]}")
+        else:
+            logger.warning(
+                f"Provision LB-ACK: hash mismatch for router '{router.name}' "
+                f"(got={request.query_params.get('h', '')[:8]}, "
+                f"expected={current[:8]})"
+            )
+
+        return _plain_text_response('ok') 
