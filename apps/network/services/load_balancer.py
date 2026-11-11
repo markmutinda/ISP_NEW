@@ -155,7 +155,7 @@ def _body(router, ups, mask=False):
     rank = {i: r + 1 for r, i in enumerate(order)}
     total, slots = _slots([u['weight'] for u in ups])
     # v7 guard — tonum [:pick ver 0 [:find ver "."]] handles both "7.24.4" and bare "6".
-    L = [':if ([:tonum [:pick [/system resource get version] 0 [:find [/system resource get version] "."]] < 7) '
+    L = [':if ([:tonum [:pick [/system resource get version] 0 [:find [/system resource get version] "."]]] < 7) '
          'do={ :error "Netily load balancing requires RouterOS v7" }',
          ':put ">>> Netily Load Balancer: applying..."']
     L += _cleanup()
@@ -185,7 +185,7 @@ def _body(router, ups, mask=False):
             L.append(
                 f'/system script add name=NLB-sync-{s} comment="NLB:sync:{s}" source={{\n'
                 f':local gw [/ip dhcp-client get [find comment="NLB:dhcp:{s}"] gateway]\n'
-                f':if ($gw != "") do={{ '
+                f':if ($gw != "") do={{ ' 
                 f'/ip route set [find comment="NLB:rt:{s}"] gateway={gw} check-gateway=ping; '
                 f'/ip route set [find comment="NLB:mon:{s}"] gateway={gw} }}\n}}')
             L.append(f'/ip dhcp-client add interface={u["rif"]} add-default-route=no use-peer-dns=no use-peer-ntp=no '
