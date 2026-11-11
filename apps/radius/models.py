@@ -474,11 +474,14 @@ class RadiusBandwidthProfile(models.Model):
         # Basic rate
         rate = f"{self.upload_speed}k/{self.download_speed}k"
         
-        if self.burst_download and self.burst_upload:
-            burst_rate = f"{self.burst_upload}k/{self.burst_download}k"
-            threshold = f"{self.burst_threshold}k/{self.burst_threshold}k"
-            burst_time = f"{self.burst_time}/{self.burst_time}"
-            rate = f"{rate} {burst_rate} {threshold} {burst_time} {self.priority}"
+        if (self.burst_download and self.burst_upload
+                and (self.burst_download > self.download_speed or self.burst_upload > self.upload_speed)):
+            thr = max(1, min(self.burst_threshold or 0, self.burst_download, self.burst_upload))
+            btime = self.burst_time or 10
+            rate = (
+                f"{rate} {self.burst_upload}k/{self.burst_download}k "
+                f"{thr}k/{thr}k {btime}/{btime} {self.priority}"
+            )
         
         return rate
     

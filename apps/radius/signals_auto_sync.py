@@ -512,106 +512,83 @@ def auto_create_radius_for_service(sender, instance, created, **kwargs):
         instance._is_processing_radius = False
 
 
+def plan_profile_fields(plan):
+    """
+    Single source of truth: Plan -> RadiusBandwidthProfile rate/burst fields (all kbps).
+    Burst values are always written, and cleared when burst is off, so they can't go stale.
+    burst_threshold on the Plan is stored in Kbps.
+    """
+    unit = (getattr(plan, 'speed_unit', 'MBPS') or 'MBPS').upper()
+    mult = {'KBPS': 1, 'GBPS': 1_000_000}.get(unit, 1000)
+    dl = (plan.download_speed or (1 if unit == 'GBPS' else 10)) * mult
+    ul = (plan.upload_speed or (1 if unit == 'GBPS' else 5)) * mult
+
+    fields = {
+        'download_speed': dl,
+        'upload_speed': ul,
+        'priority': getattr(plan, 'priority', 8) or 8,
+        'burst_download': None,
+        'burst_upload': None,
+        'burst_threshold': 0,
+        'burst_time': 0,
+    }
+
+    if getattr(plan, 'burst_enabled', False) and plan.burst_download and plan.burst_upload:
+        b_dl = plan.burst_download * mult
+        b_ul = plan.burst_upload * mult
+        # burst only makes sense if it is above the base rate
+        if b_dl > dl or b_ul > ul:
+            b_dl, b_ul = max(b_dl, dl), max(b_ul, ul)
+            thr = plan.burst_threshold or int(min(dl, ul) * 0.75)
+            # RouterOS rejects threshold > burst-limit: clamp to the lower of both directions
+            thr = max(1, min(thr, b_dl, b_ul))
+            fields.update(
+                burst_download=b_dl,
+                burst_upload=b_ul,
+                burst_threshold=thr,
+                burst_time=plan.burst_time or 10,
+            )
+    return fields
+
+
 def _get_or_create_bandwidth_profile(service_connection):
     """Get or create a bandwidth profile from a service connection's plan."""
     from .models import RadiusBandwidthProfile
-    
+
     plan = service_connection.plan
     if not plan:
         return None
-    
-    # 🟢 FIXED: Handle speed unit conversion properly
-    speed_unit = getattr(plan, 'speed_unit', 'MBPS') or 'MBPS'
-    
-    if speed_unit == 'KBPS':
-        download_kbps = plan.download_speed or 10
-        upload_kbps = plan.upload_speed or 5
-    elif speed_unit == 'GBPS':
-        download_kbps = (plan.download_speed or 1) * 1_000_000  # Gbps → Kbps
-        upload_kbps = (plan.upload_speed or 1) * 1_000_000
-    else:  # MBPS default
-        download_kbps = (plan.download_speed or 10) * 1000
-        upload_kbps = (plan.upload_speed or 5) * 1000
-    
+
+    fields = plan_profile_fields(plan)
     profile_name = f"plan_{plan.id}_{plan.code or 'auto'}"
-    
-    # Build defaults including burst and priority from the Plan
-    defaults = {
-        'description': f"Auto-created from plan: {plan.name}",
-        'download_speed': download_kbps,
-        'upload_speed': upload_kbps,
-        'priority': getattr(plan, 'priority', 8) or 8,
-        'is_active': True,
-    }
-    
-    # 🟢 FIXED: Propagate burst settings with proper unit conversion
-    if getattr(plan, 'burst_enabled', False) and plan.burst_download and plan.burst_upload:
-        speed_unit = getattr(plan, 'speed_unit', 'MBPS') or 'MBPS'
-        
-        if speed_unit == 'KBPS':
-            multiplier = 1
-        elif speed_unit == 'GBPS':
-            multiplier = 1_000_000  # Gbps → Kbps
-        else:  # MBPS
-            multiplier = 1000
-        
-        defaults['burst_download'] = plan.burst_download * multiplier
-        defaults['burst_upload'] = plan.burst_upload * multiplier
-        defaults['burst_threshold'] = (plan.burst_threshold or 0) * multiplier
-        defaults['burst_time'] = plan.burst_time or 10
-    
-    # 🆕 FUP rework: populate fup_total_limit_bytes so MikroTik enforces the cap natively
+
+    # FUP rework: Mikrotik-Total-Limit cap
     from apps.fup.services.usage_service import FUPUsageService
     _fup_policy = FUPUsageService().get_active_policy_for_service(service_connection)
     _fup_limit = _fup_policy.limit_bytes if (_fup_policy and _fup_policy.reset_period != 'PEAK_HOURS') else None
-    defaults['fup_total_limit_bytes'] = _fup_limit
-    
+
     profile, created = RadiusBandwidthProfile.objects.get_or_create(
         name=profile_name,
-        defaults=defaults,
+        defaults={
+            'description': f"Auto-created from plan: {plan.name}",
+            'is_active': True,
+            'fup_total_limit_bytes': _fup_limit,
+            **fields,
+        },
     )
-    
-    # Update if speeds/burst/priority changed
+
     if not created:
-        needs_update = False
-        if profile.download_speed != download_kbps or profile.upload_speed != upload_kbps:
-            profile.download_speed = download_kbps
-            profile.upload_speed = upload_kbps
-            needs_update = True
-        
-        plan_priority = getattr(plan, 'priority', 8) or 8
-        if profile.priority != plan_priority:
-            profile.priority = plan_priority
-            needs_update = True
-        
-        # 🟢 FIXED: Update burst settings with proper unit conversion
-        if getattr(plan, 'burst_enabled', False) and plan.burst_download and plan.burst_upload:
-            speed_unit = getattr(plan, 'speed_unit', 'MBPS') or 'MBPS'
-            
-            if speed_unit == 'KBPS':
-                multiplier = 1
-            elif speed_unit == 'GBPS':
-                multiplier = 1_000_000  # Gbps → Kbps
-            else:  # MBPS
-                multiplier = 1000
-            
-            new_burst_dl = plan.burst_download * multiplier
-            new_burst_ul = plan.burst_upload * multiplier
-            if profile.burst_download != new_burst_dl or profile.burst_upload != new_burst_ul:
-                profile.burst_download = new_burst_dl
-                profile.burst_upload = new_burst_ul
-                profile.burst_threshold = (plan.burst_threshold or 0) * multiplier
-                profile.burst_time = plan.burst_time or 10
-                needs_update = True
-        
-        # 🆕 FUP rework: keep fup_total_limit_bytes in sync on profile refresh
+        changed = []
+        for key, value in fields.items():
+            if getattr(profile, key) != value:
+                setattr(profile, key, value)
+                changed.append(key)
         if profile.fup_total_limit_bytes != _fup_limit:
             profile.fup_total_limit_bytes = _fup_limit
-            needs_update = True
-        
-        if needs_update:
-            profile.save()
-    
+            changed.append('fup_total_limit_bytes')
+        if changed:
+            profile.save(update_fields=changed + ['updated_at'])
+
     return profile
 
 
@@ -663,53 +640,35 @@ def sync_customer_status_to_radius(sender, instance, **kwargs):
 
 @receiver(post_save, sender='billing.Plan')
 def sync_plan_bandwidth_to_radius(sender, instance, created, **kwargs):
-    """Update RADIUS bandwidth profiles when a plan is modified."""
+    """Update RADIUS bandwidth profiles (speed, burst, priority) when a plan is modified."""
     from .models import RadiusBandwidthProfile, CustomerRadiusCredentials
-    
+
     try:
         if created:
             return
-        
-        # 🟢 FIXED: Handle plan bandwidth update with proper unit conversion
-        speed_unit = getattr(instance, 'speed_unit', 'MBPS') or 'MBPS'
-        
-        if speed_unit == 'KBPS':
-            download_kbps = instance.download_speed or 10
-            upload_kbps = instance.upload_speed or 5
-        elif speed_unit == 'GBPS':
-            download_kbps = (instance.download_speed or 1) * 1_000_000  # Gbps → Kbps
-            upload_kbps = (instance.upload_speed or 1) * 1_000_000
-        else:  # MBPS default
-            download_kbps = (instance.download_speed or 10) * 1000
-            upload_kbps = (instance.upload_speed or 5) * 1000
-        
+
         profile_name = f"plan_{instance.id}_{instance.code or 'auto'}"
-        
+        defaults = {
+            'description': f"Auto-updated from plan: {instance.name}",
+            'is_active': getattr(instance, 'is_active', True),
+            **plan_profile_fields(instance),
+        }
         profile, _ = RadiusBandwidthProfile.objects.update_or_create(
-            name=profile_name,
-            defaults={
-                'description': f"Auto-updated from plan: {instance.name}",
-                'download_speed': download_kbps,
-                'upload_speed': upload_kbps,
-                'is_active': instance.is_active if hasattr(instance, 'is_active') else True,
-            }
+            name=profile_name, defaults=defaults
         )
-        
-        # Re-sync all credentials using this profile
+
         credentials = CustomerRadiusCredentials.objects.filter(
-            bandwidth_profile=profile,
-            is_enabled=True
-        )
-        
+            bandwidth_profile=profile, is_enabled=True
+        ).select_related('customer', 'bandwidth_profile', 'assigned_ip_address__ip_pool')
+
         count = 0
-        for cred in credentials:
-            # We call sync directly here, which is safer than save()
+        for cred in credentials.iterator(chunk_size=200):
             cred.sync_to_radius()
             count += 1
-        
-        if count > 0:
+
+        if count:
             logger.info(f"Updated RADIUS for {count} users after plan change: {instance.name}")
-            
+
     except Exception as e:
         logger.error(f"Failed to sync plan to RADIUS: {e}")
 

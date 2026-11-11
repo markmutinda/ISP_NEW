@@ -164,6 +164,35 @@ class PlanCreateSerializer(serializers.ModelSerializer):
                 )
         # UNLIMITED needs no duration validation
         
+        # ── Burst validation (units: speeds in speed_unit, threshold in Kbps) ──
+        def _g(key):
+            if key in data:
+                return data[key]
+            return getattr(self.instance, key, None) if self.instance else None
+
+        if _g('burst_enabled'):
+            mult = {'KBPS': 1, 'GBPS': 1_000_000}.get((_g('speed_unit') or 'MBPS').upper(), 1000)
+            dl, ul = _g('download_speed'), _g('upload_speed')
+            bdl, bul = _g('burst_download'), _g('burst_upload')
+            thr, btime = _g('burst_threshold'), _g('burst_time')
+
+            if not bdl or not bul:
+                raise serializers.ValidationError(
+                    {"burst_download": "Burst download and upload speeds are required when burst is enabled."}
+                )
+            if dl and bdl * mult <= dl * mult and ul and bul * mult <= ul * mult:
+                raise serializers.ValidationError(
+                    {"burst_download": "Burst speed must be higher than the normal speed."}
+                )
+            if thr and thr > min(bdl, bul) * mult:
+                raise serializers.ValidationError(
+                    {"burst_threshold": "Burst threshold (Kbps) cannot exceed the burst speed."}
+                )
+            if btime is not None and btime <= 0:
+                raise serializers.ValidationError(
+                    {"burst_time": "Burst time must be greater than zero."}
+                )
+        
         return data
 
 
