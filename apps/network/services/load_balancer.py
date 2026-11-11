@@ -268,12 +268,15 @@ def _remove_body():
 
 def script_for(router, cfg, base_url, mask=False):
     """Returns (script, hash). Hash is computed on the unmasked body; ack line is appended after."""
+    def _lf(s):
+        return s.replace('\r\n', '\n').replace('\r', '\n')
+
     ups = [dict(u) for u in cfg.uplinks]
     if cfg.is_enabled:
-        body = _body(router, [dict(u) for u in ups])
-        shown = _body(router, ups, mask=True) if mask else body
+        body = _lf(_body(router, [dict(u) for u in ups]))
+        shown = _lf(_body(router, ups, mask=True)) if mask else body
     else:
-        body = shown = _remove_body()
+        body = shown = _lf(_remove_body())
     h = hashlib.sha1(body.encode()).hexdigest()
     ack = (f'\n:do {{ /tool fetch url="{base_url}/{router.auth_key}/{router.provision_slug}/lb-ack?h={h}" '
            f'keep-result=no check-certificate=no }} on-error={{}}')
