@@ -661,10 +661,10 @@ def post_renewal_actions(tenant_schema, customer_id, plan_name='', expires_at_is
 
         if kick_username:
             try:
-                from apps.radius.services.session_control import kick_pppoe_user
-                kick_pppoe_user(kick_username)
+                from apps.radius.tasks import kick_pppoe_session
+                kick_pppoe_session.delay(tenant_schema, kick_username)  # has its own retry/backoff
             except Exception as e:
-                logger.warning(f"[RENEW] kick failed for {kick_username}: {e}")
+                logger.warning(f"[RENEW] could not queue kick for {kick_username}: {e}")
 
         if send_sms:
             try:

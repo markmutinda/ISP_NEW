@@ -7,54 +7,116 @@ from typing import Dict, List, Optional, Any
 import time
 import re
 import socket
+import random
+import uuid
+from django.conf import settings
+from django.core.cache import cache
 
 logger = logging.getLogger(__name__)
 
 class MikrotikAPI:
     """Mikrotik RouterOS API Client - Enhanced for ISP Management"""
-    
+
+    _SLOT_TTL = 45  # slot self-expires if a worker dies, so slots can never leak forever
+
     def __init__(self, mikrotik_device):
         self.device = mikrotik_device
         self.api = None
-    
-    def connect(self) -> bool:
-            """Connect to Mikrotik device via VPN tunnel (preferred) or fallback to WAN IP."""
-            try:
-                # DYNAMIC IP SELECTION: Always use VPN IP if provisioned,
-                # fallback to public/WAN IP. The VPN tunnel bypasses NAT.
-                target_ip = (
-                    self.device.vpn_ip_address
-                    if (self.device.vpn_provisioned and self.device.vpn_ip_address)
-                    else self.device.ip_address
-                )
+        self._slot_key = None
+        self._slot_token = None
 
-                if not target_ip:
-                    logger.error(f"Cannot connect: No valid IP or VPN IP for {self.device.name}")
+    def _target_ip(self):
+        return (
+            self.device.vpn_ip_address
+            if (self.device.vpn_provisioned and self.device.vpn_ip_address)
+            else self.device.ip_address
+        )
+
+    def _acquire_slot(self, target_ip) -> bool:
+        """
+        Cluster-wide cap on concurrent API logins per router (Redis-backed).
+        RouterOS rejects with 'too many concurrent logins' beyond ~6, so we keep
+        headroom (default 3) and make extra callers wait briefly instead of failing.
+        Fails open if the cache is down.
+        """
+        max_slots = int(getattr(settings, 'MIKROTIK_API_MAX_CONCURRENT', 3))
+        wait = float(getattr(settings, 'MIKROTIK_API_SLOT_WAIT', 12))
+        token = uuid.uuid4().hex
+        deadline = time.monotonic() + wait
+        try:
+            while True:
+                order = list(range(max_slots))
+                random.shuffle(order)
+                for i in order:
+                    key = f"mtapi_slot:{target_ip}:{i}"
+                    if cache.add(key, token, self._SLOT_TTL):
+                        self._slot_key, self._slot_token = key, token
+                        return True
+                if time.monotonic() >= deadline:
+                    logger.warning(f"No free API slot for {target_ip} after {wait}s")
                     return False
+                time.sleep(random.uniform(0.15, 0.4))
+        except Exception as e:
+            logger.warning(f"API slot cache unavailable, failing open: {e}")
+            return True
 
-                self.api = connect(
-                    username=self.device.api_username,
-                    password=self.device.api_password,
-                    host=target_ip,
-                    port=self.device.api_port or 8728,
-                    timeout=10.0,  # CRITICAL: Short timeout for fast failure/response
-                    plain_login=True  # Required for ROS v7
-                )
-                logger.info(f"Connected to Mikrotik {self.device.name} ({target_ip})")
-                return True
-            except Exception as e:
-                logger.error(f"Failed to connect to {self.device.name}: {str(e)}")
-                return False
-    
+    def _release_slot(self):
+        key, token = self._slot_key, self._slot_token
+        self._slot_key = self._slot_token = None
+        if not key:
+            return
+        try:
+            if cache.get(key) == token:
+                cache.delete(key)
+        except Exception:
+            pass
+
+    def connect(self) -> bool:
+        """Connect via VPN IP (preferred) or WAN IP. Idempotent; holds one concurrency slot."""
+        if self.api is not None:
+            return True
+
+        target_ip = self._target_ip()
+        if not target_ip:
+            logger.error(f"Cannot connect: No valid IP or VPN IP for {self.device.name}")
+            return False
+
+        if not self._acquire_slot(target_ip):
+            return False
+
+        try:
+            self.api = connect(
+                username=self.device.api_username,
+                password=self.device.api_password,
+                host=target_ip,
+                port=self.device.api_port or 8728,
+                timeout=10.0,
+                plain_login=True,
+            )
+            logger.info(f"Connected to Mikrotik {self.device.name} ({target_ip})")
+            return True
+        except Exception as e:
+            logger.error(f"Failed to connect to {self.device.name}: {str(e)}")
+            self.api = None
+            self._release_slot()
+            return False
+
     def disconnect(self):
-        """Disconnect from Mikrotik device"""
+        """Disconnect and free the concurrency slot."""
         if self.api:
             try:
                 self.api.close()
-            except:
+            except Exception:
                 pass
             self.api = None
-    
+        self._release_slot()
+
+    def __del__(self):
+        try:
+            self.disconnect()
+        except Exception:
+            pass
+
     def _execute(self, path: str, **kwargs) -> Any:
             """Unified execute method for standard resources (Interfaces, Users, etc)"""
             if not self.api and not self.connect():

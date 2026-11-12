@@ -1020,12 +1020,86 @@ def send_coa_disconnect_async(nas_ip: str, username: str, session_id: str = None
         logger.warning(f"[ASYNC COA] disconnect failed for {username}@{nas_ip}: {e}")
 
 
-@shared_task(name='apps.radius.tasks.kick_pppoe_session', queue='radius', ignore_result=True)
-def kick_pppoe_session(tenant_schema: str, username: str, sessions=None):
-    """Fire-and-forget: kick a user's live router session after a DB commit."""
+@shared_task(
+    name='apps.radius.tasks.kick_pppoe_session',
+    bind=True, queue='radius', ignore_result=True, max_retries=5,
+)
+def kick_pppoe_session(self, tenant_schema: str, username: str, sessions=None):
+    """Kick a user's live router session; retries with backoff if the router couldn't be reached."""
+    import random
+    from apps.radius.models import RadAcct
     from apps.radius.services.session_control import kick_pppoe_user
     try:
         with schema_context(tenant_schema):
-            kick_pppoe_user(username, [tuple(s) for s in sessions] if sessions else None)
+            if sessions:
+                snap = [tuple(s) for s in sessions]
+            else:
+                snap = [
+                    (str(ip), sid) for ip, sid in
+                    RadAcct.objects.filter(username=username, acctstoptime__isnull=True)
+                    .values_list('nasipaddress', 'acctsessionid')
+                ]
+            if not snap:
+                return
+            kicked = kick_pppoe_user(username, snap)
+            if kicked >= len(snap):
+                return
+        raise RuntimeError(f"kicked {kicked}/{len(snap)}")
     except Exception as e:
-        logger.warning(f"[KICK TASK] {username}@{tenant_schema} failed: {e}")
+        if self.request.retries >= self.max_retries:
+            logger.error(f"[KICK TASK] giving up on {username}@{tenant_schema}: {e}")
+            return
+        countdown = 5 * (2 ** self.request.retries) + random.uniform(0, 3)
+        logger.warning(f"[KICK TASK] retry {self.request.retries + 1} for {username}: {e}")
+        raise self.retry(exc=e, countdown=countdown)
+
+
+@shared_task(name='apps.radius.tasks.recover_unkicked_renewals')
+def recover_unkicked_renewals():
+    """
+    A renewed PPPoE customer whose open session started BEFORE the renewal is still
+    on the walled (512k) session. Re-queue the kick. Idempotent: once they redial,
+    the new session starts after subscription_activated_at and drops out.
+    """
+    from django.core.cache import cache
+    from apps.radius.models import CustomerRadiusCredentials, RadAcct
+
+    now = timezone.now()
+    since = now - timedelta(minutes=30)
+    queued = 0
+
+    for tenant in get_tenant_model().objects.exclude(schema_name='public'):
+        try:
+            with schema_context(tenant.schema_name):
+                creds = dict(
+                    CustomerRadiusCredentials.objects
+                    .filter(
+                        subscription_activated_at__gte=since,
+                        is_enabled=True,
+                        connection_type__in=('PPPOE', 'BOTH'),
+                    )
+                    .filter(Q(expiration_date__isnull=True) | Q(expiration_date__gt=now))
+                    .values_list('username', 'subscription_activated_at')
+                )
+                if not creds:
+                    continue
+                rows = RadAcct.objects.filter(
+                    username__in=list(creds.keys()),
+                    acctstoptime__isnull=True,
+                    framedprotocol='PPP',
+                ).values_list('username', 'acctstarttime')
+
+                stale = {
+                    u for u, started in rows
+                    if started and started < creds[u] - timedelta(seconds=5)
+                }
+                for u in stale:
+                    if cache.add(f"unkicked:{tenant.schema_name}:{u}", "1", 150):
+                        kick_pppoe_session.delay(tenant.schema_name, u)
+                        queued += 1
+        except Exception as e:
+            logger.error(f"[UNKICKED SWEEP] {tenant.schema_name}: {e}")
+
+    if queued:
+        logger.info(f"[UNKICKED SWEEP] queued {queued} kick(s)")
+    return {'queued': queued}

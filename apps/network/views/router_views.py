@@ -955,18 +955,28 @@ mute 20
     # ────────────────────────────────────────────────────────────────
     @action(detail=True, methods=['get'], permission_classes=[IsAuthenticated, HasCompanyAccess])
     def live_status(self, request, pk=None):
-        """Get real-time router status"""
+        """Get real-time router status (cached 15s so N viewers = 1 router login)"""
+        from django.core.cache import cache
+        from django.db import connection as _db
+
         router = self.get_object()
         if router.router_type != 'mikrotik':
             return Response({"error": "This action is only available for Mikrotik routers"}, status=400)
-        
+
         if not router.api_username or not router.api_password:
             return Response({"error": "API credentials not configured for this router"}, status=400)
-        
+
+        cache_key = f"mt_live:{_db.schema_name}:{router.id}"
+        cached = cache.get(cache_key)
+        if cached is not None:
+            return Response(cached)
+
         try:
             api = mikrotik_api_module.MikrotikAPI(router)
-            status = api.get_live_status()
-            return Response(status)
+            live = api.get_live_status()
+            if live.get('online'):
+                cache.set(cache_key, live, 15)
+            return Response(live)
         except Exception as e:
             logger.error(f"Failed to get live status for router {router.name}: {str(e)}")
             return Response({"error": str(e)}, status=400)

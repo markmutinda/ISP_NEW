@@ -408,6 +408,20 @@ app.conf.beat_schedule = {
         'schedule': crontab(minute='*/15'),
         'options': {'queue': 'default'},
     },
+
+    # ════════════════════════════════════════════════════════════════
+    # RADIUS — Renewal kick safety net (every 3 minutes)
+    # Catches renewals that missed their router kick: a PPPoE customer
+    # whose open session started BEFORE subscription_activated_at is
+    # still on the walled (512k) session. Idempotent — once the
+    # customer redials, the new session starts after the renewal and
+    # drops out of the query.
+    # ════════════════════════════════════════════════════════════════
+    'recover-unkicked-renewals-every-3-min': {
+        'task': 'apps.radius.tasks.recover_unkicked_renewals',
+        'schedule': crontab(minute='*/3'),
+        'options': {'queue': 'radius'}
+    },
 }
 
 # ════════════════════════════════════════════════════════════════════════════
