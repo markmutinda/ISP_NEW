@@ -1,5 +1,5 @@
 """
-Base ViewSets with automatic company filtering for multi-tenancy
+Base ViewSets with automatic company filtering for multi-tenancy.
 """
 from rest_framework import viewsets, permissions
 from django.db.models import Q
