@@ -1,5 +1,6 @@
 # apps/billing/views/hotspot_chat_views.py
 import logging
+from django.core.cache import cache
 from django.db.models import Q
 from django.utils import timezone
 from django_tenants.utils import schema_context, get_public_schema_name
@@ -63,6 +64,17 @@ def _serialize_thread(t, *, with_messages=False):
     if with_messages:
         data['messages'] = [_serialize_message(m) for m in t.messages.all()]
     return data
+
+
+def _queue_admin_chat_alert(schema_name, phone, body, is_reply):
+    """Fire-and-forget; must never break the customer's chat."""
+    try:
+        if not cache.add(f"hs_chat_alert:{schema_name}:{phone}", 1, timeout=30):
+            return
+        from apps.messaging.tasks import send_hotspot_chat_alert_sms
+        send_hotspot_chat_alert_sms.delay(schema_name, phone, body[:200], is_reply)
+    except Exception:
+        logger.warning("Hotspot chat admin alert enqueue failed", exc_info=True)
 
 
 class HotspotChatInitView(APIView):
@@ -156,6 +168,13 @@ class HotspotChatSendView(APIView):
                 defaults={'router': router},
             )
 
+            # Who spoke last? None => brand-new chat, 'agent' => customer is replying,
+            # 'customer' => admin hasn't answered yet (don't re-alert).
+            last_sender = (
+                HotspotChatMessage.objects.filter(thread=thread)
+                .order_by('-id').values_list('sender_type', flat=True).first()
+            )
+
             message = HotspotChatMessage.objects.create(
                 thread=thread,
                 sender_type='customer',
@@ -164,9 +183,14 @@ class HotspotChatSendView(APIView):
             )
             thread.touch(
                 message,
-                status_value='open',       # was: 'open' if thread.status == 'resolved' else None
+                status_value='open',
                 unread_by_admin=True,
             )
+
+            if last_sender != 'customer':
+                _queue_admin_chat_alert(
+                    tenant.schema_name, phone, body, is_reply=last_sender is not None
+                )
 
             return Response({
                 'thread': _serialize_thread(thread, with_messages=False),

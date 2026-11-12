@@ -331,6 +331,15 @@ class SMSNotificationSettings(models.Model):
     hotspot_welcome = models.BooleanField(default=False,
         help_text="Welcome SMS when a hotspot session activates")
 
+    hotspot_chat_alert_enabled = models.BooleanField(
+        default=False,
+        help_text="SMS the admin when a hotspot customer starts a chat or replies"
+    )
+    hotspot_chat_alert_numbers = models.JSONField(
+        default=list, blank=True,
+        help_text="Phone numbers that receive hotspot chat alerts (max 5)"
+    )
+
     # ── PPPOE / STATIC NOTIFICATIONS ─────────────────────────────────────
     pppoe_welcome = models.BooleanField(default=False,
         help_text="Welcome SMS when a new PPPoE/Static customer is activated")

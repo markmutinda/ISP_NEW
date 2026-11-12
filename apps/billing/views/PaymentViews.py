@@ -23,6 +23,7 @@ from apps.core.models import AuditLog
 from apps.core.permissions import HasPaymentMethodPinAccess, HasRoleAccessPolicy, IsCompanyAdmin, IsCompanyStaff
 from apps.customers.models import Customer
 from ..models.billing_models import Invoice
+from apps.billing.utils.payment_errors import humanize_payment_failure
 from ..serializers import (
     PaymentSerializer, PaymentMethodSerializer, ReceiptSerializer,
     PaymentCreateSerializer, PaymentDetailSerializer, MpesaSTKPushSerializer,
@@ -1159,7 +1160,10 @@ class PaymentViewSet(viewsets.ModelViewSet):
                         )
                         if mpesa_txn.payment:
                             mpesa_txn.payment.status = 'FAILED'
-                            mpesa_txn.payment.failure_reason = result.get('result_desc', 'STK Push failed or cancelled')
+                            # Friendly text for the customer; raw desc stays on MpesaTransaction.result_desc
+                            mpesa_txn.payment.failure_reason = humanize_payment_failure(
+                                result.get('result_desc')
+                            )
                             mpesa_txn.payment.save(update_fields=['status', 'failure_reason'])
 
                         # ── FIX 2: Record STK cancellation for anti-abuse tracking ──
@@ -1184,30 +1188,22 @@ class PaymentViewSet(viewsets.ModelViewSet):
                         except Exception as track_err:
                             logger.warning(f"StkCancellationTracker write failed (non-fatal): {track_err}")
 
-                        # ── FIX 2b: Time out a pending HotspotSession on cancel/expiry ──
-                        # Matches inbuilt-Paybill behaviour: user cancels → session fails
-                        # (not stuck 'pending'). Only for 1032 (cancel) / 1037 (timeout).
+                        # ── FIX 2b: Fail a pending HotspotSession on ANY STK failure with a friendly reason ──
                         try:
-                            rc_int = int(result.get('result_code') or 0)
-                            if rc_int in (1032, 1037) and mpesa_txn.payment:
+                            if mpesa_txn.payment:
                                 from ..models.hotspot_models import HotspotSession
                                 hs = HotspotSession.objects.filter(
                                     payment=mpesa_txn.payment,
                                     status='pending',
                                 ).first()
                                 if hs:
-                                    reason = (
-                                        'Payment prompt was cancelled.'
-                                        if rc_int == 1032
-                                        else 'Payment timed out.'
-                                    )
-                                    hs.mark_failed(reason)
+                                    hs.mark_failed(mpesa_txn.payment.failure_reason)
                                     logger.info(
                                         f"HotspotSession {hs.session_id} marked failed after STK "
-                                        f"result_code={rc_int}"
+                                        f"result_code={result.get('result_code')}"
                                     )
                         except Exception as hs_err:
-                            logger.warning(f"Hotspot timeout on STK failure failed (non-fatal): {hs_err}")
+                            logger.warning(f"Hotspot fail-on-STK-failure failed (non-fatal): {hs_err}")
 
                         if mpesa_txn.payment:
                             AuditLog.log_action(

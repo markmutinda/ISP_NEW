@@ -311,6 +311,8 @@ class SMSNotificationSettingsSerializer(serializers.ModelSerializer):
             'use_inbuilt_system',
             # hotspot — only two remain
             'hotspot_welcome',
+            'hotspot_chat_alert_enabled',
+            'hotspot_chat_alert_numbers',
             # pppoe
             'pppoe_welcome',
             'pppoe_payment_confirmation',  # MERGED: handles both payment AND renewal confirmations
@@ -326,6 +328,21 @@ class SMSNotificationSettingsSerializer(serializers.ModelSerializer):
             'updated_at',
         ]
         read_only_fields = ['updated_at']
+
+    def validate_hotspot_chat_alert_numbers(self, value):
+        if not isinstance(value, list):
+            raise serializers.ValidationError("Must be a list of phone numbers.")
+        cleaned = []
+        for raw in value:
+            n = ''.join(ch for ch in str(raw) if ch.isdigit() or ch == '+')
+            digits = n.lstrip('+')
+            if not (9 <= len(digits) <= 15):
+                raise serializers.ValidationError(f"Invalid phone number: {raw}")
+            if n not in cleaned:
+                cleaned.append(n)
+        if len(cleaned) > 5:
+            raise serializers.ValidationError("Maximum 5 numbers allowed.")
+        return cleaned
 
 
 class SMSUnitTopupSerializer(serializers.ModelSerializer):

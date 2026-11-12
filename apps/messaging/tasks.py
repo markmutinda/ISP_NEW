@@ -875,3 +875,52 @@ def send_personalized_sms(schema_name, recipients, message, company_name=''):
         logger.warning("[COMPOSE] %s: sent=%s failed=%s", schema_name, ok, len(results) - ok)
     except Exception:
         logger.exception("[COMPOSE] send failed for schema %s", schema_name)
+
+
+@shared_task(name='apps.messaging.tasks.send_hotspot_chat_alert_sms', queue='default', ignore_result=True)
+def send_hotspot_chat_alert_sms(schema_name, phone, body, is_reply=False):
+    """SMS the tenant admin(s) when a captive-portal customer starts/continues a chat."""
+    from django_tenants.utils import schema_context
+    from .models import SMSNotificationSettings
+    from .services.gateway_dispatcher import GatewayDispatcher
+    from .services.notification_sender import _log_sms
+
+    if not schema_name or schema_name == 'public':
+        return
+
+    with schema_context(schema_name):
+        s = SMSNotificationSettings.objects.filter(pk=1).first()
+        if not s or not s.hotspot_chat_alert_enabled:
+            return
+        numbers = []
+        for n in (s.hotspot_chat_alert_numbers or []):
+            n = str(n).strip()
+            if n and n not in numbers:
+                numbers.append(n)
+        if not numbers:
+            return
+
+        preview = ' '.join((body or '').split())[:60]
+        if is_reply:
+            msg = (f'Hotspot customer {phone} has replied: "{preview}". '
+                   f'Call them directly or reply in Hotspot Chats (Tickets page).')
+        else:
+            msg = (f'Hotspot customer {phone} has texted with issue: "{preview}". '
+                   f'Kindly contact them directly or engage them in Hotspot Chats (Tickets page).')
+
+        try:
+            dispatcher = GatewayDispatcher(schema_name=schema_name)
+        except ValueError as e:
+            logger.warning("[HS CHAT ALERT] no gateway for %s: %s", schema_name, e)
+            return
+
+        for num in numbers:
+            try:
+                res = dispatcher.send_sms(to=num, message=msg)
+            except Exception as e:
+                res = {'success': False, 'error': str(e)}
+            ok = bool(res.get('success'))
+            _log_sms(num, msg, status='sent' if ok else 'failed', msg_type='automated',
+                     recipient_name='System Admin',
+                     provider_id=str(res.get('provider_id') or ''),
+                     error='' if ok else str(res.get('error') or 'Unknown error'))
