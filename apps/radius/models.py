@@ -10,7 +10,7 @@ These models mirror the FreeRADIUS SQL schema for:
 Reference: https://wiki.freeradius.org/guide/SQL-HOWTO
 """
 
-from django.db import models
+from django.db import models, transaction
 from django.db.models import Max
 from django.utils import timezone
 import uuid
@@ -779,6 +779,21 @@ class CustomerRadiusCredentials(models.Model):
                 attributes=check_attrs,
                 reply_attributes=reply_attrs,
             )
+            try:
+                with transaction.atomic():
+                    from apps.fup.models import FUPThrottleState
+                    t = FUPThrottleState.objects.filter(
+                        customer_id=self.customer_id, active=True, service_connection__isnull=False)
+                    if self.subscription_activated_at:
+                        t = t.filter(last_synced_at__gte=self.subscription_activated_at)
+                    t = t.values_list('throttled_download_mbps', 'throttled_upload_mbps').first()
+                    if t:
+                        RadReply.objects.filter(
+                            username=self.username, attribute='Mikrotik-Rate-Limit'
+                        ).update(value=f'{t[1] * 1000}k/{t[0] * 1000}k')
+            except Exception:
+                import logging
+                logging.getLogger(__name__).warning('FUP throttle re-apply failed for %s', self.username)
         else:
             service.disable_radius_user(
                 username=self.username,

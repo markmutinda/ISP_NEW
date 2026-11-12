@@ -1,11 +1,12 @@
 import csv
 import logging
 
-from django.db import transaction
+from django.db import transaction, connection
 from django.db.models import Count, Q
 from django.db.models.deletion import ProtectedError
 from django.http import HttpResponse
 from django.utils import timezone
+from django.core.cache import cache
 from rest_framework import status, viewsets
 from rest_framework.decorators import action
 from rest_framework.permissions import IsAuthenticated
@@ -34,10 +35,8 @@ from .serializers import (
     FUPAnalyticsOverviewSerializer,
     LinkPlansSerializer,
 )
-from .services import (
-    FUPEnforcementService,
-    FUPAnalyticsService,
-)
+from .services import FUPAnalyticsService
+from .services.engine import FUPEngine, snapshot_key, lastrun_key, SNAPSHOT_TTL
 
 logger = logging.getLogger(__name__)
 
@@ -59,21 +58,15 @@ class FUPDashboardSummaryView(APIView):
         active_violations = FUPViolation.objects.filter(status='OPEN').count()
         currently_throttled = FUPThrottleState.objects.filter(active=True).count()
 
-        # 🆕 FUP rework: surface freshness of the new bucket-based usage data
-        # so admins can trust the numbers on the dashboard.
-        last_bucket = (
-            FUPUsageBucket.objects
-            .order_by('-hour_start')
-            .values_list('hour_start', flat=True)
-            .first()
-        )
+        # FUP revamp: freshness of the new 5-min sweep, read straight from cache.
+        last_synced = cache.get(lastrun_key(connection.schema_name))
 
         return Response({
             'active_policies': active_policies,
             'users_under_fup': users_under_fup,
             'active_violations': active_violations,
             'currently_throttled': currently_throttled,
-            'last_synced_at': last_bucket,
+            'last_synced_at': last_synced,
         })
 
 
@@ -97,31 +90,13 @@ class FUPPolicyViewSet(viewsets.ModelViewSet):
             pass
 
     def _release_all_throttles_for_policy(self, policy, reason: str):
-        service = FUPEnforcementService()
-        released = 0
-        throttle_states = FUPThrottleState.objects.filter(policy=policy, active=True).select_related('service_connection')
-        
-        for ts in throttle_states:
-            if service.release_service(ts.service_connection, reason=reason):
-                released += 1
-        return released
+        return FUPEngine().release_policy(policy, reason)
 
     def _evaluate_all_linked_services_for_policy(self, policy):
-        service = FUPEnforcementService()
-        processed = 0
-        throttled = 0
-        
-        for link in policy.plan_links.filter(is_active=True).select_related('plan'):
-            svcs = ServiceConnection.objects.filter(status='ACTIVE', plan=link.plan)
-            for svc in svcs:
-                before = FUPThrottleState.objects.filter(service_connection=svc, active=True).exists()
-                res = service.evaluate_service(svc)
-                after = FUPThrottleState.objects.filter(service_connection=svc, active=True).exists()
-                
-                if res: processed += 1
-                if not before and after: throttled += 1
-        
-        return {'processed': processed, 'throttled': throttled}
+        from .tasks import fup_enforce_tenant
+        schema = connection.schema_name
+        transaction.on_commit(lambda: fup_enforce_tenant.apply_async(args=[schema], countdown=2))
+        return {'processed': 0, 'throttled': 0}
 
     def _cleanup_policy_before_delete(self, policy):
         """
@@ -392,52 +367,12 @@ class FUPPolicyViewSet(viewsets.ModelViewSet):
     @action(detail=True, methods=['post'])
     def run_enforcement(self, request, pk=None):
         policy = self.get_object()
-        service = FUPEnforcementService()
-        count = 0
-        
-        for link in policy.plan_links.filter(is_active=True).select_related('plan'):
-            svcs = ServiceConnection.objects.filter(status='ACTIVE', plan=link.plan)
-            for svc in svcs:
-                service.evaluate_service(svc)
-                count += 1
-        
-        # Using POLICY_UPDATED instead of MANUAL_ENFORCEMENT to match EVENT_CHOICES
-        self._log_policy_event(
-            policy,
-            'POLICY_UPDATED',
-            f'Manual enforcement run on policy {policy.name}.',
-            metadata={'services_processed': count, 'action': 'manual_enforcement'}
-        )
-                
-        return Response({'message': 'Manual enforcement complete.', 'services_processed': count})
-
-    # 🆕 FUP rework: cheap dry-run preview of a policy's impact
-    @action(detail=False, methods=['post'])
-    def preview_impact(self, request):
-        """
-        Cheap dry-run: how many active users a not-yet-saved policy config
-        would cover, and how many are already over the proposed limit.
-        Uses existing FUPUsageWindow rows — no new aggregation.
-        """
-        data_limit_gb = request.data.get('data_limit_gb')
-        if not data_limit_gb:
-            return Response({'affected': 0, 'would_throttle_now': 0})
-        limit_bytes = int(float(data_limit_gb) * 1024 ** 3)
-
-        # If editing an existing policy, scope to its linked plans; for a brand
-        # new policy there's nothing linked yet, so affected=0 is correct/expected.
-        policy_id = request.data.get('id')
-        if not policy_id:
-            return Response({'affected': 0, 'would_throttle_now': 0})
-
-        windows = FUPUsageWindow.objects.filter(
-            policy_id=policy_id,
-            period_start__lte=timezone.now(),
-            period_end__gt=timezone.now(),
-        )
-        affected = windows.count()
-        would_throttle = windows.filter(total_bytes__gt=limit_bytes).count()
-        return Response({'affected': affected, 'would_throttle_now': would_throttle})
+        from .tasks import fup_enforce_tenant
+        schema = connection.schema_name
+        transaction.on_commit(lambda: fup_enforce_tenant.apply_async(args=[schema]))
+        self._log_policy_event(policy, 'POLICY_UPDATED', f'Manual enforcement queued on {policy.name}.',
+                               metadata={'action': 'manual_enforcement'})
+        return Response({'message': 'Enforcement queued.'})
 
 
 class FUPViolationViewSet(viewsets.ReadOnlyModelViewSet):
@@ -484,59 +419,25 @@ class FUPThrottleStateViewSet(viewsets.ReadOnlyModelViewSet):
     permission_classes = [IsAuthenticated]
 
 
-class FUPUsageWindowViewSet(viewsets.ReadOnlyModelViewSet):
-    """
-    ViewSet for FUP Usage Windows.
-    This provides the data needed for the "Users Under FUP" tab with progress bars.
-    
-    Query Parameters:
-    - policy_id: Filter by policy ID
-    - status: Filter by status (NORMAL, VIOLATED, THROTTLED, RESET)
-    - throttled: Filter by is_throttled (true/false)
-    - search: Search by customer code, name, or policy name
-    - current_only: Only show current windows (default: true)
-    """
-    queryset = FUPUsageWindow.objects.select_related(
-        'customer', 'policy', 'plan', 'service_connection',
-        'hotspot_session', 'hotspot_session__plan',
-        'hotspot_plan',
-    ).all()
-    serializer_class = FUPUsageWindowSerializer
+class FUPUsageWindowViewSet(viewsets.ViewSet):
+    """Usage tab. Served from the snapshot the 5-min sweep already computed (0 DB cost)."""
     permission_classes = [IsAuthenticated]
 
-    def get_queryset(self):
-        qs = super().get_queryset()
+    def list(self, request):
+        schema = connection.schema_name
+        data = cache.get(snapshot_key(schema))
+        if data is None:  # cold cache: compute once, then cached
+            engine = FUPEngine()
+            rows, policies = engine.evaluate()
+            data = engine.build_snapshot(rows, policies)
+            cache.set(snapshot_key(schema), data, SNAPSHOT_TTL)
 
-        policy_id = self.request.query_params.get('policy_id')
-        status_val = self.request.query_params.get('status')
-        throttled = self.request.query_params.get('throttled')
-        search = self.request.query_params.get('search')
-        current_only = self.request.query_params.get('current_only', 'true')
-
-        if policy_id:
-            qs = qs.filter(policy_id=policy_id)
-
-        if status_val:
-            qs = qs.filter(status=status_val)
-
-        if throttled in ('true', 'false'):
-            qs = qs.filter(is_throttled=(throttled == 'true'))
-
+        search = (request.query_params.get('search') or '').strip().lower()
         if search:
-            qs = qs.filter(
-                Q(customer__customer_code__icontains=search) |
-                Q(customer__user__first_name__icontains=search) |
-                Q(customer__user__last_name__icontains=search) |
-                Q(policy__name__icontains=search) |
-                Q(hotspot_session__access_code__icontains=search)
-            )
-
-        if current_only == 'true':
-            now = timezone.now()
-            qs = qs.filter(period_start__lte=now, period_end__gt=now)
-
-        # Order by usage percentage descending (most critical first) and then by customer code
-        return qs.order_by('-usage_percent', 'customer__customer_code')
+            data = [d for d in data if search in d['customer_name'].lower()
+                    or search in d['customer_code'].lower()
+                    or search in d['policy_name'].lower()]
+        return Response({'count': len(data), 'results': data})
 
 
 class FUPAnalyticsOverviewView(APIView):

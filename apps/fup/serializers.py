@@ -28,6 +28,7 @@ class FUPPolicySerializer(serializers.ModelSerializer):
             'created_at', 'updated_at',
         ]
         read_only_fields = ['created_at', 'updated_at']
+        extra_kwargs = {'reset_period': {'required': False}}
 
     def validate(self, data):
         if data.get('data_limit_gb') is not None and data['data_limit_gb'] <= 0:
@@ -36,12 +37,13 @@ class FUPPolicySerializer(serializers.ModelSerializer):
             raise serializers.ValidationError('Throttle download speed must be greater than 0.')
         if data.get('throttle_upload_mbps', 0) <= 0:
             raise serializers.ValidationError('Throttle upload speed must be greater than 0.')
-        if data.get('reset_period') == 'PEAK_HOURS':
-            if not data.get('peak_hour_start') or not data.get('peak_hour_end'):
-                raise serializers.ValidationError(
-                    'peak_hour_start and peak_hour_end are required for PEAK_HOURS reset period.'
-                )
+        data['reset_period'] = 'SUBSCRIPTION'
         return data
+
+    def to_representation(self, instance):
+        rep = super().to_representation(instance)
+        rep['reset_period'] = 'SUBSCRIPTION'
+        return rep
 
     def get_linked_plans_count(self, obj):
         # FIX: Count BOTH billing plan links and hotspot plan links

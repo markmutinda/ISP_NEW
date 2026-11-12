@@ -308,26 +308,18 @@ app.conf.beat_schedule = {
     },
 
     # ════════════════════════════════════════════════════════════════
-    # FUP Automation — REWORKED
+    # FUP Automation — Revamp
     # ════════════════════════════════════════════════════════════════
-    # The two heavy N+1 jobs (sync-fup-usage-every-10-min and
-    # enforce-fup-policies-every-10-min) are REMOVED — they were replaced
-    # by event-driven delta sync + inline threshold enforcement.
-    # Delta accrual + crossed-threshold enforcement now happens inline
-    # inside fup_delta_sync_fanout, so a separate "enforce everyone" pass
-    # is no longer needed for the common case.
-    'fup-delta-sync-every-1-min': {
-        'task': 'apps.fup.tasks.fup_delta_sync_fanout',
-        'schedule': 60,  # Every 60 seconds
+    # One light periodic sweep every 5 minutes. The dispatcher only
+    # enqueues tenant tasks for tenants that actually have an active
+    # FUP policy, so tenants without one cost nothing.
+    # Release is event-based (renewal's sync_to_radius already rebuilds
+    # RADIUS and kicks the session); this sweep only tidies the DB
+    # record and picks up newly-crossed limits.
+    'fup-enforce-every-5-min': {
+        'task': 'apps.fup.tasks.fup_enforce_all',
+        'schedule': crontab(minute='*/5'),
         'options': {'queue': 'radius'},
-    },
-    # Kept as a lightweight SAFETY NET only — catches drift/missed accounting
-    # packets and releases anyone whose window reset since the last check.
-    # No longer the primary enforcement mechanism.
-    'reconcile-fup-states-hourly': {
-        'task': 'apps.fup.tasks.reconcile_fup_states',
-        'schedule': crontab(minute=15),  # Every hour at :15
-        'options': {'queue': 'radius'}
     },
 
     # ════════════════════════════════════════════════════════════════
