@@ -292,6 +292,8 @@ class CaptivePortalView(APIView):
                         'router_logo_url': None,
                         'hide_plan_speed': False,
                         'portal_font': 'outfit',
+                        'maintenance_mode': False,
+                        'maintenance_message': '',
                     }
                     branding_data = None
                 else:
@@ -311,6 +313,8 @@ class CaptivePortalView(APIView):
                         'router_logo_url': router_logo_url,
                         'hide_plan_speed': getattr(router, 'hide_plan_speed', False),
                         'portal_font': getattr(router, 'portal_font', 'outfit') or 'outfit',
+                        'maintenance_mode': bool(router.maintenance_mode),
+                        'maintenance_message': router.maintenance_message or '',
                     }
 
                     branding_data = None
@@ -682,6 +686,17 @@ class HotspotPurchaseView(APIView):
                     router = Router.objects.get(name=router_id, is_active=True)
                 except Router.DoesNotExist:
                     return Response({'error': 'Router not found'}, status=status.HTTP_404_NOT_FOUND)
+
+            # ── Maintenance mode gate (server-side) ──
+            if router.maintenance_mode:
+                return Response(
+                    {
+                        'error': router.maintenance_message
+                                 or 'This hotspot is under maintenance. Please try again later.',
+                        'code': 'ROUTER_MAINTENANCE',
+                    },
+                    status=status.HTTP_503_SERVICE_UNAVAILABLE,
+                )
 
             try:
                 plan = HotspotPlan.objects.get(id=plan_id, router=router, is_active=True)
@@ -1319,6 +1334,18 @@ class HotspotVoucherRedeemView(APIView):
                         router = Router.objects.get(name=router_id, is_active=True)
                     except Router.DoesNotExist:
                         return Response({'error': 'Router not found'}, status=status.HTTP_404_NOT_FOUND)
+
+                # ── Maintenance mode gate (server-side) ──
+                # The outer finally already releases the voucher lock key.
+                if router.maintenance_mode:
+                    return Response(
+                        {
+                            'error': router.maintenance_message
+                                     or 'This hotspot is under maintenance. Please try again later.',
+                            'code': 'ROUTER_MAINTENANCE',
+                        },
+                        status=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    )
 
                 voucher_plan_id = getattr(voucher.batch, 'hotspot_plan_id', None)
                 if voucher_plan_id and str(voucher_plan_id) != str(plan.id):
@@ -2256,6 +2283,17 @@ class HotspotFreeTrialView(APIView):
                 router = Router.objects.get(id=router_id, is_active=True)
             except (Router.DoesNotExist, ValueError):
                 return Response({'error': 'Router not found'}, status=404)
+
+            # ── Maintenance mode gate (server-side) ──
+            if router.maintenance_mode:
+                return Response(
+                    {
+                        'error': router.maintenance_message
+                                 or 'This hotspot is under maintenance. Please try again later.',
+                        'code': 'ROUTER_MAINTENANCE',
+                    },
+                    status=503,
+                )
 
             try:
                 plan = HotspotPlan.objects.get(id=plan_id, router=router, is_active=True, is_free_trial=True)

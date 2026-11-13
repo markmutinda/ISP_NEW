@@ -1994,19 +1994,45 @@ mute 20
     
     @action(detail=True, methods=['post'])
     def maintenance(self, request, pk=None):
+        """
+        Toggle maintenance mode. Uses a queryset .update() on purpose: Router.save()
+        fires post_save signals (RADIUS NAS rebuild/restart, HAProxy sync) that must
+        not run for a simple flag flip.
+        """
+        from django.db import connection as db_conn
+        from apps.core.cache_versioning import bump_cache_version
+
         router = self.get_object()
-        new_status = 'maintenance' if router.status != 'maintenance' else 'online'
-        old_status = router.status
-        router.status = new_status
-        router.save(update_fields=['status'])
-        
+
+        enabled = request.data.get('enabled')
+        if enabled is None:
+            enabled = not router.maintenance_mode
+        else:
+            enabled = str(enabled).lower() in ('true', '1', 'yes', 'on')
+
+        message = (request.data.get('reason') or '').strip()[:255] if enabled else ''
+
+        Router.objects.filter(pk=router.pk).update(
+            maintenance_mode=enabled,
+            maintenance_message=message,
+            updated_at=timezone.now(),
+        )
+
         RouterEvent.objects.create(
             router=router,
             event_type='maintenance',
-            message=f"Status changed from {old_status} to {new_status}"
+            message=f"Maintenance mode {'enabled' if enabled else 'disabled'}"
+                    + (f": {message}" if message else ""),
         )
-        
-        return Response({"status": "success", "new_status": new_status})
+
+        # Instantly invalidate cached captive-portal payloads for this tenant
+        bump_cache_version(db_conn.schema_name)
+
+        return Response({
+            "status": "success",
+            "maintenance_mode": enabled,
+            "maintenance_message": message,
+        })
     
     @action(detail=True, methods=['post'])
     def sync_users(self, request, pk=None):

@@ -79,6 +79,7 @@ class RouterSerializer(serializers.ModelSerializer):
             # Captive Portal Customisation
             'template_id', 'hotspot_name', 'support_phone', 'announcement_text', 'logo',
             'hide_plan_speed', 'portal_font',
+            'maintenance_mode', 'maintenance_message',
             # Remote access ports (HAProxy managed)
             'winbox_remote_port', 'api_remote_port', 'remote_access_url',
             'created_at', 'updated_at',
@@ -128,6 +129,10 @@ class RouterSerializer(serializers.ModelSerializer):
             'hide_plan_speed': {'required': False},
             'portal_font': {'required': False, 'allow_blank': True},
             'logo': {'required': False, 'allow_null': True},
+
+            # Maintenance mode - read-only; only the maintenance action sets these
+            'maintenance_mode': {'read_only': True},
+            'maintenance_message': {'read_only': True},
         }
 
     def get_auth_status(self, obj):

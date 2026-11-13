@@ -319,6 +319,10 @@ class Router(AuditMixin):
     notes = models.TextField(null=True, blank=True)
     is_active = models.BooleanField(default=True)
 
+    # ── Maintenance mode (captive portal shows a notice, purchases blocked) ──
+    maintenance_mode = models.BooleanField(default=False, db_index=True)
+    maintenance_message = models.CharField(max_length=255, blank=True, default='')
+
     # Legacy fields kept to prevent migration errors during transition
     radius_server = models.GenericIPAddressField(protocol='IPv4', null=True, blank=True)
     radius_port = models.IntegerField(default=1812)
