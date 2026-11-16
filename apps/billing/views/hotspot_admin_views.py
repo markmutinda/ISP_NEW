@@ -975,17 +975,21 @@ class RouterIncomeView(APIView):
 class HotspotSessionExtendView(APIView):
     """
     Extend an active hotspot session's expiration time.
-    
+
     POST /api/v1/hotspot/admin/sessions/{session_id}/extend/
-    
+
     Request body options:
     {
         "duration_amount": 1,
         "duration_unit": "HOURS",  # MINUTES, HOURS, DAYS
         // OR
-        "expiry_date": "2025-12-31T23:59:59"  # ISO format override
+        "expiry_date": "2025-12-31T23:59:59",  # ISO format override
+        "send_sms": true                       # optional, default false
     }
-    
+
+    Active sessions are extended; expired sessions are re-activated
+    (RADIUS credentials are recreated first).
+
     Permission: Admin or Staff only.
     """
     permission_classes = [IsAuthenticated, IsAdminOrStaff, HasRoleAccessPolicy]
@@ -994,31 +998,31 @@ class HotspotSessionExtendView(APIView):
     def post(self, request, session_id):
         from apps.billing.models.hotspot_models import HotspotSession
         from apps.billing.services.hotspot_radius_service import HotspotRadiusService
+        from apps.messaging.services.notification_sender import _fmt_phone
+        from django.db import connection
         from django.utils.dateparse import parse_datetime
 
-        # Get the session (must be active)
+        # Active sessions are extended; expired sessions are re-activated.
         try:
-            session = HotspotSession.objects.get(
-                session_id=session_id,
-                status='active'
-            )
+            session = HotspotSession.objects.select_related(
+                'plan', 'router', 'hotspot_client'
+            ).get(session_id=session_id, status__in=['active', 'expired'])
         except HotspotSession.DoesNotExist:
             return Response(
-                {'error': 'Active session not found'},
+                {'error': 'Active or expired session not found'},
                 status=status.HTTP_404_NOT_FOUND
             )
 
         now = timezone.now()
-        
-        # Parse extension parameters
+        reactivating = session.status == 'expired'
+        send_sms = str(request.data.get('send_sms', 'false')).lower() in ('1', 'true', 'yes')
+
         duration_amount = request.data.get('duration_amount', 1)
-        duration_unit = request.data.get('duration_unit', 'HOURS').upper()
-        expiry_date_str = request.data.get('expiry_date')  # ISO string override
-        
-        # Determine base time for extension (current expiry if still valid, else now)
+        duration_unit = str(request.data.get('duration_unit', 'HOURS')).upper()
+        expiry_date_str = request.data.get('expiry_date')
+
         base_time = session.expires_at if (session.expires_at and session.expires_at > now) else now
-        
-        # Calculate new expiry
+
         if expiry_date_str:
             new_expiry = parse_datetime(expiry_date_str)
             if not new_expiry:
@@ -1026,13 +1030,14 @@ class HotspotSessionExtendView(APIView):
                     {'error': 'Invalid expiry_date format. Use ISO format e.g., 2025-12-31T23:59:59'},
                     status=status.HTTP_400_BAD_REQUEST
                 )
+            if timezone.is_naive(new_expiry):
+                new_expiry = timezone.make_aware(new_expiry)
             if new_expiry <= now:
                 return Response(
                     {'error': 'Expiry date must be in the future'},
                     status=status.HTTP_400_BAD_REQUEST
                 )
         else:
-            # Validate duration
             try:
                 duration_amount = int(duration_amount)
                 if duration_amount <= 0:
@@ -1042,79 +1047,98 @@ class HotspotSessionExtendView(APIView):
                     {'error': 'duration_amount must be a positive integer'},
                     status=status.HTTP_400_BAD_REQUEST
                 )
-            
-            # Map unit to timedelta
-            delta_map = {
+            delta = {
                 'MINUTES': timedelta(minutes=duration_amount),
                 'HOURS': timedelta(hours=duration_amount),
                 'DAYS': timedelta(days=duration_amount),
-            }
-            delta = delta_map.get(duration_unit)
+            }.get(duration_unit)
             if not delta:
                 return Response(
                     {'error': 'duration_unit must be MINUTES, HOURS, or DAYS'},
                     status=status.HTTP_400_BAD_REQUEST
                 )
-            
             new_expiry = base_time + delta
-        
-        # Update session expiry
+
         old_expiry = session.expires_at
-        session.expires_at = new_expiry
-        session.save(update_fields=['expires_at', 'updated_at'])
-        
-        # ============================================================
-        # FIX: Update RADIUS credentials with correct Session-Timeout
-        # The extend_session method now calculates remaining seconds
-        # from new_expires_at instead of using additional_minutes
-        # ============================================================
-        try:
-            radius_service = HotspotRadiusService()
-            
-            # Calculate the number of minutes added (for logging only)
-            added_minutes = int((new_expiry - base_time).total_seconds() / 60)
-            
-            # Call extend_session - it will calculate Session-Timeout
-            # correctly from new_expires_at
-            radius_service.extend_session(
+
+        if reactivating:
+            # RADIUS rows were rejected/deleted on expiry -> recreate them first.
+            # If this fails nothing has been changed in the DB.
+            if not session.access_code:
+                return Response({'error': 'Session has no access code'}, status=status.HTTP_400_BAD_REQUEST)
+            ok = HotspotRadiusService().create_hotspot_credentials(
                 username=session.access_code,
-                additional_minutes=added_minutes,  # Used as fallback only
-                new_expires_at=new_expiry,
+                password=session.access_code,
+                router=session.router,
+                plan=session.plan,
+                expires_at=new_expiry,
+                mac_address=session.mac_address or '',
             )
-            
+            if not ok:
+                return Response(
+                    {'error': 'Failed to restore RADIUS credentials. Please try again.'},
+                    status=status.HTTP_500_INTERNAL_SERVER_ERROR
+                )
+            session.status = 'active'
+            session.expires_at = new_expiry
+            session.save(update_fields=['status', 'expires_at', 'updated_at'])
             logger.info(
-                f"Session {session.session_id} extended from {old_expiry} to {new_expiry} "
-                f"by {request.user.username} (added {added_minutes} minutes)"
+                f"Expired session {session.session_id} re-activated until {new_expiry} "
+                f"by {request.user.username}"
             )
-        except Exception as e:
-            # ============================================================
-            # FIX: Even if RADIUS extension fails, the session expiry is
-            # already updated in DB. The user will get the new expiry on
-            # next re-authentication. Log but don't fail the request.
-            # ============================================================
-            logger.warning(
-                f"RADIUS extension failed for session {session.session_id} "
-                f"(session expiry already updated in DB): {e}"
-            )
-            # Not raising an exception - the DB update is what matters most
-        
-        # Calculate human-readable extension display
+        else:
+            session.expires_at = new_expiry
+            session.save(update_fields=['expires_at', 'updated_at'])
+            try:
+                added_minutes = int((new_expiry - base_time).total_seconds() / 60)
+                HotspotRadiusService().extend_session(
+                    username=session.access_code,
+                    additional_minutes=added_minutes,
+                    new_expires_at=new_expiry,
+                )
+                logger.info(
+                    f"Session {session.session_id} extended from {old_expiry} to {new_expiry} "
+                    f"by {request.user.username}"
+                )
+            except Exception as e:
+                logger.warning(
+                    f"RADIUS extension failed for session {session.session_id} "
+                    f"(session expiry already updated in DB): {e}"
+                )
+
+        # ── Optional SMS (async, via the tenant's active gateway) ──
+        sms_status = 'disabled'
+        if send_sms:
+            client = session.hotspot_client
+            candidates = []
+            if client and client.canonical_phone and not client.canonical_phone.startswith('MAC-'):
+                candidates.append(client.canonical_phone)
+            candidates.append(session.phone_number)
+            phone = next((p for p in (_fmt_phone(c) for c in candidates if c) if p), '')
+            if phone:
+                from apps.messaging.tasks import send_hotspot_extension_sms
+                send_hotspot_extension_sms.delay(session.session_id, connection.schema_name, phone)
+                sms_status = 'queued'
+            else:
+                sms_status = 'no_phone'
+
         extension_display = ""
         if not expiry_date_str:
-            if duration_unit == 'MINUTES':
-                extension_display = f"{duration_amount} minute(s)"
-            elif duration_unit == 'HOURS':
-                extension_display = f"{duration_amount} hour(s)"
-            elif duration_unit == 'DAYS':
-                extension_display = f"{duration_amount} day(s)"
-        
+            unit_label = {'MINUTES': 'minute(s)', 'HOURS': 'hour(s)', 'DAYS': 'day(s)'}[duration_unit]
+            extension_display = f"{duration_amount} {unit_label}"
+
         return Response({
             'status': 'success',
             'session_id': session_id,
+            'reactivated': reactivating,
             'old_expiry': old_expiry.isoformat() if old_expiry else None,
             'new_expiry': new_expiry.isoformat(),
             'extension': extension_display,
-            'message': f'Session extended to {new_expiry.strftime("%b %d %Y %H:%M")}',
+            'sms': sms_status,
+            'message': (
+                f'Session {"re-activated" if reactivating else "extended"} to '
+                f'{new_expiry.strftime("%b %d %Y %H:%M")}'
+            ),
         })
 
 

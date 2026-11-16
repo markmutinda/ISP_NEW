@@ -138,6 +138,47 @@ def send_hotspot_welcome_sms(session_id: str, schema_name: str):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# HOTSPOT EXTENSION SMS — ASYNC TASK (admin extends/reactivates a session)
+# ─────────────────────────────────────────────────────────────────────────────
+
+@shared_task(name='apps.messaging.tasks.send_hotspot_extension_sms', queue='default', ignore_result=True)
+def send_hotspot_extension_sms(session_id: str, schema_name: str, phone: str):
+    """SMS a hotspot customer that their access was extended, with login details.
+    Uses the tenant's active gateway (wallet debit/refund handled by GatewayDispatcher)."""
+    from django_tenants.utils import schema_context
+    from django.utils import timezone as _tz
+    from apps.billing.models.hotspot_models import HotspotSession
+    from apps.billing.services.hotspot_credentials import device_password
+    from apps.messaging.services.notification_sender import _dispatch_result, _log_sms
+
+    if not schema_name or schema_name == 'public' or not phone:
+        return
+
+    with schema_context(schema_name):
+        s = HotspotSession.objects.select_related('plan').filter(session_id=session_id).first()
+        if not s or not s.access_code or not s.expires_at:
+            return
+
+        expiry = s.expires_at.astimezone(_tz.get_current_timezone()).strftime('%d %b %Y %H:%M')
+        msg = (
+            f"Your WiFi access has been extended until {expiry}.\n"
+            f"User: {s.access_code} Pass: {device_password(s.access_code)}\n"
+            f"Plan: {s.plan.name if s.plan else 'WiFi'}. Reconnect and enjoy!"
+        )
+
+        result = _dispatch_result(phone, msg, schema_name=schema_name)
+        ok = bool(result.get('success'))
+        _log_sms(
+            phone, msg,
+            status='sent' if ok else 'failed',
+            msg_type='automated',
+            recipient_name=s.access_code,
+            provider_id=str(result.get('provider_id') or ''),
+            error='' if ok else str(result.get('error') or 'Unknown error'),
+        )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # EXISTING TASKS
 # ─────────────────────────────────────────────────────────────────────────────
 
