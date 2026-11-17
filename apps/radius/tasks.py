@@ -1103,3 +1103,14 @@ def recover_unkicked_renewals():
     if queued:
         logger.info(f"[UNKICKED SWEEP] queued {queued} kick(s)")
     return {'queued': queued}
+
+
+@shared_task(name='apps.radius.tasks.compensate_users', queue='radius', ignore_result=True)
+def compensate_users(schema_name, job_id, params):
+    """
+    Bulk-add time to active subscriptions. Idempotent by design (see
+    compensation_service), so acks_late redelivery after a worker crash is safe.
+    """
+    from apps.radius.services import compensation_service as svc
+    with schema_context(schema_name):
+        svc.run_job(schema_name, job_id, params)

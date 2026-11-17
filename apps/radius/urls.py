@@ -19,6 +19,9 @@ from .views import (
     CustomerRadiusCredentialsViewSet,
 )
 from .usage_analytics_views import RadiusUsageAnalyticsView, RadiusUsageConsumersView
+from .compensation_views import (
+    CompensationPreviewView, CompensationExecuteView, CompensationJobView,
+)
 
 router = DefaultRouter()
 router.register(r'accounting', RadAcctViewSet, basename='radius-accounting')
@@ -40,6 +43,9 @@ urlpatterns = [
     path('usage/', RadiusUsageBulkView.as_view(), name='radius-usage-bulk'),
     path('usage/analytics/', RadiusUsageAnalyticsView.as_view(), name='radius-usage-analytics'),
     path('usage/consumers/', RadiusUsageConsumersView.as_view(), name='radius-usage-consumers'),
+    path('compensation/preview/', CompensationPreviewView.as_view(), name='radius-compensation-preview'),
+    path('compensation/execute/', CompensationExecuteView.as_view(), name='radius-compensation-execute'),
+    path('compensation/jobs/<str:job_id>/', CompensationJobView.as_view(), name='radius-compensation-job'),
     
     # User management
     path('users/', RadiusUserView.as_view(), name='radius-user-list'),
