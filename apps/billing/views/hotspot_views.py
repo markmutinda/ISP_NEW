@@ -60,6 +60,9 @@ from apps.billing.services.hotspot_credentials import (
     schedule_tv_login_push,
 )
 from apps.core.tenant_cache import resolve_tenant_cached
+from apps.billing.services.hotspot_schedule import (
+    schedule_payload, plan_is_available_now, filter_plan_dicts,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -188,7 +191,19 @@ def _serialize_hotspot_plan(plan):
         'is_popular': plan.is_popular,
         'is_free_trial': getattr(plan, 'is_free_trial', False),
         'is_tv_plan': getattr(plan, 'is_tv_plan', False),
+        'schedule': schedule_payload(plan),      # <-- ADD
     }
+
+
+def _with_schedule_applied(payload):
+    """Filter cached (unfiltered) plans by the current local day/time. No DB hits."""
+    plans = payload.get('plans')
+    if not plans:
+        return payload
+    visible = filter_plan_dicts(plans)
+    if len(visible) == len(plans):
+        return payload
+    return {**payload, 'plans': visible}
 
 
 def _close_prior_radacct_rows_for_renewal(session, username: str):
@@ -253,18 +268,18 @@ class CaptivePortalView(APIView):
             return Response(locked_payload(schema_name, lock, router_id))
 
         version = get_cache_version(schema_name)
-        cache_key = f"hotspot:captive:v3:{schema_name}:{router_id}:{version}"
+        cache_key = f"hotspot:captive:v4:{schema_name}:{router_id}:{version}"
 
         cached_payload = cache.get(cache_key)
         if cached_payload is not None:
-            return Response(cached_payload)
+            return Response(_with_schedule_applied(cached_payload))
 
         lock_key = f"{cache_key}:lock"
         if not cache.add(lock_key, "1", timeout=5):
-            stale_key = f"hotspot:captive:v3:{schema_name}:{router_id}:{version - 1}"
+            stale_key = f"hotspot:captive:v4:{schema_name}:{router_id}:{version - 1}"
             stale_payload = cache.get(stale_key)
             if stale_payload is not None:
-                return Response(stale_payload)
+                return Response(_with_schedule_applied(stale_payload))
 
         try:
             with schema_context(schema_name):
@@ -366,7 +381,6 @@ class CaptivePortalView(APIView):
                         hotspot_plans = HotspotPlan.objects.filter(
                             router=router,
                             is_active=True,
-                            **{_today_valid_day_field(): True},
                         ).only(
                             'id', 'name', 'description', 'price', 'currency',
                             'validity_type', 'validity_value',
@@ -375,6 +389,8 @@ class CaptivePortalView(APIView):
                             'simultaneous_devices', 'is_popular', 'duration_minutes', 'data_limit_mb',
                             'is_free_trial',
                             'is_tv_plan',
+                            'valid_monday', 'valid_tuesday', 'valid_wednesday', 'valid_thursday',
+                            'valid_friday', 'valid_saturday', 'valid_sunday', 'valid_time_windows',
                         ).order_by('sort_order', 'price')
                         plans_data = [_serialize_hotspot_plan(p) for p in hotspot_plans]
                     except ProgrammingError:
@@ -421,7 +437,7 @@ class CaptivePortalView(APIView):
         cache.set(cache_key, payload, timeout=3600)
 
         from django.http import JsonResponse
-        response = JsonResponse(payload)
+        response = JsonResponse(_with_schedule_applied(payload))
         response["Cache-Control"] = "public, max-age=15, stale-while-revalidate=60"
         return response
 
@@ -435,7 +451,7 @@ class HotspotPlansView(APIView):
         cached_payload = cache.get(cache_key)
         if cached_payload is not None:
             from django.http import JsonResponse
-            response = JsonResponse(cached_payload)
+            response = JsonResponse(_with_schedule_applied(cached_payload))
             response["Cache-Control"] = "public, max-age=15, stale-while-revalidate=60"
             return response
 
@@ -456,7 +472,6 @@ class HotspotPlansView(APIView):
         plans = HotspotPlan.objects.filter(
             router=router,
             is_active=True,
-            **{_today_valid_day_field(): True},
         ).only(
             'id', 'name', 'price', 'currency', 'duration_minutes', 'data_limit_mb',
             'download_speed', 'upload_speed', 'speed_unit', 'description',
@@ -464,6 +479,8 @@ class HotspotPlansView(APIView):
             'limitation_type', 'data_limit_value', 'data_limit_unit',
             'is_free_trial',
             'is_tv_plan',
+            'valid_monday', 'valid_tuesday', 'valid_wednesday', 'valid_thursday',
+            'valid_friday', 'valid_saturday', 'valid_sunday', 'valid_time_windows',
         ).order_by('sort_order', 'price')
 
         try:
@@ -490,6 +507,7 @@ class HotspotPlansView(APIView):
                 'is_popular': plan.is_popular,
                 'is_free_trial': plan.is_free_trial,
                 'is_tv_plan': plan.is_tv_plan,
+                'schedule': schedule_payload(plan),
             }
             for plan in plans
         ]
@@ -545,7 +563,7 @@ class HotspotPlansView(APIView):
         cache.set(cache_key, payload, timeout=30)
 
         from django.http import JsonResponse
-        response = JsonResponse(payload)
+        response = JsonResponse(_with_schedule_applied(payload))
         response["Cache-Control"] = "public, max-age=15, stale-while-revalidate=60"
         return response
 
@@ -702,6 +720,13 @@ class HotspotPurchaseView(APIView):
                 plan = HotspotPlan.objects.get(id=plan_id, router=router, is_active=True)
             except HotspotPlan.DoesNotExist:
                 return Response({'error': 'Plan not found'}, status=status.HTTP_404_NOT_FOUND)
+
+            if not plan_is_available_now(plan):
+                return Response(
+                    {'error': 'This plan is not available right now. Please pick another plan.',
+                     'code': 'PLAN_NOT_AVAILABLE'},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
 
             mac_address = _normalize_mac(mac_address)
 
@@ -2299,6 +2324,13 @@ class HotspotFreeTrialView(APIView):
                 plan = HotspotPlan.objects.get(id=plan_id, router=router, is_active=True, is_free_trial=True)
             except HotspotPlan.DoesNotExist:
                 return Response({'error': 'Free trial plan not found'}, status=404)
+
+            if not plan_is_available_now(plan):
+                return Response(
+                    {'error': 'This plan is not available right now. Please pick another plan.',
+                     'code': 'PLAN_NOT_AVAILABLE'},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
 
             hotspot_client = HotspotClient.get_or_create_by_mac(
                 schema_name=tenant.schema_name,

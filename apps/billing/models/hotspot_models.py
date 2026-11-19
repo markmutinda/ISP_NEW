@@ -206,6 +206,13 @@ class HotspotPlan(models.Model):
     valid_friday = models.BooleanField(default=True)
     valid_saturday = models.BooleanField(default=True)
     valid_sunday = models.BooleanField(default=True)
+    # Optional per-day time-of-day windows. Missing day = all day.
+    # e.g. {"friday": {"start": "18:00", "end": "19:00"}}
+    valid_time_windows = models.JSONField(
+        default=dict,
+        blank=True,
+        help_text='Per-day availability window, e.g. {"friday": {"start": "18:00", "end": "19:00"}}',
+    )
     
     # MikroTik Integration
     mikrotik_profile = models.CharField(

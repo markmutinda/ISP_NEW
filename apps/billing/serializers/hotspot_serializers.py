@@ -5,6 +5,7 @@ Hotspot Serializers for Admin API
 """
 from rest_framework import serializers
 from apps.billing.models.hotspot_models import HotspotPlan, HotspotSession, HotspotBranding, HotspotClient
+from apps.billing.services.hotspot_schedule import normalize_time_windows
 
 
 class HotspotPlanSerializer(serializers.ModelSerializer):
@@ -57,6 +58,7 @@ class HotspotPlanSerializer(serializers.ModelSerializer):
             # Valid days - individual fields
             'valid_monday', 'valid_tuesday', 'valid_wednesday', 'valid_thursday',
             'valid_friday', 'valid_saturday', 'valid_sunday', 'valid_days_list',
+            'valid_time_windows',
             # Input fields
             'valid_days', 'router_ids',
             # MikroTik integration
@@ -86,6 +88,12 @@ class HotspotPlanSerializer(serializers.ModelSerializer):
             # ADD THIS: subscriber_count is computed
             'subscriber_count'
         ]
+    
+    def validate_valid_time_windows(self, value):
+        try:
+            return normalize_time_windows(value)
+        except ValueError as exc:
+            raise serializers.ValidationError(str(exc))
     
     # ADD THIS METHOD: Count active hotspot sessions for this plan
     def get_subscriber_count(self, obj) -> int:
