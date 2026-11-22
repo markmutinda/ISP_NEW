@@ -21,6 +21,8 @@ TEMPLATE_VARIABLES = [
     {'key': '{amount_due}', 'label': 'Amount Due (KES)', 'example': '2,500'},
     {'key': '{admin_name}', 'label': 'Admin First Name', 'example': 'Jane'},
     {'key': '{invoice_number}', 'label': 'Invoice Number', 'example': 'NET-BILL-260912090000'},
+    # Added automatically at the end when a template does not use it.
+    {'key': '{renew_link}', 'label': 'Renew Link', 'example': 'https://bluenet.netily.co.ke/renew'},
 ]
 
 

@@ -370,16 +370,9 @@ app.conf.beat_schedule = {
         'options': {'queue': 'default'}
     },
 
-    # ────────────────────────────────────────────────────────────────
-    # SUBSCRIPTION EXPIRY SMS REMINDERS — Daily at 8:15 AM
-    # Sends SMS reminders to tenant admins 3 days and 1 day before
-    # their platform subscription expires.
-    # ────────────────────────────────────────────────────────────────
-    'subscription-expiry-sms-reminders-daily': {
-        'task': 'apps.subscriptions.tasks.send_subscription_expiry_sms_reminders',
-        'schedule': crontab(hour=8, minute=15),  # Daily at 8:15 AM
-        'options': {'queue': 'billing'}
-    },
+    # REMOVED: 'subscription-expiry-sms-reminders-daily' (8:15 AM). Its task is an
+    # alias of send_subscription_invoice_reminders, which already runs at 9:30 AM
+    # (see 'send-subscription-invoice-reminders-daily'), so tenants were swept twice.
 
     'reconcile-pending-iotec-payments-every-2-min': {
         'task': 'apps.billing.tasks.reconcile_pending_iotec_payments',

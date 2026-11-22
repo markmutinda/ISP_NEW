@@ -116,6 +116,59 @@ def _recipient_name(recipient):
     return name or recipient.get("email") or recipient.get("phone_number") or "Tenant admin"
 
 
+def _tenant_renew_url(tenant):
+    """Short link to the tenant's own dashboard; /renew opens the Renew now dialog (after login)."""
+    from django.conf import settings
+
+    subdomain = (getattr(tenant, "subdomain", "") or "").strip().lower()
+    base = (getattr(settings, "TENANT_BASE_DOMAIN", "") or "").strip().lower()
+    if not subdomain or not base or base == "localhost":
+        return ""
+    return f"https://{subdomain}.{base}/renew"
+
+
+def _append_renew_link(text, url):
+    text = (text or "").rstrip()
+    if not url or url in text:
+        return text
+    return f"{text} Renew now: {url}"
+
+
+def _reminder_email_html(message, url):
+    import html
+
+    escaped = html.escape(message or "")
+    if url:
+        escaped = escaped.replace(html.escape(url), f'<a href="{html.escape(url)}">{html.escape(url)}</a>')
+    return escaped.replace("\n", "<br>")
+
+
+def _manual_milestone():
+    # Must fit SubscriptionInvoiceReminderDelivery.milestone (max_length=20).
+    now = timezone.now()
+    return f"manual-{now:%y%m%d%H%M%S}{now.microsecond // 100000}"
+
+
+def _auto_reminder_already_handled(tenant, channel, milestone, target_date, today):
+    """
+    One automatic reminder per tenant, per channel, per day, and one overdue
+    notice per due date. Keyed on the tenant rather than the billing cycle or
+    invoice, so extra open cycles, invoices created after the first reminder,
+    or a second sweep on the same day can never re-send the same reminder.
+    """
+    with schema_context(get_public_schema_name()):
+        sent = SubscriptionInvoiceReminderDelivery.objects.filter(
+            tenant=tenant, channel=channel,
+        ).exclude(milestone__startswith="manual")
+        if sent.filter(created_at__date=today).exists():
+            return True
+        if milestone == "expired" and target_date and sent.filter(
+            milestone="expired", created_at__date__gte=target_date,
+        ).exists():
+            return True
+    return False
+
+
 def _invoice_reminder_target_date(invoice, cycle):
     """Return the latest authoritative service/due date; never expire active access early."""
     candidates = []
@@ -147,6 +200,18 @@ def _invoice_reminder_milestone(invoice, cycle, today, target_days, send_expired
 
 
 def _invoice_reminder_copy(*, tenant_name, invoice, cycle, amount_due, milestone):
+    """Reminder subject, email/in-app body and SMS, each ending with the tenant's renew link."""
+    subject, body, sms = _invoice_reminder_copy_text(
+        tenant_name=tenant_name, invoice=invoice, cycle=cycle, amount_due=amount_due, milestone=milestone,
+    )
+    url = _tenant_renew_url(cycle.tenant)
+    if url:
+        body = f"{body}\n\nRenew now: {url}"
+        sms = _append_renew_link(sms, url)
+    return subject, body, sms
+
+
+def _invoice_reminder_copy_text(*, tenant_name, invoice, cycle, amount_due, milestone):
     invoice_number = invoice.invoice_number if invoice else ""
     due_date = _invoice_reminder_target_date(invoice, cycle)
     period = f"{cycle.start_date.date()} to {cycle.end_date.date()}"
@@ -232,13 +297,15 @@ def _render_invoice_reminder_template(*, template, tenant_name, invoice, cycle, 
         "amount_due": f"{amount_due:,.0f}" if amount_due else "",
         "admin_name": admin_name,
         "invoice_number": invoice.invoice_number if invoice else "",
+        "renew_link": _tenant_renew_url(cycle.tenant),
     }
     message = template
     for key, value in context.items():
         message = message.replace("{" + key + "}", str(value))
     message = message.replace("Amount due: KES .", "Please review your invoice in Admin > Subscription.")
     message = message.replace("Amount due: KES.", "Please review your invoice in Admin > Subscription.")
-    return message
+    # Templates written before {renew_link} existed still get the link.
+    return _append_renew_link(message, context["renew_link"])
 
 
 def _invoice_reminder_template_sms(*, tenant_name, invoice, cycle, amount_due, milestone, recipient, template_override=None):
@@ -450,7 +517,7 @@ def send_subscription_invoice_reminder_for_cycle(
     if _cycle_is_settled_or_renewed(cycle, invoice):
         raise ValueError("This tenant subscription is already paid for this billing cycle.")
 
-    manual_milestone = milestone or f"manual-{timezone.now().strftime('%m%d%H%M%S%f')}"
+    manual_milestone = str(milestone)[:20] if milestone else _manual_milestone()
     tenant_name = getattr(getattr(cycle.tenant, "company", None), "name", None) or cycle.tenant.subdomain
     subject, message, _sms_message = _invoice_reminder_copy(
         tenant_name=tenant_name,
@@ -519,7 +586,7 @@ def send_subscription_invoice_reminder_for_cycle(
                         subject=subject,
                         recipient=email,
                         plain_message=email_message,
-                        html_message=email_message.replace("\n", "<br>"),
+                        html_message=_reminder_email_html(email_message, _tenant_renew_url(cycle.tenant)),
                     )
                 except Exception as exc:
                     logger.exception("Manual subscription reminder email failed for tenant=%s", cycle.tenant_id)
@@ -576,6 +643,7 @@ def send_subscription_invoice_reminder_for_cycle(
                         priority=4,
                         metadata={
                             "source": "subscription_invoice_manual_reminder",
+                            "action_url": "/admin/settings/billing?renew=1",
                             "billing_cycle_id": str(cycle.id),
                             "invoice_id": invoice.id if invoice else None,
                             "milestone": manual_milestone,
@@ -1037,8 +1105,22 @@ def send_subscription_invoice_reminders():
     Send platform subscription invoice reminders before tenant invoice due dates.
 
     Defaults are controlled by SystemSettings key `subscription_invoice_reminders`.
-    Delivery rows guard each invoice/milestone/channel/recipient from duplicates.
+    A tenant gets at most one automatic reminder per channel per day (see
+    _auto_reminder_already_handled), and only one sweep runs at a time.
     """
+    from django.core.cache import cache
+
+    lock_key = "lock:subscription-invoice-reminder-sweep"
+    if not cache.add(lock_key, timezone.now().isoformat(), timeout=60 * 30):
+        logger.info("Subscription reminder sweep already running; skipping this run.")
+        return "Subscription invoice reminder sweep already running."
+    try:
+        return _run_subscription_invoice_reminder_sweep()
+    finally:
+        cache.delete(lock_key)
+
+
+def _run_subscription_invoice_reminder_sweep():
     from apps.core.email_delivery import send_transactional_email
     from apps.messaging.services.platform_sms_sender import PlatformSMSSender
 
@@ -1057,11 +1139,14 @@ def send_subscription_invoice_reminders():
         "tenant__company",
         "subscription",
         "subscription__plan",
-    )
+    ).order_by("tenant_id", "-end_date", "-id")
 
     sms_sender = PlatformSMSSender() if "sms" in channels else None
     sent = {"email": 0, "sms": 0, "in_app": 0, "failed": 0, "skipped": 0, "cycles": 0}
+    reminded_tenants = set()
     for cycle in cycles:
+        if cycle.tenant_id in reminded_tenants:
+            continue  # one reminder per tenant per run, from its latest unpaid cycle
         try:
             invoice = None
             if cycle.invoice_reference:
@@ -1091,6 +1176,14 @@ def send_subscription_invoice_reminders():
             )
             if not milestone:
                 continue
+            reminded_tenants.add(cycle.tenant_id)
+            target_date = _invoice_reminder_target_date(invoice, cycle)
+
+            def already_handled(channel):
+                if _auto_reminder_already_handled(cycle.tenant, channel, milestone, target_date, today):
+                    sent["skipped"] += 1
+                    return True
+                return False
 
             tenant_name = getattr(getattr(cycle.tenant, "company", None), "name", None) or cycle.tenant.subdomain
             subject, message, sms_message = _invoice_reminder_copy(
@@ -1119,7 +1212,7 @@ def send_subscription_invoice_reminders():
                     phone = recipient.get("phone_number")
                     user_id = recipient.get("id")
 
-                    if "email" in channels and email:
+                    if "email" in channels and email and not already_handled("email"):
                         delivery = _get_or_create_reminder_delivery(
                             cycle=cycle,
                             invoice=invoice,
@@ -1135,7 +1228,7 @@ def send_subscription_invoice_reminders():
                                 subject=subject,
                                 recipient=email,
                                 plain_message=message,
-                                html_message=message.replace("\n", "<br>"),
+                                html_message=_reminder_email_html(message, _tenant_renew_url(cycle.tenant)),
                             )
                             if result.get("sent"):
                                 _mark_reminder_delivery(
@@ -1154,7 +1247,7 @@ def send_subscription_invoice_reminders():
                                 )
                                 sent["failed"] += 1
 
-                    if "in_app" in channels and user_id:
+                    if "in_app" in channels and user_id and not already_handled("in_app"):
                         delivery = _get_or_create_reminder_delivery(
                             cycle=cycle,
                             invoice=invoice,
@@ -1174,6 +1267,7 @@ def send_subscription_invoice_reminders():
                                 priority=4,
                                 metadata={
                                     "source": "subscription_invoice_auto_reminder",
+                                    "action_url": "/admin/settings/billing?renew=1",
                                     "billing_cycle_id": str(cycle.id),
                                     "invoice_id": invoice.id if invoice else None,
                                     "milestone": milestone,
@@ -1195,7 +1289,7 @@ def send_subscription_invoice_reminders():
                             else:
                                 sent["failed"] += 1
 
-                    if "sms" in channels and phone:
+                    if "sms" in channels and phone and not already_handled("sms"):
                         delivery = _get_or_create_reminder_delivery(
                             cycle=cycle,
                             invoice=invoice,
