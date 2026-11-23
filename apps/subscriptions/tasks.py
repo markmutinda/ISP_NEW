@@ -1,6 +1,7 @@
 # apps/subscriptions/tasks.py
 import logging
 import json
+import re
 from itertools import islice
 from datetime import timedelta
 from decimal import Decimal
@@ -127,11 +128,20 @@ def _tenant_renew_url(tenant):
     return f"https://{subdomain}.{base}/renew"
 
 
+_SINGLE_SMS_CHARS = 160
+_ADMIN_SUBSCRIPTION_SENTENCE = re.compile(r"\s*Please (?:open|review|renew)[^.]*Admin > Subscription[^.]*\.")
+
+
 def _append_renew_link(text, url):
     text = (text or "").rstrip()
     if not url or url in text:
         return text
-    return f"{text} Renew now: {url}"
+    suffix = f" Renew now: {url}"
+    if len(text) + len(suffix) > _SINGLE_SMS_CHARS:
+        # The link replaces the "open Admin > Subscription" instruction; drop it
+        # so older or custom templates still fit in a single SMS.
+        text = _ADMIN_SUBSCRIPTION_SENTENCE.sub("", text).rstrip()
+    return f"{text}{suffix}"
 
 
 def _reminder_email_html(message, url):

@@ -1536,10 +1536,10 @@ class TenantUserLedger(models.Model):
 
 class SubscriptionReminderTemplate(models.Model):
     """Singleton — SMS copy for platform subscription payment reminders."""
+    # Kept short so the rendered SMS, renew link included, fits one 160-char SMS.
     content = models.TextField(default=(
-        "Hi {admin_name}, your Netily subscription for {company_name} ({plan_name}) "
-        "is due in {days_left} day(s) on {expiry_date}. "
-        "Please open Admin > Subscription and renew to keep your account active."
+        "Hi {admin_name}, your Netily subscription for {company_name} "
+        "is due on {expiry_date}. Renew now: {renew_link}"
     ))
     updated_at = models.DateTimeField(auto_now=True)
 
