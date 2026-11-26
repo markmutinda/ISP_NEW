@@ -501,7 +501,13 @@ class AvailablePlansView(APIView):
         except Exception:
             pass
         
+        # Public, read-only: lets the customer portal theme itself before sign-in.
+        portal_theme = (getattr(settings_obj, 'customer_portal_theme', '') or 'classic')
+        if branding is not None:
+            branding['portal_theme'] = portal_theme
+
         return Response({
             'plans': plans_data,
             'branding': branding,
+            'portal_theme': portal_theme,
         })

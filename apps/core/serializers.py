@@ -807,6 +807,14 @@ class GlobalSystemSettingsSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError("Choose a supported appearance font.")
         return normalized
 
+    VALID_CUSTOMER_PORTAL_THEMES = {"classic", "midnight", "sunrise", "forest", "aurora"}
+
+    def validate_customer_portal_theme(self, value):
+        normalized = (value or "classic").strip().lower()
+        if normalized not in self.VALID_CUSTOMER_PORTAL_THEMES:
+            raise serializers.ValidationError("Choose a supported customer portal theme.")
+        return normalized
+
 
 class CustomTokenRefreshSerializer(SimpleJWTTokenRefreshSerializer):
     def validate(self, attrs):

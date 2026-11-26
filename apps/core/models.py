@@ -754,6 +754,9 @@ class GlobalSystemSettings(models.Model):
     # Appearance Settings
     appearance_font = models.CharField(max_length=40, default='outfit', blank=True)
 
+    # Customer (PPPoE) portal theme preset: classic | midnight | sunrise | forest | aurora
+    customer_portal_theme = models.CharField(max_length=32, default='classic', blank=True)
+
     class Meta:
         app_label = 'core'
         verbose_name = 'Global System Settings'

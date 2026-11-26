@@ -113,6 +113,7 @@ def _get_top_impactful_customers():
         {
             "type": "PPPOE",
             "display_name": f"{r['customer__user__first_name']} {r['customer__user__last_name']}".strip() or r["customer__customer_code"],
+            "identifier": r["customer__customer_code"] or "",
             "total_amount": float(r["total_amount"] or 0),
             "tx_count": r["transaction_count"],
             "last_payment_date": r["last_payment_date"].isoformat() if r["last_payment_date"] else None
@@ -122,6 +123,7 @@ def _get_top_impactful_customers():
         {
             "type": "HOTSPOT",
             "display_name": r["hotspot_session__hotspot_client__canonical_username"] or "Hotspot User",
+            "identifier": "",
             "total_amount": float(r["total_amount"] or 0),
             "tx_count": r["transaction_count"],
             "last_payment_date": r["last_payment_date"].isoformat() if r["last_payment_date"] else None
@@ -184,6 +186,70 @@ def _get_plan_analytics():
     return sorted(results, key=lambda x: x["total_revenue"], reverse=True)
 
 
+def _network_flow_rows(start):
+    """
+    Daily upload/download (GB) for the reports "Network Data Flow" charts.
+
+    The old source, DataUsage, is only filled by the optional SNMP monitor and never
+    covers hotspot traffic, so on most tenants the charts were permanently empty.
+    RADIUS accounting (radacct) is the source of truth for every PPPoE and hotspot
+    session, so the series is built from it. A session's counters are cumulative,
+    so its bytes are attributed to the day it was last active (stop, else last
+    interim update, else start). From the subscriber's side, NAS input = upload and
+    NAS output = download, the same convention as _top_bandwidth.
+
+    Every day in the window is returned (zero-filled) so the chart is continuous.
+    Falls back to DataUsage only when radacct has nothing for the window.
+    """
+    from apps.radius.models import RadAcct
+
+    rows = (
+        RadAcct.objects
+        .annotate(last_seen=Coalesce("acctstoptime", "acctupdatetime", "acctstarttime"))
+        .filter(last_seen__gte=start)
+        .annotate(d=TruncDay("last_seen"))
+        .values("d")
+        .annotate(
+            upload=Coalesce(Sum("acctinputoctets"), 0),
+            download=Coalesce(Sum("acctoutputoctets"), 0),
+        )
+        .order_by("d")
+    )
+    per_day = {}
+    for r in rows:
+        if r["d"] is None:
+            continue
+        key = timezone.localtime(r["d"]).date() if timezone.is_aware(r["d"]) else r["d"].date()
+        up, down = per_day.get(key, (0, 0))
+        per_day[key] = (up + int(r["upload"] or 0), down + int(r["download"] or 0))
+
+    if not any(up or down for up, down in per_day.values()):
+        legacy = (
+            DataUsage.objects.filter(period_start__gte=start)
+            .annotate(d=TruncDay("period_start"))
+            .values("d")
+            .annotate(upload=Sum("upload_bytes"), download=Sum("download_bytes"))
+        )
+        for r in legacy:
+            if r["d"] is None:
+                continue
+            key = timezone.localtime(r["d"]).date() if timezone.is_aware(r["d"]) else r["d"].date()
+            up, down = per_day.get(key, (0, 0))
+            per_day[key] = (up + int(r["upload"] or 0), down + int(r["download"] or 0))
+
+    gb = float(1024 ** 3)
+    first = timezone.localtime(start).date()
+    last = timezone.localdate()
+    out = []
+    day = first
+    while day <= last:
+        up, down = per_day.get(day, (0, 0))
+        # 3 decimals keeps small hotspot sites (a few MB a day) from rounding to a flat zero line
+        out.append({"date": day.isoformat(), "upload": round(up / gb, 3), "download": round(down / gb, 3)})
+        day += timedelta(days=1)
+    return out
+
+
 class _RangeMixin:
     ALLOWED = {
         "reports": {"7d", "30d", "90d"},
@@ -217,7 +283,7 @@ class _RangeMixin:
         # The old code used tenant_hint from user (which is None for tenant admin users)
         # causing all tenants to share the same cache key "global"
         schema = connection.schema_name
-        return f"analytics:v2:{endpoint}:{schema}:{time_range}"
+        return f"analytics:v3:{endpoint}:{schema}:{time_range}"
 
 
 class AnalyticsReportsView(APIView, _RangeMixin):
@@ -400,19 +466,8 @@ class AnalyticsReportsView(APIView, _RangeMixin):
         )
         reg_rows = [{"date": x["d"].date().isoformat(), "count": x["count"]} for x in regs]
 
-        # FIX A: network flow using correct field names (period_start, upload_bytes, download_bytes)
-        flow = (
-            DataUsage.objects.filter(period_start__gte=start)
-            .annotate(d=TruncDay("period_start"))
-            .values("d")
-            .annotate(upload=Sum("upload_bytes"), download=Sum("download_bytes"))
-            .order_by("d")
-        )
-        flow_rows = [{
-            "date": x["d"].date().isoformat(),
-            "upload": round((x["upload"] or 0) / (1024 ** 3), 2),      # Convert to GB
-            "download": round((x["download"] or 0) / (1024 ** 3), 2),  # Convert to GB
-        } for x in flow]
+        # Network data flow comes from RADIUS accounting (PPPoE + Hotspot), see _network_flow_rows
+        flow_rows = _network_flow_rows(start)
 
         # ============================================================
         # NEW: Weekly Income Data (Current Week)
